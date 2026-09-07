@@ -649,6 +649,102 @@ class TimingSummary:
     max_ms: float | None = None
 
 
+#: Faults the MODEL is responsible for: the harness could not dispatch the call
+#: at all because what the model emitted was not a usable call. These and only
+#: these are the numerator of tool-call validity.
+MODEL_FAULTS: frozenset[str] = frozenset({"unknown_tool", "invalid_arguments", "duplicate_id"})
+
+#: Faults nobody's accuracy is measured by: the user cancelled the call, or the
+#: harness's own approval plumbing broke. Excluded from BOTH rates and from both
+#: denominators — a call the user denied says nothing about how well the model
+#: emits calls, and counting it would let a cautious operator look like a bad
+#: model. Still recorded so the counts reconcile against the total.
+EXCLUDED_FAULTS: frozenset[str] = frozenset({"denied", "aborted", "skipped", "gate_failed"})
+
+
+@dataclass(frozen=True)
+class ToolCallStats:
+    """Per-session tool-call outcome counts and the two rates derived from them.
+
+    ``None`` is never returned for this type where the answer is "unknown": the
+    OWNER of that distinction is ``SessionReport.tool_calls``, which is ``None``
+    when the session predates tool-call recording. An instance of this class
+    always describes real measured rows.
+
+    The two rates are deliberately SEPARATE and separately named because they
+    answer different questions and share no denominator — which is also why the
+    renderer must not draw them as bars beside one another.
+    """
+
+    #: Every recorded tool call for the session, whatever its fault.
+    total: int = 0
+    #: Calls with no fault at all: dispatched, ran, returned without error.
+    ok: int = 0
+    #: ``fault`` -> count, for every nonempty fault. Carries the breakdown the
+    #: rates summarise, so the screen can name WHICH invalidity dominated.
+    faults: dict[str, int] = field(default_factory=dict)
+    #: ``tool_name`` -> count of faulted calls. Recorded from day one so a
+    #: "which tool does this model get wrong" view is a rendering change later
+    #: rather than a schema change.
+    faults_by_tool: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def emitted(self) -> int:
+        """Calls that count toward validity: total minus user/harness exclusions.
+
+        The validity denominator. A denied or aborted call was never allowed to
+        prove anything about the model, so it is removed from the denominator
+        rather than counted as a success — counting it as either would move the
+        figure for a reason that has nothing to do with the model.
+        """
+        return self.total - sum(self.faults.get(name, 0) for name in EXCLUDED_FAULTS)
+
+    @property
+    def model_faults(self) -> int:
+        """Calls the harness could not dispatch because the model emitted junk."""
+        return sum(self.faults.get(name, 0) for name in MODEL_FAULTS)
+
+    @property
+    def execution_faults(self) -> int:
+        """Calls that were dispatched and then failed inside the tool."""
+        return self.faults.get("execution", 0)
+
+    @property
+    def validity(self) -> float | None:
+        """Share of EMITTED calls the harness could dispatch, 0.0-1.0.
+
+        **This is the benchmarking number.** It means: of the tool calls this
+        model emitted, what fraction were well-formed enough to run. It does
+        NOT mean the tool succeeded, and it does NOT mean the model chose the
+        right tool for the job — both are outside what the harness can observe.
+
+        ``None`` when nothing was emitted: a rate over an empty denominator is
+        unknown, and this screen never draws unknown as a measured zero.
+        """
+        emitted = self.emitted
+        if emitted <= 0:
+            return None
+        return (emitted - self.model_faults) / emitted
+
+    @property
+    def execution_error_rate(self) -> float | None:
+        """Share of DISPATCHED calls that failed inside the tool, 0.0-1.0.
+
+        Diagnostic only, and explicitly **not** a model-accuracy figure: it
+        counts the web being down, a missing file, an MCP server refusing
+        credentials. A model cannot be graded on it, which is why it is named
+        and rendered apart from :attr:`validity` rather than folded into one
+        "error rate".
+
+        Denominator is calls that actually RAN — emitted minus model faults —
+        because a call the harness rejected never reached a tool to fail in.
+        """
+        dispatched = self.emitted - self.model_faults
+        if dispatched <= 0:
+            return None
+        return self.execution_faults / dispatched
+
+
 @dataclass(frozen=True)
 class SessionRequest:
     """A bounded recent-ledger row, deliberately excluding payloads and errors."""
@@ -665,6 +761,15 @@ class SessionRequest:
     duration_ms: float | None
     ttft_ms: float | None
     preparation_ms: float | None
+    #: Whether the provider call SUCCEEDED — the recorded truth, and the only
+    #: honest success predicate for a request. ``outcome`` above is
+    #: ``str(stop_reason)`` from a provider-specific finish-reason map (or an
+    #: exception class name), so it labels a failure well and decides one badly.
+    #: ``None`` means unknown, not failed: it is what an impossibly-old ledger
+    #: with no ``ok`` column would yield, and unknown must never be drawn as a
+    #: warning. APPENDED LAST deliberately — this dataclass is constructed
+    #: positionally, so inserting a field mid-list silently shifts the timings.
+    ok: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -700,6 +805,14 @@ class SessionReport:
     # by-purpose chart exists to answer. Both are kept because they carry
     # different facts — this one the consumption, that one the failure tally.
     by_purpose: dict[str, UsageAggregate] = field(default_factory=dict)
+    #: A (purpose, outcome) cross-tab: a DIAGNOSTIC LABEL, never the failure
+    #: count. ``ok_calls`` on the aggregates above is the count. The distinction
+    #: is load-bearing: ``outcome`` is provider-specific
+    #: (``stop``/``length``/``toolUse``/``refusal``, or an exception class name)
+    #: and an older ledger reports every row as ``unknown``, so deriving
+    #: failures from it painted an entire healthy session in ``warning``. What
+    #: this IS good for is saying WHICH failure a failed request hit — the
+    #: actionable half, and the reason the field is kept.
     by_purpose_outcome: dict[tuple[str, str], int] = field(default_factory=dict)
     missing_usage_calls: int = 0
     unknown_usage_calls: int = 0
@@ -718,6 +831,13 @@ class SessionReport:
     #: caller can say "20 subagents" without a second query, and so a test can
     #: assert the walk's REACH rather than only its sums.
     descendant_ids: tuple[str, ...] = ()
+    #: Tool-call outcomes for this session, or ``None`` for UNKNOWN — no
+    #: ``tool_calls`` table (a ledger written before this shipped) or no rows for
+    #: this session. ``None`` and a zeroed ``ToolCallStats`` mean opposite
+    #: things and the renderer must not conflate them: the first is "we did not
+    #: measure", the second is "we measured, and it was zero". Every session
+    #: recorded before this feature has no tool data and must read ``unknown``.
+    tool_calls: ToolCallStats | None = None
 
     @property
     def subtree_aggregate(self) -> UsageAggregate:

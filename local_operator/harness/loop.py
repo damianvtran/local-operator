@@ -132,6 +132,29 @@ _TYPE_ADAPTERS: dict[str, TypeAdapter[Any]] = {
 
 ABORTED_RESULT_TEXT = "aborted"
 SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
+
+# Why a tool call did not run cleanly, classified WHERE THE REASON IS KNOWN and
+# carried on ``ToolResult.details["__fault"]`` to the one place that reports it
+# (``park``). Deriving the class at ``park`` instead would mean text-matching
+# result strings like "Invalid arguments: " — fragile, and wrong the first time
+# a message is reworded. ``_synthetic_result`` already takes ``details`` for
+# exactly this purpose, and ``__approval_gate_failed`` set the convention.
+#
+# The split that matters is whether the MODEL is at fault, because only that
+# half is a measurement of the model. The first three are calls the harness
+# refused to dispatch because what the model emitted was not usable; the rest
+# are the user's decision, our own bug, or the world failing. Only the first
+# three feed the tool-call validity figure — see ``analytics.model.MODEL_FAULTS``,
+# which owns that classification for the read side.
+FAULT_KEY = "__fault"
+FAULT_UNKNOWN_TOOL = "unknown_tool"  # model named a tool that does not exist
+FAULT_INVALID_ARGUMENTS = "invalid_arguments"  # model violated the tool's schema
+FAULT_DUPLICATE_ID = "duplicate_id"  # model emitted one call id twice
+FAULT_DENIED = "denied"  # the user declined the call
+FAULT_GATE_FAILED = "gate_failed"  # our approval plumbing raised
+FAULT_ABORTED = "aborted"  # the user stopped the turn
+FAULT_SKIPPED = "skipped"  # steering redirected before this call ran
+FAULT_EXECUTION = "execution"  # the tool ran and failed (HTTP 500, missing file)
 # Backfill for empty tool results (coerceToolResult): Anthropic rejects an
 # empty ``is_error`` tool_result content with a 400, and other providers
 # serialize "" — one placeholder block keeps the wire legal for every client.
@@ -1593,7 +1616,9 @@ class AgentLoop:
                     _PlannedCall(
                         call=call,
                         failure=self._synthetic_result(
-                            call, f"Duplicate call id '{call.id}' skipped."
+                            call,
+                            f"Duplicate call id '{call.id}' skipped.",
+                            details={FAULT_KEY: FAULT_DUPLICATE_ID},
                         ),
                     )
                 )
@@ -1614,7 +1639,17 @@ class AgentLoop:
                 and self._peek_steering(config)
             ):
                 for remaining in plan[index:]:
-                    results.append(self._synthetic_result(remaining.call, SKIPPED_RESULT_TEXT))
+                    # Marked at the source like every other fault, though this
+                    # site bypasses ``park`` and so is not recorded: a call
+                    # steering skipped before it was ever scheduled is excluded
+                    # from both rates anyway, so its absence moves no figure.
+                    results.append(
+                        self._synthetic_result(
+                            remaining.call,
+                            SKIPPED_RESULT_TEXT,
+                            details={FAULT_KEY: FAULT_SKIPPED},
+                        )
+                    )
                 break
 
             if not _batches_shared(plan[index]):
@@ -1660,7 +1695,11 @@ class AgentLoop:
         if tool is None:
             return _PlannedCall(
                 call=call,
-                failure=self._synthetic_result(call, f"Tool not found: {call.name}"),
+                failure=self._synthetic_result(
+                    call,
+                    f"Tool not found: {call.name}",
+                    details={FAULT_KEY: FAULT_UNKNOWN_TOOL},
+                ),
             )
 
         # Lift the intent off BEFORE validation, and before anything else sees
@@ -1688,7 +1727,11 @@ class AgentLoop:
             return _PlannedCall(
                 call=call,
                 tool=tool,
-                failure=self._synthetic_result(call, "Invalid arguments: " + "; ".join(errors)),
+                failure=self._synthetic_result(
+                    call,
+                    "Invalid arguments: " + "; ".join(errors),
+                    details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+                ),
             )
         resources: tuple[str, ...] | None = None
         if tool.resource_keys is not None:
@@ -1800,11 +1843,13 @@ class AgentLoop:
                     f"{sanitize_prompt_line(named, limit=200)}\n"
                     "This is a harness fault, not a refusal by the user; the stack is in "
                     "the log.",
-                    details={"__approval_gate_failed": True},
+                    details={"__approval_gate_failed": True, FAULT_KEY: FAULT_GATE_FAILED},
                 )
             if not approved:
                 return self._synthetic_result(
-                    call, f"User denied approval for '{sanitize_prompt_line(call.name, 120)}'."
+                    call,
+                    f"User denied approval for '{sanitize_prompt_line(call.name, 120)}'.",
+                    details={FAULT_KEY: FAULT_DENIED},
                 )
 
         def on_update(update: AgentToolUpdate) -> None:
@@ -1828,18 +1873,32 @@ class AgentLoop:
                         id=f"{call.id}:{uuid.uuid4().hex}", name=name, arguments=arguments
                     )
                     if name == "eval":
+                        # DELIBERATELY not recorded and not fault-marked. This
+                        # is a structural refusal of RECURSION, not a judgement
+                        # about a tool call: no tool was resolved, nothing was
+                        # dispatched, and it fits none of the classes the two
+                        # rates are defined over. Counting it would need a ninth
+                        # fault class that neither rate consumes, which would
+                        # move the denominator without informing either figure.
                         return self._synthetic_result(
                             nested, "Recursive eval tool calls are not supported."
                         ).model_dump(mode="json")
                     if signal is not None and signal.aborted:
-                        return self._synthetic_result(nested, ABORTED_RESULT_TEXT).model_dump(
-                            mode="json"
-                        )
+                        return self._synthetic_result(
+                            nested, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
+                        ).model_dump(mode="json")
                     planned = await self._plan_call(nested, context, config)
                     if planned.failure is not None or planned.tool is None:
-                        return (
-                            planned.failure or self._synthetic_result(nested, "Tool not found.")
-                        ).model_dump(mode="json")
+                        failure = planned.failure or self._synthetic_result(
+                            nested, "Tool not found.", details={FAULT_KEY: FAULT_UNKNOWN_TOOL}
+                        )
+                        # This bridge never reaches ``park`` — it emits its own
+                        # start/end events — so it must report here or every
+                        # eval-driven tool call goes uncounted, which would
+                        # quietly understate exactly the composition-heavy runs
+                        # the accuracy figure is most wanted for.
+                        self._report_tool_call(config, context, planned, failure, origin="nested")
+                        return failure.model_dump(mode="json")
                     started = time.monotonic()
                     queue.put_nowait(
                         ToolExecutionStartEvent(
@@ -1852,8 +1911,11 @@ class AgentLoop:
                     try:
                         result = await self._runner_result(planned, context, config, signal, queue)
                     except asyncio.CancelledError:
-                        result = self._synthetic_result(nested, ABORTED_RESULT_TEXT)
+                        result = self._synthetic_result(
+                            nested, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
+                        )
                         result.duration_s = time.monotonic() - started
+                        self._report_tool_call(config, context, planned, result, origin="nested")
                         queue.put_nowait(
                             ToolExecutionEndEvent(
                                 tool_call_id=nested.id,
@@ -1889,6 +1951,7 @@ class AgentLoop:
                             is_error=result.is_error,
                         )
                     )
+                    self._report_tool_call(config, context, planned, result, origin="nested")
                     return result.model_dump(mode="json")
 
                 execution_context = execution_context.model_copy(
@@ -2006,6 +2069,13 @@ class AgentLoop:
                         is_error=result.is_error,
                     )
                 )
+            # Every tool call the model emitted passes through here exactly
+            # once — dispatched, rejected at planning, denied, aborted or
+            # skipped — which is what makes this the one honest chokepoint for
+            # the accuracy figure. ``_report_tool_call`` is put_nowait-only and
+            # swallows everything: this runs ON THE EVENT LOOP inside a live
+            # turn, so analytics may cost neither latency nor a raised turn.
+            self._report_tool_call(config, context, item, result, origin="model")
             queue.put_nowait(_TOOL_DONE)
 
         async def runner(slot: int, item: _PlannedCall) -> None:
@@ -2035,7 +2105,9 @@ class AgentLoop:
                 park(
                     slot,
                     item,
-                    self._synthetic_result(item.call, ABORTED_RESULT_TEXT),
+                    self._synthetic_result(
+                        item.call, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
+                    ),
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
@@ -2078,12 +2150,13 @@ class AgentLoop:
                     # The INNER task was cancelled (steering, or the run
                     # aborting): synthesize a skipped/aborted result so the
                     # call stays paired.
-                    text = (
-                        SKIPPED_RESULT_TEXT
-                        if not (signal is not None and signal.aborted)
-                        else ABORTED_RESULT_TEXT
+                    aborted = signal is not None and signal.aborted
+                    text = ABORTED_RESULT_TEXT if aborted else SKIPPED_RESULT_TEXT
+                    result = self._synthetic_result(
+                        item.call,
+                        text,
+                        details={FAULT_KEY: FAULT_ABORTED if aborted else FAULT_SKIPPED},
                     )
-                    result = self._synthetic_result(item.call, text)
                 park(slot, item, result, duration_s=time.monotonic() - started_at)
             except asyncio.CancelledError:
                 # THIS coroutine was cancelled from outside — which is what the
@@ -2102,7 +2175,9 @@ class AgentLoop:
                 park(
                     slot,
                     item,
-                    self._synthetic_result(item.call, ABORTED_RESULT_TEXT),
+                    self._synthetic_result(
+                        item.call, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
+                    ),
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
@@ -2192,7 +2267,15 @@ class AgentLoop:
                         and config.interrupt_mode == "immediate"
                         and self._peek_steering(config)
                     ):
-                        park(slot, item, self._synthetic_result(item.call, SKIPPED_RESULT_TEXT))
+                        park(
+                            slot,
+                            item,
+                            self._synthetic_result(
+                                item.call,
+                                SKIPPED_RESULT_TEXT,
+                                details={FAULT_KEY: FAULT_SKIPPED},
+                            ),
+                        )
                         continue
                     if item.tool is not None and item.tool.interruptible and poll_interruptible:
                         await interruptible_runner(slot, item)
@@ -2459,6 +2542,66 @@ class AgentLoop:
         return sanitize_prompt_line(
             f"{call.name}({call.raw_arguments or json.dumps(call.arguments)})"
         )
+
+    @staticmethod
+    def _classify_fault(result: ToolResult) -> str:
+        """The fault class for a finished call: ``""`` when it ran cleanly.
+
+        Reads the marker the SOURCE set (see the ``FAULT_*`` constants), and
+        falls back to ``execution`` for any other error — a tool that ran and
+        returned ``is_error``, which is by definition not a planning failure and
+        so not the model's fault. Deliberately NOT a text match on the result:
+        the reason is known where the result is built and nowhere else, and a
+        reworded message must not silently reclassify a model fault as an
+        execution error (or the reverse, which would inflate the benchmark).
+        """
+        if not result.is_error:
+            return ""
+        details = result.details or {}
+        marker = details.get(FAULT_KEY)
+        return str(marker) if isinstance(marker, str) and marker else FAULT_EXECUTION
+
+    def _report_tool_call(
+        self,
+        config: LoopConfig,
+        context: LoopContext,
+        item: "_PlannedCall",
+        result: ToolResult,
+        *,
+        origin: str,
+    ) -> None:
+        """Hand one finished call's outcome to the host. Never raises, never blocks.
+
+        Called from ``park`` and from the nested ``dispatch_tool`` bridge, both
+        of which are on the EVENT LOOP inside a live turn. The whole body is
+        inside one guard because the callback is host-supplied: the harness's
+        contract is that a measurement can never break the thing it measures,
+        and that has to hold even against a host hook that throws.
+
+        The tool name is taken from the resolved tool when there is one and from
+        the CALL otherwise — a hallucinated name has no tool, and that name is
+        exactly what a "which tool does this model get wrong" view needs.
+        """
+        callback = config.record_tool_call
+        if callback is None:
+            return
+        try:
+            session_id = ""
+            tool_context = context.tool_context
+            if tool_context is not None:
+                session_id = getattr(tool_context, "session_id", "") or ""
+            if not session_id:
+                return
+            name = item.tool.name if item.tool is not None else item.call.name
+            duration = result.duration_s
+            callback(
+                name,
+                origin,
+                self._classify_fault(result),
+                -1.0 if duration is None else float(duration) * 1000.0,
+            )
+        except Exception:  # noqa: BLE001 — analytics must never raise into a turn
+            logger.debug("tool-call analytics hook failed", exc_info=True)
 
     @staticmethod
     def _synthetic_result(

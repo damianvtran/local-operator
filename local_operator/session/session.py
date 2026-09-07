@@ -5315,6 +5315,27 @@ class Session:
         it."""
         self._fallback_tool_resolver = resolver
 
+    def _record_tool_call(
+        self, tool_name: str, origin: str, fault: str, duration_ms: float
+    ) -> None:
+        """Ledger hook for ``LoopConfig.record_tool_call``. Never raises.
+
+        The session supplies its OWN id rather than the loop passing one: the
+        harness is deliberately ignorant of the ledger, and this is the object
+        that knows which session the call belongs to. Everything below the
+        enqueue is best-effort by contract — see ``analytics.record_tool_call``,
+        which is a single bounded ``put_nowait`` onto the recorder's existing
+        queue and writer thread.
+        """
+        if not self._session_id:
+            return
+        try:
+            from local_operator.analytics import record_tool_call
+
+            record_tool_call(self._session_id, tool_name, origin, fault, duration_ms)
+        except Exception:  # noqa: BLE001 — analytics must never break a turn
+            logger.debug("analytics: session tool-call hook failed", exc_info=True)
+
     # -- context accounting ---------------------------------------------------
 
     def _note_usage(self, messages: Sequence[AgentMessage]) -> None:
@@ -6305,6 +6326,13 @@ class Session:
                 redact_tool_result=(
                     self._variables.redact if self._variables is not None else None
                 ),
+                # Tool-call outcomes into the shared ledger, so /session can
+                # report this model's tool-call validity. Supplied as a closure
+                # for the same reason redact_tool_result is: the harness has no
+                # analytics dependency and must keep none. ``record_tool_call``
+                # is put_nowait-only and swallows its own errors, so this stays
+                # off the turn's critical path.
+                record_tool_call=self._record_tool_call,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )

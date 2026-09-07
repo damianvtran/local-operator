@@ -8,7 +8,10 @@ per-provider and per-session breakdowns the ``/analytics`` screen renders.
 
 from __future__ import annotations
 
+import sqlite3
 import time
+
+import pytest
 
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.store import (
@@ -1186,3 +1189,113 @@ def test_aggregate_exposes_parent_edges_for_the_table_rollup(tmp_path):
     assert set(agg.by_session) == {"root", "kid", "solo"}
     assert sum(a.cost_micro for a in agg.by_session.values()) == agg.cost_micro
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# tool_calls: recording, rollup, retention, and the unknown rule
+# ---------------------------------------------------------------------------
+
+
+def test_tool_calls_roundtrip_and_classification(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1")])
+    assert (
+        store.record_tool_calls(
+            [
+                (1, "s1", "read", "model", "", 30.0),
+                (2, "s1", "read", "model", "", 31.0),
+                (3, "s1", "reed_file", "model", "unknown_tool", 1.0),
+                (4, "s1", "edit", "model", "invalid_arguments", 1.0),
+                (5, "s1", "web_fetch", "model", "execution", 900.0),
+                (6, "s1", "bash", "model", "denied", 1.0),
+                (7, "s1", "read", "nested", "", 12.0),
+            ]
+        )
+        == 7
+    )
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    assert stats.total == 7 and stats.ok == 3
+    assert stats.faults == {
+        "unknown_tool": 1,
+        "invalid_arguments": 1,
+        "execution": 1,
+        "denied": 1,
+    }
+    # denied leaves the denominator: 6 emitted, 2 of them model faults.
+    assert stats.emitted == 6
+    assert stats.validity == pytest.approx(4 / 6)
+    # The hallucinated NAME is retained, which is what a per-tool view needs.
+    assert stats.faults_by_tool["reed_file"] == 1
+
+
+def test_a_session_with_no_tool_rows_reads_unknown_not_zero(tmp_path):
+    """The pre-ship case: requests recorded, tool calls never were."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1")])
+    store.record_tool_calls([(1, "other", "read", "model", "", 30.0)])
+    assert store.session_report("s1").tool_calls is None
+
+
+def test_a_ledger_without_the_tool_calls_table_reads_unknown(tmp_path):
+    """An older ledger must open and report unknown, never raise."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,"
+        " session_id TEXT NOT NULL, provider TEXT NOT NULL, model_id TEXT NOT NULL,"
+        " ok INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER NOT NULL DEFAULT 0,"
+        " output_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_read_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_write_tokens INTEGER NOT NULL DEFAULT 0,"
+        " reasoning_tokens INTEGER NOT NULL DEFAULT 0,"
+        " context_tokens INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (1, 's1', 'p', 'm');"
+    )
+    conn.commit()
+    conn.close()
+    report = AnalyticsStore(path).session_report("s1")
+    assert report.available
+    assert report.tool_calls is None
+
+
+def test_prune_bounds_the_tool_call_table(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db", retention_days=90)
+    now = 10_000_000_000
+    old = now - 91 * 86_400_000
+    store.record_tool_calls(
+        [(old, "s1", "read", "model", "", 1.0), (now, "s1", "read", "model", "", 1.0)]
+    )
+    store.prune(now_ms=now)
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None and stats.total == 1
+
+
+def test_recent_requests_carry_ok_and_a_missing_column_reads_unknown(tmp_path):
+    """``ok`` on the projection, and ``col('ok','NULL')`` — not ``'0'``.
+
+    The zero default would report every request on a column-less ledger as
+    FAILED, which is the false alarm this field was added to remove.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1", ok=True), _snap(session_id="s1", ok=False)])
+    flags = {r.ok for r in store.session_report("s1").recent}
+    assert flags == {True, False}
+
+    path = tmp_path / "noflag.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,"
+        " session_id TEXT NOT NULL, provider TEXT NOT NULL, model_id TEXT NOT NULL,"
+        " input_tokens INTEGER NOT NULL DEFAULT 0,"
+        " output_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_read_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_write_tokens INTEGER NOT NULL DEFAULT 0,"
+        " reasoning_tokens INTEGER NOT NULL DEFAULT 0,"
+        " context_tokens INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (1, 's1', 'p', 'm');"
+    )
+    conn.commit()
+    conn.close()
+    recent = AnalyticsStore(path).session_report("s1").recent
+    assert recent and recent[0].ok is None, "an absent ok column must read unknown, not failed"

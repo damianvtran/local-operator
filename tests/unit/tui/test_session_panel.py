@@ -16,6 +16,7 @@ from local_operator.analytics.model import (
     SessionReport,
     SessionRequest,
     TimingSummary,
+    ToolCallStats,
     UsageAggregate,
 )
 from local_operator.analytics.store import AnalyticsStore
@@ -147,6 +148,18 @@ async def test_assembled_slash_snapshot_scroll_and_focus(tmp_path, monkeypatch, 
         await pilot.pause()
         assert screen._scroll.scroll_y > 0
         await pilot.press("home")
+        # Wait on the ANIMATION, not on a fixed number of pauses. ``home``
+        # animates ``scroll_y`` back to the top, so the number of frames it
+        # needs is proportional to how far it has to travel — a taller panel
+        # (this one grew by the measured tool-call rows) simply takes more of
+        # them. Asserting after one ``pause`` was a bet on the panel's height,
+        # which is why it broke on a section being added rather than on
+        # anything about scrolling changing. Same idiom as
+        # ``test_resume_render._press_and_settle``.
+        for _ in range(160):
+            if not app.animator.is_being_animated(screen._scroll, "scroll_y"):
+                break
+            await pilot.pause()
         await pilot.pause()
         assert screen._scroll.scroll_y == 0
         store.record_batch([_snap(session_id="sess")])
@@ -357,7 +370,21 @@ def _agg(calls=1, ok=None, ctx=0, out=0, cost=0, known=0, components=None, reaso
     return aggregate
 
 
-def _request(index, purpose="turn", outcome="ok", ctx=40000, out=1000, duration=2000.0):
+def _request(
+    index,
+    purpose="turn",
+    outcome="toolUse",
+    ctx=40000,
+    out=1000,
+    duration=2000.0,
+    ok: bool | None = True,
+):
+    # ``outcome`` defaults to a string the recorder ACTUALLY writes. The old
+    # default was ``"ok"``, which nothing in the product has ever emitted: the
+    # provider path writes ``str(stop_reason)`` (stop/length/toolUse/refusal) or
+    # an exception class name. Fixtures asserting the impossible value are what
+    # let the "every healthy request failed" defect ship, so the vocabulary here
+    # is now the real one and ``ok`` — the recorded truth — decides success.
     return SessionRequest(
         request_id=f"r{index}",
         ts_ms=1788602400000 + index * 47000,
@@ -371,6 +398,7 @@ def _request(index, purpose="turn", outcome="ok", ctx=40000, out=1000, duration=
         duration_ms=duration,
         ttft_ms=400.0,
         preparation_ms=25.0,
+        ok=ok,
     )
 
 
@@ -397,12 +425,16 @@ def _populated():
             "compaction": _agg(3, 2, 270000, 2700, 3870, 3),
             "aside": _agg(4, 4, 48000, 1200, 5340, 4),
         },
+        # The shape the recorder really produces: healthy rows carry a provider
+        # finish reason, not the literal "ok". Failure counts come from
+        # ``ok_calls`` on the aggregates above, never from this cross-tab.
         by_purpose_outcome={
-            ("turn", "ok"): 12,
-            ("turn", "error"): 2,
-            ("compaction", "ok"): 2,
-            ("compaction", "error"): 1,
-            ("aside", "ok"): 4,
+            ("turn", "toolUse"): 10,
+            ("turn", "stop"): 2,
+            ("turn", "ProviderError"): 2,
+            ("compaction", "stop"): 2,
+            ("compaction", "ProviderError"): 1,
+            ("aside", "stop"): 4,
         },
         timings={
             "duration_ms": TimingSummary(25, 2223, 400, 3770),
@@ -725,7 +757,7 @@ def test_full_share_row_does_not_crop_its_failure_count():
         aggregate=one,
         by_model={("anthropic", "claude-sonnet-4-6"): one},
         by_purpose={"turn": one},
-        by_purpose_outcome={("turn", "ok"): 16, ("turn", "error"): 2},
+        by_purpose_outcome={("turn", "toolUse"): 16, ("turn", "ProviderError"): 2},
     )
     # 84 is the real card width of a 100-column terminal, where this reproduced.
     for width in (84, 88, 100):
@@ -881,10 +913,21 @@ def test_sequence_chart_never_renders_an_absent_duration_as_zero():
     # themselves: an unmeasured request must not define the window max either.
     mixed = (
         SessionRequest(
-            "b", 1788602400000 + 10000, "p", "m", "turn", "ok", True, 1000, 100, 4000.0, None, None
+            "b",
+            1788602400000 + 10000,
+            "p",
+            "m",
+            "turn",
+            "toolUse",
+            True,
+            1000,
+            100,
+            4000.0,
+            None,
+            None,
         ),
         SessionRequest(
-            "a", 1788602400000, "p", "m", "turn", "ok", True, 1000, 100, None, None, None
+            "a", 1788602400000, "p", "m", "turn", "toolUse", True, 1000, 100, None, None, None
         ),
     )
     report = SessionReport("sess", aggregate=_agg(2, 2, 2000, 200), recent=mixed)
@@ -1043,3 +1086,200 @@ def test_restored_floor_is_reconciled_in_prose_not_copied():
 
     plain = build_session_report(_tree_report(), runtime(), width=120).plain
     assert "restored floor" not in plain
+
+
+# ---------------------------------------------------------------------------
+# Failure accounting: `ok`, never the `outcome` string
+# ---------------------------------------------------------------------------
+
+
+def test_healthy_session_reports_no_failures_whatever_the_outcome_strings():
+    """The operator's bug: a fully-successful session read "15 req · 15 failed".
+
+    The cause was a predicate testing ``outcome not in ("ok", "unknown")``
+    against a vocabulary that never contains ``"ok"`` — the recorder writes
+    ``str(stop_reason)`` (``stop``/``length``/``toolUse``) or an exception class
+    name. This fixture uses those REAL strings, so it fails on the code that
+    shipped and cannot be satisfied by reintroducing an ``"ok"`` literal.
+    """
+    turn = _agg(15, 15, 1_100_000, 30_000)
+    naming = _agg(1, 1, 220, 40)
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(16, 16, 1_100_220, 30_040),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(16, 16, 1_100_220, 30_040)},
+        by_purpose={"turn": turn, "naming": naming},
+        by_purpose_outcome={
+            ("turn", "toolUse"): 12,
+            ("turn", "stop"): 3,
+            ("naming", "stop"): 1,
+        },
+    )
+    text = build_session_report(report, runtime(), 100).plain
+    assert "failed" not in text, "a healthy session must not report a failure anywhere"
+    for row in _rows(text, "By purpose"):
+        assert "req" in row
+
+
+def test_a_genuinely_failed_session_still_reports_it():
+    """The guard must still be able to go red.
+
+    A test that only proves the false alarm is gone would also pass if the
+    annotation were deleted outright, which would hide real outages — so the
+    negative case above is only meaningful beside this one.
+    """
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(15, 12, 1_100_000, 30_000),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(15, 12, 1_100_000, 30_000)},
+        by_purpose={"turn": _agg(15, 12, 1_100_000, 30_000)},
+        # Deliberately EMPTY: the count comes from ``ok_calls``, so the failure
+        # must be reported even with no outcome cross-tab to label it.
+        by_purpose_outcome={},
+    )
+    text = build_session_report(report, runtime(), 100).plain
+    assert "3 failed" in text
+    # ``By model`` gains the annotation too, correctly: a provider failing every
+    # call used to be invisible there.
+    assert sum("3 failed" in row for row in _rows(text, "By model")) == 1
+
+
+def test_request_sequence_warns_on_ok_false_and_not_on_an_outcome_string():
+    """``_draw_request_sequence`` had the same string bug; ``ok`` decides now."""
+    healthy = SessionReport(
+        "sess",
+        aggregate=_agg(2, 2, 2000, 200),
+        recent=(_request(1, outcome="toolUse", ok=True), _request(0, outcome="stop", ok=True)),
+    )
+    text = build_session_report(healthy, runtime(), 88).plain
+    rows = _section(text, "Last 2 requests")
+    assert rows and not any("toolUse" in r or "stop" in r for r in rows)
+
+    failed = SessionReport(
+        "sess",
+        aggregate=_agg(2, 1, 2000, 200),
+        recent=(
+            _request(1, outcome="ProviderError", ok=False),
+            _request(0, outcome="toolUse", ok=True),
+        ),
+    )
+    rows = _section(build_session_report(failed, runtime(), 88).plain, "Last 2 requests")
+    # Still red when it should be: the outcome string is DISPLAYED once ``ok``
+    # has established the row is a failure.
+    assert sum("ProviderError" in r for r in rows) == 1
+
+
+def test_unknown_ok_is_not_a_failure():
+    """``ok=None`` is an absent measurement, and this screen never paints one red.
+
+    That is the 419k-row case on the operator's live ledger: legacy rows whose
+    ``outcome`` is the literal ``'unknown'``. They carry ``ok=1``, but a ledger
+    old enough to lack the column entirely yields ``None``, and neither may
+    render as a warning.
+    """
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(2, 2, 2000, 200),
+        recent=(
+            _request(1, outcome="unknown", ok=None),
+            _request(0, outcome="unknown", ok=None),
+        ),
+    )
+    rows = _section(build_session_report(report, runtime(), 88).plain, "Last 2 requests")
+    assert rows and not any("unknown" in r.split("·")[-1] for r in rows if "·" in r)
+
+
+# ---------------------------------------------------------------------------
+# Tool-call validity
+# ---------------------------------------------------------------------------
+
+
+def _tool_report(stats):
+    return SessionReport(
+        "sess",
+        aggregate=_agg(4, 4, 4000, 400),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(4, 4, 4000, 400)},
+        by_purpose={"turn": _agg(4, 4, 4000, 400)},
+        tool_calls=stats,
+    )
+
+
+def test_no_tool_data_reads_unknown_and_never_a_measured_zero():
+    """Every session recorded before this shipped has no tool rows.
+
+    ``unknown``, not ``0%``: a fabricated zero on a diagnostics screen cannot be
+    told apart from a measurement, which is this screen's standing invariant.
+    """
+    text = build_session_report(_tool_report(None), runtime(), 100).plain
+    section = _section(text, "Tool surface")
+    assert any("Tool calls" in r and "unknown" in r for r in section)
+    # The rates are omitted entirely rather than shown as unknown.
+    assert not any("Call validity" in r for r in section)
+    assert not any("Execution errors" in r for r in section)
+    assert "0%" not in "".join(section)
+
+
+def test_a_real_zero_fault_count_renders_as_a_measurement():
+    """A session that emitted 20 clean calls is 100% — that IS measured."""
+    stats = ToolCallStats(total=20, ok=20, faults={}, faults_by_tool={})
+    text = build_session_report(_tool_report(stats), runtime(), 100).plain
+    section = _section(text, "Tool surface")
+    assert any("Call validity" in r and "100.0%" in r for r in section)
+    assert any("Tool calls" in r and "20" in r for r in section)
+
+
+def test_validity_counts_only_model_faults_and_excludes_user_cancellations():
+    """The benchmarking number must not move when the USER declines a call.
+
+    10 calls: 2 model faults, 1 execution error, 2 denied. Validity is over the
+    8 EMITTED (10 - 2 denied), so 6/8 = 75.0% — the denied pair is removed from
+    the denominator rather than counted either way.
+    """
+    stats = ToolCallStats(
+        total=10,
+        ok=5,
+        faults={"unknown_tool": 1, "invalid_arguments": 1, "execution": 1, "denied": 2},
+        faults_by_tool={"reed_file": 1, "edit": 1, "web_fetch": 1, "bash": 2},
+    )
+    assert stats.emitted == 8
+    assert stats.model_faults == 2
+    assert stats.validity == pytest.approx(0.75)
+    # Execution rate is over calls that actually RAN: 8 emitted - 2 rejected = 6.
+    assert stats.execution_error_rate == pytest.approx(1 / 6)
+
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    joined = "\n".join(section)
+    assert "75.0%" in joined
+    assert "2 invalid of 8 emitted" in joined
+    # The execution row is labelled as NOT an accuracy figure, every time.
+    assert "not a model-accuracy figure" in joined
+
+
+def test_validity_is_unknown_when_nothing_countable_was_emitted():
+    """Rows exist but every call was denied: a rate over an empty denominator."""
+    stats = ToolCallStats(total=3, ok=0, faults={"denied": 3}, faults_by_tool={"bash": 3})
+    assert stats.emitted == 0
+    assert stats.validity is None
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    assert any("Call validity" in r and "unknown" in r for r in section)
+
+
+def test_the_validity_qualifier_survives_a_narrow_frame():
+    """The scope of a percentage is not sheddable chrome.
+
+    ``kv``'s ``notes`` ladder exists because a qualifier cropped mid-word or
+    dropped wholesale leaves a correct figure looking like a wrong one.
+    """
+    stats = ToolCallStats(total=412, ok=389, faults={"invalid_arguments": 12}, faults_by_tool={})
+    for width in (60, 72, 88, 100):
+        section = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        row = next(r for r in section if "Call validity" in r)
+        assert len(row) <= width
+        # Some spelling of the scope always survives, and it is never cut mid-word.
+        assert "emitted" in row, f"scope lost at {width}: {row!r}"

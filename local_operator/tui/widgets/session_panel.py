@@ -48,8 +48,10 @@ from textual.widgets import Static
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
+    MODEL_FAULTS,
     SessionReport,
     TimingSummary,
+    ToolCallStats,
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
@@ -377,8 +379,6 @@ def _metric_meta(metric: str, prefix: str) -> str:
 def _group_rows(
     groups: list[tuple[str, UsageAggregate]],
     metric: str,
-    *,
-    failures: dict[str, int] | None = None,
 ) -> tuple[list[_BarRow], bool]:
     """Rows for a partitioning table (by model, by purpose), biggest first.
 
@@ -406,6 +406,24 @@ def _group_rows(
     and leaves the honest ``$—``, which is the only figure here we can stand
     behind. This is the same rule as ``_timing_rows`` and ``_gauge_row``: an
     absent measurement is never drawn as a measured zero.
+
+    **The failure tally is ``calls - ok_calls``, never a test on the ``outcome``
+    string.** ``ok`` is the recorded truth: a boolean the provider path writes on
+    every row. ``outcome`` is ``str(stop_reason)`` (``model/configure.py``) drawn
+    from each adapter's finish-reason map — ``stop``/``length``/``toolUse``/
+    ``refusal`` — or an exception class name, so its vocabulary is
+    PROVIDER-SPECIFIC and drifts whenever an adapter is added. The predicate this
+    replaced tested ``outcome not in ("ok", "unknown")`` against a string nothing
+    has ever written, so every healthy request rendered in ``warning`` as failed
+    while ``Totals`` — which already read ``ok_calls`` — said zero on the same
+    screen. Keep the predicate on ``ok``; the next vocabulary change must not be
+    able to reach it.
+
+    ``ok`` is safe to read unconditionally: ``calls.ok INTEGER NOT NULL DEFAULT
+    1`` has existed since the table was created, it is not in
+    ``store._MIGRATION_COLUMNS``, and ``session_report`` already refuses any DB
+    missing the base column set — so no reachable ledger lacks it, and a group
+    reporting every request failed is a real state that must still render.
     """
     total = sum(_metric_value(agg, metric) for _, agg in groups)
     ordered = sorted(
@@ -416,7 +434,7 @@ def _group_rows(
     rows: list[_BarRow] = []
     for name, agg in ordered:
         note: list[tuple[str, str]] = [(f"{agg.calls} req", "dim")]
-        failed = (failures or {}).get(name, 0)
+        failed = max(0, agg.calls - agg.ok_calls)
         if failed:
             # ``warning``, not ``dim``: a failed request is the one thing on this
             # screen a reader must not scroll past, and at the far right of the
@@ -435,27 +453,6 @@ def _group_rows(
             )
         )
     return rows, total > 0
-
-
-def _failures(report: SessionReport) -> dict[str, int]:
-    """Non-``ok`` request count per purpose, from the existing outcome cross-tab.
-
-    ``by_purpose`` carries the consumption and ``by_purpose_outcome`` carries
-    the outcomes; the failure tally is the second folded onto the first, not a
-    third query.
-    """
-    # ``unknown`` is excluded, not folded into the failures: an older ledger has
-    # no ``outcome`` column, so every row reads ``unknown`` and counting those
-    # would paint a healthy legacy session as entirely failed — in ``warning``,
-    # the one colour on this screen that must never cry wolf.
-    return {
-        purpose: sum(
-            count
-            for (name, outcome), count in report.by_purpose_outcome.items()
-            if name == purpose and outcome not in ("ok", "unknown")
-        )
-        for purpose in report.by_purpose
-    }
 
 
 def _component_rows(aggregate: UsageAggregate) -> tuple[list[_BarRow], int]:
@@ -825,7 +822,7 @@ def _shared_columns(
     # Measured WITH the failure annotations, because they are what the draw
     # pass emits: measuring `14 req` and then drawing `14 req · 2 failed` sizes
     # the note column too small and crops it to `14 req · 2 f`.
-    rows.extend(_group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))[0])
+    rows.extend(_group_rows(list(report.by_purpose.items()), metric)[0])
     component_rows, component_total = _component_rows(aggregate)
     rows.extend(component_rows)
     rows.extend(_tool_rows(aggregate, component_total))
@@ -946,7 +943,7 @@ def _draw_recorded_usage(
     _draw_by_model(body, report, width, metric, cols)
     _draw_by_purpose(body, report, width, metric, cols)
     _draw_input_split(body, aggregate, width, cols)
-    _draw_tool_surface(body, aggregate, width, cols)
+    _draw_tool_surface(body, aggregate, width, cols, report.tool_calls)
     _draw_request_sequence(body, report, width, metric)
     body.header("Timings", "observed wall time · includes retries", "wall time")
     body.extend(_timing_rows(report.timings, width))
@@ -1032,7 +1029,7 @@ def _draw_by_purpose(
     """
     if not report.by_purpose:
         return
-    rows, priced = _group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))
+    rows, priced = _group_rows(list(report.by_purpose.items()), metric)
     body.header("By purpose", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     # Only when there is a contrast to explain: the legend defines ``turn``
     # against the harness's own purposes, so it is noise when the rows are all
@@ -1058,9 +1055,102 @@ def _draw_input_split(body: _Body, aggregate: UsageAggregate, width: int, cols: 
     body.blank()
 
 
-def _draw_tool_surface(body: _Body, aggregate: UsageAggregate, width: int, cols: _Columns) -> None:
+def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
+    """Measured tool-call counts and the two rates, above the estimated bars.
+
+    Scalars via ``kv``, deliberately WITHOUT bars. A bar asserts a shared
+    denominator — the rule stated on ``Totals`` and ``_group_rows`` — and these
+    two rates have different ones: validity is over calls the model EMITTED,
+    the execution rate is over calls that actually RAN. Drawn side by side as
+    tracks they would invite a comparison that is arithmetically meaningless.
+
+    **The unknown rule, which is this screen's standing invariant.** ``stats is
+    None`` means no tool data for this session — either a ledger predating the
+    feature or a session that recorded none — and it renders as ``unknown``,
+    never as ``0 calls`` or ``0%``. Every session recorded before this shipped
+    is in that state, and a fabricated zero on a diagnostics screen is worse
+    than a withheld fact: the reader cannot tell it from a measurement.
+    """
+    if stats is None or stats.total <= 0:
+        body.kv("Tool calls", "unknown", "not recorded for this session")
+        # The two rates are OMITTED rather than shown as unknown: three unknown
+        # rows is noise, and the one row above already says why.
+        return
+    failed = stats.total - stats.ok
+    detail = f"{stats.ok} ok" + (f" · {failed} failed" if failed else "")
+    body.kv("Tool calls", str(stats.total), detail)
+
+    validity = stats.validity
+    if validity is None:
+        # Rows exist but nothing counted toward the denominator (every call was
+        # denied or aborted). Mirrors ``_timing_rows``' "unknown (0 samples)"
+        # wording on purpose, so the two read as the same kind of statement.
+        body.kv("Call validity", "unknown", "0 emitted")
+    else:
+        invalid = stats.model_faults
+        # A ladder, not a plain note: this qualifier carries the SCOPE of the
+        # percentage (which calls it is over), and a scope cropped mid-word or
+        # shed wholesale leaves a correct figure looking like a wrong one — the
+        # defect ``kv``'s ``notes`` parameter exists to fix.
+        body.kv(
+            "Call validity",
+            f"{validity * 100:.1f}%",
+            notes=(
+                f"{invalid} invalid of {stats.emitted} emitted",
+                f"{invalid} of {stats.emitted} emitted",
+                "emitted calls",
+            ),
+        )
+        # Name the faults rather than only counting them: "which one" is the
+        # actionable half, and it is what makes the figure a benchmark rather
+        # than a score. Biggest first, and only faults that actually occurred.
+        for name in sorted(MODEL_FAULTS, key=lambda f: -stats.faults.get(f, 0)):
+            count = stats.faults.get(name, 0)
+            if count:
+                # Leading space matches ``_tool_rows``' " └ " exactly: the two
+                # sub-row groups sit in the same section, and two different
+                # indents for the same relationship reads as a misalignment.
+                body.kv(f" └ {name.replace('_', ' ')}", str(count))
+
+    execution = stats.execution_error_rate
+    if execution is not None and stats.execution_faults:
+        # Explicitly labelled as NOT a model metric, every time it is drawn. It
+        # counts the web being down and an MCP server refusing credentials; a
+        # reader who takes it for an accuracy figure will blame the model for
+        # the network.
+        body.kv(
+            "Execution errors",
+            str(stats.execution_faults),
+            notes=(
+                f"{execution * 100:.1f}% · not a model-accuracy figure",
+                f"{execution * 100:.1f}% · not model accuracy",
+                "not model accuracy",
+            ),
+        )
+
+
+def _draw_tool_surface(
+    body: _Body,
+    aggregate: UsageAggregate,
+    width: int,
+    cols: _Columns,
+    stats: ToolCallStats | None = None,
+) -> None:
     rows = _tool_rows(aggregate, _component_rows(aggregate)[1])
-    body.header("Tool surface", "≈ estimated share of context tokens", "≈ estimated")
+    # The meta says "measured calls" AND "≈ estimated tokens" because the
+    # section now carries both kinds of number: the call counts below are
+    # counted, the token bars under them are apportioned. A single "≈ estimated"
+    # header would have mislabelled the measured half as an estimate.
+    body.header("Tool surface", "measured calls · ≈ estimated tokens", "measured · ≈ est.")
+    # Measured rows FIRST, then the estimated bars: they are the stronger fact,
+    # and the disclaimer below applies only to the bars.
+    #
+    # NO blank line between the two groups. A blank ENDS a section on this
+    # screen — that is the rule ``_section`` encodes and the reader learns from
+    # every other block — so separating them would render one section as two,
+    # the second of which has no header. The `kv` scalars and the bar rows are
+    # already visually distinct without inventing a second section boundary.
+    _draw_tool_call_rows(body, stats)
     if rows:
         body.extend(_render_rows(rows, cols, width, estimated=True))
     else:
@@ -1070,9 +1160,14 @@ def _draw_tool_surface(body: _Body, aggregate: UsageAggregate, width: int, cols:
     # support: there is no per-tool-name token or cost column, and cost is
     # priced per call at record time, so splitting it across these three
     # components would invent a number the provider never billed.
+    #
+    # Reworded from "this is" to "the token bars above are" now that the
+    # section also carries MEASURED call counts. The original wording would
+    # have swept those into the same disclaimer and told the reader that a
+    # counted number was an estimate.
     body.note(
-        "Per-tool-name tokens and dollars are not recorded; this is the tool "
-        "machinery's share of input, not the cost of any one tool call."
+        "Per-tool-name tokens and dollars are not recorded; the token bars above "
+        "are the tool machinery's share of input, not the cost of any one tool call."
     )
     body.blank()
 
@@ -1123,7 +1218,16 @@ def _draw_request_sequence(body: _Body, report: SessionReport, width: int, metri
     rows: list[_BarRow] = []
     for request, value in zip(series, values):
         note: tuple[tuple[str, str], ...] = ((request.purpose, "dim"),)
-        if request.outcome != "ok":
+        # ``ok``, not the ``outcome`` string, decides whether this row is a
+        # failure — the same rule as ``_group_rows`` and for the same reason:
+        # ``outcome`` is a provider-specific finish reason, and testing it
+        # against a literal ``"ok"`` nothing writes painted every healthy
+        # request in ``warning``. Three-state on purpose: ``None`` is UNKNOWN
+        # (a ledger with no ``ok`` column) and takes the clean path, because an
+        # absent measurement is never rendered as a failure on this screen.
+        # The outcome string is still DISPLAYED once ``ok`` has established the
+        # row is a failure — it is what says which failure.
+        if request.ok is False:
             note = ((request.purpose, "dim"), (" · ", "dim"), (request.outcome, "warning"))
         rows.append(
             _BarRow(

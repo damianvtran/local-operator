@@ -57,6 +57,49 @@ class _NameTask:
         self.rank = rank
 
 
+class _ToolCallTask:
+    """One tool-call sample queued for the writer thread.
+
+    Routed through the SAME queue, thread and connection as call samples and
+    name upserts, for the reason ``_NameTask`` records: two threads opening
+    their first connection to a freshly-created database race in a way that
+    left the writer unable to see its own commits. There is exactly one writer
+    here and adding a second is forbidden.
+
+    Fields are the store's insert tuple, flattened. The producer is the harness
+    (``AgentLoop.park``), which has no analytics import and reaches this through
+    a ``LoopConfig`` callback — so the shape has to be primitives.
+    """
+
+    __slots__ = ("ts_ms", "session_id", "tool_name", "origin", "fault", "duration_ms")
+
+    def __init__(
+        self,
+        ts_ms: int,
+        session_id: str,
+        tool_name: str,
+        origin: str,
+        fault: str,
+        duration_ms: float,
+    ) -> None:
+        self.ts_ms = ts_ms
+        self.session_id = session_id
+        self.tool_name = tool_name
+        self.origin = origin
+        self.fault = fault
+        self.duration_ms = duration_ms
+
+    def as_row(self) -> tuple[int, str, str, str, str, float]:
+        return (
+            self.ts_ms,
+            self.session_id,
+            self.tool_name,
+            self.origin,
+            self.fault,
+            self.duration_ms,
+        )
+
+
 #: Upper bound on queued-but-unwritten samples. A provider call takes seconds
 #: and a batch write takes milliseconds, so this only fills if the disk is
 #: wedged — at which point dropping is the correct behaviour. Sized for a
@@ -84,7 +127,7 @@ class AnalyticsRecorder:
 
     def __init__(self, store: AnalyticsStore | None = None) -> None:
         self._store = store if store is not None else AnalyticsStore()
-        self._queue: "queue.Queue[CallSnapshot | _NameTask | None]" = queue.Queue(
+        self._queue: "queue.Queue[CallSnapshot | _NameTask | _ToolCallTask | None]" = queue.Queue(
             maxsize=_QUEUE_MAXSIZE
         )
         self._thread: threading.Thread | None = None
@@ -126,16 +169,17 @@ class AnalyticsRecorder:
         while True:
             batch: list[CallSnapshot] = []
             names: list[_NameTask] = []
+            tools: list[_ToolCallTask] = []
             try:
                 item = self._queue.get(timeout=_FLUSH_INTERVAL_S)
             except queue.Empty:
                 self._maybe_prune()
                 continue
             if item is None:  # sentinel: flush and exit
-                self._flush(batch, names)
+                self._flush(batch, names, tools)
                 self._queue.task_done()
                 return
-            self._classify(item, batch, names)
+            self._classify(item, batch, names, tools)
             self._queue.task_done()
             # Opportunistically drain whatever else is already queued so a
             # burst becomes one transaction.
@@ -145,26 +189,42 @@ class AnalyticsRecorder:
                 except queue.Empty:
                     break
                 if item is None:
-                    self._flush(batch, names)
+                    self._flush(batch, names, tools)
                     self._queue.task_done()
                     return
-                self._classify(item, batch, names)
+                self._classify(item, batch, names, tools)
                 self._queue.task_done()
-            self._flush(batch, names)
+            self._flush(batch, names, tools)
             self._maybe_prune()
 
     @staticmethod
     def _classify(
-        item: "CallSnapshot | _NameTask",
+        item: "CallSnapshot | _NameTask | _ToolCallTask",
         batch: list[CallSnapshot],
         names: list["_NameTask"],
+        tools: list["_ToolCallTask"],
     ) -> None:
         if isinstance(item, _NameTask):
             names.append(item)
+        elif isinstance(item, _ToolCallTask):
+            tools.append(item)
         else:
             batch.append(item)
 
-    def _flush(self, batch: list[CallSnapshot], names: list["_NameTask"]) -> None:
+    def _flush(
+        self,
+        batch: list[CallSnapshot],
+        names: list["_NameTask"],
+        tools: list["_ToolCallTask"] | None = None,
+    ) -> None:
+        if tools:
+            # Its own transaction, not joined to the ledger insert below: tool
+            # calls are produced DURING a turn and the ledger row at the end of
+            # it, so the two never share a batch anyway.
+            try:
+                self._store.record_tool_calls([task.as_row() for task in tools])
+            except Exception:  # noqa: BLE001 — a bad sample must not kill the writer
+                logger.debug("analytics: tool-call flush failed", exc_info=True)
         if names:
             for task in names:
                 try:
@@ -244,6 +304,44 @@ class AnalyticsRecorder:
         except Exception:  # noqa: BLE001 — naming is best-effort
             logger.debug("analytics: name enqueue failed", exc_info=True)
 
+    def record_tool_call(
+        self,
+        session_id: str,
+        tool_name: str,
+        origin: str,
+        fault: str,
+        duration_ms: float = -1.0,
+    ) -> None:
+        """Best-effort: record one tool call's outcome off the hot path.
+
+        Called from ``AgentLoop.park``, which runs ON THE EVENT LOOP inside a
+        live turn. So this does the least possible work — one bounded
+        ``put_nowait`` — and, like :meth:`record`, never raises and never
+        blocks: analytics that can add latency to a turn or abort one is a
+        defect, not a measurement.
+
+        ``fault`` is ``""`` for a call that ran cleanly, else the classification
+        set at the source (see ``store``'s ``tool_calls`` schema comment).
+        """
+        if self._closed or not session_id:
+            return
+        self._ensure_thread()
+        try:
+            self._queue.put_nowait(
+                _ToolCallTask(
+                    int(time.time() * 1000),
+                    session_id,
+                    tool_name,
+                    origin,
+                    fault,
+                    float(duration_ms),
+                )
+            )
+        except queue.Full:
+            logger.debug("analytics: queue full, dropped a tool call")
+        except Exception:  # noqa: BLE001 — recording is best-effort
+            logger.debug("analytics: tool-call enqueue failed", exc_info=True)
+
     @property
     def dropped(self) -> int:
         """How many samples were dropped for a full queue (0 on a healthy run)."""
@@ -319,6 +417,26 @@ def record_call(snapshot: CallSnapshot) -> None:
         get_recorder().record(snapshot)
     except Exception:  # noqa: BLE001 — recording is never allowed to raise
         logger.debug("analytics: record_call failed", exc_info=True)
+
+
+def record_tool_call(
+    session_id: str,
+    tool_name: str,
+    origin: str,
+    fault: str,
+    duration_ms: float = -1.0,
+) -> None:
+    """Module-level convenience: enqueue a tool-call sample. Never raises.
+
+    This is what ``Session`` binds into ``LoopConfig.record_tool_call``. The
+    outer guard is not redundant with the recorder's own: this runs on the event
+    loop during a turn, and even the singleton lookup must not be able to throw
+    into it.
+    """
+    try:
+        get_recorder().record_tool_call(session_id, tool_name, origin, fault, duration_ms)
+    except Exception:  # noqa: BLE001 — recording is never allowed to raise
+        logger.debug("analytics: record_tool_call failed", exc_info=True)
 
 
 def reset_recorder_for_test(store: AnalyticsStore | None = None) -> AnalyticsRecorder:

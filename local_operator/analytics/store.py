@@ -42,6 +42,7 @@ from local_operator.analytics.model import (
     SessionReport,
     SessionRequest,
     TimingSummary,
+    ToolCallStats,
     UsageAggregate,
     UsagePeriod,
     apportion_components,
@@ -248,6 +249,32 @@ CREATE TABLE IF NOT EXISTS usage_monthly (
   updated_at_ms INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (month, model)
 );
+
+-- One row per TOOL CALL the harness dispatched or rejected. Separate from
+-- ``calls`` rather than a pair of counters on it, because the provider row is
+-- written in ``_record_stream``'s ``finally`` BEFORE the tools run and the
+-- ledger is append-only — there is no row to increment and no request id
+-- reaching the harness to increment it by. A table also gets the per-tool-name
+-- breakdown a counter never could. Measured cost: 96 bytes/row, ~18 MB
+-- steady-state at the observed tool-call rate.
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_ms INTEGER NOT NULL,
+  session_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL DEFAULT '',
+  -- 'model' = the model emitted a tool_use block; 'nested' = eval's
+  -- dispatch_tool bridge. Separable because a nested call is the model's CODE
+  -- calling a tool, not the model emitting a call, and conflating them would
+  -- let one scripted retry loop dominate the accuracy figure.
+  origin TEXT NOT NULL DEFAULT 'model',
+  -- '' = the call ran and returned without error. Model faults:
+  -- unknown_tool | invalid_arguments | duplicate_id. Not the model's fault:
+  -- execution | denied | aborted | skipped | gate_failed. The value is set at
+  -- the SOURCE via ToolResult.details['__fault'] where the reason is known,
+  -- never text-matched out of a result string afterwards.
+  fault TEXT NOT NULL DEFAULT '',
+  duration_ms REAL NOT NULL DEFAULT -1
+);
 """
 
 _CALL_COLUMNS = (
@@ -333,6 +360,19 @@ _OPTIONAL_INDEXES: tuple[tuple[str, str], ...] = (
         "parent_session_id",
         "CREATE INDEX IF NOT EXISTS idx_calls_parent ON calls(parent_session_id)",
     ),
+)
+
+#: Indexes on tables OTHER than ``calls``, created next to ``_OPTIONAL_INDEXES``
+#: and for the same reason: keeping them out of ``_SCHEMA`` means a failure here
+#: costs the index alone, where a raising statement inside ``executescript``
+#: aborts the REST of that script — losing the rollup tables and latching
+#: ``_broken`` for the process. They are unconditional (the table is created in
+#: ``_SCHEMA`` immediately above), so unlike ``_OPTIONAL_INDEXES`` there is no
+#: column to gate on. ``session`` serves the per-session report rollup;
+#: ``ts_ms`` serves ``prune``'s retention delete.
+_TABLE_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(ts_ms)",
 )
 
 #: THE parent-edge rule, as one SQL expression, used by every surface that
@@ -783,6 +823,11 @@ class AnalyticsStore:
                 conn.execute(statement)
             except Exception:  # noqa: BLE001 — a missing index is slow, not broken
                 logger.debug("analytics: could not create index on %s", column, exc_info=True)
+        for statement in _TABLE_INDEXES:
+            try:
+                conn.execute(statement)
+            except Exception:  # noqa: BLE001 — a missing index is slow, not broken
+                logger.debug("analytics: could not create a table index", exc_info=True)
 
     def _rebuild_insert_plan(self) -> None:
         """Recompute the insert SQL + value selector from ``_present_optional``.
@@ -903,6 +948,65 @@ class AnalyticsStore:
                 time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
             except Exception:  # noqa: BLE001 — a lost batch must not kill the writer
                 logger.debug("analytics: batch insert failed", exc_info=True)
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                return 0
+        return 0
+
+    def record_tool_calls(self, rows: Sequence[tuple[int, str, str, str, str, float]]) -> int:
+        """Insert tool-call samples in one transaction. Returns rows written.
+
+        ``rows`` are ``(ts_ms, session_id, tool_name, origin, fault, duration_ms)``
+        — a plain tuple rather than a dataclass because the producer is the
+        harness, which deliberately has no analytics import, so the shape has to
+        survive a ``LoopConfig`` callback signature.
+
+        Batched, retried on ``SQLITE_BUSY`` and best-effort exactly like
+        :meth:`record_batch`, and on the SAME writer thread and connection.
+        Never raises: a lost tool sample is a slightly-wrong accuracy figure,
+        and a raise here would be a broken turn.
+
+        Deliberately its OWN transaction rather than joined to the ledger write:
+        tool calls are produced during a turn while the ledger row is written at
+        the end of the provider stream, so the two never arrive in the same
+        batch and pairing them would only delay one of them.
+        """
+        if not rows:
+            return 0
+        conn: sqlite3.Connection | None = None
+        for attempt in range(_WRITE_RETRIES):
+            conn = self._connect()
+            if conn is not None or self._broken:
+                break
+            time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
+        if conn is None:
+            return 0
+        sql = (
+            "INSERT INTO tool_calls "
+            "(ts_ms, session_id, tool_name, origin, fault, duration_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        for attempt in range(_WRITE_RETRIES):
+            try:
+                conn.executemany(sql, rows)
+                conn.commit()
+                return len(rows)
+            except sqlite3.OperationalError as exc:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                if not _is_lock_error(exc):
+                    logger.debug("analytics: tool-call insert failed", exc_info=True)
+                    return 0
+                if attempt == _WRITE_RETRIES - 1:
+                    logger.debug("analytics: tool-call batch dropped after busy retries")
+                    return 0
+                time.sleep(_WRITE_RETRY_BACKOFF_S * (attempt + 1))
+            except Exception:  # noqa: BLE001 — a lost batch must not kill the writer
+                logger.debug("analytics: tool-call insert failed", exc_info=True)
                 try:
                     conn.rollback()
                 except Exception:  # noqa: BLE001
@@ -1063,6 +1167,11 @@ class AnalyticsStore:
         - The raw ``calls`` ledger keeps ``retention_days`` (default 90) by
           ``ts_ms`` — unchanged; its row count is the return value, preserving
           the original contract.
+        - ``tool_calls`` keeps the SAME ``retention_days`` window by ``ts_ms``.
+          It is a raw per-event ledger like ``calls`` and grows with tool-call
+          volume rather than request volume, so it needs the bound more than
+          ``calls`` does. Its rows are NOT added to the return value, which
+          contractually counts raw-ledger requests.
         - ``usage_daily`` keeps the most recent 365 DISTINCT ``day`` values
           (not 365 rows — each day holds one row per model), so the daily bar
           can look back a year regardless of how many models ran. The subquery
@@ -1091,6 +1200,14 @@ class AnalyticsStore:
             conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("analytics: prune failed", exc_info=True)
+        # Guarded on its own, like the rollups: a DB whose ``tool_calls`` table
+        # predates this feature (or failed to create) must still prune what it
+        # can rather than losing the ledger delete above.
+        try:
+            conn.execute("DELETE FROM tool_calls WHERE ts_ms < ?", (cutoff,))
+            conn.commit()
+        except Exception:  # noqa: BLE001 — a tool-call prune failure is non-fatal
+            logger.debug("analytics: tool-call prune failed", exc_info=True)
         # Rollup prunes are best-effort and independent of the ledger prune
         # above: a failure here must not undo the ledger delete or raise.
         try:
@@ -1403,6 +1520,12 @@ class AnalyticsStore:
                 col("context_tokens"),
                 col("output_tokens"),
                 *(f"NULLIF({col(name, '-1')}, -1)" for name in timings),
+                # ``NULL``, NOT the usual ``"0"`` default. ``col``'s zero
+                # fallback would report every request on a column-less ledger as
+                # FAILED, which is precisely the false alarm this field was added
+                # to remove. ``NULL`` yields ``ok=None`` = unknown, and the
+                # renderer draws unknown clean.
+                col("ok", "NULL"),
             ]
             recent = tuple(
                 SessionRequest(
@@ -1418,6 +1541,7 @@ class AnalyticsStore:
                     duration_ms=row[9],
                     ttft_ms=row[10],
                     preparation_ms=row[11],
+                    ok=None if row[12] is None else bool(row[12]),
                 )
                 for row in conn.execute(
                     "SELECT " + ", ".join(fields) + scope + " ORDER BY ts_ms DESC, id DESC LIMIT ?",
@@ -1427,6 +1551,7 @@ class AnalyticsStore:
             descendants, descendant_ids = self._descendant_usage(
                 conn, session_id, columns, measures
             )
+            tool_calls = self._tool_call_stats(conn, session_id)
             return SessionReport(
                 session_id=session_id,
                 aggregate=aggregate,
@@ -1441,6 +1566,7 @@ class AnalyticsStore:
                 recent=recent,
                 first_ts_ms=first,
                 last_ts_ms=last,
+                tool_calls=tool_calls,
             )
         except Exception:  # noqa: BLE001 — diagnostics must not interrupt a turn
             logger.debug("analytics: session report unavailable", exc_info=True)
@@ -1500,6 +1626,54 @@ class AnalyticsStore:
                 if parent:
                     parents[str(sid)] = str(parent)
         return parents
+
+    @staticmethod
+    def _tool_call_stats(conn: sqlite3.Connection, session_id: str) -> ToolCallStats | None:
+        """Tool-call outcomes for one session, or ``None`` meaning UNKNOWN.
+
+        ``None`` is returned when the ``tool_calls`` table does not exist (a
+        ledger written before this feature) **or** when it holds no rows for this
+        session. The second case is the important one: every session recorded
+        before this shipped has requests but no tool rows, and rendering that as
+        ``0 calls / 0% invalid`` would be a fabricated measurement on the exact
+        screen whose standing invariant is that an absent measurement is never
+        drawn as a measured zero.
+
+        The cost of that rule is a session which genuinely made zero tool calls,
+        which is INDISTINGUISHABLE from an unrecorded one in a bare ``COUNT(*)``
+        and therefore also reads ``unknown``. That is the safe error in both
+        directions — a wrong ``unknown`` withholds a fact, a wrong ``0%`` states
+        one — and it self-corrects the moment the session makes a tool call.
+        """
+        try:
+            rows = list(
+                conn.execute(
+                    "SELECT fault, tool_name, COUNT(*) FROM tool_calls "
+                    "WHERE session_id = ? GROUP BY fault, tool_name",
+                    (session_id,),
+                )
+            )
+        except sqlite3.Error:
+            # No such table: an older ledger. Unknown, not zero, and not an
+            # error — diagnostics must open against any ledger version.
+            logger.debug("analytics: tool_calls unavailable", exc_info=True)
+            return None
+        if not rows:
+            return None
+        total = 0
+        ok = 0
+        faults: dict[str, int] = {}
+        faults_by_tool: dict[str, int] = {}
+        for fault, tool_name, count in rows:
+            count = int(count)
+            total += count
+            if not fault:
+                ok += count
+                continue
+            faults[str(fault)] = faults.get(str(fault), 0) + count
+            name = str(tool_name)
+            faults_by_tool[name] = faults_by_tool.get(name, 0) + count
+        return ToolCallStats(total=total, ok=ok, faults=faults, faults_by_tool=faults_by_tool)
 
     def _descendant_usage(
         self,
