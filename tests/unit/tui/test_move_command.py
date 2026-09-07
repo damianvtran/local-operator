@@ -500,56 +500,69 @@ async def test_the_eval_warning_survives_a_cleared_transcript(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_a_replaced_session_does_not_inherit_the_eval_latch(tmp_path: Path) -> None:
-    """The eval warning belongs to the conversation that ran `eval`.
+async def test_the_eval_record_follows_the_conversation_across_a_round_trip(
+    tmp_path: Path,
+) -> None:
+    """A -> B -> A: the record belongs to the conversation, not the viewer.
 
-    DRIVES A REAL REPLACEMENT through `_adopt_session` — the funnel every
-    swap path reaches — instead of performing the reset itself. The previous
-    version of this guard assigned `_session_used_eval_latch = False` by hand
-    and then asserted `False` stayed `False`, so it passed with the production
-    reset deleted and was structurally unable to notice that two of the three
-    session-replacement paths never reset at all (review MAJOR-4.1/4.2).
+    THE THREE STATES IN ONE WALK, because closing either direction alone is
+    what three review rounds each did. Leaving A must not carry its record to
+    B (a conversation told its namespace was destroyed when it never had one,
+    MAJOR-4.1); returning to A must not have lost it (a live kernel destroyed
+    in silence, MAJOR-5.1 — the sidebar return path re-adopts the SAME
+    session, whose kernel never died). A single flag cannot satisfy both, which
+    is why the record is keyed by session id.
 
-    That is why the leak shipped: `_reload_session` reset the flag, but
-    `_apply_sidebar_presentation` rebinds `_transcript` to the incoming view
-    and `_attach_or_refuse` adopts a successor, and a conversation that never
-    ran `eval` was told its namespace had been destroyed.
+    EVERY ADOPTED SESSION GETS ITS OWN EMPTY VIEW, and that is load-bearing
+    rather than tidiness: `_session_used_eval` falls back to the transcript,
+    so a probe that adopts B while A's `eval` card is still on screen has the
+    fallback answer for it and passes over a broken record. That masking is
+    what made a simulation of the round-5 remedy report success — and what made
+    an earlier repro of MAJOR-5.1 fail to reproduce it.
     """
     session_a = MovableSession(cwd=str(tmp_path), outcome="rebound")
     session_a.session_id = "conversation-a"
+    session_b = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    session_b.session_id = "conversation-b"
     app = OperatorApp(lambda: _factory(session_a))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
         for _ in range(3):
             await pilot.pause()
-        assert app._session_used_eval(), "the session that ran eval is not flagged"
+        assert app._session_used_eval(), "the session that ran eval is not recorded"
 
-        # THE REAL SWAP: adopt a different conversation, exactly as every
-        # replacement path does, and give it its own empty transcript — which
-        # is what makes the transcript half unable to retract a leaked latch.
-        session_b = MovableSession(cwd=str(tmp_path), outcome="rebound")
-        session_b.session_id = "conversation-b"
-        app._adopt_session(session_b)
+        # A -> B, with B on its own empty view as production gives it.
+        app._adopt_session(session_b, replay_history=False, reuse_controller=True)
         app._transcript_view().clear_blocks()
         for _ in range(3):
             await pilot.pause()
-
         assert not app._session_used_eval(), (
-            "conversation B inherited A's eval latch and would be warned about "
-            "a namespace it never had"
+            "conversation B inherited A's eval record and would be warned "
+            "about a namespace it never had"
+        )
+
+        # B -> A. The same live session returns; its kernel never died, so the
+        # warning it is owed must still be there.
+        app._adopt_session(session_a, replay_history=False, reuse_controller=True)
+        for _ in range(3):
+            await pilot.pause()
+        assert app._session_used_eval(), (
+            "returning to conversation A lost its eval record, so a move would "
+            "destroy a live kernel in silence"
         )
 
 
 @pytest.mark.asyncio
-async def test_the_latch_answers_only_for_the_session_it_was_stamped_for(
+async def test_the_eval_record_answers_only_for_the_session_that_ran_it(
     tmp_path: Path,
 ) -> None:
-    """The key, asserted directly rather than through a swap's side effects.
+    """Membership, asserted directly rather than through a swap's side effects.
 
-    A latch left set against another session's id must be structurally unable
-    to answer for the current one — that is what makes a swap site added later
-    unable to reintroduce the leak by forgetting to clear.
+    The state is per conversation, so the storage is too: another session's id
+    in the record cannot answer for this one. That is the property which makes
+    a swap path added later unable to reintroduce either direction — there is
+    nothing for it to remember to clear.
     """
     session = MovableSession(cwd=str(tmp_path), outcome="rebound")
     session.session_id = "the-current-one"
@@ -560,11 +573,33 @@ async def test_the_latch_answers_only_for_the_session_it_was_stamped_for(
         for _ in range(3):
             await pilot.pause()
 
-        # Set, but stamped for somebody else: the shape a leak takes.
-        app._session_used_eval_latch = True
-        app._eval_latch_session_id = "a-conversation-the-user-left"
-        assert not app._session_used_eval(), "a stale-keyed latch answered"
+        # Somebody else's conversation is recorded: the shape a leak takes.
+        app._sessions_that_used_eval.add("a-conversation-the-user-left")
+        assert not app._session_used_eval(), "another session's record answered"
 
-        # The same flag, correctly stamped, does answer.
-        app._eval_latch_session_id = "the-current-one"
+        # This conversation's own id does answer.
+        app._sessions_that_used_eval.add("the-current-one")
         assert app._session_used_eval()
+
+
+def test_the_eval_record_is_bounded() -> None:
+    """The set is capped: a viewer can walk through many conversations in one
+    process, and an unbounded id set is a slow leak for a signal that only
+    decorates one receipt.
+
+    Asserted through the recorder rather than by reading the constant, so the
+    bound is checked where it is enforced. The empty-id case is here too: an
+    unidentified session cannot be matched on read, so storing one would grow
+    the set without ever answering a question.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+
+    app._remember_session_used_eval("")
+    assert not app._sessions_that_used_eval, "an unidentifiable session was stored"
+
+    for index in range(app._EVAL_MEMORY_MAX + 50):
+        app._remember_session_used_eval(f"session-{index}")
+    assert len(app._sessions_that_used_eval) <= app._EVAL_MEMORY_MAX
+    # The most recent writer is always present: eviction may drop an older id,
+    # never the one being recorded.
+    assert f"session-{app._EVAL_MEMORY_MAX + 49}" in app._sessions_that_used_eval
