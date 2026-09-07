@@ -502,6 +502,77 @@ async def test_a_parked_conversation_keeps_its_pending_fork_indicator():
 
 
 @pytest.mark.asyncio
+async def test_the_fork_indicator_describes_the_session_the_user_is_looking_at():
+    """A parked conversation's `forking` must not be painted over another one.
+
+    The other half of the park gate above, and a defect that predates this PR:
+    on base, nothing on the sidebar path wrote `fork_pending` at all, so the
+    outgoing conversation's segment simply stayed lit over the session switched
+    TO. `retire=False` kept that behaviour rather than causing it — it fixed the
+    return leg — so both legs are only correct once `_commit_sidebar_session`
+    re-derives the flag from the incoming session after its adopt.
+
+    Why this is worse than a stale readout (design round 3, D3): the segment is
+    an AFFORDANCE. It advertises `esc`, and `action_stop` probes `self._session`
+    — now a different conversation — so the offered cancel cannot reach the fork
+    it names, and nothing ever clears it. That is precisely the lie
+    `_schedule_fork_report` brings the segment down to avoid, one session over.
+
+    Asserted on the RENDERED band, like its sibling, because `_fork_pending`
+    alone cannot see this: a code round can verify the `None` leave-alone is
+    correct and still miss that the resulting FRAME describes the wrong
+    conversation. Both legs live in one test because they are the pair a
+    one-sided fix breaks: clearing unconditionally would take the live
+    indicator back off the return leg (review round 2, MAJOR-3).
+    """
+    home = SidebarRemote("home-session", pending_fork=True)
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+        cost=12.35,
+        context=98_765,
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            app._sync_fork_pending()
+            for _ in range(5):
+                await pilot.pause()
+            assert app._status is not None
+            assert app._status.is_showing("fork"), "the band never showed `forking` to begin with"
+            assert FORK_PENDING_TEXT in app._status.render_text(100).plain
+
+            await _switch(app, pilot, busy)
+            for _ in range(10):
+                await pilot.pause()
+
+            # The park leg. `busy` has no fork of any kind, so the segment it
+            # would be offering `esc` for does not exist on this conversation.
+            assert busy.has_pending_fork() is False
+            assert FORK_PENDING_TEXT not in app._status.render_text(100).plain, (
+                "the parked conversation's `forking` is painted over the session "
+                "switched TO, advertising an `esc` that cannot reach that fork"
+            )
+
+            await _switch(app, pilot, home)
+            for _ in range(10):
+                await pilot.pause()
+
+            # The return leg, unchanged: the fork is still waiting for its
+            # boundary, so the segment it can still be cancelled from is back.
+            assert home.has_pending_fork() is True
+            assert app._status.is_showing("fork")
+            assert FORK_PENDING_TEXT in app._status.render_text(100).plain, (
+                "resolving the indicator for the incoming session cost the "
+                "live fork its indicator on the conversation that owns it"
+            )
+
+
+@pytest.mark.asyncio
 async def test_a_park_withdraws_the_splash_toast_but_keeps_the_notice():
     """The park drops the outgoing toast and keeps the outgoing splash row.
 
