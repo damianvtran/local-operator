@@ -1453,13 +1453,18 @@ def _rejection_prompt(reason: str, observation: Observation) -> str:
 
 
 def _note_eval_session_name(session_id: str, *, route: RouteIdentity, episode_id: str) -> None:
-    """Label this episode's ledger row ``eval <provider>/<model> · <episode>``.
+    """Label this episode's ledger row ``eval <episode> · <model>``.
 
-    The route comes first because it is what a reader of a cost table is
-    comparing across episodes, and the episode id is kept (abbreviated) so a row
-    can still be traced back to its evidence bundle. ``short_session_label``
-    truncates to 32 characters for the table, which this shape survives with the
-    route intact.
+    The EPISODE ID COMES FIRST because it is the only part that differs between
+    two rows of the same benchmark run, and ``short_session_label`` truncates to
+    32 characters: with the route first, every episode against one model
+    rendered the identical string ``eval anthropic/claude-sonnet-4-5`` and the
+    episode — the half that says WHICH episode spent the money, and the link
+    back to its evidence bundle — was exactly the half truncated away.
+
+    The provider is dropped rather than abbreviated: a model id already implies
+    its provider for every route the harness runs, so it is the cheapest thing
+    to spend the remaining budget on.
 
     Best-effort and import-local, like every other analytics touch: the
     evaluation package is import-inert by contract, and an episode must never
@@ -1468,7 +1473,7 @@ def _note_eval_session_name(session_id: str, *, route: RouteIdentity, episode_id
     try:
         from local_operator.analytics import get_recorder
 
-        label = f"eval {route.provider_id}/{route.model_id} · {episode_id}"
+        label = f"eval {episode_id} · {route.model_id}"
         get_recorder().note_session_name(session_id, label)
     except Exception:  # noqa: BLE001 — analytics is never a dependency
         logger.debug("analytics: eval session name failed", exc_info=True)

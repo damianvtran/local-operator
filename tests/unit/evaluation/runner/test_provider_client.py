@@ -2215,10 +2215,28 @@ def test_an_eval_episode_names_its_own_ledger_row(
         row = conn.execute(
             "SELECT name FROM session_names WHERE session_id = 'lop-eval-ep-42'"
         ).fetchone()
-        # The route leads, because that is what a reader of a cost table
-        # compares across episodes; the episode id is kept so a row still
-        # traces back to its evidence bundle.
+        # The EPISODE leads: it is the only part that differs between two rows
+        # of one benchmark run, and the table truncates to 32 characters, so a
+        # route-first shape rendered every episode identically (review F2).
         assert row is not None
-        assert row[0] == f"eval {ROUTE.provider_id}/{ROUTE.model_id} · ep-42"
+        assert row[0] == f"eval ep-42 · {ROUTE.model_id}"
     finally:
         recorder.close()
+
+
+def test_eval_labels_of_one_run_stay_distinct_after_table_truncation() -> None:
+    """Two episodes on one model must not render as the same row.
+
+    Round-1 F2: with the route first, ``eval anthropic/claude-sonnet-4-5 · ep-…``
+    is already 32 characters before the episode id starts, so the whole benchmark
+    run rendered as one repeated string and the episode — the half that says
+    which one — was the half truncated away.
+    """
+    from local_operator.analytics.model import short_session_label
+
+    labels = [
+        short_session_label("s1", "eval ep-1a2b3c4d · claude-sonnet-4-5"),
+        short_session_label("s2", "eval ep-9f8e7d6c · claude-sonnet-4-5"),
+    ]
+    assert labels[0] != labels[1]
+    assert "ep-1a2b3c4d" in labels[0] and "ep-9f8e7d6c" in labels[1]

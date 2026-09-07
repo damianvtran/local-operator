@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
+    SESSION_LABEL_CHARS,
     CallSnapshot,
     UsageAggregate,
     apportion_components,
     price_snapshot,
+    session_table_labels,
     snapshot_component_chars,
     split_system_prompt,
 )
@@ -360,3 +362,41 @@ def test_price_snapshot_reported_zero_is_known_free():
     cost_micro, known = price_snapshot(snap)
     assert known is True
     assert cost_micro == 0
+
+
+def test_session_table_labels_leaves_unique_labels_untouched():
+    labels = session_table_labels({"aa11": "Fix the rollup", "bb22": "Rename sessions"})
+    assert labels == {"aa11": "Fix the rollup", "bb22": "Rename sessions"}
+
+
+def test_session_table_labels_disambiguates_identical_names():
+    """Siblings compose byte-identical names; the table must still address them."""
+    names = {f"{i}f3a9c2e1b7d": "reviewer · Article-search-svc schema review" for i in range(4)}
+    labels = session_table_labels(names)
+    assert len(set(labels.values())) == 4
+    assert all(len(v) <= SESSION_LABEL_CHARS for v in labels.values())
+    # The suffix survives truncation — a disambiguator that is cut off is not one.
+    for sid, label in labels.items():
+        assert label.endswith(sid[:4])
+
+
+def test_session_table_labels_widens_the_fragment_until_it_separates():
+    """A 4-char fragment that still collides grows rather than giving up."""
+    names = {f"abcdefgh{i}": "coder · one shared parent task" for i in range(3)}
+    labels = session_table_labels(names)
+    assert len(set(labels.values())) == 3
+
+
+def test_session_table_labels_widens_an_unnamed_row_instead_of_repeating_its_id():
+    """An unnamed row already renders an id prefix; it must not get a second copy."""
+    names = {"lop-eval-ep-0a52bce248bd": "", "lop-eval-ep-0ce67ac2d3a1": ""}
+    labels = session_table_labels(names)
+    assert len(set(labels.values())) == 2
+    for sid, label in labels.items():
+        assert sid.startswith(label)
+        assert "·" not in label
+
+
+def test_session_table_labels_never_exceeds_the_table_width():
+    names = {f"{i:012x}": "x" * 80 for i in range(5)}
+    assert all(len(v) <= SESSION_LABEL_CHARS for v in session_table_labels(names).values())

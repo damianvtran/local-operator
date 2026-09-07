@@ -29,7 +29,7 @@ it is the right way to pin what the screen SAYS.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Mapping, Protocol, Sequence
 
 from rich.style import Style
 from rich.text import Text
@@ -44,6 +44,7 @@ from local_operator.analytics.model import (
     COMPONENT_LABELS,
     UsageAggregate,
     UsagePeriod,
+    session_table_labels,
     short_session_label,
 )
 from local_operator.tui import theme as theme_mod
@@ -711,11 +712,19 @@ def build_report(
     # frame the shared column is allowed to grow (review D3) so the extra width
     # widens the content rather than leaving a dead right gutter.
     names = getattr(aggregate, "session_names", {}) or {}
-    session_labelled = {
-        short_session_label(sid, names.get(sid, "")): agg
+    # Keyed by SESSION ID, never by the rendered label. Two sessions can render
+    # the same 32-char string (identical names, or names agreeing in their first
+    # 32 characters), and a label-keyed dict does not merge those rows — it
+    # silently keeps the last one and drops the rest, taking their tokens, calls
+    # and cost off the screen entirely. On the operator's ledger that hid 46
+    # sessions before subagent naming existed and 355 after it, so the table is
+    # built as (label, aggregate) pairs whose identity is the id.
+    session_labels = session_table_labels({sid: names.get(sid, "") for sid in aggregate.by_session})
+    session_rows = [
+        (session_labels.get(sid, short_session_label(sid, names.get(sid, ""))), agg)
         for sid, agg in aggregate.by_session.items()
-    }
-    all_names = [n for n in aggregate.by_provider] + [n for n in session_labelled]
+    ]
+    all_names = [n for n in aggregate.by_provider] + [label for label, _ in session_rows]
     if all_names:
         # Grow the name column with the frame: a wide card gets a roomier column
         # (up to 48) so its width is used; a narrow one stays compact (30).
@@ -728,8 +737,8 @@ def build_report(
         lines.append(_group_section("By provider", aggregate.by_provider, width, name_col))
         lines.append(Text())
 
-    if session_labelled:
-        lines.append(_group_section("By session", session_labelled, width, name_col))
+    if session_rows:
+        lines.append(_group_section("By session", session_rows, width, name_col))
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
@@ -752,11 +761,18 @@ _WIDE_TABLE_MIN = 72
 
 def _group_section(
     title: str,
-    groups: dict[str, "UsageAggregate"],
+    groups: "Mapping[str, UsageAggregate] | Sequence[tuple[str, UsageAggregate]]",
     width: int,
     name_col: int,
 ) -> Text:
     """A per-provider or per-session table as one multi-line ``Text`` block.
+
+    Takes either a name->aggregate mapping (the provider table, whose keys are
+    genuinely unique) or a SEQUENCE of ``(label, aggregate)`` pairs (the session
+    table, whose labels are display text and may repeat). The pair form exists
+    because a dict keyed by a rendered label silently drops every row after the
+    first collision; rows are identified upstream by session id and arrive here
+    already labelled.
 
     Returned as a single ``Text`` with embedded newlines so the caller keeps a
     flat list of blocks; the screen splits on newlines only for the scroll
@@ -778,8 +794,9 @@ def _group_section(
     # Sort by cost when any of these groups is priced, else by tokens. Keyed on
     # the tuple so an unpriced group sorts by tokens as a tiebreak rather than
     # collapsing to a single $0 bucket.
+    pairs = list(groups.items()) if isinstance(groups, Mapping) else list(groups)
     ordered = sorted(
-        groups.items(),
+        pairs,
         key=lambda kv: (kv[1].cost_micro, kv[1].total_tokens),
         reverse=True,
     )
