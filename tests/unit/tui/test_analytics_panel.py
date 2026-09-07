@@ -825,21 +825,47 @@ def test_no_content_width_overruns_its_box_and_clips_a_column():
     holding the column at the full cap for the overrun to become visible —
     which is the ordinary shape of this table and was the shape of the ledger
     the review bisected.
+
+    The sweep covers DATA PROFILES as well as widths, which is design review
+    D11's structural lesson rather than an embellishment. The first version of
+    this test swept every width in the band and still shipped a real defect,
+    because it swept them all at ``calls=100``: the row overhead is a function
+    of the DATA, so a width sweep at a single data profile pins one slice
+    through a two-dimensional space and is blind along the other axis. Both
+    axes that size a row are varied here — the cost figure (2-8 cells) and the
+    call count (3-6 digits) — with magnitudes taken from the operator's real
+    ledger, whose largest session ran 25,445 calls and whose ``anthropic``
+    provider row ran 317,977. Against the hard-coded 4-cell calls allowance
+    those two profiles fail at 6 and 12 widths respectively while ``calls=100``
+    passes, which is exactly the blind spot that let D11 through a green test
+    and an exported frame at once.
     """
     names = {
         "abc123def456": "Toggleable Sidebar for Session Switching in the TUI",
         "bbb222ccc333": "coder · Improve Support for Local Model Provider",
         "ccc333ddd444": "short one",
     }
-    for label, cost_micro in (("cheap", 4_200_000), ("expensive", 3_433_960_000)):
+    # (label, cost_micro, calls). 100 is the ordinary small-session case; the
+    # other two are the ledger's real largest session and largest provider row.
+    profiles = (
+        ("cheap", 4_200_000, 100),
+        ("expensive", 3_433_960_000, 100),
+        ("cheap/5-digit-calls", 4_200_000, 25_445),
+        ("expensive/5-digit-calls", 3_433_960_000, 25_445),
+        ("cheap/6-digit-calls", 4_200_000, 317_977),
+        ("expensive/6-digit-calls", 3_433_960_000, 317_977),
+    )
+    for label, cost_micro, calls in profiles:
 
-        def _build(width: int) -> UsageAggregate:
+        def _build(width: int, cost_micro: int = cost_micro, calls: int = calls) -> UsageAggregate:
             agg = _agg()
             base = next(iter(agg.by_session.values()))
             agg.by_session = {}
             for sid in names:
                 scope = copy.copy(base)
                 scope.cost_micro = cost_micro
+                scope.calls = calls
+                scope.cost_known_calls = calls
                 agg.by_session[sid] = scope
             setattr(agg, "session_names", dict(names))
             return agg
@@ -893,6 +919,12 @@ def test_report_fits_the_box_the_scroll_container_actually_paints():
     ``scrollable_content_region``, the box Textual actually paints into. It
     covers both frames the review asked for; 114 is the first width that
     clipped and 120 is the ordinary terminal in the band.
+
+    The session rows carry the ledger's real call magnitude (design review D11).
+    At the fixture's original ``calls=100`` this test passed at both widths while
+    the operator's own data clipped at both — the two widths this test exists to
+    protect. A row's width is a function of its data, so a test that pins the
+    geometry has to carry data of the size that occurs.
     """
     import asyncio
 
@@ -901,8 +933,15 @@ def test_report_fits_the_box_the_scroll_container_actually_paints():
             agg = _agg()
             base = next(iter(agg.by_session.values()))
             agg.by_session = {}
-            for sid in ("abc123def456", "bbb222ccc333", "ccc333ddd444"):
-                agg.by_session[sid] = copy.copy(base)
+            for sid, calls in (
+                ("abc123def456", 317_977),
+                ("bbb222ccc333", 25_445),
+                ("ccc333ddd444", 96),
+            ):
+                scope = copy.copy(base)
+                scope.calls = calls
+                scope.cost_known_calls = calls
+                agg.by_session[sid] = scope
             setattr(
                 agg,
                 "session_names",
@@ -934,3 +973,82 @@ def test_report_fits_the_box_the_scroll_container_actually_paints():
                     )
 
     asyncio.run(run())
+
+
+def test_calls_column_is_sized_by_the_data_not_by_a_constant():
+    """A 6-digit call count widens the calls column instead of overrunning it.
+
+    Design review D11. ``_row_overhead`` budgeted the calls column at a literal
+    4 cells while ``_group_section`` painted it with a ``:>4`` PAD \u2014 and a pad
+    grows rather than truncating, so a wider number pushed every column to its
+    right off the box. The operator's ledger has ``anthropic`` at 317,977 calls
+    and eight sessions past 9,999, which cost the ``% cache`` column on the 13
+    most expensive rows of both tables across terminals 104-123.
+
+    Two independent things are asserted, because the defect was a DISAGREEMENT
+    between them rather than a fault in either alone:
+
+    * the budget knows how wide the column will be (``_row_overhead`` grows with
+      the digits), and
+    * the paint agrees, so the column is aligned and the row still fits.
+
+    The alignment half matters on its own: a per-row pad left ``317977 calls``
+    and ``16 calls`` with their labels at different offsets, which defeats
+    reading the column straight down.
+    """
+    small = _scoped(calls=16)
+    large = _scoped(calls=317_977)
+
+    budget_small = _row_overhead([("ollama", small)], 120)
+    budget_large = _row_overhead([("anthropic", large)], 120)
+    assert budget_large - budget_small == len("317977") - len("9999"), (
+        "the row overhead must grow with the width of the call count; it read "
+        f"{budget_small} for 16 calls and {budget_large} for 317,977"
+    )
+
+    # Mixed magnitudes in ONE table: the column is sized to the widest count,
+    # every row is padded to that same width, and nothing overruns the box.
+    agg = _agg()
+    base = next(iter(agg.by_session.values()))
+    agg.by_session = {}
+    names = {}
+    for sid, name, calls in (
+        ("abc123def456", "Toggleable Sidebar for Session Switching in the TUI", 317_977),
+        ("bbb222ccc333", "coder \u00b7 Improve Support for Local Model Provider", 25_445),
+        ("ccc333ddd444", "short one", 16),
+    ):
+        scope = copy.copy(base)
+        scope.calls = calls
+        scope.cost_known_calls = calls
+        agg.by_session[sid] = scope
+        names[sid] = name
+    setattr(agg, "session_names", names)
+
+    for width in range(100, 141):
+        text = "\n".join(line.plain for line in build_report(agg, width))
+        rows = [
+            li.rstrip() for li in text.split("By session", 1)[-1].splitlines() if " tokens" in li
+        ]
+        widest = max(cell_len(li) for li in rows)
+        assert widest <= width, (
+            f"at content width {width} a 6-digit call count pushes the row to "
+            f"{widest} cells, clipping {widest - width} off the box: {rows[0]!r}"
+        )
+        offsets = {li.index(" calls") for li in rows}
+        assert len(offsets) == 1, (
+            "every row's ' calls' label must sit at the same offset for the column "
+            f"to be readable; at width {width} they sit at {sorted(offsets)}"
+        )
+
+
+def _scoped(*, calls: int) -> UsageAggregate:
+    """One per-provider/per-session scope with a given call count."""
+    return UsageAggregate(
+        calls=calls,
+        input_tokens=500_000,
+        output_tokens=120_000,
+        context_tokens=3_500_000,
+        cache_read_tokens=3_000_000,
+        cost_micro=4_200_000,
+        cost_known_calls=calls,
+    )

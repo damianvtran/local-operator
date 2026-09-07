@@ -66,16 +66,35 @@ from tests.unit.tui.test_slash_echo import _submit  # noqa: E402
 #: Enough expensive rows to fill the frame, with two names at or past the 48-cell
 #: cap so the name column is actually held open at its maximum — see the module
 #: docstring on why one long row is not enough to reproduce D8.
+#:
+#: The third element is the CALL COUNT, and it is why this fixture was rebuilt
+#: for design review D11. The previous seed rendered ``16 calls`` and ``2
+#: calls`` — 1-2 digits against what was then a hard-coded 4-cell allowance — so
+#: the exported frames could not show the column that actually overran, and a
+#: real defect passed a visual review. These magnitudes are taken from the
+#: operator's own ledger (largest session 25,445 calls; the ``anthropic``
+#: provider row 317,977) so the frames exercise the 5- and 6-digit widths that
+#: exist in practice, alongside small counts so the column is ragged in the way
+#: real data makes it. A fixture whose magnitudes are all toy-sized is evidence
+#: only about toy data.
 BAND_ROWS = [
-    ("8f21ac93bb04", "Toggleable Sidebar for Session Switching in the TUI", 3433.96),
-    ("2b77de10c9a5", "coder · Improve Support for Local Model Providers", 2957.68),
-    ("d40c81ff7a13", "reviewer · Article-search-svc schema review", 2950.37),
-    ("6b1d0e97ca42", "Harden Against Credential Leak Paths in the runner", 2210.11),
-    ("0f3a8d2e5c19", "eval osworld/chrome-0421 · claude-sonnet-4-6", 1980.44),
-    ("77c4e0a1b8d3", "qa-tester · Update Provider Onboarding and OAuth", 1755.02),
-    ("c19b4f7d3a08", "short one", 1502.75),
-    ("98bfe7686ffe", "", 1200.10),
+    ("8f21ac93bb04", "Toggleable Sidebar for Session Switching in the TUI", 3433.96, 25445),
+    ("2b77de10c9a5", "coder · Improve Support for Local Model Providers", 2957.68, 21927),
+    ("d40c81ff7a13", "reviewer · Article-search-svc schema review", 2950.37, 12804),
+    ("6b1d0e97ca42", "Harden Against Credential Leak Paths in the runner", 2210.11, 8324),
+    ("0f3a8d2e5c19", "eval osworld/chrome-0421 · claude-sonnet-4-6", 1980.44, 1712),
+    ("77c4e0a1b8d3", "qa-tester · Update Provider Onboarding and OAuth", 1755.02, 430),
+    ("c19b4f7d3a08", "short one", 1502.75, 96),
+    ("98bfe7686ffe", "", 1200.10, 8),
 ]
+
+#: The per-session call counts above sum to the provider row's count, and the
+#: ledger's real provider total is an order of magnitude past its largest
+#: session (317,977 vs 25,445). Seeding one row per call would mean ~70k inserts
+#: for a screenshot, so the provider column is topped up with a single
+#: cheap-to-seed session carrying the remainder; the point of the fixture is the
+#: WIDTH of the rendered numbers, not their provenance.
+PROVIDER_CALLS = 317_977
 
 #: The band to sweep. Chosen to bracket the 96-cell content-box breakpoint with
 #: room on both sides: at 0.9x-6 (``_card_width``) terminals 108-126 map to
@@ -88,26 +107,35 @@ FRAME_WIDTHS = (114, 120)
 
 
 def seed(store: AnalyticsStore) -> None:
-    """Write the band fixture into the isolated ledger, names included."""
+    """Write the band fixture into the isolated ledger, names included.
+
+    ``UsageAggregate.calls`` is ``COUNT(*)`` over the ledger, so a row's call
+    count is literally how many snapshots it carries — there is no field to set.
+    The D11 magnitudes therefore cost real inserts (~390k), which is why the
+    spend and token totals are divided across a row's calls rather than repeated:
+    the rendered ``$`` and ``tokens`` figures must stay the ones the earlier
+    rounds captured, so that only the CALLS column changes between the round-2
+    and round-3 frames and a reader comparing them sees one variable move.
+    """
     snapshots = []
     index = 0
-    for session_id, name, usd in BAND_ROWS:
-        for part in range(2):
+    for session_id, name, usd, calls in BAND_ROWS:
+        for part in range(calls):
             snapshots.append(
                 replace(
                     _snap(
                         session_id=session_id,
                         provider="anthropic",
                         model_id="claude-sonnet-4-6",
-                        context=120_000 + index * 900,
-                        input_tokens=40_000,
-                        cache_read=70_000,
-                        cache_write=2_000,
-                        output_tokens=6_000,
-                        reasoning=1_200,
-                        cost_micro=int(usd * 1_000_000 / 2),
+                        context=(120_000 + index * 900) // calls,
+                        input_tokens=40_000 // calls,
+                        cache_read=70_000 // calls,
+                        cache_write=2_000 // calls,
+                        output_tokens=6_000 // calls,
+                        reasoning=1_200 // calls,
+                        cost_micro=int(usd * 1_000_000 / calls),
                         chars={"conversation": 4000, "tool_results": 2200},
-                        ts_ms=1788602400000 + index * 61000,
+                        ts_ms=1788602400000 + index * 61000 + part,
                         ok=True,
                     ),
                     request_id=f"req-{index:04d}-{part}",
@@ -116,9 +144,40 @@ def seed(store: AnalyticsStore) -> None:
                     duration_ms=2400,
                 )
             )
-            index += 1
+        index += 1
         if name:
             store.upsert_session_name(session_id, name)
+
+    # Top the provider row up to the ledger's real 6-digit magnitude. Carries
+    # negligible spend and tokens so it changes only the CALLS width — the
+    # column under audit — and lands in a session too cheap to appear in the
+    # top-of-table rows the frames show.
+    filler = PROVIDER_CALLS - sum(row[3] for row in BAND_ROWS)
+    for part in range(max(0, filler)):
+        snapshots.append(
+            replace(
+                _snap(
+                    session_id="f1lle4c0unt5",
+                    provider="anthropic",
+                    model_id="claude-sonnet-4-6",
+                    context=1,
+                    input_tokens=1,
+                    cache_read=0,
+                    cache_write=0,
+                    output_tokens=1,
+                    reasoning=0,
+                    cost_micro=1,
+                    chars={"conversation": 1},
+                    ts_ms=1788602400000 + part,
+                    ok=True,
+                ),
+                request_id=f"req-fill-{part}",
+                purpose="turn",
+                outcome="ok",
+                duration_ms=1,
+            )
+        )
+    store.upsert_session_name("f1lle4c0unt5", "routine background polling")
     store.record_batch(snapshots)
 
 
