@@ -1139,7 +1139,83 @@ so they are opt-in (`LO_RUN_SNAPSHOTS=1`) and regenerated with
 `--snapshot-update`. Do not add a golden as a substitute for looking at the
 change.
 
-### 6. Evidence goes on the PR, never into the repository
+### 6. Capturing a browser surface: headless Chrome, never a window
+
+Sections 1-5 are about Textual, which is the bulk of this UI. The browser
+extension's popup and options page are the other user-visible surface here, and
+they are captured out of a real Chrome rather than out of a pilot. **Any Chrome
+an agent launches for testing, capture, or CDP work runs `--headless=new`.**
+
+This is not a preference. On 2026-09-07 agent test harnesses driving the
+extension launched *headful* Chrome, and the windows took focus from the
+operator repeatedly while he was working in another application. The whole
+browser story on this machine is built on never doing that — the extension
+creates its tab with `active: false`, every cmux command passes `--focus false`,
+and `guide://browser` carries a "Focus safety — never steal the user's focus"
+section. A harness that pops a window on screen violates the same principle the
+product spends real effort upholding, and "it is only a quick check" is exactly
+the reasoning that produced the incident.
+
+New headless is not the old one: it is the same browser binary with no window,
+so extensions, DevTools/CDP, screenshots and synthetic input all work. Measured
+on this host (Chrome 152.0.7977.76, `--headless=new`), the built
+`extension/dist` loaded, its popup rendered at an explicit 300x600 viewport, and
+`Page.captureScreenshot` returned a 34 KB PNG showing the real pairing form;
+`Input.dispatchMouseEvent` dispatched. Nothing appeared on screen.
+
+**Load the extension over CDP, not `--load-extension`.** Branded Chrome removed
+that switch in 137 (`PSA: Removing --load-extension flag in Chrome branded
+builds`, chromium-extensions), and the
+`--disable-features=DisableLoadExtensionCommandLineSwitch` escape hatch is gone
+too. It does not error — it is **silently ignored**, so a harness using it gets
+a Chrome with no extension and an agent that concludes headless "does not
+support extensions". Verified here: with `--load-extension=extension/dist` the
+only `chrome-extension://` targets were Chrome's own built-ins and our manifest
+name was absent; `Extensions.loadUnpacked` over CDP returned our id and the
+popup drove normally. `docs/design/browser-extension-e2e.md` records the same
+finding on Chrome 151.
+
+**Size the viewport explicitly.** Headless inherits no real window, so it
+defaults to whatever the platform picks — measured 756x469 at `dpr=1` on this
+host with no flag. Pass `--window-size=300,600` (the extension popup's true
+metrics) or `Emulation.setDeviceMetricsOverride`. A frame whose dimensions were
+assumed rather than set is not evidence of anything.
+
+**Never pair a headful before-frame with a headless after-frame.** Device pixel
+ratio and scrollbar presence differ between the modes, so a cross-mode pair
+shows differences the change did not cause — the §3 trap, with the mode as the
+hidden variable. Recapture both sides in the same mode.
+
+The hygiene flags below are not decoration; each one is an incident:
+
+- **A unique `--user-data-dir` per launch**, under `/tmp`. Never the operator's
+  profile, and never a shared path: a second Chrome on a live profile dir is
+  how a run corrupts the one the extension is paired to.
+- **`--use-mock-keychain --password-store=basic`.** Real Chrome on macOS
+  otherwise reaches for the login keychain and raises modal "Keychain not
+  found" dialogs on the operator's screen — which happened, from 37 concurrent
+  instances. These are on-screen dialogs, so they defeat headless on their own.
+- **`start_new_session=True` plus process-group teardown** (SIGTERM to the
+  pgid, SIGKILL if it does not settle) **and an `atexit` handler**. The reason
+  is not that `terminate()` fails when it runs — on Chrome 152 it reaped a
+  13-process tree cleanly — it is that the harness does not always get to run
+  it. A harness killed mid-run leaves the browser reparented to PPID 1 holding
+  its profile dir: measured here, `SIGKILL` to the harness left **10** Chrome
+  processes alive with the browser at `PPID 1`. A previous session leaked 47
+  that way. Own the process group so the survivors are addressable, and assert
+  zero afterwards (`pgrep -f <your unique profile prefix>`) rather than assuming.
+- **Never touch the operator's own running Chrome.** Match on your own profile
+  prefix, never `pkill -f "Google Chrome"`.
+
+One thing this rule does **not** cover: `open -g -a "Google Chrome"` in
+`guide://browser`. That wakes the **operator's real paired browser** so the
+extension reconnects — a different activity from launching a test harness, and
+already background-launched by `-g`. It is correct as written; do not
+"headless" it. The distinction is the profile: the operator's logged-in browser
+is woken in the background and never given debug flags, while a harness browser
+is a throwaway profile that is headless, debug-ported and torn down.
+
+### 7. Evidence goes on the PR, never into the repository
 
 **Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
 screenshots, terminal byte captures, measurement logs, review-round
