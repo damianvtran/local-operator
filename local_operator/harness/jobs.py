@@ -36,6 +36,43 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RUNNING_JOBS = 15
 DEFAULT_RETENTION_MS = 5 * 60_000
 
+
+def retention_expired(job: Any, retention_ms: int, *, now: float | None = None) -> bool:
+    """Has this row outlived its retention window?
+
+    THE one definition of "past retention", used by
+    :meth:`AsyncJobManager._sweep_due` (which evicts) and by the readers that
+    merely present a row (the TUI dock's roster resolver). Both have to answer
+    identically: a panel that applied its own arithmetic would eventually
+    disagree with the ledger it claims to be a view over, and the disagreement
+    would show up as a row that either lingers past the sweep or vanishes
+    before it — the two failure modes this function exists to make impossible.
+
+    Three exemptions, and each is load-bearing:
+
+    * a row with no ``settled_at`` has not settled, so retention has not
+      started;
+    * a ``running`` row is never expired, whatever its stamps say — retention
+      reclaims finished work and must never remove live work;
+    * a ``restored`` row is exempt permanently. Rehydrated rows carry the
+      PREVIOUS session's settle stamp, which is almost always already past the
+      window, so treating them normally would evict every resumed child on the
+      first pass — the exact rows resume exists to keep visible.
+
+    Accepts any row-shaped object (``AsyncJob`` on an owner, a ``JobState`` DTO
+    on a follower) via ``getattr``, because both reach the dock.
+    """
+    if bool(getattr(job, "restored", False)):
+        return False
+    if str(getattr(job, "status", "") or "") == "running":
+        return False
+    settled_at = getattr(job, "settled_at", None)
+    if settled_at is None:
+        return False
+    reference = time.time() if now is None else now
+    return float(settled_at) < reference - retention_ms / 1000.0
+
+
 #: Cap on a job's retained live-output tail (``AsyncJob.output_tail``). Sized
 #: to hold a meaningful working window of a chatty job (a terraform plan, a
 #: training loop's recent epochs) while staying far below the per-call result
@@ -399,6 +436,49 @@ class AsyncJobManager:
         return job
 
     def list(self, *, owner_id: str | None = None) -> list[AsyncJob]:
+        """Every job row, oldest first, with retention applied AT READ TIME.
+
+        The sweep runs here — not only on a settle — because retention's
+        contract (see :meth:`_sweep_due`) is "observable for the full retention
+        period after it settles", not "until some other job happens to settle".
+        Every other ``_sweep_due`` call site is inside a job's own settle/cancel
+        path, so the LAST batch of a session had nothing left to drive its
+        eviction: settled subagent rows sat in the dock's ``Subagents`` panel
+        for the rest of the session and were reclaimed only by starting a new
+        one (issue #524, observed as a live roster showing "+45 more").
+
+        Swept on READ rather than on a timer, deliberately:
+
+        * **The roster is a pull surface.** Every consumer already re-reads it
+          (the TUI's 1 Hz poll, the panel repaint, the ``jobs`` tool, the
+          resume-sidecar writer), and a row that is never read cannot be
+          observed stale. Sweeping where the observation happens makes "a
+          caller never sees an out-of-retention row" a property of the type
+          rather than of a timer's cadence, and it holds identically for
+          server/exec hosts that run no TUI poll at all.
+        * **A timer would need a lifecycle this object does not have.** The
+          manager is constructed outside a running loop in plenty of call sites
+          (tests, restore paths), so a ``create_task`` in ``__init__`` is not
+          available; starting one lazily then means a start hook, a cancel in
+          ``dispose``, and a task that must not outlive the manager — new
+          failure modes (a leaked task, a sweep firing into a disposed
+          manager) bought for no additional guarantee, since a row can only
+          matter once something reads it.
+        * **Cost is nil.** ``_sweep_due`` is one O(n) pass over a roster this
+          method already sorts in O(n log n), on a dict whose size is bounded
+          by the fan-out.
+
+        What this deliberately does NOT change: the sweep evicts only rows that
+        are already past ``settled_at + retention`` and are not ``running``, so
+        a caller sees exactly what it saw before INSIDE the window, and no live
+        job is ever removed. It also does not notify — an eviction is retention
+        arriving, not a job mutation, and firing ``_on_roster_change`` from a
+        read would re-enter this method through the session's own roster writer
+        (``Session._persist_subagent_roster`` reads ``jobs.list()``). The next
+        real mutation persists the shrunken roster, which is the same ordering
+        the existing post-delivery sweep already had.
+        """
+        self._sweep_due()
         jobs = list(self._jobs.values())
         if owner_id is not None:
             jobs = [job for job in jobs if job.owner_id == owner_id]
@@ -413,6 +493,19 @@ class AsyncJobManager:
     @property
     def max_running(self) -> int:
         return self._max_running
+
+    @property
+    def retention_ms(self) -> int:
+        """The retention window this manager applies, in milliseconds.
+
+        Exposed because a READER outside the manager has to be able to apply
+        the SAME window without guessing at it: the TUI dock resolves its rows
+        through the comms graph (which deliberately holds a reference the sweep
+        cannot free — see ``_ChildRecord.job_ref``), so it filters with
+        :func:`retention_expired` against this value rather than re-deriving a
+        constant that a test or a host may have overridden.
+        """
+        return self._retention_ms
 
     def set_max_running(self, value: int) -> None:
         """Change the concurrency ceiling on a LIVE manager.
@@ -1205,20 +1298,21 @@ class AsyncJobManager:
         Retention runs from ``settled_at`` (settle time), never
         ``start_time``: a job that ran longer than the window must still be
         observable for the full retention period after it settles.
+
+        Driven from two kinds of call site, and it needs both. The settle/cancel
+        paths sweep so a long-lived session's ledger stays bounded as work flows
+        through it; :meth:`list` sweeps so the contract above holds for the LAST
+        batch too, which has no later settle behind it (issue #524). Idempotent
+        and total: a second call with nothing due does nothing.
         """
-        cutoff = time.time() - self._retention_ms / 1000.0
+        now = time.time()
         for job_id in [
             job_id
             for job_id, job in self._jobs.items()
-            # ``restored`` rows are exempt: they carry the PREVIOUS session's
-            # settle stamp, which is almost always already past the retention
-            # window, so an unguarded sweep would evict every rehydrated child
-            # on the first pass after resume — the exact rows this feature
-            # exists to keep visible. They leave only when the session ends.
-            if not job.restored
-            and job.status != "running"
-            and job.settled_at is not None
-            and job.settled_at < cutoff
+            # The predicate (including the ``restored``/``running`` exemptions
+            # and why they exist) lives in :func:`retention_expired`, shared
+            # with the readers that present a row without owning it.
+            if retention_expired(job, self._retention_ms, now=now)
         ]:
             del self._jobs[job_id]
             self._signals.pop(job_id, None)
