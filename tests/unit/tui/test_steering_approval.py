@@ -3198,3 +3198,126 @@ async def test_moving_the_caret_after_a_copy_gives_ctrl_c_back_to_the_draft() ->
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert app.is_running, "the second tap quit with the draft lost"
+
+
+@pytest.mark.asyncio
+async def test_a_promoted_compose_key_rekeys_its_row_instead_of_mounting_a_second() -> None:
+    """A provider that sends the name before the id must still paint ONE row.
+
+    The row is announced under `compose:0` because that is the only identity
+    available before the id arrives; the loop then announces the promotion by
+    naming both ids on one frame. Keyed purely by `tool_call_id`, that frame
+    reads as a brand-new call, so the screen would carry two rows for one call
+    and turn-end retirement would mark the abandoned one `⊘ interrupted` —
+    which is the exact failure the compose key is latched to avoid, reached
+    through the fix for it.
+
+    Drives the REAL app so the adoption path, not a re-implementation of it, is
+    what gets exercised.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="compose:0", tool_name="write", argument_bytes=8)
+            )
+        )
+        await pilot.pause()
+        assert set(app._composing_cards) == {"compose:0"}
+
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(
+                    tool_call_id="real_0",
+                    tool_name="write",
+                    argument_bytes=14079,
+                    supersedes_tool_call_id="compose:0",
+                )
+            )
+        )
+        await pilot.pause()
+        # The SAME row, rekeyed — not a second one beside it.
+        assert set(app._composing_cards) == {"real_0"}
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "composing" in row]) == 1
+        assert [row for row in painted if "13.7 KB" in row]
+
+        # And the real start adopts it by id, with no fallback needed.
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="real_0", tool_name="write", args={"path": "/tmp/x"}
+                )
+            )
+        )
+        await pilot.pause()
+        assert not app._composing_cards
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "write" in row]) == 1
+        assert not [row for row in painted if "composing" in row]
+
+
+@pytest.mark.asyncio
+async def test_a_promotion_for_an_unknown_row_still_mounts_exactly_one_card() -> None:
+    """A promotion whose placeholder this surface never saw is not special.
+
+    A viewer attaching mid-dictation can receive the promotion without ever
+    having seen the frame it supersedes. There is no row to rekey, so the
+    normal mount runs and the call gets its one card under the real id.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(
+                    tool_call_id="real_0",
+                    tool_name="write",
+                    argument_bytes=14079,
+                    supersedes_tool_call_id="compose:0",
+                )
+            )
+        )
+        await pilot.pause()
+        assert set(app._composing_cards) == {"real_0"}
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "composing" in row]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_supersession_keeps_exactly_one_row_on_screen() -> None:
+    """The hand-off repeats on every later frame; the screen must not react.
+
+    Once the row has been rekeyed there is no placeholder left to pop, so each
+    repeat takes the ordinary path and updates the row already keyed by the
+    real id. A second card here would be the two-rows-for-one-call failure
+    arriving through the mechanism meant to prevent it.
+    """
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(
+            ToolComposing(
+                ToolCallComposeEvent(tool_call_id="compose:0", tool_name="write", argument_bytes=8)
+            )
+        )
+        for size in (4096, 8192, 14079):
+            app.post_message(
+                ToolComposing(
+                    ToolCallComposeEvent(
+                        tool_call_id="real_0",
+                        tool_name="write",
+                        argument_bytes=size,
+                        supersedes_tool_call_id="compose:0",
+                    )
+                )
+            )
+        await pilot.pause()
+        assert set(app._composing_cards) == {"real_0"}
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "composing" in row]) == 1
+        assert [row for row in painted if "13.7 KB" in row]

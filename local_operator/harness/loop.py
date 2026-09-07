@@ -1333,6 +1333,16 @@ class AgentLoop:
                             "bytes": 0,
                             "announced": 0.0,
                             "key": "",
+                            # Whether ``key`` is the index-derived placeholder
+                            # rather than the provider's id. Tracked as a flag
+                            # instead of sniffing a ``compose:`` prefix off the
+                            # key, because a provider id is opaque and may
+                            # legally look like anything.
+                            "placeholder": False,
+                            # The placeholder this call was announced under,
+                            # once its real id has replaced it. Retained for
+                            # the rest of the stream — see the emission below.
+                            "supersedes": None,
                             "reported": -1,
                             # Bounded copy of the head of the argument stream,
                             # kept only until the intent scrape resolves. `None`
@@ -1380,6 +1390,68 @@ class AgentLoop:
                         # interrupted.
                         if not state["key"]:
                             state["key"] = state["id"] or f"compose:{event.index}"
+                            state["placeholder"] = not state["id"]
+                        elif state["placeholder"] and state["id"]:
+                            # The real id has arrived for a row announced under
+                            # a placeholder. The identity moves ONCE, here, and
+                            # is ANNOUNCED — the placeholder key is otherwise
+                            # kept for the rest of the stream while
+                            # ``tool_execution_start``/``_end`` carry the real
+                            # id, so every consumer that keys rows by
+                            # ``tool_call_id`` (the in-flight seed, the TUI's
+                            # composing cards, the mobile projection) ends up
+                            # holding TWO records for one call. A viewer joining
+                            # mid-turn then gets a composing row nothing can
+                            # adopt, and turn-end retirement paints it
+                            # ``⊘ interrupted`` on a call that SUCCEEDED.
+                            #
+                            # Announced rather than silently recomputed: silent
+                            # recomputation is the bug the latch above exists to
+                            # prevent (two rows for one call). Consumers rekey
+                            # the row they already have because this frame names
+                            # both ids.
+                            #
+                            # Announced immediately and UNTHROTTLED, then
+                            # REPEATED on every later compose frame for this
+                            # call. The throttle may swallow an ordinary compose
+                            # frame with no loss — a later one carries the same
+                            # cumulative size — but a frame carrying the
+                            # identity change is not interchangeable, so the
+                            # announcement must survive a lossy path. Anything
+                            # between here and a viewer may legitimately drop
+                            # frames: the per-connection queue compacts and
+                            # overflows, and a viewer that was away sees only
+                            # what the seed retained. Naming the placeholder on
+                            # every subsequent frame makes the hand-off
+                            # idempotent — a consumer that already rekeyed finds
+                            # nothing to drop — and makes it impossible for the
+                            # ONE frame that carried it to be the one lost,
+                            # which would strand the row this exists to rescue.
+                            #
+                            # The immediate emission is also the ordering
+                            # guarantee: the hand-off reaches the seed before
+                            # the ``tool_execution_start`` that follows on the
+                            # real id.
+                            #
+                            # Only announced when a row was actually published
+                            # under the placeholder (``announced`` is still 0.0
+                            # before the first frame): with nothing on screen
+                            # and nothing in the seed there is no row to
+                            # supersede, so the key is corrected in place and
+                            # consumers are told nothing.
+                            if state["announced"] != 0.0:
+                                state["supersedes"] = state["key"]
+                            state["key"] = state["id"]
+                            state["placeholder"] = False
+                            if state["supersedes"]:
+                                state["reported"] = state["bytes"]
+                                yield ToolCallComposeEvent(
+                                    tool_call_id=state["key"],
+                                    tool_name=state["name"],
+                                    argument_bytes=state["bytes"],
+                                    intent=state["intent"],
+                                    supersedes_tool_call_id=state["supersedes"],
+                                )
                         now = time.monotonic()
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
@@ -1390,6 +1462,7 @@ class AgentLoop:
                                 tool_name=state["name"],
                                 argument_bytes=state["bytes"],
                                 intent=state["intent"],
+                                supersedes_tool_call_id=state["supersedes"],
                             )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
@@ -1408,6 +1481,7 @@ class AgentLoop:
                                 tool_name=state["name"],
                                 argument_bytes=state["bytes"],
                                 intent=state["intent"],
+                                supersedes_tool_call_id=state["supersedes"],
                             )
                     stop_reason = event.stop_reason
                     if event.usage is not None:

@@ -29,6 +29,7 @@ asyncio components against each other, which is the e2e stage's job.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -1029,3 +1030,175 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
             await viewer.dispose()
         server.close()
         await handle.dispose()
+
+
+# ---------------------------------------------------------------------------
+# A viewer joining AFTER the tools finished, against a provider that sends each
+# call's name before its id.
+#
+# The dangerous window is after the calls END but before ``agent_end`` clears
+# ``live_events``. Under the unfixed code the seed held the placeholder-keyed
+# compose rows BESIDE the real ends, so the joiner mounted three composing
+# cards nothing could adopt, discarded three ends it had no card for, and
+# painted `⊘ interrupted` on three calls that SUCCEEDED.
+#
+# Driven against the production handle, the production server, a real socket
+# and the production ``RemoteSession`` for the reason this module's docstring
+# gives: a stub that declares the capability is what hid the last outage.
+# ---------------------------------------------------------------------------
+
+
+def _late_id_tool_turn(count: int) -> list[Any]:
+    """A provider stream that announces each call's NAME before its ID.
+
+    This is the ordering `providers/clients.py` tolerates on the Responses API,
+    where ``call_id`` falls back to the empty string. Scripted here rather than
+    waiting for a provider to start doing it, because the branch is reachable
+    by contract and had no coverage at all.
+    """
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+
+    events: list[Any] = [StreamTextDelta(delta="working")]
+    # Names first, with NO id: this is what latches the `compose:{index}` key.
+    events += [StreamToolCallDelta(index=i, id="", name="probe") for i in range(count)]
+    events += [
+        StreamToolCallDelta(index=i, id="", name="", argument_delta="{}") for i in range(count)
+    ]
+    # The real ids arrive only now, and every execution event carries them.
+    events += [
+        StreamToolCallDelta(index=i, id=f"real_{i}", name="", argument_delta="")
+        for i in range(count)
+    ]
+    events.append(StreamEndEvent(stop_reason="toolUse"))
+    return events
+
+
+@pytest.mark.asyncio
+async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """Three succeeded calls must not be painted as interrupted.
+
+    Asserted on the SEED the viewer is actually handed: it must carry one entry
+    per call, keyed by the id the executions used, and no compose row whose
+    call has already started. That is the property `_retire_live_tool_cards`
+    depends on — its docstring says so, and says the fix belongs in the seed,
+    which is where it is.
+    """
+    import os
+
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+    from local_operator.session.remote import RemoteSession
+    from tests.e2e.harness import text_turn
+
+    tools_done = asyncio.Event()
+    hold_summary = asyncio.Event()
+
+    async def execute(  # noqa: ANN001
+        tool_call_id, args, signal=None, on_update=None, context=None
+    ):
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="probe", content=[TextContent(text="ok")]
+        )
+
+    probe = AgentTool(
+        name="probe",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+        interruptible=True,
+    )
+
+    class _Stream:
+        """Turn 1 dictates 3 late-id calls; turn 2 is held open.
+
+        Holding turn 2 keeps the turn alive after the tools have ended, which
+        is the exact window ``live_events`` still describes and the window a
+        `/resume` lands in.
+        """
+
+        def __init__(self) -> None:
+            self.requests: list[Any] = []
+            self.fired = False
+
+        def __call__(self, request, signal=None):  # noqa: ANN001
+            self.requests.append(request)
+            roles = [getattr(m, "role", "") for m in getattr(request, "messages", [])]
+            has_result = "tool" in roles
+            is_tool_turn = bool(getattr(request, "tools", None)) and not has_result
+            if is_tool_turn:
+                self.fired = True
+
+            async def gen():
+                if is_tool_turn:
+                    for event in _late_id_tool_turn(3):
+                        yield event
+                    return
+                if has_result:
+                    tools_done.set()
+                    await hold_summary.wait()
+                for event in text_turn("summarised"):
+                    yield event
+
+            return gen()
+
+    directory = headless_tui_env / "sessions" / "latejoin0001"
+    directory.mkdir(parents=True)
+    session = build_session(directory, _Stream(), tools=[probe], cwd=workspace)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    # A real runtime process writes this; without it `find_owner_record` cannot
+    # see a perfectly healthy runtime and the viewer goes cold, faking an abort.
+    (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    viewer = None
+    owner_turn = asyncio.create_task(session.prompt("run three probes"))
+    try:
+        await asyncio.wait_for(tools_done.wait(), timeout=30)
+
+        record = await _wait_for_record(headless_tui_env, session.session_id)
+        viewer = await RemoteSession.connect(
+            record,
+            session.session_id,
+            config_dir=headless_tui_env,
+            takeover_factory=_never_take_over,
+        )
+        assert viewer.frontend_state is not None
+        seed = list(viewer.frontend_state.live_events)
+
+        tool_rows = [
+            row
+            for row in seed
+            if str(row.get("type", "")).startswith("tool_")
+            or row.get("type") == "tool_call_compose"
+        ]
+        composing = [row for row in tool_rows if row.get("type") == "tool_call_compose"]
+        ended = {
+            str(row.get("tool_call_id"))
+            for row in tool_rows
+            if row.get("type") == "tool_execution_end"
+        }
+
+        # The three calls succeeded, so their ends are what the seed must
+        # carry — and it must carry NOTHING that claims they are still being
+        # composed. Before the fix this held three `compose:N` rows beside
+        # these ends, and every one of them became a false `⊘ interrupted`.
+        assert ended == {"real_0", "real_1", "real_2"}, seed
+        assert composing == [], (
+            "the seed handed the joiner a composing row for a call that had "
+            f"already finished; those rows are painted interrupted: {composing}"
+        )
+        # No id space other than the executions' own reaches the joiner.
+        assert {str(row.get("tool_call_id")) for row in tool_rows} == ended
+    finally:
+        hold_summary.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(owner_turn, timeout=30)
+        if viewer is not None:
+            await viewer.dispose()
+        server.close()
+        await session.dispose()

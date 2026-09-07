@@ -29298,6 +29298,21 @@ class OperatorApp(App[None]):
         reasonable reading of that frame was that the agent had hung.
         """
         event = message.event
+        # The call's real id has just arrived for a row this surface mounted
+        # under an index-derived placeholder: REKEY the row rather than letting
+        # the lookup below miss and mount a second one. Without this the
+        # promotion frame reads as a brand-new call, so the screen carries two
+        # rows for one call and the abandoned one is marked ``⊘ interrupted`` at
+        # turn end — precisely the failure the compose key is latched to avoid.
+        superseded = getattr(event, "supersedes_tool_call_id", None)
+        if superseded:
+            promoted = self._composing_cards.pop(str(superseded), None)
+            if promoted is not None:
+                promoted.tool_call_id = event.tool_call_id
+                # The anchor is the row's scroll identity; leaving it on the
+                # placeholder would strand a restored scroll position.
+                promoted.navigation_anchor_id = f"tool:{event.tool_call_id}"
+                self._composing_cards[event.tool_call_id] = promoted
         card = self._composing_cards.get(event.tool_call_id)
         if card is None:
             card = ToolCard(event.tool_call_id, event.tool_name)
