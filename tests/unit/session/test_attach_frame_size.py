@@ -29,6 +29,7 @@ from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
+    _SHAREABLE_STATE_FIELDS,
     MODEL_CATALOGUE_FLOOR_ROWS,
     USAGE_COMPONENT_CAP,
     FrontendSessionState,
@@ -472,6 +473,47 @@ def test_every_collection_field_is_classified() -> None:
     # stale entry here implying coverage that no longer exists.
     stale = classified - _collection_fields()
     assert not stale, f"stale entries for fields that no longer exist: {sorted(stale)}"
+
+
+def test_shareable_state_fields_are_real_and_immutable() -> None:
+    """The copy-free allow-list must name real fields that cannot be mutated.
+
+    ``read_field`` hands out the store's OWN object, so the allow-list is the
+    entire safety argument. Round 2 found it asserting neither half: it listed
+    ``conversation_name`` (the field is ``conversation_title``), which passed
+    the ``KeyError`` gate and then raised ``AttributeError`` from ``getattr``
+    on a per-frame path, and it admitted ``selected_model``/``effective_model``
+    /``last_usage`` — non-frozen models whose instance a caller could rewrite,
+    removing an invariant ``state`` provides by copying.
+
+    Driven off ``model_fields`` and the annotation, in the same shape as the
+    collection-field guard above: a renamed field fails here rather than at a
+    user's terminal, and a field whose type becomes mutable cannot re-enter the
+    set without someone stating why sharing it is safe.
+    """
+    immutable = (str, bool, int, float)
+
+    unknown = _SHAREABLE_STATE_FIELDS - set(FrontendSessionState.model_fields)
+    assert not unknown, (
+        f"copy-free field(s) that do not exist on FrontendSessionState: {sorted(unknown)}. "
+        "`read_field` checks membership BEFORE `getattr`, so a name that is not a real "
+        "field passes the guard and then raises AttributeError on a per-frame path."
+    )
+
+    mutable: list[str] = []
+    for name in sorted(_SHAREABLE_STATE_FIELDS):
+        annotation = FrontendSessionState.model_fields[name].annotation
+        types = {
+            arg for arg in getattr(annotation, "__args__", (annotation,)) if arg is not type(None)
+        }
+        if not types or not all(isinstance(t, type) and issubclass(t, immutable) for t in types):
+            mutable.append(name)
+    assert not mutable, (
+        f"copy-free field(s) whose value is not deeply immutable: {mutable}. "
+        "`read_field` shares the store's own object, so anything a caller can mutate "
+        "in place — a model, a dict, a list — must read through `state` instead and "
+        "pay for its deep copy."
+    )
 
 
 def test_every_job_row_field_is_classified() -> None:

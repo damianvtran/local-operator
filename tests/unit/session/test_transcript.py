@@ -16,11 +16,14 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.tool_bridge import format_mcp_result
+from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import (
     ENTRY_MESSAGE,
     Transcript,
     TranscriptEntry,
+    read_replay_suffix,
     read_transcript_page,
+    replay_entries,
 )
 
 
@@ -611,3 +614,105 @@ async def test_cancelled_fold_cannot_replace_a_successors_new_message(tmp_path, 
     assert transcript.has_entry("new")
     history = reopened.build_llm_history()
     assert any(isinstance(message, Message) and message.text == "new" for message in history)
+
+
+# -- backward suffix replay ---------------------------------------------------
+#
+# ``read_replay_suffix`` exists so a legacy attach stops paying for a whole-file
+# JSON parse when the replay only uses rows from the latest compaction's kept
+# window. The property that makes that safe is EQUIVALENCE with the whole-file
+# parse, so every shape the replay handles specially is asserted here against
+# ``Transcript(...).build_llm_history()`` rather than against expected values:
+# if the semantics move, both sides move together and the suffix must follow.
+
+
+def _dump(history):
+    return [message.model_dump(mode="json") for message in history]
+
+
+async def _journal(directory: Path, *, shape: str) -> list[str]:
+    """A journal whose kept window sits behind enough bulk to span chunks."""
+    transcript = Transcript(directory)
+    ids: list[str] = []
+    for n in range(8):
+        ids.append((await transcript.append_message(Message.user(f"early q{n}"))).id)
+        ids.append((await transcript.append_message(Message.assistant(f"early a{n}"))).id)
+    # Bookkeeping rows larger than the reader's chunk, so a single row spans
+    # a chunk boundary and the incomplete-head handling is exercised.
+    for index in range(3):
+        await transcript.append_custom("bulk", {"index": index, "pad": "x" * (1 << 20)})
+    if shape != "no-compaction":
+        for n in range(6):
+            ids.append((await transcript.append_message(Message.user(f"kept q{n}"))).id)
+            ids.append((await transcript.append_message(Message.assistant(f"kept a{n}"))).id)
+        preserved = (
+            [{"id": ids[2], "text": "early q1"}] if shape == "compaction+preserved" else None
+        )
+        await transcript.append_compaction("summary", ids[-12], 100, preserved_user_turns=preserved)
+        for n in range(2):
+            ids.append((await transcript.append_message(Message.user(f"post q{n}"))).id)
+            ids.append((await transcript.append_message(Message.assistant(f"post a{n}"))).id)
+        if shape in ("compaction+prunes", "folded"):
+            await transcript.append_prune(ids[-6], "[pruned]")
+            await transcript.append_prune(ids[-1], "[pruned]")
+        if shape == "folded":
+            await transcript.compact_file(min_reclaim_bytes=0)
+    await transcript.append_custom("checkpoint", {"epoch": "e1"})
+    return ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape",
+    ["no-compaction", "compaction", "compaction+prunes", "compaction+preserved", "folded"],
+)
+async def test_replay_suffix_matches_whole_file_parse(tmp_path, shape):
+    directory = tmp_path / "sess"
+    ids = await _journal(directory, shape=shape)
+    full = Transcript(directory)
+    store = AttachmentStore(directory)
+
+    suffix = read_replay_suffix(directory, checkpoint_type="checkpoint")
+    assert _dump(replay_entries(suffix.entries, store)) == _dump(full.build_llm_history())
+    assert suffix.checkpoint == full.latest_custom("checkpoint")
+    if shape != "no-compaction":
+        # The point of the reader: it must NOT have read the early history.
+        assert suffix.bytes_read < (directory / "transcript.jsonl").stat().st_size
+    else:
+        # No compaction means no boundary to stop at: whole file, honestly.
+        assert suffix.bytes_read == (directory / "transcript.jsonl").stat().st_size
+
+    # Cuts at the tail, inside the kept window, and (for compacted journals)
+    # BEFORE the marker — where a compaction above the cut must be ignored
+    # exactly as the whole-file replay ignores it after slicing at the cursor.
+    cuts = [ids[-1], ids[-3]] + ([ids[-6]] if shape != "no-compaction" else [])
+    for cut in cuts:
+        cut_suffix = read_replay_suffix(directory, through_id=cut)
+        assert cut_suffix.through_present
+        assert _dump(replay_entries(cut_suffix.entries, store, through_id=cut)) == _dump(
+            full.build_llm_history(through_id=cut)
+        ), (shape, cut)
+
+
+@pytest.mark.asyncio
+async def test_replay_suffix_reports_an_unknown_cursor_instead_of_cutting(tmp_path):
+    """A cursor not in the journal is an answer, never a silent tail cut.
+
+    The strict-cut contract: the caller decides whether an absent cursor means
+    "legacy best-effort, replay everything" or "the negotiated window is gone".
+    The reader's job is to have read far enough to KNOW it is absent.
+    """
+    directory = tmp_path / "sess"
+    await _journal(directory, shape="compaction")
+    suffix = read_replay_suffix(directory, through_id="not-a-row")
+    assert not suffix.through_present
+    assert suffix.bytes_read == (directory / "transcript.jsonl").stat().st_size
+
+
+def test_replay_suffix_absent_journal_is_empty_history(tmp_path):
+    """Same answer as ``Transcript(directory)``: no file means nothing yet."""
+    suffix = read_replay_suffix(tmp_path / "absent")
+    assert suffix.entries == () and suffix.bytes_read == 0
+    assert (
+        replay_entries(suffix.entries, None) == Transcript(tmp_path / "absent").build_llm_history()
+    )

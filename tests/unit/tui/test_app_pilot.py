@@ -1335,8 +1335,12 @@ async def test_every_authoritative_slash_routes_to_owner_with_supported_images()
             arg = "coder inspect [Image #1]" if attachments else "value"
             app._run_slash_command(f"/{capability.command} {arg}", attachments)
             await pilot.pause()
+    # A legacy owner's loop classification cannot move the terminal's local
+    # source-bound scheduler to the owner (which explicitly refuses /loop).
     assert [name for name, _, _ in routed] == [
-        capability.command for capability in session.frontend_state.slash_capabilities
+        capability.command
+        for capability in session.frontend_state.slash_capabilities
+        if capability.command != "loop"
     ]
     assert [(name, count) for name, _, count in routed if name in {"agent", "team"}] == [
         ("agent", 1),
@@ -2032,6 +2036,54 @@ async def test_follower_model_picker_lists_the_owners_models() -> None:
         picker = app.query_one(Editor).model_picker
         selectors = [row.selector for row in picker._rows]
         assert "anthropic/claude-sonnet-4-6" in selectors, selectors
+
+
+@pytest.mark.asyncio
+async def test_model_picker_first_frame_is_initial_catalogue_not_live() -> None:
+    """P1-c: opening /model paints initial_catalogue; live_catalogue is a worker.
+
+    Boot must not call live_catalogue. The first painted rows are the disk
+    catalogue; the network refresh is the worker `_refresh_catalogue`.
+    """
+    from local_operator.providers.controller import CatalogueEntry
+
+    calls: list[str] = []
+
+    class RecordingController(FakeProviderController):
+        def initial_catalogue(self, *, cache_dir: Any = None) -> list[Any]:
+            calls.append("initial")
+            return [
+                CatalogueEntry(
+                    provider="anthropic",
+                    model_id="claude-sonnet-4-6",
+                    label="Claude Sonnet 4.6",
+                    context_window=1_000_000,
+                    input_price=3.0,
+                    output_price=15.0,
+                    connected=True,
+                    aggregated=False,
+                )
+            ]
+
+        async def live_catalogue(
+            self, *, ttl_s: float | None = None
+        ) -> tuple[list[Any], dict[str, str]]:
+            calls.append("live")
+            return [], {}
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session), provider_controller=RecordingController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is session:
+                break
+        assert "live" not in calls, "boot/mount must not call live_catalogue"
+        app._populate_model_picker()
+        assert calls[0] == "initial", calls
+        assert calls.count("initial") == 1
+        # live_catalogue is the worker, not the first frame.
+        assert "live" not in calls[:1]
 
 
 @pytest.mark.asyncio
@@ -5876,9 +5928,9 @@ async def test_loop_goal_stop_cancels() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_goal_reload_safety() -> None:
-    # Swapping app._session mid-loop must stop the worker cleanly and reset all
-    # three fields (esp. the suppress flag, which would otherwise mute the NEXT
-    # session's completion toasts).
+    # Reload explicitly retires the source; an ordinary sidebar selection must
+    # NOT cancel its loop. All source fields still reset and a late TurnEnded
+    # must not notify the newly selected conversation.
     session = GoalSession()
     session.prompt_gate = asyncio.Event()
     app = OperatorApp(lambda: _factory(session))
@@ -5891,12 +5943,16 @@ async def test_loop_goal_reload_safety() -> None:
         session.judge_verdicts = ["VERDICT: CONTINUE\nnot yet"] * 50
         await _type_command(pilot, app, "loop do the thing")
         assert app._loop_running is True
-        # Simulate a reload: the session the worker captured is no longer live.
+        # Mirror _reload_session's explicit retirement, not a sidebar switch.
+        source = app._interaction
+        source.retired = True
         app._session = GoalSession()
         session.prompt_gate.set()
         await _settle_loop(pilot, app)
         for _ in range(6):
             await pilot.pause()
+        # This reduced host still displays the retired source until adoption;
+        # its receipt must say stopped, never that the goal was achieved.
         text = _transcript_text(app)
     assert "stopped by reload" in text
     assert app._loop_running is False

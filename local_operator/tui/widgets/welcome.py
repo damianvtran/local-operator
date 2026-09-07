@@ -1281,6 +1281,12 @@ class WelcomeView(Static):
         self._sync_pulse_timer()
         self._sync_tip_timer()
 
+    _navigation_visible = True
+
+    def set_navigation_visible(self, visible: bool) -> None:
+        self._navigation_visible = visible
+        self.sync_animation_rate()
+
     def _sync_pulse_timer(self) -> None:
         """Glow only while the splash is on screen and animation is allowed.
 
@@ -1307,7 +1313,7 @@ class WelcomeView(Static):
         therefore also restarts it at rest, which is the right frame to come
         back to and the one `_stop_pulse_timer` already guarantees.
         """
-        wanted = bool(self.display) and motion_enabled()
+        wanted = self._navigation_visible and bool(self.display) and motion_enabled()
         if wanted and self._pulse_timer is None:
             self._pulse_origin = time.monotonic()
             self._pulse_timer = self.set_interval(MARK_PULSE_INTERVAL_S, self._pulse_tick)
@@ -1378,7 +1384,7 @@ class WelcomeView(Static):
         an arbitrary sample of the ring. The env kill switch still
         suppresses the *pulse*. It does not freeze the tip.
         """
-        wanted = bool(self.display) and animation_focused()
+        wanted = self._navigation_visible and bool(self.display) and animation_focused()
         if wanted and self._tip_timer is None:
             # The row OPENS on `TIPS[0]` (or TIP_SETUP / TIP_PASTE) and never
             # on a lottery. The pool is ordered, and the first thing a

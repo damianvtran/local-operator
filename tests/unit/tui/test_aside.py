@@ -195,7 +195,7 @@ async def test_closing_the_aside_returns_the_composer_to_bang_mode() -> None:
         for key in "echo hi":
             await pilot.press("space" if key == " " else key)
         assert editor.shell_mode is True
-        await pilot.press("ctrl+b")
+        await pilot.press("f8")
         await pilot.pause()
         assert editor.shell_mode is False
         await pilot.press("escape")  # the user's door out of the card
@@ -354,7 +354,7 @@ async def test_the_card_shares_the_composer_s_column(size) -> None:  # noqa: ANN
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        await pilot.press("ctrl+b")
+        await pilot.press("f8")
         await pilot.pause()
         await pilot.pause()
 
@@ -381,7 +381,7 @@ async def test_width_parity_survives_a_live_resize() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
-        await pilot.press("ctrl+b")
+        await pilot.press("f8")
         await pilot.pause()
         await pilot.resize_terminal(60, 24)
 
@@ -530,7 +530,7 @@ async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(
 # -- leaving ---------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_escape_restores_the_main_chat_and_its_half_typed_prompt() -> None:
-    """Ctrl+B mid-draft, ask, Esc: the draft is back and the chat is intact.
+    """F8 mid-draft, ask, Esc: the draft is back and the chat is intact.
 
     The draft is what makes the aside a place you STEP INTO. Losing it would
     make the feature cost a retype every time, which is exactly the tax that
@@ -544,7 +544,7 @@ async def test_escape_restores_the_main_chat_and_its_half_typed_prompt() -> None
         editor.focus()
         await pilot.pause()
         editor.load_text("port the compaction gate to")
-        await pilot.press("ctrl+b")
+        await pilot.press("f8")
         await pilot.pause()
 
         assert app.query_one(AsidePanel).is_open
@@ -601,7 +601,7 @@ async def test_reopening_the_aside_opens_an_empty_one() -> None:
         await pilot.press("escape")
         await pilot.pause()
 
-        await pilot.press("ctrl+b")
+        await pilot.press("f8")
         await pilot.pause()
 
         assert app.query_one(AsidePanel).is_open

@@ -960,7 +960,9 @@ class OwnedSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients."""
         return self._session.frontend_state
 
-    async def subscribe_frontend(self, on_update: Callable[[Any], None]) -> Any:
+    async def subscribe_frontend(
+        self, on_update: Callable[[Any], None], *, display_window: bool = False
+    ) -> Any:
         """Snapshot and subscribe atomically, on the loop that publishes.
 
         ``Session.subscribe_frontend`` refreshes through the publishing path
@@ -968,7 +970,13 @@ class OwnedSessionHandle(SessionHandle):
         every client's exact-``+1`` gap check detect transport loss. Awaited
         rather than wrapped because the caller is already on this loop.
         """
-        return self._session.subscribe_frontend(on_update)
+        return self._session.subscribe_frontend(on_update, display_window=display_window)
+
+    async def record_shell(self, command: str, result: Any) -> None:
+        await self._session.record_shell(command, result)
+
+    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+        return self._session.history_page(before, anchor)
 
     def subscribe_events(self, on_event: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Feed serialized AgentEvents to the runtime's v4 relay.
@@ -1812,7 +1820,16 @@ class OwnedSessionHandle(SessionHandle):
         from local_operator.harness.types import Message
 
         messages = [Message.model_validate(turn) for turn in turns]
-        return await self._session.complete_aside(messages)
+        complete = self._session.complete_aside
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is not None and "on_usage" in inspect.signature(complete).parameters:
+            # A remote caller receives text, not a billable usage callback. The
+            # authoritative owner must charge the request here; otherwise a
+            # hidden goal judge (and other remote asides) silently costs zero.
+            return await complete(
+                messages, on_usage=lambda usage: store.accrue_usage(self._session, usage)
+            )
+        return await complete(messages)
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork a viewer's aside exchange into the durable conversation."""

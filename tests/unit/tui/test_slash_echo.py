@@ -79,6 +79,7 @@ ECHO_POLICY = {
     # replaces the transcript region, so a user row printed behind it would
     # only be readable after leaving. It takes no argument at all.
     "settings": False,
+    "sidebar": False,
     "search": False,
     "accounts": False,
     # The cascade tree IS the receipt, and there is no argument to restate.
@@ -149,6 +150,7 @@ PROMPT_POLICY = {
     # replaces the transcript region, so a user row printed behind it would
     # only be readable after leaving. It takes no argument at all.
     "settings": False,
+    "sidebar": False,
     "search": False,
     "accounts": False,
     "failovers": False,
