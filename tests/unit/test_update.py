@@ -1071,3 +1071,53 @@ def test_installed_version_rereads_disk_within_one_process(tmp_path: Path) -> No
         )
     finally:
         _sys.path.remove(str(site))
+
+
+def test_cli_version_flag_reports_the_running_build(tmp_path: Path) -> None:
+    """`--version` must answer from `installed_version()`, not raw metadata.
+
+    THE SURFACE THE USER CHECKS FIRST. Install metadata is written once and
+    never moves when the checkout's `pyproject.toml` does, so
+    `importlib.metadata.version("local-operator")` reports the version an
+    editable install was CREATED at rather than the one it is running — and a
+    leftover `*.egg-info` shadows the real dist-info downward on top of that.
+    `installed_version()` corrects both; `--version` used to bypass it, so the
+    one surface a user reads to answer "which build am I on?" was also the one
+    still answering from the stale channel. That was the reported symptom this
+    change ships with, so shipping it uncorrected invites a duplicate report of
+    the bug it fixes.
+
+    THE FIXTURE HAS TO CREATE THE DIVERGENCE, or the test is vacuous: in a
+    clean checkout both channels agree, so asserting they match passes just as
+    well on the bypassing form (verified — the first version of this test did).
+    So the editable source is pinned to a version the metadata does not have,
+    which is the ordinary state of any editable checkout after a release bump.
+
+    Driven as a REAL SUBPROCESS through the parser builder, because the value
+    is baked in at construction time by an `argparse` `action="version"`: an
+    in-process call reads whatever the already-imported `cli` module captured,
+    which is exactly what a stale `.pyc` would hide.
+    """
+    repo = Path(__file__).resolve().parents[2]
+    marker = "9.9.9"
+    # Force the two channels apart: `_editable_source_version` is the input
+    # `installed_version()` prefers, and no real metadata can report 9.9.9.
+    probe = (
+        "import local_operator.update as u;"
+        f"u._editable_source_version=lambda: {marker!r};"
+        "import local_operator.cli as c;"
+        "p=c.build_cli_parser();"
+        "a=[x for x in p._actions if '--version' in getattr(x,'option_strings',[])][0];"
+        "print(a.version)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(repo)
+    )
+    assert out.returncode == 0, f"probe failed:\n{out.stderr[-2000:]}"
+    printed = out.stdout.strip().splitlines()[-1]
+    assert printed == f"v{marker}", (
+        "`--version` did not read through installed_version(): "
+        f"got {printed!r}, expected 'v{marker}'. A raw "
+        "importlib.metadata.version() call reports the installed metadata and "
+        "cannot see the running checkout's version."
+    )
