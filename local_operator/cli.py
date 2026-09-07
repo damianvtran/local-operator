@@ -46,6 +46,9 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+# stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
+# does not violate this module's no-heavy-module-level-imports rule.
+from local_operator import procname
 from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
@@ -3779,7 +3782,81 @@ def _install_group_reaper_soft_death() -> None:
         _chain(_sig)
 
 
+#: Subcommands whose process is LONG-LIVED and therefore worth re-execing to
+#: rename. Everything absent from this set — `send`, `sessions`, `config`,
+#: `credential`, `stop`, `login` — finishes in well under a second and never
+#: lingers in Activity Monitor, so paying the re-exec there would be pure
+#: latency for a row nobody can see. ``None`` is the bare interactive launch.
+_BRANDED_SUBCOMMANDS = frozenset({None, "serve", "mobile", "exec", "browser"})
+
+
+def _maybe_brand_process(args: argparse.Namespace) -> None:
+    """Re-exec through the branded interpreter image when it is worth it.
+
+    WHY THIS IS GATED, and why the gate is not "always". A re-exec restarts the
+    interpreter, so the replacement process re-pays every import this one has
+    already done — and `local_operator.cli` alone costs 221 ms of imports
+    (pydantic/yaml, measured with `-X importtime`). Measured end to end here:
+    `lop --version` went 223 ms -> 410 ms, i.e. **+186 ms**, not the ~35 ms a
+    bare-interpreter re-exec suggests. That is a bad trade for a command that
+    exits immediately and whose row nobody ever sees in Activity Monitor.
+
+    So the cost is paid only by processes that live long enough for the name to
+    be the point: the interactive TUI, `serve`, `mobile`, `exec`, `browser`.
+    For those, ~190 ms sits against a startup already north of a second and a
+    process that then runs for minutes to hours.
+
+    Detached children (session runtimes, eval workers, exec workers) do NOT go
+    through this path at all: their parent spawns them with `executable=` set to
+    the branded image, so they are born branded and pay nothing.
+
+    Never raises, and returns normally whenever branding is unavailable — in
+    which case this process carries on exactly as it does today, still alive to
+    have repaired the link for next time. That liveness is the whole reason the
+    `lop` shebang is NOT pointed at the link; see `procname.py`.
+    """
+    subcommand = getattr(args, "subcommand", None)
+    if subcommand not in _BRANDED_SUBCOMMANDS:
+        return
+    procname.reexec_branded(_process_label(args))
+
+
+def _process_label(args: argparse.Namespace) -> str | None:
+    """The argv[0] this process should carry, or None for the bare brand.
+
+    Only fixed templates and machine-generated values (ports, an agent name that
+    is already slugged upstream) reach this: argv is world-readable through
+    `ps`, so no prompt, path, or model-produced text may ever be interpolated
+    into it. See the label vocabulary in `procname.py`.
+    """
+    subcommand = getattr(args, "subcommand", None)
+    if subcommand == "serve":
+        return procname.branded_argv0(procname.LABEL_SERVE, port=int(getattr(args, "port", 0)))
+    if subcommand == "mobile":
+        return procname.branded_argv0(
+            procname.LABEL_MOBILE, port=int(getattr(args, "port", 0) or 0)
+        )
+    if subcommand is None:
+        # The interactive TUI. The session id is not minted yet at this point
+        # (the session is built after the re-exec), so the agent name is all the
+        # identity available — and it is the field an operator actually scans
+        # for when several sessions are running.
+        # `dest="agent_name"` — `--agent` is the flag, not the attribute.
+        agent = getattr(args, "agent_name", None)
+        if isinstance(agent, str) and agent:
+            return procname.branded_argv0(
+                procname.LABEL_SESSION_AGENT, agent=procname.safe_field(agent)
+            )
+    return None
+
+
 def main() -> int:
+    # Name this process in the OS process listing. On Linux this is a
+    # ~microsecond `prctl` on the current process and nothing else happens; the
+    # macOS half (which needs a re-exec) is deferred until after the parse, for
+    # the cost reason documented at `_maybe_brand_process`.
+    procname.set_process_name()
+
     # FIRST, before anything else can log. `helpers.py` used to configure the
     # root logger as an import side effect; now the entry point owns it, which
     # is what lets the TUI branch below swap the console handler for a file.
@@ -3787,6 +3864,12 @@ def main() -> int:
     try:
         parser = build_cli_parser()
         args = parser.parse_args()
+
+        # macOS: replace this process with a branded image so Activity Monitor
+        # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
+        # a no-op everywhere else. Placed after the parse so `--version` and
+        # `--help` (which argparse exits from inside `parse_args`) never pay it.
+        _maybe_brand_process(args)
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all

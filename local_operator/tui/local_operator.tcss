@@ -1819,6 +1819,20 @@ CopyPickerScreen .copy-picker {
     overflow: hidden;
 }
 
+/* Shown in place of the card on a terminal too small to draw one, where the
+ * alternative is a dimmed screen that says nothing at all. A SIBLING of the
+ * card rather than a row inside it, so the card's pinned "either the footer
+ * is on screen or nothing drew" contract is untouched: one row, no ground of
+ * its own, and `dim` because it is an explanation of a degraded frame rather
+ * than anything to act on. */
+#copy-picker-too-small {
+    width: 100%;
+    height: 1;
+    content-align: center middle;
+    text-align: center;
+    color: $lo-dim;
+}
+
 
 /* ── /resume session picker ────────────────────────────────────────────── *
  *
@@ -1845,6 +1859,40 @@ SessionPickerScreen .session-picker {
 }
 
 #session-picker-body {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+
+
+/* ── /move directory picker ────────────────────────────────────────────── *
+ *
+ * The `/resume` picker's twin, and deliberately identical to it: both answer
+ * a "read a list, pick a row" question with a cursor and hand a value back,
+ * so giving them different visual language would make one more screen look
+ * like a different app.
+ *
+ * `max-width` rather than a fixed width so an 80-column terminal gets the
+ * card it can hold; the widget measures its own columns against
+ * PICKER_MAX_WIDTH and truncates the path from the LEFT, which is the one
+ * column that can give up cells. Content-sized in both axes like `/resume`,
+ * because the row budget is computed in Python (`_page_rows`) and a second
+ * cap in the sheet is how a card loses its footer to a clip from the outside. */
+MovePickerScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+MovePickerScreen .move-picker {
+    width: auto;
+    height: auto;
+    max-width: 86;
+    max-height: 80%;
+    background: $lo-overlay;
+    padding: 1 2;
+}
+
+#move-picker-body {
     width: auto;
     height: auto;
     color: $lo-fg;

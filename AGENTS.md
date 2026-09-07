@@ -1080,6 +1080,64 @@ the one the venv was installed from, and this checkout is deleted immediately.
 Never copy that line into a feature worktree — see "Every feature worktree
 owns its own venv".
 
+**The same hazard has an additive form: `git add -A` and `git commit -a`.**
+Every command named above takes something away, so the rule reads as being
+about destruction — and an agent who had read it walked into this anyway,
+because adding sounds safe. It is not: in a checkout other agents are working
+in, both are whole-tree operations in exactly the sense above, sweeping peers'
+in-flight work into **your** commit under **your** authorship. They differ only
+in reach — `-a` takes every *tracked* modification, `-A` takes those and
+untracked files as well — so `-A` is the wider hazard and neither is narrow.
+Nothing useful in the output says so (`add -A` prints nothing at all;
+`commit -a` prints a file count, never names or authorship), and the fabricated
+authorship surfaces only later, out of `git log`. Stage explicit pathspecs —
+`git add <the files you actually edited>`. The ban lifts where the destructive
+one does: in a throwaway worktree nobody else touches, `-A` is fine, because
+there is no other work for it to reach. Measured on `feat/move-command`
+(PR #727), where two sessions shared one worktree: `5b1de59e1` at 10:59:36
+swept a peer's in-progress `tests/unit/session/test_remote_move.py` into a
+`fix(tui):` commit, and `type-check` failed at `test_remote_move.py:368:37`
+(`CancelledError` not assignable to `Exception | None`) because the widening
+that makes that test type-check landed 3m24s later in the peer's own commit
+`06ee21d9e`. The PR's head was red for a defect its own intended change did
+not contain.
+
+**The undo for a mistaken edit is a reverse edit of your own hunk, never a
+whole-file operation.** Everything above is written against a deliberate act —
+clearing the tree to get a before-frame — so none of it intercepts the reflex
+thirty seconds after you notice you edited the wrong thing, when the goal is
+just to put it back and `git checkout HEAD -- <path>` is the first command to
+hand. Same hazard, different mental context, and an agent who had read the rule
+above walked into it today. What makes an operation unsafe is that **its unit
+is the whole file rather than your hunk** — every command listed at the top of
+this block, plus a `write` that re-emits a whole file. Treat the list as
+examples and not as the rule, since enumerating is how `git add -A` stayed
+unnamed until someone hit it. The ban lifts where the others do: in a worktree
+nobody else is working in, or a throwaway, all of these are ordinary — the test
+is exclusivity, not ownership, because a worktree can be yours and still have a
+peer in it, which is exactly how #727 above happened. Where you are not alone,
+undo your own change the way you made it — a targeted reverse edit of exactly
+the lines you touched, leaving every other line as you found it — and better
+still, avoid needing the undo by checking `git rev-parse --show-toplevel`
+before a write, since the mistake that provokes the panic is usually aiming the
+edit at the wrong checkout. The undo rule limits the blast radius; the path
+check prevents the event. Today a subagent editing `.github/workflows/ci.yml`
+in the shared checkout instead of its own worktree ran
+`git checkout HEAD -- .github/workflows/ci.yml` to take it back, and destroyed
+a peer's unstaged work with its own: on the order of 27 lines, from a diffstat
+of roughly +23/−37 against HEAD of which its own edit was about +19/−10 —
+figures reconstructed from the session log, not re-derived, because the content
+is gone. Unstaged content is never hashed into the object store, so nothing
+recovers it: `git diff --cached` on the path was empty, all 283 entries under
+`.git/lost-found/other` were searched and held no candidate, and no commit
+after the incident touches the path. That checkout held 1,611 uncommitted paths
+from concurrent sessions when this was written, which is why a whole-file
+operation there has a blast radius you cannot see before you run it. One probe
+to avoid while investigating such an accident: `git fsck --lost-found`
+**writes** those entries rather than reporting them, so it mutates the very
+tree under investigation — plain `git fsck` lists the same dangling objects and
+creates nothing.
+
 Two stills side by side catch what a single "looks fine" never does. The
 usage-card round found a **pre-existing** bug this way: the after-frame had a
 scrollbar the before-frame did not, which turned out to be any tall overlay
@@ -1283,6 +1341,25 @@ miscalibrated — and "raise it" is only correct in the second case. Reproduce
 the sample, check whether the same test fails on `main` and on unrelated
 branches, and confirm the work under the probe is the legitimate kind. Widening
 a bound because it went red is how a guard stops guarding.
+
+### A pytest run that STOPS EARLY with exit 0 is not a pass
+
+Check the count, not just the exit code. `main()` is called in-process by the
+suite (`assert main() == 7`), so anything `main()` does to *its own process*
+happens to pytest. A change that added an `os.execv` early in `main()` replaced
+the running pytest with a fresh interpreter: the file printed dots to 57%, then
+stopped, and the shell reported **exit 0**. No failure, no traceback, no
+summary line — 42 of 98 tests simply never ran, and every gate looked green.
+
+It surfaced only because the summary line was missing from the output. So:
+`98 passed` is evidence; a bare exit code is not. The same shape hides behind
+`| tail`, which reports the *pipeline's* status — see the `rc=126` note in the
+Environment section, which is this hazard's twin.
+
+Anything a process can do to itself — `execv`, `os._exit`, `chdir`, signal
+handlers, `sys.exit` in a library path — needs a guard proving it is a real
+launch before it fires. `procname.is_own_launch()` is that guard for the
+branded re-exec, and its test is the one that pins this.
 
 ### Prove the test can still fail
 

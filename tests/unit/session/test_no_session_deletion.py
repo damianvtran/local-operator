@@ -72,6 +72,39 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # -- procname: the branded interpreter image -----------------------------
+    # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
+    # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
+    # of them is derived from a session id, a config dir, or any caller input,
+    # so none can name a path under sessions/. `branded_link_path()` refuses
+    # outright unless `sys.prefix != sys.base_prefix`, which further pins the
+    # target to a venv this project owns.
+    (
+        "local_operator/procname.py::_plant_hardlink",
+        "os.replace",
+        "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_hardlink",
+        "os.unlink",
+        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_plant_libpython",
+        "os.replace",
+        "Atomic plant of <venv>/lib/libpython3.X.dylib; both paths are venv-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_libpython",
+        "os.unlink",
+        "Clears this pid's own .tmp symlink in <venv>/lib before linking",
+    ),
+    (
+        "local_operator/procname.py::_sweep_orphan_temps",
+        "<path>.unlink",
+        "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
+    ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
@@ -91,6 +124,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.unlink",
         "Removes only its named temporary draft file after a failed atomic replacement",
+    ),
+    # `/move`'s recent-directory list, and the same shape as the draft store
+    # above: one named FILE at `<config_dir>/move-recents.json`, written to a
+    # tempfile in that same directory and replaced over. The destination is a
+    # literal filename joined to the config root, so it can never name a
+    # directory and never resolve under sessions/ — and the value written is a
+    # list of path STRINGS, never a path this code opens or removes.
+    (
+        "local_operator/tui/move_targets.py::remember_recent",
+        "os.replace",
+        "Atomic replacement of the single move-recents.json file in the config dir, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/tui/move_targets.py::remember_recent",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
     ),
     # -- the one legitimate remover -----------------------------------------
     (
