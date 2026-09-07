@@ -72,6 +72,39 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # -- procname: the branded interpreter image -----------------------------
+    # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
+    # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
+    # of them is derived from a session id, a config dir, or any caller input,
+    # so none can name a path under sessions/. `branded_link_path()` refuses
+    # outright unless `sys.prefix != sys.base_prefix`, which further pins the
+    # target to a venv this project owns.
+    (
+        "local_operator/procname.py::_plant_hardlink",
+        "os.replace",
+        "Atomic plant of <venv>/bin/'Local Operator'; both paths are venv-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_hardlink",
+        "os.unlink",
+        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
+        2,
+    ),
+    (
+        "local_operator/procname.py::_plant_libpython",
+        "os.replace",
+        "Atomic plant of <venv>/lib/libpython3.X.dylib; both paths are venv-derived",
+    ),
+    (
+        "local_operator/procname.py::_plant_libpython",
+        "os.unlink",
+        "Clears this pid's own .tmp symlink in <venv>/lib before linking",
+    ),
+    (
+        "local_operator/procname.py::_sweep_orphan_temps",
+        "<path>.unlink",
+        "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
+    ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",

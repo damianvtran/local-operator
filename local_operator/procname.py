@@ -124,10 +124,26 @@ BRAND = "Local Operator"
 #: are not truncated in ``ps -o args``.
 _PROC_NAME_MAX = 31
 
-#: Set on the re-exec'd process so a branded launch can never re-enter the
-#: re-exec and loop. Read by :func:`should_reexec`; the value is not inspected,
-#: only its presence.
-BRANDED_ENV = "LOCAL_OPERATOR_BRANDED"
+#: THERE IS NO ENVIRONMENT GUARD, on purpose — this note is here so nobody
+#: reintroduces one.
+#:
+#: A re-exec'd process reports ``sys.executable`` as the branded link it was
+#: executed through, so :func:`should_reexec` answers "already branded?" from
+#: the process's own identity. An earlier revision used a
+#: ``LOCAL_OPERATOR_BRANDED`` marker instead and it was wrong three ways:
+#:
+#:  - written into ``os.environ``, it was copied by ``reexec.replace_self``
+#:    (``env = os.environ.copy()``) into ``/reload`` and ``/update``, so the
+#:    relaunched session inherited "already branded" and de-branded itself
+#:    PERMANENTLY — reproduced: post-reload image ``python``;
+#:  - it leaked into every child spawned with an inherited environment
+#:    (``launch.py`` does ``dict(os.environ)``), so genuine launches beneath us
+#:    silently refused to brand;
+#:  - being presence-tested, ``…=0`` DISABLED branding, the opposite of every
+#:    other flag here.
+#:
+#: An identity check has none of those failure modes: there is no marker to
+#: set, inherit, leak, scrub, or misread as configuration.
 
 #: Fixed argv[0] labels. ``argv`` is a PUBLIC channel — every user on the host
 #: can read it out of ``ps`` — so these are FIXED format strings with only
@@ -291,8 +307,10 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
     (b) ``st_nlink < 2`` — something replaced the hardlink with a copy (an
         archive restore, an rsync without ``-H``), which is the ``@rpath``
         failure again and is no longer the same inode as the interpreter;
-    (c) the companion libpython symlink is missing or dangling — the
-        measured 100%-abort mode.
+    (c) the companion libpython symlink is missing, dangling, or points at
+        something other than THIS interpreter's dylib — the measured
+        100%-abort mode, plus the subtler case where an interpreter upgrade
+        leaves a live symlink aimed at the previous install's library.
 
     The inode is ground truth, so no version-stamp file is written; a stamp
     would be a second source of truth that can itself go stale while the inode
@@ -313,8 +331,20 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
         return True  # (a)
     if link_stat.st_nlink < 2:
         return True  # (b)
-    if libpython is not None and not libpython.exists():
-        return True  # (c) — ``exists`` follows the symlink, so a dangling one is False
+    if libpython is not None:
+        # `exists` follows the symlink, so a dangling one is already False.
+        if not libpython.exists():
+            return True  # (c) missing or dangling
+        # A LIVE symlink is not automatically a CORRECT one. After an
+        # interpreter upgrade the old link still resolves — to the previous
+        # install's dylib — and loading a mismatched libpython beside a fresh
+        # interpreter is exactly the crash this whole shape exists to avoid.
+        # Compared by resolved path against the running interpreter's own lib.
+        try:
+            if libpython.resolve() != (real.parent.parent / "lib" / libpython.name).resolve():
+                return True  # (c) live but pointing at the wrong library
+        except OSError:
+            return True
     return False
 
 
@@ -398,10 +428,16 @@ def _plant_libpython(link: Path, real: Path, name: str) -> bool:
         if not source.is_file():
             return False
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_symlink() or target.exists():
-            if target.resolve() == source.resolve():
-                return True
-            target.unlink()
+        if (target.is_symlink() or target.exists()) and target.resolve() == source.resolve():
+            return True
+        # NO unlink of a wrong-but-live symlink before the replace. `os.replace`
+        # overwrites a symlink atomically, so the unlink bought nothing and
+        # opened a window in which the venv has NO libpython at all — and any
+        # concurrent start landing in that window hits the measured
+        # 100%-abort mode (`Abort trap: 6`). The whole point of the
+        # temp-then-replace shape is that the target is never absent; removing
+        # it first defeated that.
+        #
         # Symlink via a temp name + replace, for the same concurrency reason as
         # the hardlink: sibling worktrees plant this at the same moment.
         tmp = target.with_name(f".{name}.{os.getpid()}.tmp")
@@ -448,9 +484,13 @@ def ensure_branded_interpreter() -> Path | None:
             # No dylib to pin means the hardlink would abort at launch. Refuse
             # rather than plant a landmine.
             return None
-        # Only on the replant path, so the common startup stays three stats and
-        # no directory scan.
+        # BOTH plant directories. A killed plant can leak a temp in `bin/`
+        # (named for the brand) or in `lib/` (named for the dylib), and
+        # sweeping only the first left lib temps accumulating forever. Only on
+        # the replant path, so the common startup stays three stats and no
+        # directory scan.
         _sweep_orphan_temps(link.parent, BRAND)
+        _sweep_orphan_temps(link.parent.parent / "lib", name)
         if not _plant_libpython(link, real, name):
             return None
         if not _plant_hardlink(link, real):
@@ -464,22 +504,23 @@ def ensure_branded_interpreter() -> Path | None:
 def should_reexec() -> Path | None:
     """The branded image to re-exec through, or None to stay as we are.
 
-    None whenever: we are already branded (``BRANDED_ENV`` set — this is what
-    makes a re-exec loop impossible), the current image IS already the link,
-    or no branded image could be planted.
+    None whenever: this process is ALREADY running through the branded image
+    (which is what makes a re-exec loop impossible), it is not a real ``lop``
+    launch, or no branded image could be planted.
     """
     try:
-        if os.environ.get(BRANDED_ENV):
+        # THE LOOP GUARD, and it is deliberately not an environment variable.
+        # A re-exec'd process reports `sys.executable` as the LINK it was
+        # executed through, so "am I already branded?" is answered by the
+        # process's own identity — no marker to set, inherit, leak or scrub.
+        # This also covers a launchd job pointed straight at the link.
+        if os.path.basename(sys.executable) == BRAND:
             return None
         # Only a real `lop` launch may replace itself; see `is_own_launch`.
         if not is_own_launch():
             return None
         link = ensure_branded_interpreter()
         if link is None:
-            return None
-        # Already running through the link (a re-exec'd child whose env was
-        # scrubbed, or a launchd job pointed straight at it).
-        if os.path.basename(sys.executable) == BRAND:
             return None
         if not os.access(link, os.X_OK):
             return None
@@ -531,11 +572,15 @@ def reexec_branded(label: str | None = None) -> None:
     — is still ALIVE to have repaired the link for next time. This is the whole
     reason the ``lop`` shebang is left alone; see the module docstring.
 
-    argv, environment, cwd and the controlling tty are preserved exactly:
-    ``os.execv`` keeps cwd and every file descriptor (so the tty, and Textual's
-    view of it, is untouched), and ``sys.orig_argv`` is the interpreter's own
-    launch line including the ``-X``/``-u`` style flags a plain ``sys.argv``
-    would drop.
+    cwd and the controlling tty are preserved exactly: ``exec`` keeps cwd and
+    every file descriptor (so the tty, and Textual's view of it, is untouched),
+    and ``sys.orig_argv`` is the interpreter's own launch line including the
+    ``-X``/``-u`` style flags a plain ``sys.argv`` would drop.
+
+    One thing is deliberately NOT preserved, and it is the point: ``argv[0]``
+    becomes the label. The ENVIRONMENT is passed through untouched — the loop
+    guard is the process's own ``sys.executable``, not a marker, for the
+    reasons recorded at :data:`BRAND`.
 
     WHY THIS DOES NOT BREAK ``resume_executable`` OR ``/reload``. Both read
     ``sys.argv[0]``, and CPython sets that from the SCRIPT path, not from the
@@ -549,9 +594,9 @@ def reexec_branded(label: str | None = None) -> None:
     It is deliberately independent of :mod:`local_operator.reexec`: that module
     replaces the process AFTER the TUI tears down, to pick up a new wheel, and
     exits ``REEXEC_CODE`` (75) to get there. This runs before anything starts,
-    changes no argument, and its child re-enters ``main`` with ``BRANDED_ENV``
-    set — so a later ``/reload`` still execs the ``lop`` launcher normally and
-    that new process brands itself again from scratch.
+    changes no argument, and leaves no marker behind — so a later ``/reload``
+    execs the ``lop`` launcher normally and that new process brands itself
+    again from scratch, which is exactly what a reload should do.
     """
     try:
         link = should_reexec()
@@ -564,10 +609,12 @@ def reexec_branded(label: str | None = None) -> None:
         # puts a readable line in ``ps -o args``. The IMAGE is `link`, which is
         # what Activity Monitor reads.
         argv[0] = branded_argv0(label) if label else BRAND
-        os.environ[BRANDED_ENV] = "1"
+        # Plain `execv`: the environment is inherited unchanged and NOTHING is
+        # written into `os.environ`. The replacement process recognises itself
+        # as branded from `sys.executable`; see the note at `BRAND` for the
+        # three ways the marker this replaced went wrong.
         os.execv(str(link), argv)
     except Exception:  # noqa: BLE001 — a failed exec must leave us running
-        os.environ.pop(BRANDED_ENV, None)
         logger.debug("branded re-exec skipped", exc_info=True)
 
 

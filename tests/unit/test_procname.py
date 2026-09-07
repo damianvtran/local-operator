@@ -155,6 +155,45 @@ class TestStaleness:
         assert not dead.exists(), "a dead pid's temp must be swept"
         assert mine.exists(), "a live pid's temp must be left alone"
 
+    def test_replants_when_libpython_points_at_the_wrong_library(self, branded):
+        """Trigger (c), second half: a LIVE symlink is not automatically CORRECT.
+
+        Found while verifying the B4 fix. `exists()` only proves the link
+        resolves, so after an interpreter upgrade a link aimed at the PREVIOUS
+        install's dylib passed the check — and loading a mismatched libpython
+        beside a fresh interpreter is the crash this shape exists to avoid.
+        """
+        name = procname._libpython_name()
+        assert name
+        lib = branded.parent.parent / "lib" / name
+        lib.unlink()
+        lib.symlink_to("/etc/hosts")  # live, resolvable, and wrong
+        assert lib.exists(), "precondition: the symlink resolves"
+
+        assert procname.ensure_branded_interpreter() == branded
+        expected = Path(os.path.realpath(sys.executable)).parent.parent / "lib" / name
+        assert lib.resolve() == expected.resolve()
+
+    def test_orphan_temps_are_swept_in_lib_as_well_as_bin(self, branded):
+        """REGRESSION (review round 1, B3): both plant directories are swept.
+
+        A killed plant leaks a temp named for the BRAND in `bin/` or for the
+        DYLIB in `lib/`. Sweeping only `bin/` left lib temps accumulating
+        forever, one per crashed startup.
+        """
+        name = procname._libpython_name()
+        assert name
+        bin_orphan = branded.parent / f".{procname.BRAND}.999999.tmp"
+        lib_orphan = branded.parent.parent / "lib" / f".{name}.999998.tmp"
+        bin_orphan.write_bytes(b"orphan")
+        lib_orphan.write_bytes(b"orphan")
+
+        branded.unlink()  # force the replant path
+        assert procname.ensure_branded_interpreter() == branded
+
+        assert not bin_orphan.exists(), "bin/ orphan must be swept"
+        assert not lib_orphan.exists(), "lib/ orphan must be swept too"
+
     def test_healthy_shape_is_not_rewritten(self, branded):
         """The common path does no filesystem writes.
 
@@ -260,10 +299,126 @@ class TestFallbackLadder:
         monkeypatch.setattr(sys, "orig_argv", orig_argv)
         assert procname.is_own_launch() is expected
 
-    def test_reexec_is_suppressed_once_branded(self, monkeypatch):
-        """The env guard is what makes a re-exec loop impossible."""
-        monkeypatch.setenv(procname.BRANDED_ENV, "1")
+    def test_reexec_is_suppressed_once_branded(self, monkeypatch, tmp_path):
+        """Already running through the link => no second exec. No loop.
+
+        The loop guard is the process's OWN identity (`sys.executable` is the
+        branded link), not an environment marker — see
+        `test_reexec_leaves_the_environment_untouched` for why a marker was
+        removed.
+        """
+        fake_link = tmp_path / "bin" / procname.BRAND
+        fake_link.parent.mkdir(parents=True)
+        fake_link.touch()
+        monkeypatch.setattr(sys, "executable", str(fake_link))
         assert procname.should_reexec() is None
+
+    def test_reexec_leaves_the_environment_untouched(self, monkeypatch):
+        """REGRESSION (review round 1, B1+B2): no marker may enter os.environ.
+
+        An earlier revision set `LOCAL_OPERATOR_BRANDED` in the LIVE
+        environment before exec'ing. Two things broke, both reproduced:
+
+        - `/reload` and `/update` (`reexec.replace_self`) do
+          `env = os.environ.copy()` and exec the plain `lop` launcher, so the
+          relaunch inherited "already branded" and the session was de-branded
+          permanently (post-reload image: `python`);
+        - every child spawned with an inherited environment (`launch.py` does
+          `dict(os.environ)`) carried it, so genuine launches refused to brand.
+
+        The environment this process hands to `exec` must therefore be exactly
+        the one it already had.
+        """
+        before = dict(os.environ)
+        captured: dict[str, object] = {}
+
+        def _fake_execv(path, argv):
+            captured["path"] = path
+            captured["argv"] = argv
+
+        monkeypatch.setattr(procname, "should_reexec", lambda: Path("/x/Local Operator"))
+        monkeypatch.setattr(os, "execv", _fake_execv)
+        # `execve` would also be a defect here: it is how a marker gets passed
+        # without mutating os.environ, and this feature needs no marker at all.
+        monkeypatch.setattr(
+            os,
+            "execve",
+            lambda *a: pytest.fail("re-exec must not pass a modified environment"),
+        )
+        procname.reexec_branded("Local Operator [serve] port=1")
+
+        assert captured["path"] == "/x/Local Operator"
+        assert dict(os.environ) == before, "re-exec must not mutate the live environment"
+
+    def test_reload_roundtrip_rebrands(self, branded):
+        """A relaunch after `/reload` must brand AGAIN, not inherit a marker.
+
+        Drives the real shape: a branded process (image = the link) spawns a
+        child with `os.environ.copy()`, exactly as `reexec.replace_self` does.
+        That child must see nothing that would stop it branding.
+        """
+        report = branded.parent.parent / "reload_probe.py"
+        report.write_text(
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})\n"
+            "from local_operator import procname\n"
+            # The relaunch runs the ORDINARY interpreter (the lop launcher's
+            # shebang), so it must not already look branded...
+            "print(os.path.basename(sys.executable) == procname.BRAND)\n"
+            # ...and nothing in the inherited environment may veto branding.
+            "print(any('BRANDED' in k for k in os.environ))\n"
+        )
+        handoff = branded.parent.parent / "reload_handoff.py"
+        handoff.write_text(
+            "import os, subprocess, sys\n"
+            f"subprocess.run([{str(os.path.realpath(sys.executable))!r}, {str(report)!r}],"
+            " env=os.environ.copy(), check=True)\n"
+        )
+        result = subprocess.run(
+            [procname.branded_argv0(procname.LABEL_SERVE, port=1), str(handoff)],
+            executable=str(branded),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        looks_branded, has_marker = result.stdout.split()
+        assert looks_branded == "False", "the relaunched interpreter must not look branded"
+        assert has_marker == "False", "no inherited marker may suppress re-branding"
+
+    def test_inherited_env_child_is_not_vetoed(self, branded):
+        """REGRESSION (B2): nothing in an inherited environment suppresses branding.
+
+        `launch.py` hands a runtime `dict(os.environ)` wholesale. When the
+        parent wrote a marker into its own environment, that child — a genuine
+        `lop` launch — inherited "already branded" and silently declined.
+
+        The assertion is about the ENVIRONMENT, not about whether this
+        particular child plants: a process exec'd from a link outside a venv
+        reports `sys.prefix == sys.base_prefix` and correctly refuses to plant
+        into a shared interpreter prefix. What must hold is that the decision
+        is made on the child's own merits with no inherited veto.
+        """
+        probe = (
+            "import os, sys;"
+            "sys.path.insert(0, %r);" % str(Path(__file__).resolve().parents[2])
+            + "from local_operator import procname;"
+            "print(any('BRANDED' in k for k in os.environ));"
+            # The refusal, when it happens, is the venv check and nothing else.
+            "print(sys.prefix != sys.base_prefix or procname.branded_link_path() is None)"
+        )
+        result = subprocess.run(
+            [procname.branded_argv0(procname.LABEL_SESSION_ANON, id="deadbeef"), "-c", probe],
+            executable=str(branded),
+            env=dict(os.environ),  # exactly what launch.py hands a runtime
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        has_marker, decided_on_own_merits = result.stdout.split()
+        assert has_marker == "False", "no marker may leak into an inherited environment"
+        assert decided_on_own_merits == "True"
 
     def test_ensure_never_raises(self, monkeypatch):
         """Contract: decoration must never break a startup, whatever fails."""
