@@ -1,0 +1,296 @@
+{
+  "source": "/private/tmp/lop-analytics-names",
+  "band": [
+    104,
+    130
+  ],
+  "frames": [
+    114,
+    120
+  ],
+  "pages_scrolled": 3,
+  "session_rows_seeded": 8,
+  "ledger_unchanged": true,
+  "widths_with_clipped_rows": [],
+  "sweep": [
+    {
+      "terminal": 104,
+      "content_box": 86,
+      "widest_row": 86,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 105,
+      "content_box": 87,
+      "widest_row": 86,
+      "gutter": 1,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 106,
+      "content_box": 88,
+      "widest_row": 86,
+      "gutter": 2,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 107,
+      "content_box": 89,
+      "widest_row": 89,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 108,
+      "content_box": 90,
+      "widest_row": 89,
+      "gutter": 1,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 109,
+      "content_box": 91,
+      "widest_row": 89,
+      "gutter": 2,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 110,
+      "content_box": 92,
+      "widest_row": 92,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 111,
+      "content_box": 92,
+      "widest_row": 92,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 112,
+      "content_box": 93,
+      "widest_row": 93,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 113,
+      "content_box": 94,
+      "widest_row": 94,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 114,
+      "content_box": 95,
+      "widest_row": 95,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache",
+      "frames_identical": true,
+      "rows_on_screen": 14,
+      "on_screen": [
+        "  Est. cost             $18k  \u2248 list price \u00d7 tokens",
+        "\u258c 1 day with usage   $18k \u00b7 cost \u00b7 t \u2192 tokens",
+        "\u258c Monthly   by calendar month \u00b7 cost \u00b7 t \u2192 tokens",
+        "\u258c Where input went   \u2248 estimated split of context tokens",
+        "  anthropic                                    1.5M tokens$18k   317977 calls    44% cache",
+        "  Toggleable Sidebar for Session\u2026            101.8k tokens$3.4k    25445 calls    50% cache",
+        "  coder \u00b7 Improve Support for Local Model\u2026   109.6k tokens$3k    21927 calls    60% cache",
+        "  reviewer \u00b7 Article-search-svc schema\u2026      115.2k tokens$3k    12804 calls    56% cache",
+        "  Harden Against Credential Leak Paths in\u2026   116.5k tokens$2.2k     8324 calls    57% cache",
+        "  eval osworld/chrome-0421 \u00b7 claude-sonnet\u2026  128.4k tokens$2k     1712 calls    56% cache",
+        "  qa-tester \u00b7 Update Provider Onboarding\u2026    129.9k tokens$1.8k      430 calls    56% cache",
+        "  short one                                  131.3k tokens$1.5k       96 calls    56% cache",
+        "  98bfe7686ffe                               132.3k tokens$1.2k        8 calls    55% cache",
+        "  routine background polling                 494.5k tokens$0.247   247231 calls     0% cache"
+      ]
+    },
+    {
+      "terminal": 115,
+      "content_box": 96,
+      "widest_row": 96,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 116,
+      "content_box": 97,
+      "widest_row": 97,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 117,
+      "content_box": 98,
+      "widest_row": 98,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 118,
+      "content_box": 99,
+      "widest_row": 99,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 119,
+      "content_box": 100,
+      "widest_row": 99,
+      "gutter": 1,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 120,
+      "content_box": 101,
+      "widest_row": 99,
+      "gutter": 2,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache",
+      "frames_identical": true,
+      "rows_on_screen": 14,
+      "on_screen": [
+        "  Est. cost             $18k  \u2248 list price \u00d7 tokens",
+        "\u258c 1 day with usage   $18k \u00b7 cost \u00b7 t \u2192 tokens",
+        "\u258c Monthly   by calendar month \u00b7 cost \u00b7 t \u2192 tokens",
+        "\u258c Where input went   \u2248 estimated split of context tokens",
+        "  anthropic                                        1.5M tokens$18k   317977 calls    44% cache",
+        "  Toggleable Sidebar for Session Switching in\u2026   101.8k tokens$3.4k    25445 calls    50% cache",
+        "  coder \u00b7 Improve Support for Local Model\u2026       109.6k tokens$3k    21927 calls    60% cache",
+        "  reviewer \u00b7 Article-search-svc schema review    115.2k tokens$3k    12804 calls    56% cache",
+        "  Harden Against Credential Leak Paths in the\u2026   116.5k tokens$2.2k     8324 calls    57% cache",
+        "  eval osworld/chrome-0421 \u00b7 claude-sonnet-4-6   128.4k tokens$2k     1712 calls    56% cache",
+        "  qa-tester \u00b7 Update Provider Onboarding and\u2026    129.9k tokens$1.8k      430 calls    56% cache",
+        "  short one                                      131.3k tokens$1.5k       96 calls    56% cache",
+        "  98bfe7686ffe                                   132.3k tokens$1.2k        8 calls    55% cache",
+        "  routine background polling                     494.5k tokens$0.247   247231 calls     0% cache"
+      ]
+    },
+    {
+      "terminal": 121,
+      "content_box": 101,
+      "widest_row": 99,
+      "gutter": 2,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 122,
+      "content_box": 102,
+      "widest_row": 102,
+      "gutter": 0,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 123,
+      "content_box": 103,
+      "widest_row": 102,
+      "gutter": 1,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 124,
+      "content_box": 104,
+      "widest_row": 102,
+      "gutter": 2,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 125,
+      "content_box": 105,
+      "widest_row": 102,
+      "gutter": 3,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 126,
+      "content_box": 106,
+      "widest_row": 102,
+      "gutter": 4,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 127,
+      "content_box": 107,
+      "widest_row": 102,
+      "gutter": 5,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 128,
+      "content_box": 108,
+      "widest_row": 102,
+      "gutter": 6,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 129,
+      "content_box": 109,
+      "widest_row": 102,
+      "gutter": 7,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    },
+    {
+      "terminal": 130,
+      "content_box": 110,
+      "widest_row": 102,
+      "gutter": 8,
+      "rows": 9,
+      "rows_clipped": 0,
+      "sample_tail": "s    50% cache"
+    }
+  ]
+}

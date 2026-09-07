@@ -815,25 +815,71 @@ def _row_overhead(groups: "Sequence[tuple[str, UsageAggregate]]", width: int) ->
 
     A constant cannot fix that, because the overhead is not constant: the cost
     column is sized to the widest figure actually present (``$4.20`` vs
-    ``$3.4k+``), and the cache column is dropped entirely below
-    ``_WIDE_TABLE_MIN``. So it is computed from the groups being rendered, and
-    the caller subtracts it from the content box. The arithmetic below mirrors
-    the ``block.append`` sequence in :func:`_group_section` line for line; the
-    two must be changed together.
+    ``$3.4k+``), the calls column to the widest call count, and the cache column
+    is dropped entirely below ``_WIDE_TABLE_MIN``. So it is computed from the
+    groups being rendered, and the caller subtracts it from the content box. The
+    arithmetic below mirrors the ``block.append`` sequence in
+    :func:`_group_section` line for line; the two must be changed together.
+
+    Design review D11 is the same error one column further along, and it is why
+    every term here is now measured rather than assumed. The calls column was
+    ``3 + 4 + len(" calls")`` — a 4-digit allowance chosen against a fixture
+    rendering ``16 calls``. On the operator's real ledger ``anthropic`` has
+    317,977 calls and eight sessions are past 9,999, so the pad ran two cells
+    over its allowance and pushed ``% cache`` off the box for the 13 most
+    expensive rows of both tables across terminals 104-123. The rule this
+    function now holds to: **no column width is assumed from a literal where the
+    data can size it**, because a constant that is right for the fixture is
+    wrong for the ledger, three times running.
     """
     if not groups:
         return 0
-    # ``  {name}`` indent, then ``{tokens:>8} tokens``.
-    overhead = 2 + 8 + len(" tokens")
+    # ``  {name}`` indent, then ``{tokens:>NN} tokens``.
+    overhead = 2 + _tokens_col(groups) + len(" tokens")
     # ``   `` gap + the right-aligned cost cell, sized to the widest figure in
     # this table exactly as ``_group_section`` sizes it.
     overhead += 3 + max(len(format_cost(agg)) for _, agg in groups)
-    # ``   {calls:>4} calls``
-    overhead += 3 + 4 + len(" calls")
+    # ``   {calls:>NN} calls`` — likewise sized to the widest count present.
+    overhead += 3 + _calls_col(groups) + len(" calls")
     # ``   {pct:>4} cache`` — only when the frame is wide enough to keep it.
+    # This 4 is the one literal that stays, because it is not an allowance: it
+    # is the exact maximum :func:`format_percent` can return. That function is
+    # total over its domain and its widest output is ``100%`` (``—`` is 1 cell,
+    # ``99%``/``73%`` are 3), so the pad can never be overrun by data the way
+    # the calls and cost pads could. Widen it if that formatter ever grows.
     if width >= _WIDE_TABLE_MIN:
         overhead += 3 + 4 + len(" cache")
     return overhead
+
+
+def _calls_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
+    """Cells the ``calls`` column needs for the widest count in this table.
+
+    Floored at 4 so the ordinary small-ledger layout is unchanged (design review
+    D11 asked only that the column stop being *understated*, not that it shrink
+    on a fresh install), and measured above that so a six-digit provider total
+    widens the column instead of overrunning it.
+
+    Shared by :func:`_row_overhead` and :func:`_group_section` so the budget and
+    the paint agree by construction rather than by two literals happening to
+    match — the divergence between those two is precisely what D8 and D11 were.
+    """
+    return max(4, max((len(f"{agg.calls}") for _, agg in groups), default=0))
+
+
+def _tokens_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
+    """Cells the ``tokens`` column needs, floored at the historical 8.
+
+    Audited as part of D11 and included for the same reason: ``{…:>8}`` is a pad,
+    not a truncation, so it is the same latent defect as the calls column even
+    though no plausible ledger reaches it today. :func:`format_tokens` abbreviates
+    to a unit suffix, so 51B tokens (the operator's real total) is 3 cells and 8
+    is not exceeded until roughly 10**16 tokens. That makes this a guard rather
+    than a fix: it is a no-op on every real dataset and cannot narrow the column,
+    but it means no term in the row overhead is a bare constant that data can
+    outgrow silently.
+    """
+    return max(8, max((len(format_tokens(agg.total_tokens)) for _, agg in groups), default=0))
 
 
 def _group_section(
@@ -883,6 +929,14 @@ def _group_section(
 
     show_cache = width >= _WIDE_TABLE_MIN
     cost_col = max(len(format_cost(agg)) for _, agg in ordered)
+    # Sized from the data through the SAME helpers ``_row_overhead`` budgets
+    # with, so the space reserved and the space painted cannot drift apart.
+    # These were literal ``:>8``/``:>4`` pads; a per-row pad also left the
+    # column ragged once counts varied in width (``317977 calls`` beside
+    # ``16 calls`` put the two ``calls`` labels at different offsets), which
+    # defeats scanning the column straight down exactly as D3 described.
+    tokens_col = _tokens_col(ordered)
+    calls_col = _calls_col(ordered)
     for name, agg in ordered:
         block.append("\n")
         # TRUNCATE as well as pad (design review D3). ``{name:<{name_col}}``
@@ -894,13 +948,13 @@ def _group_section(
         # ``name_col``, so this is a backstop for the former and a no-op for the
         # latter; ``truncate_cells`` measures in CELLS, matching the pad.
         block.append(f"  {truncate_cells(name, name_col):<{name_col}}", style=fg)
-        block.append(f"{format_tokens(agg.total_tokens):>8} tokens", style=fg)
+        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=fg)
         # Cost sits next to tokens as the other headline number, in full-strength
         # ``fg`` — it is the answer this feature exists to give, not a footnote.
         # The lower-bound ``+`` is dimmed by ``append_cost`` (review D1).
         block.append("   ")
         append_cost(block, agg, cost_col, fg, dim)
-        block.append(f"   {agg.calls:>4} calls", style=dim)
+        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
         if show_cache:
             block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
     return block
