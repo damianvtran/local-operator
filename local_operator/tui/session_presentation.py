@@ -7,6 +7,7 @@ acknowledgement, or reference to the currently selected app session.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -24,6 +25,15 @@ from local_operator.tui.widgets.transcript import (
     TranscriptBlock,
     TranscriptView,
 )
+
+#: Resident bytes of retained text one parked presentation may hold, measured
+#: with ``sys.getsizeof`` rather than estimated from a character count. It must
+#: stay >= ``DISPLAY_HISTORY_BYTES`` (512 KiB): the window layer is permitted to
+#: produce a payload that large, so a smaller retain budget structurally refuses
+#: presentations the layer above legitimately built. See
+#: :meth:`SessionPresentation.retainable` for what this protects against and how
+#: to measure a real presentation against it before changing it.
+RETAIN_TEXT_BYTES = 1024 * 1024
 
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):
@@ -300,6 +310,64 @@ class SessionPresentation:
 
         One cached view can otherwise retain arbitrarily much history. Unknown
         renderers (including decoded images) are rebuilt instead of guessing.
+
+        **What the budget is protecting against, and in what units.** The bound
+        is RESIDENT BYTES of retained text, not characters and not the JSON
+        wire frame the window layer prices itself in. It exists so ONE parked
+        view cannot pin an unbounded slice of a 200 MB journal in RAM;
+        ``RETAINED_PRESENTATIONS`` parked views each get this budget, so
+        N x this number bounds the retained TEXT.
+
+        It does **not** bound a retained presentation's total resident cost.
+        The mounted ``TranscriptView`` and its widget tree are parked (offset
+        ``100vw``), not freed, and that tree is not what this method measures —
+        so N x the budget is a bound on one term, not a memory ceiling for the
+        cache. Stated plainly because the previous wording ("the real ceiling
+        is N x this number") reads as the latter, and the next person tuning
+        this needs to know which quantity they are holding. The text term is
+        still the one worth bounding here: it is the term that scales with
+        conversation length, which is what makes a long transcript expensive.
+
+        **Why ``sys.getsizeof`` and not ``len(value) * k``.** CPython stores
+        ``str`` in PEP 393 compact form: 1, 2 or 4 bytes per character
+        depending on the widest code point, plus a header. So no constant
+        multiplier is right for all content — measured here, the same 4096
+        characters cost 4137 bytes as ASCII, 8250 as BMP and 16444 as astral.
+        ``getsizeof`` is the honest measure of one string object, and it costs
+        ~75 ns against ~29 ns for ``len`` on a 500 KB string — irrelevant
+        beside the mount + layout this predicate decides whether to repeat.
+
+        It is honest **per object**, which is why the charge sits below the
+        ``id(value) in seen`` check: charged above it, one string aliased by N
+        blocks was charged N times for a single allocation (measured: one
+        300 KB string under 5 keys charged 1.43 MiB and was refused at a true
+        cost of 0.29 MiB). Over-charging is how both previous mis-tunings
+        failed, so the identity check is load-bearing, not tidiness.
+
+        **This bound has now been mis-tuned twice, in the same direction.**
+        The node cap (see the comment below) silently refused every real owner
+        once. Then the string term charged ``len(value) * 4`` — a worst-case
+        UTF-32 assumption — against a 1 MiB budget, so the effective budget was
+        256 KiB while ``DISPLAY_HISTORY_BYTES`` permits the window layer to
+        hand this predicate a 512 KiB payload. The two limits contradicted each
+        other and the cache silently never cached: a refused presentation is
+        never inserted into ``_sidebar_presentations``, so it never stops
+        matching the prewarm candidate filter and is fully re-prepared (mount +
+        layout + unmount, on the event loop) on every 2 s sidebar poll. Three
+        of the operator's ten live sessions were stuck in that loop, which is
+        the reported "lag with the sidebar open, fine when I close it".
+
+        **How to verify this rather than re-derive it.** Do not reason about
+        the multiplier; measure a real presentation. Walk the same roots this
+        method walks, sum ``sys.getsizeof`` over the strings, and compare
+        against ``RETAIN_TEXT_BYTES``. On the operator's eight largest real
+        transcripts the retained text measures 3-660 KiB (the roots are the
+        blocks plus the unmounted ``_resume_pending_head``/``_resume_results``
+        paging buffers, which dominate at 127-357 KiB), so 1 MiB admits every
+        one of them with the largest at 64% of budget. If you are considering
+        tightening this, get that measurement first: the failure mode of a too-
+        tight bound here is not a rejected cache entry, it is a permanent
+        re-preparation loop that looks like general UI slowness.
         """
         if len(self.replay.view.blocks()) > 128:
             return False
@@ -319,7 +387,21 @@ class SessionPresentation:
             self.held_steer_blocks,
         ]
         seen: set[int] = set()
-        remaining = 1024 * 1024
+        # `seen` stores ADDRESSES, and an address only identifies an object
+        # among those that are simultaneously ALIVE. Every node the walk drops
+        # can therefore have its address handed to a later, unrelated node,
+        # which `seen` then skips as already-visited — silently un-charging it.
+        # This is not hypothetical: `retained_payloads()` builds a FRESH tuple
+        # per block, so on a 64-block presentation holding 64 KiB of distinct
+        # text each, 62 of 64 tuples reused a freed address and the walk
+        # charged 0.13 MiB against 4.00 MiB actual — and admitted it.
+        #
+        # So everything that gets an id in `seen` is kept alive here until the
+        # walk returns. Bounded by construction: the node cap caps the pointer
+        # count, and the string budget caps the transient TEXT held, because
+        # the walk returns False as soon as `remaining` goes negative.
+        alive: list[Any] = []
+        remaining = RETAIN_TEXT_BYTES
         nodes = 0
         while stack:
             value = stack.pop()
@@ -334,16 +416,27 @@ class SessionPresentation:
             # trips long before on any real content.
             if nodes > 65536:
                 return False
+            if value is None or isinstance(value, (bool, int, float)):
+                continue
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            alive.append(value)
             if isinstance(value, str):
-                remaining -= len(value) * 4
+                # Resident cost, not character count: see the docstring. A
+                # `len(value) * 4` estimate here over-charged ASCII content 4x
+                # and disabled the cache entirely.
+                #
+                # Charged BELOW the identity check, so one string object held
+                # by N blocks costs one copy of RAM and is charged once. Above
+                # it, a transcript with repeated identical tool output was
+                # charged N x for a single allocation — an over-estimate, and
+                # over-estimating is the direction that produced both previous
+                # mis-tunings.
+                remaining -= sys.getsizeof(value)
             elif isinstance(value, bytes):
                 remaining -= len(value)
-            elif value is None or isinstance(value, (bool, int, float)):
-                pass
-            elif id(value) in seen:
-                continue
             else:
-                seen.add(id(value))
                 if isinstance(value, TranscriptBlock):
                     payload = value.retained_payloads()
                     if payload is None:
