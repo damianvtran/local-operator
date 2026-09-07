@@ -30,6 +30,48 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
 
+#: The widest the list may grow on a roomy terminal, in the same units as
+#: :data:`SIDEBAR_WIDTH` (content, before the gutter is added).
+#:
+#: At the base 30 the title column is about 20 cells once the caret, the state
+#: mark and the age have taken theirs, and real conversation names are longer
+#: than that: the reporter's own frame showed "Article-search-svc s…",
+#: "Add Flavia's Adverse Med…", "Update Provider Onbo…" — eleven of twelve rows
+#: ellipsized, several of them cut before the word that distinguishes them from
+#: their neighbour. A list whose whole job is "recognise your own conversation"
+#: cannot do it at that budget, and a wide terminal has the cells to spare.
+#:
+#: 44 gives about 34 title cells, which fits the great majority of generated
+#: titles outright. It is a CAP rather than a target: growth is paid for out of
+#: surplus only (see :data:`SIDEBAR_MAIN_COMFORT_WIDTH`), so a narrow terminal
+#: is unaffected and nothing here can squeeze the conversation.
+SIDEBAR_MAX_WIDTH = 44
+
+#: The main lane's COMFORT width, which growth may not eat into.
+#:
+#: Distinct from :data:`SIDEBAR_MAIN_MIN_WIDTH`, and the distinction is what
+#: makes widening safe. That constant is a HARD floor — below it the drawer
+#: stops displacing the conversation and becomes an overlay. This one is the
+#: point past which extra columns are surplus: the sidebar grows only into
+#: terminal width beyond it, so the transcript keeps a comfortable measure at
+#: every size and the list simply stays at its base width when there is nothing
+#: spare. 80 is the conventional readable measure and the width the transcript's
+#: own wrapping is tuned around.
+#:
+#: Measured against the TERMINAL, not against the conversation widget, and the
+#: two differ by :data:`APP_SCREEN_INSET` (code review round 1, M1: the lane
+#: was measured at 78 cells where a naive reading of this constant promises
+#: 80). The inset is subtracted explicitly in :func:`sidebar_content_width` so
+#: the guarantee this constant names is the one the layout actually delivers.
+SIDEBAR_MAIN_COMFORT_WIDTH = 80
+
+#: Cells the app's own chrome takes out of the terminal before any lane is
+#: measured — the outer inset the stylesheet puts on the workspace (one cell
+#: each side). Named rather than inlined because it is the difference between
+#: "terminal width" and "width the lanes divide up", and a growth rule that
+#: forgets it over-promises by exactly this much.
+APP_SCREEN_INSET = 2
+
 #: How long a requested row waits before its state mark becomes a spinner.
 #: The tint itself is immediate — it is the acknowledgement that the click
 #: landed. The spinner is only for a switch that is genuinely taking a while,
@@ -64,6 +106,47 @@ SIDEBAR_GUTTER = 3
 #: the separation the gutter buys.
 SIDEBAR_MIN_CONTENT_WIDTH = 24
 SIDEBAR_MAIN_MIN_WIDTH = 60
+
+
+def sidebar_content_width(terminal_width: int) -> int:
+    """How wide the list's CONTENT should be in a terminal this wide.
+
+    One pure function so the width the app docks and the width any test or
+    capture reasons about are the same number, derived the same way — the
+    layout used to compute it inline, which is fine until a second caller needs
+    to predict it.
+
+    The rule, in one sentence: **start at the base width and spend only
+    surplus.** Surplus is whatever the terminal has beyond the app's own inset,
+    the base sidebar, its gutter and a comfortable main lane
+    (:data:`SIDEBAR_MAIN_COMFORT_WIDTH`); the list takes it up to
+    :data:`SIDEBAR_MAX_WIDTH` and never more. Consequences worth stating
+    because they are the safety argument:
+
+    * A terminal at or below the comfort threshold gets exactly today's
+      layout — this cannot regress a narrow window, and the overlay behaviour
+      at genuinely small sizes is untouched.
+    * The conversation never drops below :data:`SIDEBAR_MAIN_COMFORT_WIDTH`
+      *because of growth*: the sidebar is only ever handed columns the
+      conversation did not need. Below the threshold the lane can of course be
+      narrower — that is the terminal being small, not the list taking
+      anything.
+    * Growth is monotonic in terminal width, so dragging a window wider never
+      makes the list narrower.
+
+    :data:`APP_SCREEN_INSET` is subtracted because the lanes divide the
+    terminal MINUS the app's outer inset, not the terminal. Omitting it made
+    the promise wrong by two cells at every size where growth is active (code
+    review round 1, M1) — a real measurement of 78 against a documented 80,
+    which is the kind of quiet drift that makes a stated invariant untrustable
+    even when nothing visibly breaks.
+    """
+    reserved = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    surplus = terminal_width - reserved
+    if surplus <= 0:
+        return SIDEBAR_WIDTH
+    return min(SIDEBAR_MAX_WIDTH, SIDEBAR_WIDTH + surplus)
+
 
 #: The list's own spinner cadence, deliberately slower than
 #: :data:`terminal_title.SPINNER_INTERVAL_S` that the band and the panels use.
