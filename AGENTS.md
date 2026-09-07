@@ -654,20 +654,29 @@ Warnings that still hold, each of which has already cost a release:
 
   ```sh
   git ls-tree -r --name-only origin/main \
-    | grep -E '^tests/unit/.*test_.*\.py$' | sort | nl \
+    | grep -E '^tests/unit/.*test_.*\.py$' | LC_ALL=C sort | nl \
     | grep <the-test-file-that-failed>   # line N -> index N-1, shard (N-1) % 5
   ```
 
-  Run it once against `origin/main` and once against your branch: if the shard
-  differs, the failing test ran in a different group than it does on `main`,
-  and a failure that appears only on your branch may be nothing to do with your
-  diff. **The shift is a reason to check attribution, not by itself a cause of
-  failure** — a re-sharded file usually still passes, so treat a differing
-  index as "verify before blaming yourself", not as an explanation. Confirm by
-  reproducing on clean `origin/main` under the conditions CI uses (the shard
-  job runs `pytest --cov`, and some failures do not reproduce bare). Attributing
-  one of these to a diff that touched no related file has already cost a review
-  round.
+  `LC_ALL=C` is load-bearing, not decoration: CI sorts in Python's byte order,
+  while shell `sort` honours `LC_COLLATE`. On an `en_*.UTF-8` locale the two
+  orderings diverge, and because each divergence is an adjacent swap **every
+  divergent file lands in a different shard** — 51 of 452 when measured,
+  versus 0 under `LC_ALL=C`. Getting this wrong says a file moved shards when it
+  did not, which is the same misattribution this warning exists to prevent.
+
+  Run it once against `origin/main` and once against your branch. If the shard
+  differs, the failing test ran in a different group than it does on `main`, so
+  a failure appearing only on your branch may have nothing to do with your
+  diff. **A differing index is a reason to check attribution, not by itself an
+  explanation** — confirm either way by reproducing on clean `origin/main`
+  under the conditions CI uses (the shard job runs `pytest --cov`, and some
+  failures do not reproduce bare). The one case where the grouping genuinely
+  *is* the cause is cross-test pollution: if the test fails reproducibly in its
+  new shard and passes in its old one, the neighbours it now runs beside are
+  leaking or withholding state, and you have a test-isolation bug to fix rather
+  than a false alarm. Attributing one of these to a diff that touched no
+  related file has already cost a review round.
 - **Several PRs going red at once is a shared cause, not several bugs.**
   `cli-sanity` and `server-sanity` call a live model (both are marked
   "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
