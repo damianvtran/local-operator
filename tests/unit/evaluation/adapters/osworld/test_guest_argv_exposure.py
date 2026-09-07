@@ -107,6 +107,15 @@ def test_a_pkill_shaped_payload_no_longer_matches_our_own_live_process() -> None
     guest runs ``pyautogui.typewrite``; the host has no GUI stack, so the
     statement's runtime is stood in for by a sleep while the argv -- the thing
     under test -- is built exactly as production builds it.
+
+    The matcher runs from the TEST process, which is a sibling of the process
+    under test rather than its descendant. That is not incidental: ``pkill``
+    and ``pgrep`` deliberately never select their own ancestors, so a matcher
+    run as a child of the typing process cannot see it and would report a
+    false pass. The guest topology is the sibling one -- the agent types into
+    a terminal, and that terminal runs the command -- which is what
+    ``test_the_typing_process_is_not_signalled_by_the_command_it_typed``
+    exercises at the signal level.
     """
     source = PKGS_PREFIX.replace("import pyautogui; ", "").format(
         command="time.sleep(30); typed = %r" % FATAL_TYPED_TEXT
@@ -134,6 +143,60 @@ def test_a_pkill_shaped_payload_no_longer_matches_our_own_live_process() -> None
     finally:
         process.kill()
         process.wait(timeout=10)
+
+
+@pytest.mark.skipif(shutil.which("pkill") is None, reason="needs pkill")
+def test_the_typing_process_is_not_signalled_by_the_command_it_typed() -> None:
+    """The episode's actual failure, at the signal level: exit -15.
+
+    This reproduces the incident rather than a proxy for it. A decoy process
+    carrying the recording's command line stands in for the agent's own
+    ``ffmpeg``, a second process runs the statement whose text names that
+    pattern, and a real ``pkill -f`` then runs as a SIBLING of it -- the guest
+    topology, where the agent types into a terminal and the terminal runs the
+    command.
+
+    Two outcomes are asserted together, because fixing the first by breaking
+    the second would be no fix at all: our typing process survives, and the
+    decoy still dies. The agent's cleanup must keep working; only the false
+    match on ourselves may disappear.
+    """
+    decoy = subprocess.Popen(
+        ["/bin/sh", "-c", f'exec -a "{FATAL_PATTERN} decoy" sleep 30'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    argv = python_source_argv("import time; time.sleep(10); typed = %r" % FATAL_TYPED_TEXT)
+    typist = subprocess.Popen(
+        [sys.executable, *argv[1:]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        # Both must be visible to the matcher before it runs, or a survival
+        # result would only mean "nothing had started yet".
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if (
+                subprocess.run(
+                    ["pgrep", "-f", f"{FATAL_PATTERN} decoy"], capture_output=True
+                ).returncode
+                == 0
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the decoy never became visible to the matcher")
+
+        subprocess.run(["pkill", "-f", FATAL_PATTERN], capture_output=True)
+        time.sleep(0.5)
+
+        assert decoy.poll() is not None, "the agent's own cleanup must still work"
+        assert typist.poll() != -15, "our typing process was SIGTERMed by the text it typed"
+        assert typist.poll() is None, "our typing process must still be running"
+    finally:
+        for process in (decoy, typist):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
 
 
 # ----------------------------------------------------------------------------
