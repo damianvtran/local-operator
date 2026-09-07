@@ -1679,6 +1679,10 @@ class SubagentView(Vertical):
         self._launch_prompts: dict[str, str] = {}
         self._status = "running"
         self._queued = False
+        #: See :meth:`show`. Initialised here as well so a title painted before
+        #: the first ``show`` (an early repaint on a freshly mounted page)
+        #: cannot raise on a missing attribute.
+        self._paused = False
         self._elapsed = "0s"
         #: The child's ROLE and effort TIER, recorded on the job at launch
         #: (``AsyncJob.agent_role``/``effort``). Shown in the title so the page
@@ -1819,6 +1823,7 @@ class SubagentView(Vertical):
         status: str,
         queued: bool,
         elapsed: str,
+        paused: bool = False,
         outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
@@ -1866,6 +1871,11 @@ class SubagentView(Vertical):
         self._label = strip_control_sequences(label or job_id)
         self._status = status
         self._queued = queued
+        # A pause is mechanically a cancel, so ``status`` reads ``cancelled``
+        # and only the comms graph knows the difference. Carried here so the
+        # page's title and the dock row it was opened from cannot name the
+        # same child two different things (design round 2, D5).
+        self._paused = paused
         self._elapsed = elapsed
         self._outcome = strip_control_sequences(outcome or "").strip()
         # Role and effort are launch-time facts and never change under a running
@@ -3143,8 +3153,14 @@ class SubagentView(Vertical):
             row.truncate(width, overflow="ellipsis")
             return row
 
-        glyph, word, token = status_glyph(self._status, queued=self._queued, spinner_glyph=spinner)
-        if self._status == "cancelled" and self._outcome == CANCELLED_BEFORE_START:
+        glyph, word, token = status_glyph(
+            self._status, queued=self._queued, spinner_glyph=spinner, paused=self._paused
+        )
+        if (
+            self._status == "cancelled"
+            and not self._paused
+            and self._outcome == CANCELLED_BEFORE_START
+        ):
             # `⊘ cancelled · 1m36s` beside rows reading `⣷ running · 7m53s`
             # presents a PARKED wait as a run: an operator concludes the child
             # burned a minute and a half of tokens before they killed it, when

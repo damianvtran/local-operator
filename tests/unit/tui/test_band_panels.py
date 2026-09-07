@@ -32,10 +32,13 @@ from local_operator.tui.widgets.status_line import format_agents
 from local_operator.tui.widgets.subagent_panel import (
     MAX_SUBAGENT_ROWS,
     Density,
+    JobStats,
     SubagentPanel,
     SubagentRow,
     SummaryCounts,
+    compose_row,
     compose_summary,
+    row_facts,
 )
 from local_operator.tui.widgets.todo_panel import MAX_TODO_ROWS, TodoPanel
 
@@ -2149,32 +2152,67 @@ async def test_the_dock_keeps_a_paused_child_past_the_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_batch_that_settled_together_leaves_together() -> None:
-    """Design round 1, D2. Rows settling within one bucket cross the window on
-    the SAME repaint, so a fan-out that finished together reads as one event
-    rather than a dock that ratchets down a row at a time.
+async def test_a_batch_that_settled_together_leaves_in_one_shrink_event() -> None:
+    """Design round 1, D2 — and it MUST discriminate the mechanism.
 
-    Stamps are spread across a whole bucket to prove the coalescing, and the
-    window is long enough that none of them is expired yet at the start."""
-    session = FakeSession()
-    now = time.time()
-    # Settled one second apart, all inside a single 15 s bucket.
-    jobs = [_Job(f"b{index}", f"child {index}", status="completed") for index in range(6)]
-    for index, job in enumerate(jobs):
-        job.settled_at = now - index
-    session.jobs = _RetentionManager(jobs, retention_ms=600_000)
-    session._subagent_comms = _GraphComms(jobs)
+    The first version of this test aged all six rows past the window by an
+    identical amount and asserted the end state was empty, which is true with
+    or without bucketing; both reviewers independently mutation-tested it and
+    found it passes with the bucketing stubbed out (review round 2 F3, design
+    round 2). A test that cannot fail is worse than no test, so this one walks
+    the batch ACROSS the boundary a tick at a time and counts how many separate
+    repaints shrink the dock — the quantity D2 was actually about.
 
-    app = OperatorApp(_async_factory(session))
-    async with app.run_test(size=(100, 24)) as pilot:
-        await _boot_with_jobs(app, pilot)
-        assert len(app._subagent_roster()[0]) == 6
+    The unbucketed control in the same run is what makes the assertion bite: it
+    is computed from the same stamps through the same predicate, so if the
+    bucket ever stops coalescing, the two collapse to the same number and the
+    comparison fails.
+    """
+    from local_operator.harness.jobs import roster_expired
+    from local_operator.tui.app import _bucketed_settle_stamp
 
-        # Age the whole batch past the window by the same amount. Quantising
-        # means one pass takes all six, not six passes taking one each.
-        for job in jobs:
-            job.settled_at = (job.settled_at or 0.0) - 700_000.0
-        assert app._subagent_roster()[0] == []
+    window_ms = 300_000.0
+    base = 1_700_000_000.0
+
+    def visible(stamps: list[float], now: float, *, bucketed: bool) -> int:
+        return sum(
+            1
+            for stamp in stamps
+            if not roster_expired(
+                SimpleNamespace(status="completed", restored=False, settled_at=stamp),
+                window_ms,
+                now=now,
+                settled_at=_bucketed_settle_stamp(stamp, window_ms) if bucketed else stamp,
+            )
+        )
+
+    def shrink_events(stamps: list[float], *, bucketed: bool) -> int:
+        # One second per tick, exactly as the 1 Hz poll advances, over a range
+        # that brackets the whole crossing.
+        counts = [
+            visible(stamps, max(stamps) + window_ms / 1000.0 - 25 + tick, bucketed=bucketed)
+            for tick in range(60)
+        ]
+        return sum(1 for before, after in zip(counts, counts[1:]) if before != after)
+
+    # Swept across the batch's PHASE against the bucket grid rather than
+    # asserted at one convenient instant. A batch straddling a bucket boundary
+    # legitimately sheds in two events instead of one (both reviewers measured
+    # the same distribution, ~2/3 at one event and ~1/3 at two), so pinning a
+    # single phase would be pinning luck — while the property D2 is actually
+    # about holds at EVERY phase, which is what this asserts.
+    seen = set()
+    for phase in range(300):
+        offset = phase / 20.0  # 0-15 s in 50 ms steps: one whole bucket
+        # Settled one second apart, as a real fan-out does.
+        stamps = [base + offset - index for index in range(6)]
+        seen.add(shrink_events(stamps, bucketed=True))
+        assert shrink_events(stamps, bucketed=False) == 6, "control must always ratchet"
+
+    # Never worse than two repaints, always strictly better than the six the
+    # unbucketed control shows, at every alignment.
+    assert seen <= {1, 2}, seen
+    assert max(seen) < 6
 
 
 @pytest.mark.asyncio
@@ -2210,6 +2248,17 @@ async def test_the_expiry_clock_only_ever_rounds_a_row_a_longer_life() -> None:
     assert _expiry_bucket_s(300_000.0) == ROSTER_EXPIRY_BUCKET_S
     assert _expiry_bucket_s(1_200.0) < 1.2
     assert _expiry_bucket_s(0.0) == 0.0
+
+    # ``W mod b == 0`` — the invariant `_bucketed_settle_stamp`'s rationale now
+    # rests on, so it is pinned rather than asserted in prose. It is what makes
+    # flooring the reader's clock ACCIDENTALLY equivalent here; if a future
+    # bucket rule breaks it, that docstring's argument needs rewriting and this
+    # is the test that says so.
+    for window_s in (1.2, 5.0, 60.0, 300.0, 900.0):
+        bucket = _expiry_bucket_s(window_s * 1000.0)
+        assert bucket > 0
+        assert bucket < window_s
+        assert abs(window_s % bucket) < 1e-9, (window_s, bucket)
     # A zero-length bucket must not divide by zero; it simply does not coalesce.
     assert _bucketed_settle_stamp(base + 0.5, 0.0) == base + 0.5
 
@@ -2286,4 +2335,141 @@ async def test_a_raising_filter_shows_stale_rows_and_says_so(caplog) -> None:
             rows = app._subagent_roster()[0]
 
     assert [getattr(job, "id", "") for job in rows] == ["kept"]  # failed open
-    assert any("retention filter" in record.message for record in caplog.records)
+    assert any("roster window filter" in record.message for record in caplog.records)
+
+
+def test_a_paused_child_does_not_render_as_a_cancelled_one() -> None:
+    """Design round 2, D5. ``SubagentComms.pause`` is mechanically a cancel, so
+    both rows carry ``status == "cancelled"`` — and after the retention change
+    they have OPPOSITE lifetimes (a pause persists, a cancel expires in five
+    minutes). Two pixel-identical rows that behave differently is the frame
+    contradicting the intent the user recorded, so the pause gets its own word,
+    exactly as ``interrupted`` already has one for the same reason."""
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.subagent_panel import (
+        GLYPH_CANCELLED,
+        GLYPH_PAUSED,
+        status_glyph,
+    )
+
+    paused = status_glyph("cancelled", paused=True)
+    cancelled = status_glyph("cancelled")
+
+    assert paused != cancelled
+    assert paused[0] == GLYPH_PAUSED and paused[1] == "paused"
+    assert cancelled[0] == GLYPH_CANCELLED and cancelled[1] == "cancelled"
+
+    # One cell, like every other glyph in the column: the media-control marks
+    # next to this one are two-cell emoji and would shear the time column.
+    assert cell_len(paused[0]) == 1 == cell_len(cancelled[0])
+
+    # A pause still LANDING must not paint the child as stopped while it is
+    # demonstrably running — the window `_describe` guards with "pausing".
+    assert status_glyph("running", paused=True, spinner_glyph="⣾")[1] == "running"
+
+
+def test_the_paused_word_matches_the_state_the_phone_already_shows() -> None:
+    """`mobile/projection.py` has mapped `paused`/`pausing` to a distinct
+    `parked` state all along, so before this the phone showed a state the TUI
+    did not. Pinned as a cross-surface agreement rather than a copy assertion:
+    what matters is that neither surface calls a pause a cancellation."""
+    from typing import get_args
+
+    from local_operator.mobile.types import SubagentStatus
+    from local_operator.tui.widgets.subagent_panel import status_glyph
+
+    assert "parked" in get_args(SubagentStatus)
+    assert status_glyph("cancelled", paused=True)[1] != status_glyph("cancelled")[1]
+
+
+@pytest.mark.asyncio
+async def test_the_dock_paints_a_paused_child_as_paused() -> None:
+    """The same distinction end to end through the real panel: the row the
+    filter keeps forever is also the row that says why it is being kept."""
+    from local_operator.tui.widgets.subagent_panel import GLYPH_PAUSED
+
+    session = FakeSession()
+    now = time.time()
+    held = _Job("held", "migrating the watchlist schema", status="cancelled")
+    held.settled_at = now
+    dropped = _Job("dropped", "abandoned the backfill probe", status="cancelled")
+    dropped.settled_at = now
+    jobs = [held, dropped]
+    session.jobs = _RetentionManager(jobs, retention_ms=300_000)
+    session._subagent_comms = _GraphComms(jobs, paused={"held"})
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        for _ in range(4):
+            await pilot.pause()
+        # The text the rows painted, through the panel's own facts pipeline —
+        # `SubagentRow.paint` renders exactly this `compose_row` output, so a
+        # row's word here is the word on screen.
+        rendered = {
+            job_id: compose_row(
+                facts=row_facts(
+                    panel._jobs_by_id[job_id],
+                    fallback_id=job_id,
+                    current=False,
+                    paused=job_id in panel._paused_ids,
+                ),
+                stats=JobStats(),
+                spinner_glyph="⣾",
+                width=100,
+                rung=0,
+                column=40,
+                clock=6,
+                role_column=0,
+            ).plain
+            for job_id in panel._rows
+        }
+
+    assert GLYPH_PAUSED in rendered["held"], rendered["held"]
+    assert "paused" in rendered["held"]
+    # The ordinary cancel is untouched — this must distinguish the two, not
+    # rename both.
+    assert GLYPH_PAUSED not in rendered["dropped"], rendered["dropped"]
+    assert "cancelled" in rendered["dropped"]
+
+
+@pytest.mark.asyncio
+async def test_the_collapsed_caption_counts_a_pause_apart_from_a_cancel() -> None:
+    """The summary is the panel's ONLY representation at that density, so a
+    caption folding the two together would put the distinction straight back
+    where the expanded rows just took it out. Also pins the memo key: pausing
+    changes the counts without changing anything on the job row, the same trap
+    ``queued`` already documents."""
+    session = FakeSession()
+    now = time.time()
+    jobs = [
+        _Job("held", "migrating the watchlist schema", status="cancelled"),
+        _Job("dropped", "abandoned the backfill probe", status="cancelled"),
+    ]
+    for job in jobs:
+        job.settled_at = now
+    session.jobs = _RetentionManager(jobs, retention_ms=300_000)
+    comms = _GraphComms(jobs, paused={"held"})
+    session._subagent_comms = comms
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert panel.density is Density.SUMMARY
+        caption = panel.summary_text()
+        assert "1 paused" in caption, caption
+        assert "1 cancelled" in caption, caption
+
+        # Resuming clears the flag on the RECORD; nothing on the job row moves.
+        # Without the memo key carrying it, the caption would keep saying
+        # "1 paused" indefinitely.
+        comms._paused = set()
+        app._refresh_band()
+        for _ in range(8):
+            await pilot.pause()
+        caption = panel.summary_text()
+        assert "paused" not in caption, caption
+        assert "2 cancelled" in caption, caption

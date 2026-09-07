@@ -267,6 +267,7 @@ from local_operator.tui.widgets.subagent_panel import (
     SubagentPanel,
     SubagentRow,
     job_elapsed,
+    paused_child_ids,
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
 from local_operator.tui.widgets.toast import (
@@ -720,17 +721,17 @@ JOB_POLL_INTERVAL_S = 1.0
 #: repaint, so a fan-out that finished together leaves together — one visible
 #: event, matching how the user thinks about a batch ("that batch is done").
 #:
-#: Without it the dock shrinks a row at a time: six children settling a second
-#: apart produced six separate dock repaints, ratcheting down over minutes on
-#: a staggered fan-out (design round 1, D2). The movement was always confined
-#: to the dock — the composer stays pinned and transcript content does not
-#: drift — which is why this is polish rather than a defect.
+#: Without it the dock shrinks ONE ROW PER EXPIRY, so a fan-out ratchets down
+#: over as many repaints as it had children (design round 1, D2). The movement
+#: was always confined to the dock — the composer stays pinned and transcript
+#: content does not drift — which is why this is polish rather than a defect.
 #:
 #: Chosen at 15 s as the largest bucket that is still small against the
 #: 5-minute default window (5% of it) — big enough to coalesce a realistic
 #: batch, small enough that "five minutes" stays an honest description.
-#: Quantising DOWN is what makes this safe: it can only ever DELAY an expiry,
-#: never hasten one, so no row is dropped before its full window has elapsed.
+#: Rounding UP is what makes this safe: it can only ever DELAY an expiry,
+#: never hasten one, so no row is dropped before its full window has elapsed
+#: (see :func:`_bucketed_settle_stamp`, which is where the rounding happens).
 #: Applied at the READER only; the ledger sweeps on the exact clock.
 ROSTER_EXPIRY_BUCKET_S = 15.0
 
@@ -743,6 +744,14 @@ ROSTER_EXPIRY_BUCKET_S = 15.0
 #: delay, an oversized bucket does not break correctness; it silently
 #: lengthens the window, which is exactly the kind of quiet disagreement
 #: between stated and actual behaviour this PR exists to remove.
+#:
+#: A SECOND property falls out of this ratio and is worth naming, because
+#: :func:`_bucketed_settle_stamp` depends on it: a constant ratio means
+#: ``W / b == 20`` exactly whenever the fraction binds, so ``W mod b == 0`` on
+#: every window this rule produces. That is the condition under which
+#: bucketing a row's stamp and flooring the reader's clock agree — see that
+#: function for why the choice between them is about robustness rather than
+#: about one of them working and the other not.
 ROSTER_EXPIRY_BUCKET_FRACTION = 0.05
 
 
@@ -757,13 +766,49 @@ def _bucketed_settle_stamp(settled_at: float, retention_ms: float) -> float:
     within one bucket share an expiry instant and therefore leave the dock on
     the SAME pass.
 
-    The quantization is on the STAMP, not on the reader's clock, and that
-    distinction is the whole mechanism — I measured the clock version first and
-    it does not coalesce at all. Flooring ``now`` makes the comparison instant
-    jump in steps, but each row is still compared against its own stamp, so six
-    rows a second apart still cross a stepping boundary one at a time (measured:
-    3 separate shrink events over ten 1 Hz ticks, against 6 unquantized). Giving
-    the rows a shared boundary is what makes one batch one event.
+    QUANTISING THE READER'S CLOCK INSTEAD WOULD ALSO WORK on every window this
+    code ships. The reason to prefer this is robustness, not effectiveness, and
+    the distinction is recorded here rather than quietly dropped because this
+    comment is the record of why a reviewer's proposal was not taken.
+
+    An earlier version asserted the clock variant "does not coalesce at all",
+    citing a point measurement. That was WRONG: the figure came from a probe
+    that advanced each row's ``settled_at`` while holding ``now`` fixed — the
+    inverse of the real system, where the stamps are fixed and the clock
+    advances — and flooring a frozen clock is a constant, so that rig could not
+    show coalescing for the variant it was judging. Three independent reviewers
+    failed to reproduce it.
+
+    The honest argument is arithmetic, and unlike any measurement it holds at
+    every phase:
+
+    * flooring the clock expires a row at the first multiple of ``b`` after
+      ``settled_at + W``;
+    * bucketing the stamp expires it at ``ceil(settled_at / b) * b + W``.
+
+    Those coincide for rows sharing a bucket exactly when ``W mod b == 0``.
+    :data:`ROSTER_EXPIRY_BUCKET_FRACTION` makes that true by construction on
+    every window it produces (``W / b == 20``), which is why the clock variant
+    is *accidentally* correct here rather than wrong. Pick a window where the
+    ratio does not divide — ``W = 323.5 s``, ``W / b = 21.57`` — and the two
+    diverge. Bucketing the stamp is correct for ANY window, so it does not
+    depend on a constant elsewhere in this file continuing to hold.
+
+    NO POINT FIGURE FOR THE COALESCING IS QUOTED ANYWHERE HERE, deliberately.
+    How many repaints a batch costs depends on where its stamps fall against
+    the bucket grid: the same six rows shed in one pass at most alignments and
+    two when they straddle a boundary. Four separate agents measured this
+    mechanism and produced four different numbers, each correct for its own
+    alignment and each wrong as a general claim — which is exactly how the
+    false assertion above got written. What is true at every phase is the
+    ordering: bucketed is never worse than unbucketed, and unbucketed costs one
+    repaint per row. ``test_a_batch_that_settled_together_leaves_in_one_shrink_event``
+    asserts that as a phase sweep with an unbucketed control, rather than
+    pinning a single lucky alignment.
+
+    It also keeps the reader's clock honest: a row is still aged against the
+    real ``now``, so its age stays directly comparable to the ledger's, and
+    only the stamp is adjusted.
 
     Rounds UP, never down: a later effective stamp means a LATER expiry, so a
     row is only ever granted up to one extra bucket of visibility and can never
@@ -15459,7 +15504,7 @@ class OperatorApp(App[None]):
         return job
 
     @staticmethod
-    def _within_retention(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
+    def _within_roster_window(jobs: list[Any], manager: Any, paused_ids: set[str]) -> list[Any]:
         """Drop rows the roster window has released — see :func:`roster_expired`.
 
         Split out of :meth:`_subagent_roster` so the rule is testable on its
@@ -15499,6 +15544,11 @@ class OperatorApp(App[None]):
         if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
             return jobs
         now = time.time()
+        # ONE representation of the window for both the predicate and the
+        # bucket. They previously took ``int`` and ``float`` of the same value:
+        # harmless at every realistic window, but two spellings of one quantity
+        # is how a sub-millisecond window ends up truncating to 0 in one of
+        # them and not the other (review round 2, F4).
         window = float(retention_ms)
         try:
             return [
@@ -15506,38 +15556,15 @@ class OperatorApp(App[None]):
                 for job in jobs
                 if not roster_expired(
                     job,
-                    int(retention_ms),
+                    window,
                     paused=str(getattr(job, "id", "") or "") in paused_ids,
                     now=now,
                     settled_at=_bucketed_stamp_of(job, window),
                 )
             ]
         except Exception:  # noqa: BLE001 — the dock must not fail on a filter
-            logger.warning("subagent roster retention filter failed", exc_info=True)
+            logger.warning("subagent roster window filter failed", exc_info=True)
             return jobs
-
-    @staticmethod
-    def _paused_child_ids(comms: Any) -> set[str]:
-        """Job ids the parent PAUSED, read from the graph that owns the fact.
-
-        A pause is recorded on ``_ChildRecord.paused`` and surfaces as
-        ``node.status == "paused"`` (``SubagentComms._node``, where it outranks
-        every other status for the same reason it matters here). Reading the
-        node keeps this a pure consumer of the comms projection rather than a
-        second interpretation of the record.
-
-        Never raises: a status surface must not be taken down by a graph that
-        cannot answer, and an empty set simply means "no intent known", which
-        degrades to the plain retention rule.
-        """
-        try:
-            nodes = comms.nodes() if callable(getattr(comms, "nodes", None)) else ()
-            return {
-                str(node.job_id) for node in nodes if str(getattr(node, "status", "")) == "paused"
-            }
-        except Exception:  # noqa: BLE001 — the dock must not fail on a lookup
-            logger.warning("reading paused subagents failed", exc_info=True)
-            return set()
 
     def _subagent_roster(self) -> tuple[list[Any], Any]:
         """Resolve one direct-child scope for open, retarget, tick and close.
@@ -15578,7 +15605,7 @@ class OperatorApp(App[None]):
             if comms is not None and callable(getattr(comms, "children", None)):
                 nodes = comms.children(view.job_id if view is not None else None)
                 jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
-                jobs = self._within_retention(jobs, manager, self._paused_child_ids(comms))
+                jobs = self._within_roster_window(jobs, manager, paused_child_ids(comms))
                 return jobs, job_for(view.job_id) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.
@@ -16405,6 +16432,10 @@ class OperatorApp(App[None]):
             # opened from has been evicted from the ledger, and claiming the
             # child is still working would be the one wrong answer.
             status=str(getattr(job, "status", "") or "gone") if job is not None else "gone",
+            # A pause reads as ``cancelled`` on the job row; only the graph
+            # knows it was deliberate, and the page must not contradict the
+            # dock row it was opened from (design round 2, D5).
+            paused=str(getattr(node, "status", "")) == "paused",
             queued=bool(getattr(job, "queued", False)),
             elapsed=job_elapsed(job) if job is not None else "0s",
             # The settled outcome, for the one fact the page's own fields
