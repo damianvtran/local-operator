@@ -214,11 +214,17 @@ function show(state: State): void {
     // the failure path just made.
     //
     // A second `!form.contains(document.activeElement)` term was tried here and
-    // removed: no mutation could make it decide a case. `pairingShown` is
-    // already false on every entry from another state, and true on every
-    // re-render of this one, so the activeElement check never gets to matter.
-    // A guard no test can distinguish from its absence is one the next reader
-    // has to re-derive, so the single operative term is left on its own.
+    // removed. It is NOT indistinguishable in principle — driving
+    // pairing -> connected -> pairing with focus held in the field does produce
+    // divergent behaviour in a synthetic harness. What makes it inert in the
+    // real popup is a DOM timing fact: hiding a section with `display: none`
+    // blurs the focused element ASYNCHRONOUSLY, a frame later, and every path
+    // that leaves and re-enters the pairing state awaits at least once in
+    // between (render() awaits getSession() and /health). So by the time we are
+    // back here the blur has always landed, `document.activeElement` is the
+    // body, and the term cannot decide. Removed rather than kept as a
+    // "cheap invariant", because a guard whose only justification is a race it
+    // always loses is one the next reader has to re-derive to trust.
     if (!pairingShown) input?.focus();
   }
   pairingShown = state === "pairing";
@@ -590,6 +596,11 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       // the user's feedback; render() below only upgrades it to the connected
       // view once health confirms.
       locallyPaired = true;
+      // This card dwells ~1s before `connected` takes over. That dwell is NOT
+      // padding to make success legible and must not be shortened here: it is
+      // the worker's first reconnect backoff, and it is load-bearing. See the
+      // warning on backoffDelayMs in reconnect.ts — shortening it inverts the
+      // socket-eviction race and breaks pairing outright.
       show("paired");
       await new Promise((resolve) => setTimeout(resolve, 250));
       await render();
@@ -617,6 +628,11 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     error.textContent = "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+    // Same recovery as the rejected-code branch above: the typed digits are
+    // still in the field with the caret at 6, where maxlength is satisfied, so
+    // without this the retry after a transport failure silently swallows every
+    // keystroke and a paste too.
+    input.select();
   } finally {
     // Always unlock, success included: if health later drops (daemon restart)
     // the user lands back on this form, and it must not arrive pre-disabled.

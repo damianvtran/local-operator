@@ -2,6 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- CLASSIC script, in <head>, BEFORE the stylesheet, on purpose. popup.js
+         is a deferred module and so cannot size #pending before the compositor
+         paints; this can. It must precede the <link> because a classic script
+         placed after one blocks on that stylesheet loading first, which delays
+         the parser past the point where the body can paint unstyled. See
+         first-paint.js — it is the only thing that runs pre-paint. -->
+    <script src="first-paint.js"></script>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>

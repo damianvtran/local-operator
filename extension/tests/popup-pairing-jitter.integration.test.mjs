@@ -496,6 +496,82 @@ test("the first paint is pinned to the state this browser will actually reach (D
   }
 });
 
+test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)", async () => {
+  // The D1 test below reads the inline style AFTER `await bundle.import()`, so
+  // it structurally cannot observe the pre-module paint — it passed while the
+  // already-paired user still saw a 340px -> 207px resize on 4 of 12 opens,
+  // measured off composited frames. popup.js is `<script type="module">` and
+  // therefore DEFERRED: anything it does to layout happens after the compositor
+  // may already have painted the stylesheet's default pin.
+  //
+  // The fix is structural, so this guard is too: it pins the load order that
+  // closes the window, which a DOM read after import can never distinguish.
+  // Chrome is not available in CI, so the composited-frame measurement stays a
+  // manual step (recorded on the PR); this is the part that must not silently
+  // regress on a refactor.
+  const html = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+  const head = html.slice(html.indexOf("<head>"), html.indexOf("</head>"));
+
+  const preScript = /<script(?![^>]*\btype\s*=\s*"module")[^>]*src="first-paint\.js"/.exec(head);
+  assert.ok(
+    preScript,
+    "first-paint.js must load from <head> as a CLASSIC script; as a module it is deferred past first paint",
+  );
+  // Compared on the TAGS, not on the first mention of each filename: the
+  // comment above the script names it too, so an indexOf on the raw text finds
+  // the comment and reports the right order however the tags are actually
+  // arranged. (Confirmed: that spelling survived a mutation that moved the
+  // <link> above the <script>.)
+  const stripped = head.replace(/<!--[\s\S]*?-->/g, "");
+  assert.ok(
+    /<script[^>]*src="first-paint\.js"[\s\S]*<link[^>]*href="popup\.css"/.test(stripped),
+    "the pre-paint script must precede the stylesheet: a classic script after a <link> blocks on it loading",
+  );
+  assert.ok(
+    !/<script[^>]*src="popup\.js"/.test(head),
+    "the module must not be moved into <head> instead — it stays deferred wherever it is",
+  );
+
+  // It must stay import-free. A single import makes it a module, which hands
+  // back exactly the deferral it exists to avoid.
+  const source = await readFile(join(HERE, "..", "src", "popup", "first-paint.js"), "utf8");
+  assert.ok(
+    !/^\s*import\s/m.test(source) && !/\brequire\s*\(/.test(source),
+    "first-paint.js must have no imports; any import makes it a deferred module",
+  );
+
+  // Its pins and key must agree with popup.ts, which owns them. They are
+  // duplicated because nothing can be shared with code that runs this early,
+  // and a silent divergence is a resize for one of the two populations.
+  const popup = await readFile(join(HERE, "..", "src", "popup", "popup.ts"), "utf8");
+  const owned = /readPairedHint\(\) \? "(\d+)px" : "(\d+)px"/.exec(popup);
+  assert.ok(owned, "popup.ts must still own the measured pins");
+  const early = /paired \? PAIRED_PIN : UNPAIRED_PIN/.test(source) && {
+    paired: /PAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
+    unpaired: /UNPAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
+  };
+  assert.ok(early, "first-paint.js must choose between a paired and an unpaired pin");
+  assert.equal(early.paired, owned[1], "the paired pin must match popup.ts");
+  assert.equal(early.unpaired, owned[2], "the unpaired pin must match popup.ts");
+
+  const key = /PAIRED_HINT_KEY = "([^"]+)"/.exec(popup)?.[1];
+  assert.ok(source.includes(`"${key}"`), `first-paint.js must read the same key (${key}) popup.ts writes`);
+
+  // And the CSS fallback must be the unpaired pin: it is what a browser whose
+  // hint cannot be read at all gets.
+  const css = await readFile(join(HERE, "..", "src", "popup", "popup.css"), "utf8");
+  const fallback = /#pending\s*\{[^}]*min-height:\s*(\d+)px/.exec(css);
+  assert.equal(fallback?.[1], owned[2], "the CSS fallback must be the unpaired pin");
+
+  // The store package is an explicit allowlist; an unlisted file ships a popup
+  // whose <head> references a 404 and whose pin is never applied.
+  const shipped = await readFile(join(HERE, "..", "store-package-files.txt"), "utf8");
+  assert.ok(
+    shipped.split("\n").includes("popup/first-paint.js"),
+    "first-paint.js must be in the store package allowlist",
+  );
+});
+
 test("the paired hint follows /health in both directions (D1)", async () => {
   // The hint is a layout guess and must never drift from reality: an unpair has
   // to shrink the next first paint back, or the returning user gets the resize

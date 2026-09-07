@@ -18,7 +18,8 @@
  * popup's reserved error slot is sized against a single known worst case. Two
  * lines at 300px: the slot is permanent, so extra words cost height on every
  * pairing card, error or not. */
-export const PAIR_MISMATCH_MESSAGE = "That code didn't match. Codes expire after two minutes.";
+export const PAIR_MISMATCH_MESSAGE =
+  "That code didn't match. Codes expire after two minutes — check the app.";
 
 export interface PairResultFrame {
   event?: string;

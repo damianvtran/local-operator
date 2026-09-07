@@ -422,16 +422,25 @@ input:disabled {
  * EVERY open — the resize it causes is unconditional, and only its duration
  * depends on how slow /health is.
  *
- * The pin is therefore chosen per user at first paint, in popup.ts, from a
- * synchronous localStorage hint: 237px for a browser that has never paired (it
- * becomes the 360.5px pairing form) and 116px for one that has (it becomes the
- * 239.9px connected card). A single pin cannot serve both — pinning to the form
- * costs the already-paired user, who opens this popup for the rest of the
- * product's life, a ~121px settle; pinning to the tallest state would leave a
- * permanent band of empty card under `connected` for everyone.
+ * The pin is therefore chosen per user, from a synchronous localStorage hint:
+ * 219px for a browser that has never paired (it becomes the 340px pairing form)
+ * and 86px for one that has (it becomes the 207px connected card). A single pin
+ * cannot serve both — pinning to the form costs the already-paired user, who
+ * opens this popup for the rest of the product's life, a 133px settle; pinning
+ * to the tallest state would leave a permanent band of empty card under
+ * `connected` for everyone.
  *
- * The fallback here is the unpaired height, which is what a browser with no
- * usable storage gets. */
+ * That choice is applied by first-paint.js, a CLASSIC script in <head>, NOT by
+ * popup.ts. popup.js is a deferred module, so an inline style it sets arrives
+ * after the compositor may already have painted: with only the module doing the
+ * work the already-paired user still saw the tall pin on 4 of 12 opens. The
+ * rule below is therefore the value for a browser whose hint cannot be read at
+ * all, and the pre-paint script overrides it for everyone else.
+ *
+ * All four numbers are measured at 300x600 and move together — the card's
+ * height depends on the pairing form, which depends on the reserved error slot
+ * below. Re-measure BOTH pins if any of them changes; a stale pin is a resize,
+ * which is the defect this whole block exists to prevent. */
 #pending {
   min-height: 219px;
 }

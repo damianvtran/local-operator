@@ -626,7 +626,7 @@ class BridgeService:
                 # is showing no error at all. Kept byte-identical to the
                 # extension's own PAIR_MISMATCH_MESSAGE fallback, which is the
                 # string a user sees when the daemon sends none.
-                message = "That code didn't match. Codes expire after two minutes."
+                message = "That code didn't match. Codes expire after two minutes — check the app."
             return PairResult(ok=False, message=message)
         token = secrets.token_urlsafe(32)
         _private_write(
