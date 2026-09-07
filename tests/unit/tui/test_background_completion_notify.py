@@ -75,33 +75,48 @@ def store_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def spawned(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Every argv the app would hand the OS, captured at the real boundary.
+    """Every notification the app decides to send, captured at ITS boundary.
 
     The visible, deliberate opt-in out of ``tests/conftest.py``'s suite-wide
     ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` gate, which exists so no test can put a
     real banner in the maintainer's Notification Centre. Opting in is safe here
-    precisely because every spawn below is intercepted: this file asserts on the
-    argv a delivery WOULD hand the OS, and nothing is ever launched.
+    because nothing below is ever launched.
+
+    INTERCEPTED AT ``detached_notify``, NOT AT ``spawn_detached``, and the
+    distinction is a CI failure this file already paid for. What these tests
+    assert is the app's ROUTING DECISION — which session is announced, how
+    often, with what title, and whether the watermark moved. Which argv that
+    decision finally becomes is a property of the HOST: ``detached_notify``
+    resolves a signed bundle, then ``osascript``, then ``notify-send``, and on a
+    Linux CI runner with none of them installed it correctly delivers nothing
+    and returns False. Capturing spawns therefore made a green macOS run and a
+    red Linux run of identical, correct code (run 34091362532, shard 2).
+
+    The wire those argvs travel is not left untested — ``tui/test_notify.py``
+    already pins every backend's exact command as a pure function.
     """
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
     calls: list[list[str]] = []
 
-    def capture(argv: list[str], **kwargs: Any) -> int:
-        calls.append(list(argv))
-        return 4242
+    def deliver(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+        # Recorded in the same flat shape the argv assertions used, so a test
+        # reads as "what did the user get told", not as a call signature.
+        calls.append([title, body, session_id, subtitle])
+        return True
 
-    # Patched at each name the delivery ladder actually calls, so a route that
-    # bypassed one of them would launch a real notifier and be noticed.
-    monkeypatch.setattr("local_operator.proc.spawn_detached", capture)
-    monkeypatch.setattr("local_operator.tui.notify.spawn_detached", capture)
-    monkeypatch.setattr("local_operator.tui.notify._spawn_detached", lambda argv: capture(argv))
+    monkeypatch.setattr("local_operator.tui.notify.detached_notify", deliver)
+    # The cmux route is a genuinely different backend, so it is captured too:
+    # this suite runs INSIDE cmux on the maintainer's machine, and the
+    # ``store_root`` fixture scrubs ``CMUX_*`` precisely so the bare-terminal
+    # path — the configuration the bug was reported in — is what is exercised.
+    # If that scrub ever regresses, this records the fact instead of launching.
     monkeypatch.setattr(
-        "local_operator.tui.notify._spawn_detached_ok", lambda argv: bool(capture(argv))
+        "local_operator.proc.spawn_detached", lambda argv, **kwargs: calls.append(list(argv)) or 1
     )
-    # The signed bundle is a compiled artifact that may or may not exist on the
-    # machine running this; forcing the plain route keeps the argv assertions
-    # deterministic without changing which DECISION is under test.
-    monkeypatch.setattr("local_operator.tui.notify._identity_notifier", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "local_operator.tui.notify.spawn_detached",
+        lambda argv, **kwargs: calls.append(list(argv)) or 1,
+    )
     return calls
 
 
@@ -346,7 +361,11 @@ async def test_a_failed_delivery_hands_the_claim_back(
 
     Otherwise a spawn refused once silences that completion permanently — the
     exact class of silent hole this feature exists to close.
+
+    Does not take the ``spawned`` fixture (it patches delivery itself), so it
+    opts out of the suite-wide notification gate on its own.
     """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
     _make_session(store_root, "current", "Current conversation")
     background = _make_session(store_root, "bg0000000001", "Background work")
     store = AttentionStore(store_root / "attention.db")
