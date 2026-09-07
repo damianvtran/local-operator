@@ -1992,6 +1992,15 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        #: How the last logical turn ended, published on the canonical snapshot
+        #: as ``last_turn_outcome``. A viewer that dropped mid-turn and rebinds
+        #: after the turn settled cannot recover this from ``live_events``
+        #: (cleared at ``agent_end``); without it it would synthesise
+        #: ``aborted=True`` and paint a false "interrupted". ``""`` until the
+        #: first turn ends. Set from the emitted end, which is one value per
+        #: user prompt (compaction continuations hold the end until the
+        #: pipeline flushes).
+        self._last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
         # The loop's held end owns billing, but a later post-turn compaction owns
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
@@ -5751,6 +5760,16 @@ class Session:
     async def _emit(self, event: AgentEvent) -> None:
         if isinstance(event, AgentEndEvent):
             self._attention_outcome = event
+            # The emitted end is the logical turn's outcome (held ends flush
+            # here from the pipeline finally; abort/error skip the hold and
+            # emit immediately). The canonical snapshot copies this field so a
+            # rebinding viewer can synthesise the matching AgentEndEvent.
+            if event.error:
+                self._last_turn_outcome = "error"
+            elif event.aborted:
+                self._last_turn_outcome = "aborted"
+            else:
+                self._last_turn_outcome = "completed"
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -5784,8 +5803,29 @@ class Session:
                 )
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
+        #
+        # ``_is_streaming`` is the third term, and it is what makes a RECONNECT
+        # work. A headless runtime has ``_has_ui=False``, so when its only
+        # viewer's socket drops the server unsubscribes and ``has_subscribers``
+        # goes False — the fold then stops, and everything the runtime does for
+        # the rest of the turn is absent from ``live_events``. The viewer
+        # re-binds moments later to a snapshot that has forgotten the tool the
+        # runtime started while it was away: the card never paints and its real
+        # ``tool_execution_end`` arrives orphaned, to be discarded unrendered at
+        # ``agent_end``. That is the whole point of the bounded seed ("a
+        # frontend that joins mid-turn"), and a mid-turn drop is exactly when a
+        # frontend joins. Bounded to a live turn, so a genuinely unobserved
+        # idle session still does no work.
+        #
+        # This does mean the fold now also runs for a session NO viewer has
+        # ever attached to — every subagent — which is a real cost and the
+        # reason ``live_events`` needed its own wire bound (see
+        # ``LIVE_EVENT_END_ROWS_MAX``). Kept deliberately: "has a viewer right
+        # now" is not knowable at fold time in any useful way, since the whole
+        # point is to have the seed ready for a viewer that has not arrived
+        # yet. Bounded retention is the cheaper guarantee.
         store = getattr(self, "_frontend_state_store", None)
-        if store is not None and (self._has_ui or store.has_subscribers):
+        if store is not None and (self._has_ui or store.has_subscribers or self._is_streaming):
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
             # compaction, pruning, or a fold; unchanged events do no extra work.

@@ -26531,6 +26531,17 @@ class OperatorApp(App[None]):
         obviously, ``_current_activity`` derives the working line's label from
         those cards, so the NEXT turn opened by announcing ``running bash`` for
         a bash call that had died with the previous session.
+
+        Deliberately UNCONDITIONAL: whatever is still live here has, by
+        definition, no outcome on this surface, so there is nothing to be
+        conditional on. What keeps that honest is upstream — the reconnect seed
+        retains each ``tool_execution_end`` (see
+        ``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``), so a call that finished while
+        the viewer was away settles its card through the normal path BEFORE
+        retirement runs. A card reaching here really did stop mid-flight. If a
+        future change lets the seed drop an end again, this method will mark a
+        succeeded call ``⊘ interrupted`` — that was the round-1 Q2 bug, and the
+        fix belongs in the seed rather than in an outcome test here.
         """
         cards = list(self._tool_cards.values()) + list(self._composing_cards.values())
         for card in cards:

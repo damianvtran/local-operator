@@ -88,7 +88,13 @@ class FakeHandle:
         if event.type == "agent_start":
             self._frontend.mutate(streaming=True, generation=event.generation)
         elif event.type == "agent_end":
-            self._frontend.mutate(streaming=False)
+            if getattr(event, "error", None):
+                outcome = "error"
+            elif getattr(event, "aborted", False):
+                outcome = "aborted"
+            else:
+                outcome = "completed"
+            self._frontend.mutate(streaming=False, last_turn_outcome=outcome)
         if self._event_handler is not None:
             self._event_handler(event.model_dump(mode="json"))
 
@@ -1948,6 +1954,182 @@ async def test_a_credential_frame_with_a_non_string_value_is_refused() -> None:
         assert frame.get("op") == "error", f"a non-string value was accepted: {frame}"
         assert "value must be a string" in frame.get("message", ""), frame
         assert handle.verbs == []
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> None:
+    """Test 20: ``_push`` skips events+frontend clients; welcome still delivered.
+
+    Daemon and events-only attach clients keep receiving projection repaints
+    byte-for-byte. A full-TUI viewer (events AND frontend_state) got the
+    welcome as its identity check and then must not be flooded.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    daemon_writer = events_writer = tui_writer = None
+    try:
+        record = await _wait_record()
+        daemon_reader, daemon_writer = await _dial(record)
+
+        events_reader, events_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        events_writer.write(
+            json.dumps({"key": record.control_key, "client": "attach", "events": True}).encode()
+            + b"\n"
+        )
+        await events_writer.drain()
+        assert json.loads(await events_reader.readline())["op"] == "projection"
+
+        tui_reader, tui_writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        tui_writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await tui_writer.drain()
+        assert json.loads(await tui_reader.readline())["op"] == "projection"
+        seed = json.loads(await tui_reader.readline())
+        assert seed["op"] == "frontend_sync"
+
+        await runtime._push()
+        daemon_repaint = json.loads(await asyncio.wait_for(daemon_reader.readline(), timeout=2))
+        assert daemon_repaint["op"] == "projection"
+        events_repaint = json.loads(await asyncio.wait_for(events_reader.readline(), timeout=2))
+        assert events_repaint["op"] == "projection"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(tui_reader.readline(), timeout=0.15)
+    finally:
+        for writer in (daemon_writer, events_writer, tui_writer):
+            if writer is not None:
+                writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    """Test 21: one INFO line per actual removal, naming the reason."""
+    import logging
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record, client="attach")
+        conns = list(runtime._clients.values())
+        assert len(conns) == 1
+        caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
+        runtime._drop_client(conns[0], reason="test")
+        infos = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+        ]
+        assert len(infos) == 1, [rec.getMessage() for rec in infos]
+        assert "dropped attach client" in infos[0].getMessage()
+        assert "events=" in infos[0].getMessage()
+        assert infos[0].getMessage().endswith(": test")
+        # Second call (reader-loop finally) must not INFO again.
+        runtime._drop_client(conns[0], reason="reader eof")
+        infos_after = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+        ]
+        assert len(infos_after) == 1
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_attach_cap_drop_reason_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writers: list[Any] = []
+    try:
+        record = await _wait_record()
+        caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
+        for _ in range(ATTACH_MAX_CLIENTS + 1):
+            _reader, writer = await _dial(record, client="attach")
+            writers.append(writer)
+        await asyncio.sleep(0.1)
+        messages = [
+            rec.getMessage()
+            for rec in caplog.records
+            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+        ]
+        assert any(msg.endswith(": attach cap") for msg in messages), messages
+    finally:
+        for writer in writers:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_tui_send_timeout_is_five_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test 22: full-TUI clients use ``_TUI_SEND_TIMEOUT_S``, not the 1 s bound."""
+    from local_operator.session.runtime import server as server_mod
+
+    assert server_mod._SEND_TIMEOUT_S == 1.0
+    assert server_mod._TUI_SEND_TIMEOUT_S == 5.0
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    seen: list[float] = []
+    original = asyncio.wait_for
+
+    async def spy_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
+        seen.append(float(timeout) if timeout is not None else -1.0)
+        return await original(awaitable, timeout=timeout)
+
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "events": True,
+                    "frontend_state": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        # Welcome + frontend_sync drain through _send_to.
+        await asyncio.sleep(0.2)
+        conns = [c for c in runtime._clients.values() if c.wants_events and c.wants_frontend]
+        assert conns, "full-TUI client never registered"
+        seen.clear()
+        monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
+        await runtime._send_to(conns[0], {"op": "ping"})
+        assert 5.0 in seen, f"TUI send bound was not 5.0 s; saw {seen}"
+        assert 1.0 not in seen, f"full-TUI client still used the 1 s bound; saw {seen}"
     finally:
         if writer is not None:
             writer.close()
