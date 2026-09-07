@@ -1253,11 +1253,13 @@ Drive it over CDP on `$port` per the steps below, then tear it down — by PID,
 because this snippet's Chrome is in your own process group:
 
 ```sh
-# SIGTERM to the browser PID alone is NOT enough and its shortfall is timing
-# dependent, which is why it looks fine in a quick test: measured on Chrome 152,
-# killing it left 1 survivor when torn down immediately and 5 once the browser
-# had settled for a second or more. Sweep your OWN profile afterwards -- the
-# pattern is what scopes it to your Chrome and never the operator's.
+# SIGTERM to the browser PID alone is NOT enough, and what it misses varies run
+# to run -- measured on Chrome 152 across 11 runs it left anywhere from 0 to 5
+# helpers behind, with no stable pattern by timing. That is exactly why a quick
+# test "passes": some runs really do come back clean. Never conclude from one.
+# Sweep your OWN profile afterwards, and assert the count rather than trusting
+# it. The unique mktemp pattern is what scopes the sweep to your Chrome and
+# never the operator's.
 kill "$chrome_pid" 2>/dev/null
 sleep 2
 pkill -f "$profile" 2>/dev/null
