@@ -232,6 +232,21 @@ def _session_key(context: ToolContext | None) -> str:
     return context.session_id or f"ctx-{id(context):x}"
 
 
+def _label_id(session_key: str) -> str:
+    """8 hex characters identifying a session in the process listing.
+
+    Hashed rather than passed through: a session key can be a caller-supplied
+    ``session_id`` string, and argv is world-readable on this host. A stable
+    hex digest identifies the kernel for an operator reading ``ps`` without
+    disclosing anything the key might carry.
+    """
+    import hashlib
+
+    if not session_key:
+        return "00000000"
+    return hashlib.sha256(session_key.encode("utf-8", "replace")).hexdigest()[:8]
+
+
 def _create_windows_kill_job(pid: int) -> int:
     """Own ``pid`` with a kill-on-close Windows Job Object.
 
@@ -452,11 +467,16 @@ def _remember(key: str, kernel: _Kernel) -> None:
         _record_reset(_key, "kernel evicted to make room for other active sessions")
 
 
-async def _spawn(cwd: str) -> _Kernel:
+async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
     POSIX uses a new session/process group. Windows assigns the worker to a
     kill-on-close Job Object before the first request is sent.
+
+    ``session_key`` only names the worker in the OS process listing (a machine
+    id, never user text — see the argv-is-public note in
+    :mod:`local_operator.procname`), so an operator looking at Activity Monitor
+    can tell WHICH session's eval kernel is burning CPU.
     """
     spawn_options: dict[str, Any] = {
         "stdin": asyncio.subprocess.PIPE,
@@ -474,8 +494,18 @@ async def _spawn(cwd: str) -> _Kernel:
         spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         spawn_options["start_new_session"] = True
+    # Brand the worker: `executable=` sets the binary image Activity Monitor
+    # reads, argv[0] sets the line `ps`/`top` show. Both degrade to today's
+    # bare interpreter when no branded image could be planted.
+    from local_operator import procname
+
+    link = procname.ensure_branded_interpreter()
+    argv0 = sys.executable
+    if link is not None:
+        spawn_options["executable"] = str(link)
+        argv0 = procname.branded_argv0(procname.LABEL_EVAL, id=_label_id(session_key))
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
+        argv0,
         "-u",
         "-m",
         "local_operator.tools.eval_worker",
@@ -655,7 +685,7 @@ async def _run_in_background(
             "attached; re-run without background.",
         )
     try:
-        kernel = await _spawn(_safe_cwd(context))
+        kernel = await _spawn(_safe_cwd(context), _session_key(context))
     except OSError as exc:
         return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
 
@@ -876,7 +906,7 @@ async def execute_eval(
     kernel = _KERNELS.pop(key, None)
     if kernel is None:
         try:
-            kernel = await _spawn(_safe_cwd(context))
+            kernel = await _spawn(_safe_cwd(context), key)
         except OSError as exc:
             _ACTIVE_KERNELS.discard(key)
             _CLOSE_ON_RETURN.discard(key)

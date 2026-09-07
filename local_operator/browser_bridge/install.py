@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from local_operator import procname
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import (
     DEFAULT_PORT,
@@ -46,13 +47,15 @@ def log_path() -> Path:
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     return {
         "Label": LABEL,
-        "ProgramArguments": [
-            sys.executable,
-            "-m",
+        # Branded interpreter image when one can be planted: macOS names this
+        # background item by the basename of ProgramArguments[0], so a bare
+        # `sys.executable` is what made installing the bridge notify that
+        # 'python3 is running in the background'. Falls back to sys.executable.
+        "ProgramArguments": procname.launchd_program(
             "local_operator.browser_bridge.daemon",
             "--port",
             str(port),
-        ],
+        ),
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": str(log_path()),

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from local_operator import procname
 from local_operator.paths import config_dir
 from local_operator.tunnels import config
 
@@ -36,7 +37,11 @@ def install() -> None:
         config.private_write(log, "")
         value = {
             "Label": LABEL,
-            "ProgramArguments": [sys.executable, "-m", "local_operator.tunnels.service"],
+            # Branded interpreter image when one can be planted: macOS names
+            # this background item by the basename of ProgramArguments[0], so a
+            # bare `sys.executable` is what made installing the tunnel notify
+            # 'python3 is running in the background'. Falls back unchanged.
+            "ProgramArguments": procname.launchd_program("local_operator.tunnels.service"),
             "EnvironmentVariables": {"LOCAL_OPERATOR_CONFIG_DIR": str(config_dir())},
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},

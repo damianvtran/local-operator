@@ -330,6 +330,18 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     if os.name == "posix":
         popen_kwargs["start_new_session"] = True
 
+    # Name the detached worker in the OS process listing, keyed by the job id
+    # this call already prints to the user, so `ps` and `lop`'s own job output
+    # agree on one handle. Both the image and argv[0] fall back to the bare
+    # interpreter when no branded image exists.
+    from local_operator import procname
+
+    link = procname.ensure_branded_interpreter()
+    if link is not None:
+        popen_kwargs["executable"] = str(link)
+        argv = list(argv)
+        argv[0] = procname.branded_argv0(procname.LABEL_EXEC, job=job_id)
+
     with _open_log_file(log_path) as log_handle:
         log_handle.write(
             f"# local-operator exec background job\n# prompt: {command}\n".encode("utf-8")

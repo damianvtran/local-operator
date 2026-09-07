@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import io
 import json
+import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -753,8 +754,18 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # Detached argv, one new session on POSIX.
     popen_mock.assert_called_once()
     argv = popen_mock.call_args[0][0]
-    assert argv[:5] == [
-        sys.executable,
+    kwargs = popen_mock.call_args[1]
+
+    # argv[0] is the process LABEL when a branded interpreter image exists
+    # (`executable=` then carries the real image), and the bare interpreter
+    # when it does not. Both are correct; what must never drift is the module
+    # and the request that follow it. See `local_operator.procname`.
+    if kwargs.get("executable"):
+        assert os.path.basename(kwargs["executable"]) == "Local Operator"
+        assert argv[0].startswith("Local Operator [exec] job=")
+    else:
+        assert argv[0] == sys.executable
+    assert argv[1:5] == [
         "-m",
         "local_operator.exec_worker",
         "--prompt",
@@ -762,7 +773,6 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     ]
     assert "--json" in argv and "--yolo" in argv
     assert "--job-id" in argv  # CL-09 terminal-record wiring
-    kwargs = popen_mock.call_args[1]
     if sys.platform != "win32":
         assert kwargs.get("start_new_session") is True
 

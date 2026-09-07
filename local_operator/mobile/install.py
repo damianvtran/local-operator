@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from local_operator import procname
 from local_operator.mobile.auth import generate_password, load_password, store_password
 from local_operator.mobile.daemon import DEFAULT_PORT
 from local_operator.paths import log_dir
@@ -119,13 +120,15 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     (install, status, tests) reads the same rendering."""
     return {
         "Label": LABEL,
-        "ProgramArguments": [
-            sys.executable,
-            "-m",
+        # Branded interpreter image when one can be planted: macOS names this
+        # background item by the basename of ProgramArguments[0], so a bare
+        # `sys.executable` is what made `lop mobile install` notify that
+        # 'python3 is running in the background'. Falls back to sys.executable.
+        "ProgramArguments": procname.launchd_program(
             "local_operator.mobile.service",
             "--port",
             str(port),
-        ],
+        ),
         "RunAtLoad": True,
         # Restart on crash, throttled by launchd's own 10s floor; an
         # exit-code-2 (no password) stays down because KeepAlive keys on

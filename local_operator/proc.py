@@ -20,7 +20,9 @@ else entirely:
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ def spawn_detached(
     *,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    label: str | None = None,
 ) -> bool:
     """Fire-and-forget ``argv``. Returns True when the child was STARTED.
 
@@ -44,10 +47,33 @@ def spawn_detached(
     ``cwd`` matters for the spawn backends: a new terminal window must open in
     the session's own working directory, not wherever this process happens to
     be, or the restored conversation points at the wrong project.
+
+    ``label`` names the child in the OS process listing when ``argv[0]`` is a
+    Python interpreter. The image is switched to the branded hardlink via
+    ``executable=`` (what Activity Monitor reads) and ``argv[0]`` becomes the
+    label (what ``ps``/``top`` read) — the two independent name axes documented
+    in :mod:`local_operator.procname`. Opt-in and best-effort: with no branded
+    image available the argv is spawned exactly as passed, so a caller can set
+    it unconditionally.
     """
+    launch = list(argv)
+    executable: str | None = None
+    if label and launch:
+        from local_operator import procname
+
+        link = procname.ensure_branded_interpreter()
+        # Only rewrite when argv[0] really is the interpreter we would be
+        # replacing. A spawn of some OTHER binary (a terminal emulator, `open`)
+        # must keep its own image, or `executable=` would run Python under that
+        # program's arguments.
+        if link is not None and os.path.realpath(launch[0]) == os.path.realpath(sys.executable):
+            executable = str(link)
+            launch[0] = procname.branded_argv0(label)
+
     try:
         subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-            list(argv),
+            launch,
+            executable=executable,
             cwd=cwd,
             env=dict(env) if env is not None else None,
             stdin=subprocess.DEVNULL,
