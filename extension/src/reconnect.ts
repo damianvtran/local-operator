@@ -45,6 +45,21 @@ export const RECONNECT_ALARM_PERIOD_MINUTES = 1;
 // dead daemon from being hammered while still recovering a live socket quickly.
 export const MAX_BACKOFF_MS = 30_000;
 
+// The FIRST delay (attempt 0 = 1000ms) is load-bearing beyond backoff, and must
+// not be shortened to make pairing feel faster.
+//
+// Submitting a pairing code opens the popup's own socket, and the daemon's rule
+// is later-connection-wins: that socket evicts the worker's (close 4000). The
+// worker then re-dials after this delay. Shortening it so the "Paired." card
+// hands over to "Connected." sooner inverts the race — the worker's re-dial
+// arrives while the popup's pairing socket is still open and EVICTS IT, and
+// pairing breaks outright (measured: 4/4 stuck on "Paired." with the daemon
+// reporting paired: false).
+//
+// So the ~1s dwell on the success card is not merely honest latency waiting for
+// /health to catch up; it is the window that lets the popup finish pairing on
+// its own socket before the worker takes the connection back. Treat it as a
+// serialisation constraint, not as a UX cost to be optimised away.
 export function backoffDelayMs(attempt: number): number {
   return Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** attempt);
 }

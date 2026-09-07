@@ -11,9 +11,14 @@
  * must therefore render from the pair_result frame ALONE and never be
  * downgraded by a stale health probe. */
 
-/** The default mismatch copy (branding doc's pairing-error microcopy). */
-export const PAIR_MISMATCH_MESSAGE =
-  "That code didn't match. Codes expire after two minutes — check the app for a fresh one.";
+/** The default mismatch copy (branding doc's pairing-error microcopy).
+ *
+ * Byte-identical to the daemon's own mismatch string (browser_bridge/daemon.py)
+ * so the user meets one sentence rather than two spellings of it, and so the
+ * popup's reserved error slot is sized against a single known worst case. Two
+ * lines at 300px: the slot is permanent, so extra words cost height on every
+ * pairing card, error or not. */
+export const PAIR_MISMATCH_MESSAGE = "That code didn't match. Codes expire after two minutes.";
 
 export interface PairResultFrame {
   event?: string;

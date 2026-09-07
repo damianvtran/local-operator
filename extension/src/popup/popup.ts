@@ -146,18 +146,80 @@ const TONE: Record<State, string> = {
 // prompt's `freshPrompt` rule a few lines down in render().
 let pairingShown = false;
 
+// How long a /health probe may hang before the render gives up on it. Bounded
+// because renders are serialised — see daemonHealth().
+const HEALTH_TIMEOUT_MS = 3000;
+
+// The last known pairing outcome, mirrored into localStorage so the FIRST
+// PAINT can size itself.
+//
+// #pending is the only section shipping visible, so it paints on every open,
+// before render()'s awaits resolve. Its pinned height therefore decides how far
+// the card travels when the real state arrives. Pinned to the pairing form the
+// first-run user settles with no motion but the already-paired user — who opens
+// this popup for the rest of the product's life — falls ~121px. chrome.storage
+// is async and so cannot inform a synchronous first paint; localStorage on an
+// extension page is synchronous, so the bit is mirrored there purely as a
+// LAYOUT HINT.
+//
+// It is a hint and nothing else: it never gates behaviour, and render() paints
+// whatever /health actually reports. A stale or absent bit costs one resize,
+// which is exactly the behaviour without it — so there is nothing to fail
+// closed about, and no security surface (it records that a pairing happened,
+// never a credential).
+const PAIRED_HINT_KEY = "lop:paired-hint";
+
+function readPairedHint(): boolean {
+  try {
+    return localStorage.getItem(PAIRED_HINT_KEY) === "1";
+  } catch {
+    // Storage can be unavailable (disabled, quota, partitioned context). The
+    // unpaired pin is the safe default: it is the state a user who cannot be
+    // identified is most likely to be in on their first open.
+    return false;
+  }
+}
+
+function writePairedHint(paired: boolean): void {
+  try {
+    localStorage.setItem(PAIRED_HINT_KEY, paired ? "1" : "0");
+  } catch {
+    // A hint that cannot be stored simply is not used next time.
+  }
+}
+
+/** Size the pre-render placeholder to the state it is most likely to become,
+ * so the first paint settles without moving the popup window. Called inline at
+ * module scope, before the first paint, and again whenever the hint changes. */
+function applyPendingPin(): void {
+  const pending = document.getElementById("pending");
+  if (!pending) return;
+  // Measured at 300x600 against THIS card: 86px lands the card on connected's
+  // height (207px), 219px on the pairing form's (340px). Re-measure both if the
+  // pairing form or the error slot changes height — a stale pin is a resize.
+  pending.style.minHeight = readPairedHint() ? "86px" : "219px";
+}
+applyPendingPin();
+
 function show(state: State): void {
   for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
   document.getElementById("card")?.style.setProperty("--tone", TONE[state]);
   if (state === "pairing") {
     const input = document.getElementById("pair-code") as HTMLInputElement | null;
-    // Only on a form the user has not been looking at, and never over a focus
-    // they already placed inside the form themselves: re-focusing an element
-    // that is already focused still collapses the selection to the caret, so
-    // an activeElement check is not redundant with `pairingShown`.
-    const form = document.getElementById("pair-form");
-    const alreadyInForm = form?.contains(document.activeElement) ?? false;
-    if (!pairingShown && !alreadyInForm) input?.focus();
+    // Focus only a form the user has NOT been looking at. `pairingShown` is
+    // false exactly when we are arriving at the pairing state from another one,
+    // which is the only time an autofocus is a service rather than an
+    // interruption — on a re-render of a form already on screen it yanks the
+    // caret back from wherever the user moved it, and collapses the selection
+    // the failure path just made.
+    //
+    // A second `!form.contains(document.activeElement)` term was tried here and
+    // removed: no mutation could make it decide a case. `pairingShown` is
+    // already false on every entry from another state, and true on every
+    // re-render of this one, so the activeElement check never gets to matter.
+    // A guard no test can distinguish from its absence is one the next reader
+    // has to re-derive, so the single operative term is left on its own.
+    if (!pairingShown) input?.focus();
   }
   pairingShown = state === "pairing";
 }
@@ -165,7 +227,22 @@ function show(state: State): void {
 async function daemonHealth(): Promise<Health | null> {
   const { port = DEFAULT_PORT } = await getLocal();
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    // BOUNDED, because renders are serialised. An unbounded probe against a
+    // daemon that accepts the TCP connection but never answers would suspend
+    // render() before any show() — and since renderRunning is only cleared in
+    // .finally() and renderQueued chains off it, that one stalled probe wedges
+    // EVERY later render, permanently. The frozen frame is #pending, which has
+    // no Retry button, and both Retry handlers are `() => void render()` and so
+    // become silently inert. A merely slow daemon freezes it for the whole
+    // stall. daemon.py's own _supervise docstring documents a daemon that
+    // "keeps answering /health as though it were healthy" as a real state, so
+    // this is not hypothetical.
+    //
+    // The existing `catch` below turns an abort into `null`, which renders the
+    // `disconnected` card — the one state carrying a Retry the user can act on.
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    });
     if (!response.ok) return null;
     return (await response.json()) as Health;
   } catch {
@@ -351,6 +428,10 @@ async function renderOnce(): Promise<void> {
     show("incompatible");
     return;
   }
+  // /health is the authority on whether this browser is paired, so it is what
+  // the first-paint layout hint is mirrored from — in BOTH directions, so an
+  // unpair shrinks the next first paint back to the form's height.
+  writePairedHint(health.paired);
   if (health.paired) {
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
@@ -522,7 +603,15 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       // `finally` unlock runs only after this handler returns. (The finally
       // re-call is idempotent.)
       setPairBusy(false);
-      input.focus();
+      // SELECT, not just focus. The rejected digits stay in the field with the
+      // caret at position 6, where maxlength="6" is already satisfied — so
+      // every subsequent keystroke, and a paste of the correct code, is
+      // silently discarded. Observed costing a user two of their five attempts
+      // on the same wrong code, with no visual signal that their input never
+      // landed. Selecting means the first keystroke or paste replaces the
+      // rejected code, which is how every other "wrong code, try again" field
+      // behaves.
+      input.select();
     }
   } catch {
     error.textContent = "Could not reach Local Operator on this machine.";

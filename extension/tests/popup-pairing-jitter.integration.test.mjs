@@ -79,6 +79,13 @@ function installDomStub() {
         node.selectionStart = s;
         node.selectionEnd = e;
       },
+      // A real input's select() focuses and selects the whole value.
+      select: () => {
+        doc.activeElement = node;
+        node.focusCount++;
+        node.selectionStart = 0;
+        node.selectionEnd = node._value.length;
+      },
       // popup.ts uses form.contains(document.activeElement) to avoid stealing a
       // focus the user placed inside the form themselves.
       contains: (other) => other != null && (other === node || node._contains.has(other)),
@@ -90,7 +97,8 @@ function installDomStub() {
       querySelectorAll: () => [],
       _handlers: {},
       click: () => (node._handlers.click || []).forEach((h) => h()),
-      dispatch: (event) => (node._handlers[event] || []).forEach((h) => h({ preventDefault() {} })),
+      dispatch: (event) =>
+        (node._handlers[event] || []).forEach((h) => h({ preventDefault() {}, stopPropagation() {} })),
     };
     // A real <input> collapses the selection to the end when `.value` is
     // assigned a DIFFERENT string, and short-circuits an identical one. That
@@ -139,6 +147,18 @@ function installDomStub() {
     close: () => {},
     matchMedia: () => ({ matches: false, addEventListener: () => {} }),
   };
+  // Synchronous storage, which is what lets the first paint size itself before
+  // any await. Persisted across installDomStub() calls within a test so the
+  // "hint survives to the next open" property is expressible.
+  if (!globalThis.localStorage) {
+    const store = new Map();
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      clear: () => store.clear(),
+    };
+  }
   return nodes;
 }
 
@@ -257,9 +277,12 @@ test("no diagnostic state ships visible: the first paint is neutral (J1)", async
     "the disconnected card must never be the pre-render default",
   );
   // The placeholder must not diagnose anything, or it is the same defect with
-  // different copy.
+  // different copy. Checked against the RENDERED text only — HTML comments
+  // legitimately quote the other states' copy to explain the rule.
   const pending = html.slice(html.indexOf('<section id="pending"'));
-  const body = pending.slice(0, pending.indexOf("</section>"));
+  const body = pending
+    .slice(0, pending.indexOf("</section>"))
+    .replace(/<!--[\s\S]*?-->/g, "");
   assert.doesNotMatch(body, /not reachable|isn't reachable|Not connected/i,
     "the placeholder must not assert a connection verdict it has not established");
 });
@@ -268,21 +291,35 @@ test("no diagnostic state ships visible: the first paint is neutral (J1)", async
 
 test("the pairing card holds one height across placeholder, form and error (J1/J7)", async () => {
   // A Chrome action popup auto-sizes to its content, so any height difference
-  // between these three is a visible resize of the popup WINDOW — the "jittery"
-  // report. The stylesheet is the only thing that decides it, so it is asserted
-  // here rather than through the module.
+  // between these is a visible resize of the popup WINDOW — the "jittery"
+  // report. The stylesheet decides it, so it is asserted here.
   //
-  // The numbers are measured, not guessed: rendered in Chrome 152 at the
-  // popup's true 300x600 metrics against a real daemon, the card is 358px for
-  // the placeholder, the pairing form, and the form carrying an error alike.
-  // Before the fix the same sequence measured 259 -> 292 -> 358.
+  // These assertions COMPARE the captured values. An earlier version only
+  // checked that the regex matched, which meant `min-height: 1px` passed — the
+  // exact blindness that let a 188px first-paint regression through review to
+  // be caught by looking at a frame instead.
   const css = await readFile(join(HERE, "..", "src", "popup", "popup.css"), "utf8");
 
+  // The placeholder's fallback pin. popup.ts overrides this per user at first
+  // paint (see the paired-hint test below); this is what a browser with no
+  // usable localStorage gets, so it must be the unpaired/pairing-form height.
   const pendingMin = /#pending\s*\{[^}]*min-height:\s*(\d+)px/.exec(css);
   assert.ok(pendingMin, "the placeholder must pin a height, or the card resizes when render() settles");
+  assert.equal(
+    Number(pendingMin[1]),
+    219,
+    "the fallback pin must be the pairing form's height (measured 219px -> card 340px at 300x600)",
+  );
 
+  // The error's reserved slot. 36px is two lines at 12px/1.5 — the height the
+  // longest message the daemon can send occupies at 300px.
   const errorMin = /#pair-error\s*\{[^}]*min-height:\s*(\d+)px/.exec(css);
   assert.ok(errorMin, "the pairing error must reserve its space rather than reflow the card");
+  assert.equal(
+    Number(errorMin[1]),
+    36,
+    "the error slot must reserve exactly two lines; more is height every pairing card pays for nothing",
+  );
 
   // Reserved space is only reserved if the hidden line still occupies it.
   assert.match(
@@ -297,6 +334,275 @@ test("the pairing card holds one height across placeholder, form and error (J1/J
     /#pair-error\.hidden\s*\{[^}]*display:\s*block/,
     "the hidden error must override the shared .hidden display:none to keep its box",
   );
+});
+
+test("every pairing failure message fits the reserved slot (J7)", async () => {
+  // The 36px reservation is calibrated to a WRAP, not to one string, and the
+  // slot is permanent — a message that wraps to three lines resizes the card
+  // exactly as before the fix. So the binding that matters is between the
+  // reservation and the longest message that can land in it.
+  //
+  // Measured at the card's content width (300px body - 2x16px body padding -
+  // 2x1px card border - 2x10px card margin = 246px) in the popup's body face at
+  // 12px. Rather than re-deriving pixel metrics here, the invariant asserted is
+  // the one that produced 36px: no message exceeds two lines' worth of
+  // characters at this width.
+  const daemon = await readFile(
+    join(HERE, "..", "..", "local_operator", "browser_bridge", "daemon.py"),
+    "utf8",
+  );
+  const flow = await readFile(join(HERE, "..", "src", "popup", "pair-flow.ts"), "utf8");
+  const popup = await readFile(join(HERE, "..", "src", "popup", "popup.ts"), "utf8");
+
+  // Python implicit string concatenation means a message can be spelled across
+  // several source lines, so adjacent literals are JOINED before measuring.
+  // Without this the longest message — the one the reservation is calibrated
+  // against — is silently skipped the moment someone wraps it, which is exactly
+  // how that string was written when this slot was first sized.
+  //
+  // Done line-wise rather than with one regex: a run of quoted literals on
+  // consecutive lines is the only shape Python's concatenation takes here, and
+  // it is far easier to read than a nested-quantifier match.
+  const joinAdjacent = (text) => {
+    const out = [];
+    let current = null;
+    for (const line of text.split("\n")) {
+      const parts = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+      if (parts.length === 1 && /^\s*"/.test(line)) {
+        // A bare continuation line: append to the message being built.
+        current = current === null ? parts[0] : current + parts[0];
+        continue;
+      }
+      if (current !== null) out.push(current);
+      current = null;
+      // A line that both opens a message and may continue on the next.
+      if (parts.length >= 1 && /=\s*\(?\s*"|message=\s*"|else\s+"/.test(line)) current = parts.at(-1);
+      else out.push(...parts);
+    }
+    if (current !== null) out.push(current);
+    return out;
+  };
+
+  const messages = [
+    ...joinAdjacent(daemon).filter((m) =>
+      /^(That code|No live pairing code|Too many attempts)/.test(m),
+    ),
+    /PAIR_MISMATCH_MESSAGE = "([^"]+)"/.exec(flow)?.[1],
+    /error\.textContent = "(Could not reach[^"]*)"/.exec(popup)?.[1],
+  ].filter(Boolean);
+
+  assert.ok(messages.length >= 5, `expected the real failure strings, found ${messages.length}`);
+  // The daemon's mismatch copy is the string the 36px slot is calibrated to.
+  assert.ok(
+    messages.some((m) => m.startsWith("That code didn't match")),
+    "the daemon's mismatch message must be among the strings measured",
+  );
+
+  // Word wrapping, not character division: a line breaks at the last word that
+  // fits, so a naive length/width underestimates the line count badly enough to
+  // miss the case this test exists for. The old mismatch copy (87 chars) is
+  // ceil(87/52) = 2 by division but genuinely wraps to THREE lines, which is
+  // the regression that sized this slot at 54px in the first place.
+  //
+  // 41 characters per line is the measured fit at the card's 246px content
+  // width in the popup's 12px body face — calibrated against the two strings
+  // whose rendered wrap the designer measured: the 87-char copy at 3 lines and
+  // the 55-char replacement at 2.
+  const CHARS_PER_LINE = 41;
+  const LINES_RESERVED = 2;
+  const wrappedLines = (message) => {
+    let lines = 1;
+    let column = 0;
+    for (const word of message.split(" ")) {
+      const width = word.length + (column === 0 ? 0 : 1);
+      if (column + width > CHARS_PER_LINE) {
+        lines++;
+        column = word.length;
+      } else {
+        column += width;
+      }
+    }
+    return lines;
+  };
+  for (const message of messages) {
+    const lines = wrappedLines(message);
+    assert.ok(
+      lines <= LINES_RESERVED,
+      `"${message}" wraps to ${lines} lines but the slot reserves ${LINES_RESERVED}; it would resize the card`,
+    );
+  }
+});
+
+test("the error sits above the button that produced it (D2)", async () => {
+  // Placement, not styling: below `.actions` the permanently-reserved slot put
+  // a 66px void between the last control and the footer rule, and put the
+  // message below the button on failure.
+  const html = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+  const form = html.slice(html.indexOf('<form id="pair-form">'), html.indexOf("</form>"));
+  assert.ok(form.includes('id="pair-error"'), "the error must live inside the pairing form");
+  assert.ok(
+    form.indexOf('id="pair-error"') < form.indexOf('class="actions"'),
+    "the error must come before the actions row, not after it",
+  );
+});
+
+test("the first paint is pinned to the state this browser will actually reach (D1)", async () => {
+  // #pending paints on EVERY open, before render()'s awaits resolve, so its
+  // pinned height decides how far the card travels. One pin cannot serve both
+  // populations: the pairing form is 360.5px and the connected card 239.9px.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+
+  // An already-paired browser. The hint is synchronous (localStorage), because
+  // chrome.storage cannot inform a first paint.
+  globalThis.localStorage.setItem("lop:paired-hint", "1");
+  installFetchStub(() => true);
+  let bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+    assert.equal(
+      nodes.get("pending").style.minHeight,
+      "86px",
+      "a paired browser's first paint must be pinned to the connected card's height",
+    );
+    assert.equal(
+      nodes.get("connected").classList.contains("hidden"),
+      false,
+      "precondition: it really does settle on connected",
+    );
+  } finally {
+    await bundle.close();
+  }
+
+  // A browser that has never paired.
+  const fresh = installDomStub();
+  const second = installChromeStub();
+  globalThis.localStorage.removeItem("lop:paired-hint");
+  installFetchStub(() => false);
+  bundle = await loadPopup();
+  try {
+    second.areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+    assert.equal(
+      fresh.get("pending").style.minHeight,
+      "219px",
+      "an unpaired browser's first paint must be pinned to the pairing form's height",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("the paired hint follows /health in both directions (D1)", async () => {
+  // The hint is a layout guess and must never drift from reality: an unpair has
+  // to shrink the next first paint back, or the returning user gets the resize
+  // the pin exists to remove.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  globalThis.localStorage.removeItem("lop:paired-hint");
+  let paired = true;
+  installFetchStub(() => paired);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+    assert.equal(globalThis.localStorage.getItem("lop:paired-hint"), "1", "pairing must record the hint");
+
+    paired = false;
+    await chrome.storage.session.set({ connState: "pairing" });
+    await tick(30);
+    assert.equal(
+      globalThis.localStorage.getItem("lop:paired-hint"),
+      "0",
+      "an unpair must clear the hint, or the next first paint is pinned to the wrong state",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("the placeholder is gone once render settles (A4)", async () => {
+  // #pending ships visible, so it is hidden only by show()'s toggle over the
+  // sections list. Dropping it from that list leaves the placeholder stacked
+  // above the real card, which no other assertion observes.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installFetchStub(() => true);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+    assert.equal(
+      nodes.get("pending").classList.contains("hidden"),
+      true,
+      "the placeholder must be hidden once a real state is painted, not left stacked above it",
+    );
+    const visible = ["connected", "paired", "pairing", "disconnected", "pending"].filter(
+      (id) => !nodes.get(id).classList.contains("hidden"),
+    );
+    assert.deepEqual(visible, ["connected"], "exactly one card may be visible after render settles");
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ------------------------------------------------------------------ A1 ---- */
+
+test("a stalled health probe still reaches a state the user can retry from (A1)", async () => {
+  // Renders are serialised, so an unbounded probe does not strand ONE render —
+  // renderRunning never clears and renderQueued chains off it, so it wedges
+  // every later render permanently. The frozen frame is #pending, which has no
+  // Retry button, and both Retry handlers are `() => void render()` and become
+  // silently inert.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+
+  let fetches = 0;
+  // A daemon that accepts the connection and never answers. Honours the abort
+  // signal the way a real fetch does — rejecting — which is what lets the
+  // render finish at all.
+  globalThis.fetch = (_url, init) => {
+    fetches++;
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  };
+
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    // Longer than the 3s bound the probe must impose.
+    await tick(3600);
+
+    assert.equal(
+      nodes.get("disconnected").classList.contains("hidden"),
+      false,
+      "a stalled probe must land on the retryable disconnected card, not freeze on the placeholder",
+    );
+    assert.equal(
+      nodes.get("pending").classList.contains("hidden"),
+      true,
+      "the popup must not be parked on a card with no Retry button",
+    );
+
+    // ...and the popup must still be LIVE: further triggers must issue new
+    // probes rather than queue behind a render that never finished.
+    const before = fetches;
+    nodes.get("retry").click();
+    await tick(60);
+    assert.ok(
+      fetches > before,
+      `Retry must issue a new probe (fetches ${before} -> ${fetches}); a wedged render makes it silently inert`,
+    );
+  } finally {
+    await bundle.close();
+  }
 });
 
 /* ------------------------------------------------------------------ J2 ---- */
@@ -315,13 +621,18 @@ test("a re-render does not yank focus back into the pairing code field (J2)", as
     assert.equal(nodes.get("pairing").classList.contains("hidden"), false, "precondition: the form is up");
     assert.equal(document.activeElement, input, "precondition: a newly shown form takes focus once");
 
-    // The user reads the code out of the terminal and tabs onward. While
-    // unpaired the worker idle-suspends and the alarm floor rewakes it, so
-    // connState is rewritten under them on every teardown and hello_ack.
-    const submit = nodes.get("pair-submit");
-    submit.focus();
+    // The user tabs OUTSIDE the form — the ordinary case in the report: they
+    // click the port row or the footer while reading the code out of the
+    // terminal. This is deliberately not the submit button: the button is
+    // inside #pair-form, so `alreadyInForm` would be true and `!pairingShown`
+    // would never be the deciding term — a mutation dropping `!pairingShown`
+    // survived the earlier version of this test for exactly that reason.
+    const outside = nodes.get("port");
+    outside.focus();
     const focusesBefore = input.focusCount;
 
+    // While unpaired the worker idle-suspends and the alarm floor rewakes it,
+    // so connState is rewritten under the user on every teardown and hello_ack.
     await chrome.storage.session.set({ connState: "connecting" });
     await tick(30);
     await chrome.storage.session.set({ connState: "pairing" });
@@ -329,7 +640,7 @@ test("a re-render does not yank focus back into the pairing code field (J2)", as
 
     assert.equal(
       document.activeElement,
-      submit,
+      outside,
       "a re-render must not steal focus from a user who has tabbed onward",
     );
     assert.equal(
@@ -366,6 +677,109 @@ test("re-entering the pairing state after leaving it focuses the field again (J2
       document.activeElement,
       nodes.get("pair-code"),
       "a form the user has not seen yet must take focus",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a render never re-focuses a field the user is already editing (J2)", async () => {
+  // The consequence the guard exists to prevent, asserted on the state that
+  // makes it expensive: a user mid-edit with a SELECTION. Re-focusing an input
+  // collapses the selection to the caret, which would silently undo the
+  // select() the failure path performs — so this also protects U1.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installFetchStub(() => false);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+
+    const input = nodes.get("pair-code");
+    // The user is mid-edit with a selection — exactly the state the failure
+    // path's select() leaves them in.
+    input.focus();
+    input._value = "123456";
+    input.setSelectionRange(0, 6);
+    const focusesBefore = input.focusCount;
+
+    // Force the case the guard's second term exists for: the pairing state is
+    // re-shown while focus is genuinely inside the form.
+    await chrome.storage.session.set({ connState: "connecting" });
+    await tick(30);
+
+    assert.equal(
+      input.focusCount,
+      focusesBefore,
+      "a render must not re-focus a field the user is editing: it collapses the selection to the caret",
+    );
+    assert.equal(input.selectionStart, 0, "the user's selection must survive the render");
+    assert.equal(input.selectionEnd, 6, "the user's selection must survive the render");
+  } finally {
+    await bundle.close();
+  }
+});
+
+/** The daemon's side of a pairing submit, over the popup's own socket: a
+ * hello_ack followed by a pair_result. `ok:false` is the rejection path. */
+function installPairSocket({ ok = false, message = "That code didn't match." } = {}) {
+  globalThis.WebSocket = class {
+    constructor() {
+      queueMicrotask(() => this.onopen?.({}));
+    }
+    send(raw) {
+      const frame = JSON.parse(String(raw));
+      if (frame.event === "hello") {
+        queueMicrotask(() =>
+          this.onmessage?.({ data: JSON.stringify({ event: "hello_ack", proto: 1, paired: false }) }),
+        );
+      } else if (frame.event === "pair") {
+        queueMicrotask(() =>
+          this.onmessage?.({
+            data: JSON.stringify({ event: "pair_result", ok, message, token: ok ? "tok" : undefined }),
+          }),
+        );
+      }
+    }
+    close() {}
+  };
+}
+
+/* ------------------------------------------------------------------ U1 ---- */
+
+test("a rejected code is selected so the next keystroke replaces it (U1)", async () => {
+  // maxlength="6" is already satisfied by the rejected digits, so with the
+  // caret at 6 every further keystroke AND a paste are silently discarded.
+  // Observed costing a user two of five attempts on the same wrong code.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installFetchStub(() => false);
+  installPairSocket({ ok: false });
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+
+    const input = nodes.get("pair-code");
+    input._value = "707770";
+    input.setSelectionRange(6, 6);
+
+    // The daemon rejects it over the popup's own socket.
+    nodes.get("pair-form").dispatch("submit");
+    await tick(120);
+
+    assert.equal(
+      nodes.get("pair-error").classList.contains("hidden"),
+      false,
+      "precondition: the attempt was rejected",
+    );
+    assert.equal(
+      input.selectionStart === 0 && input.selectionEnd === input.value.length,
+      true,
+      `the rejected code must be selected so typing replaces it (got ${input.selectionStart}-${input.selectionEnd} of "${input.value}")`,
     );
   } finally {
     await bundle.close();

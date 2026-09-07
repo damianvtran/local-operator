@@ -84,11 +84,19 @@
               autocomplete="one-time-code"
               aria-describedby="pair-error"
             />
+            <!-- ABOVE the button, and inside the form. The error's reserved
+                 slot (popup.css) is permanent, so below `.actions` it parked a
+                 66px void between the last control and the footer rule, which
+                 reads as a mis-measured card rather than as rhythm; between the
+                 field and the button the same slack reads as form spacing. It
+                 also puts the message next to the field it is about instead of
+                 below the button that produced it, so failure does not send the
+                 eye past the primary action and back. -->
+            <p class="error hidden" id="pair-error" role="alert"></p>
             <div class="actions">
               <button type="submit" class="btn primary block">Pair</button>
             </div>
           </form>
-          <p class="error hidden" id="pair-error" role="alert"></p>
         </section>
 
         <!-- Ships HIDDEN like every other section. A diagnostic error state must
@@ -116,8 +124,15 @@
              Its height matches the states it most often resolves into, so the
              popup window does not jump as it settles. -->
         <section id="pending" class="state" role="status">
-          <h1 class="title">Local Operator</h1>
-          <p class="sub">Checking this browser's connection…</p>
+          <!-- The title states what is happening, like every other state
+               ("Connected.", "Paired.", "Not connected.", "Update needed.").
+               It previously repeated the wordmark 14px above it, spending the
+               card's strongest typographic slot on a word already on screen and
+               making a legitimate loading state read as an empty broken card.
+               The copy still refuses to diagnose: this is the one state that
+               has established nothing yet. -->
+          <h1 class="title">Checking connection.</h1>
+          <p class="sub">Looking for Local Operator on this computer…</p>
         </section>
 
         <section id="incompatible" class="state hidden">
