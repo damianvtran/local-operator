@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.context_files import (
+    _read_head,
     discover_context_files,
     load_repo_guidance,
     render_context_files,
@@ -130,18 +131,163 @@ def test_index_line_ranges_address_the_real_lines(tmp_path: Path) -> None:
 
     found = re.findall(r"- L(\d+)-(\d+): (.+)", rendered)
     assert found, "expected an index"
+
+    # The head boundary is computed, NOT sniffed from the span's first line.
+    # Guarding the identity assertion behind `if span[0].startswith("#")` makes
+    # the test self-disabling in exactly the failure it exists to catch: a
+    # start that drifts off its heading lands on body text, the guard goes
+    # false, and the assertion is skipped. A start+1 mutant passed the whole
+    # suite that way. Every row is now checked unconditionally, in the one of
+    # two modes its start determines.
+    _, head_lines, _ = _read_head(guidance)
+
+    straddling = 0
     for raw_start, raw_end, title in found:
         start, end = int(raw_start), int(raw_end)
         span = lines[start - 1 : end]
         assert span, f"empty span for {title}"
-        # A section wholly past the head is addressed from its own heading. A
-        # section straddling the cut is offered as its REMAINDER instead, so
-        # its range starts at body text rather than at the heading the model
-        # has already read.
-        if span[0].startswith("#"):
-            assert span[0].lstrip("#").strip() == title
+        if start == head_lines + 1:
+            # The straddling section: its heading is already resident, so the
+            # range offered is the REMAINDER and must NOT start on a heading.
+            # Pinning this stops the exemption from becoming a loophole.
+            straddling += 1
+            assert not span[0].startswith("#"), (
+                f"{title!r} was offered from the head boundary, so it should "
+                f"start at body text, not at {span[0]!r}"
+            )
+        else:
+            # Every other row must land exactly on its own heading line.
+            assert span[0].lstrip("#").strip() == title, (
+                f"index row {title!r} points at L{start} but read() sees " f"{span[0]!r} there"
+            )
         # Either way the span stops before the next same-or-higher heading.
         assert not any(line.startswith("## ") for line in span[1:])
+    assert straddling <= 1, "at most one section can straddle the head cut"
+
+
+@pytest.mark.parametrize(
+    "name,body",
+    [
+        # No heading of any level.
+        (
+            "no headings",
+            "\n".join(f"prose line {i}" for i in range(1200)) + "\nNEVER delete prod.\n",
+        ),
+        # Only H1s: the index lists H2/H3, so this yields no listable rows.
+        (
+            "only H1",
+            "# Alpha\n"
+            + "background prose here\n" * 400
+            + "\n# Beta rules\n"
+            + "detail line\n" * 400
+            + "\n# Gamma\nnever do X\n",
+        ),
+        # Every heading inside the head, prose continuing well past it.
+        ("headings only in head", "# Doc\n\n## Only\n\n" + "tail prose line\n" * 900),
+    ],
+)
+def test_oversized_file_never_renders_without_disclosure(
+    name: str, body: str, tmp_path: Path
+) -> None:
+    """The module's one invariant: content is never dropped silently.
+
+    Each shape here yields NO listable section, which used to make the index
+    render as "" and the caller emit a bare head — the tail gone AND unnamed,
+    with not even the file's path to find it by. ``main`` shipped these files
+    WHOLE, so that was a content regression as well as the exact
+    absent-and-invisible failure this module exists to invert.
+    """
+    from local_operator.context_files import GUIDANCE_HEAD_BYTES
+
+    repo = _make_repo(tmp_path)
+    assert len(body.encode()) > GUIDANCE_HEAD_BYTES, f"{name} fixture is not oversized"
+    (repo / "AGENTS.md").write_text(body)
+    rendered = load_repo_guidance(repo)
+
+    assert "NOT included above" in rendered, f"{name}: tail dropped with no disclosure"
+    assert "AGENTS.md" in rendered, f"{name}: no path to read"
+    assert re.search(r"L\d+", rendered), f"{name}: no line range to read"
+    assert "you MUST" in rendered, f"{name}: no imperative to read the rest"
+
+
+def test_unterminated_code_fence_still_indexes_the_tail(tmp_path: Path) -> None:
+    """A fence left open at EOF is a formatting slip, not a 60KB code block.
+
+    Believing it swallows every later heading and strands the tail unnamed.
+    The scan retries without fence tracking and discloses that it did so.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "# Team rules\n\n## Setup\n\n```sh\necho hi\n"
+        + "prose line here\n" * 700
+        + "\n## Deploy policy\n\nNEVER deploy to production on a Friday.\n"
+    )
+    rendered = load_repo_guidance(repo)
+
+    assert "Deploy policy" in rendered, "heading after an unclosed fence went unnamed"
+    assert "unclosed code fence" in rendered, "the recovery was not disclosed"
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"],
+)
+def test_line_numbering_matches_the_read_tool(separator: str, tmp_path: Path) -> None:
+    """The index's line numbers are a CONTRACT with the ``read`` tool.
+
+    ``read`` decodes and calls ``str.splitlines()``, which breaks on six
+    separators beyond ``\\n``. Counting on ``\\n`` alone drifts every later
+    range by one per occurrence, compounding down the file — and the model
+    then lands on a plausible WRONG range and follows the wrong rule, which is
+    worse than finding nothing. This pins both sides to one splitter, so a
+    change to either breaks loudly instead of drifting.
+    """
+    from local_operator.tools.builtin import _decode_text_lines
+
+    repo = _make_repo(tmp_path)
+    guidance = repo / "AGENTS.md"
+    guidance.write_text(
+        "# Doc\n\n## Head\n\n"
+        + f"prose line with{separator}a separator in it\n" * 400
+        + "\n## Late section\n\nTHE RULE.\n"
+    )
+    rendered = load_repo_guidance(repo)
+
+    # Resolve the emitted range through the REAL consumer, not a local split.
+    _, lines = _decode_text_lines(guidance.read_bytes())
+    match = re.search(r"- L(\d+)-(\d+): Late section", rendered)
+    assert match, f"late section not indexed with separator {separator!r}"
+    start, end = int(match.group(1)), int(match.group(2))
+    assert lines[start - 1] == "## Late section", (
+        f"separator {separator!r}: index says L{start}, read() sees " f"{lines[start - 1]!r}"
+    )
+    assert any("THE RULE." in line for line in lines[start - 1 : end])
+
+
+def test_every_index_range_round_trips_through_the_real_read_path(tmp_path: Path) -> None:
+    """The PR's thesis, mechanically: if the pointer is followed, does it land?
+
+    Whether a model *chooses* to follow the pointer is not testable here. That
+    it resolves correctly when followed is, and it is the half that silently
+    broke — so it is asserted against ``read``'s own splitter rather than a
+    reimplementation of it.
+    """
+    from local_operator.tools.builtin import _decode_text_lines
+
+    repo = _make_repo(tmp_path)
+    guidance = repo / "AGENTS.md"
+    guidance.write_text(_oversized(tail_sections=6))
+    rendered = load_repo_guidance(repo)
+
+    _, lines = _decode_text_lines(guidance.read_bytes())
+    _, head_lines, _ = _read_head(guidance)
+    rows = re.findall(r"- L(\d+)-(\d+): (.+)", rendered)
+    assert rows, "expected an index"
+    for raw_start, raw_end, title in rows:
+        start, end = int(raw_start), int(raw_end)
+        assert 1 <= start <= end <= len(lines), f"{title}: range outside the file"
+        if start != head_lines + 1:
+            assert lines[start - 1].lstrip("#").strip() == title
 
 
 def test_file_within_head_size_ships_whole_without_ceremony(tmp_path: Path) -> None:
@@ -233,9 +379,14 @@ def test_guidance_cap_bounds_ingestion_before_hash_and_render(
     rendered = load_repo_guidance(repo)
 
     # One enormous line: nothing to cut on, so the head is the byte prefix and
-    # the render stays bounded regardless of how large the file is.
-    assert rendered.count("x") <= GUIDANCE_HEAD_BYTES
+    # the render stays bounded regardless of how large the file is. Counted on
+    # the run of file bytes rather than on every "x" in the render, since the
+    # disclosure prose legitimately contains the letter too.
+    longest_run = max(len(run) for run in re.findall(r"x+", rendered))
+    assert longest_run <= GUIDANCE_HEAD_BYTES
     assert len(rendered.encode()) < GUIDANCE_HEAD_BYTES + 2_000
+    # A heading-free oversized file must still say the tail exists.
+    assert "NOT included above" in rendered
 
 
 def test_scan_ceiling_is_disclosed_rather_than_silently_dropping_sections(

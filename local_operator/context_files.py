@@ -39,6 +39,14 @@ LINE boundary) followed by a generated index of every remaining section with
 its line range, plus an imperative to read that range before acting on its
 subject.
 
+THE ONE INVARIANT: an oversized file NEVER renders without disclosure. Some
+files yield no listable sections at all — no headings, only H1s, or every
+heading inside the head — and for those the index degrades to a bare pointer
+(path, line count, the range to read) rather than to silence. Emitting a bare
+head with nothing saying the file continues would drop the operator's rules
+both invisibly and unrecoverably, which is worse than the byte cut this
+replaces: that at least admitted it had truncated.
+
 This is a CORRECTNESS FIX before it is a token saving. The previous contract
 kept the first 64KiB of each file and appended a one-line "truncated" note.
 For this repository's own AGENTS.md — 93,355 bytes, 11 top-level sections —
@@ -73,41 +81,63 @@ import hashlib
 import os
 import stat
 from pathlib import Path
+from typing import BinaryIO
 
 #: How many guidance files ride one system prompt. Nearest wins; deeper
 #: ancestors beyond this are dropped rather than silently overflowing the
 #: start-context budget (the 30k contract in docs/REWRITE.md).
 MAX_CONTEXT_FILES = 5
 
-#: Per-file ingest cap for the *resident* text and for the discovery digest.
-#: A guidance file is instructions, not documentation; past this the file is
-#: read on demand (it is on disk and grep-able) instead of occupying every
-#: turn's cached prefix.
-MAX_FILE_BYTES = 64 * 1024
+#: Bytes hashed when deciding whether two discovered files are the same file.
+#: This does NOT bound the resident text -- :data:`GUIDANCE_HEAD_BYTES` does.
+#: It is only the dedup probe, kept bounded so a nested tree of large guidance
+#: files cannot be made to read gigabytes during discovery.
+#:
+#: Consequence worth knowing: two files identical in their first 64KiB but
+#: differing afterwards collapse to one. That is pre-existing behaviour; the
+#: file's length is folded into the digest so the common "same prefix,
+#: different length" case stays distinguishable.
+MAX_DIGEST_BYTES = 64 * 1024
 
 #: How much of an oversized guidance file stays resident in the prompt.
 #:
-#: The trade-off is adherence against cost, and it is asymmetric. Rules the
-#: agent breaks *without knowing it should have looked something up* — a
-#: release gate, a review gate, "never symlink a venv", "read the committed
-#: ref, not the working tree" — only work when they are resident; a head too
-#: small silently converts those into rules nobody consults. Reference
-#: material (timing analysis, widget conventions, subsystem internals) is safe
-#: to leave lazy: the agent knows it is about to edit a widget, so an index
-#: entry is enough to send it to the file.
+#: The trade-off is adherence against cost, and it is asymmetric in PRINCIPLE:
+#: rules the agent breaks *without knowing it should have looked something up*
+#: want to be resident, while reference material (timing analysis, widget
+#: conventions, subsystem internals) is safe to leave lazy, because an agent
+#: about to edit a widget knows to consult the widget section.
 #:
-#: 8KiB was chosen over 6KiB and 12KiB against this repository's own 93KiB
-#: AGENTS.md: it carries the environment/test/lint gates that apply to every
-#: task regardless of subject, while cutting ~20.7k tokens from a fresh
-#: session. Raising it buys progressively less — the material past 8KiB is
-#: increasingly subject-specific, which is exactly the material an index
-#: serves well. Lowering it starts evicting unconditional gates.
+#: WHAT THIS MODULE CAN ACTUALLY DELIVER IS NARROWER, and the difference has
+#: been measured rather than assumed. The head is necessarily the file's first
+#: N bytes: this module renders whatever the operator wrote, in the order they
+#: wrote it, and MUST NOT reorder or edit their file to suit its own budget.
+#: So the head holds the unconditional rules only where the file happens to
+#: front-load them. On this repository's own AGENTS.md it largely does not —
+#: measured at 8KiB, the head carries the test/lint/e2e gates and the xdist
+#: worker-count rationale, while "never symlink a venv", "read the committed
+#: ref", the version-bump rule, the merge tiers and the release-owner protocol
+#: are all INDEX-ONLY. That is a property of the file's ordering, not a defect
+#: this module may fix; front-loading is the file owner's call.
 #:
-#: NOTE this is a byte offset into the file as the operator wrote it. It is
-#: NOT a claim that the first 8KiB of an arbitrary AGENTS.md are its most
-#: important bytes — that is a property of how the file is ordered, which is
-#: the file owner's business and not something this module edits or reorders.
+#: The index is what makes that acceptable rather than fatal: those sections
+#: carry imperative headings ("Never symlink one", "Read the committed ref,
+#: not the working tree") which state the rule's gist in the row itself, and
+#: they are one addressed read away. Note also that on this file they are past
+#: the old 64KiB byte cut anyway, so they move from absent-and-invisible to
+#: named-and-reachable.
+#:
+#: 8KiB was chosen over 6KiB and 12KiB: it carries the gates that apply to
+#: every task regardless of subject while cutting ~19.7k billed tokens from a
+#: fresh session. Raising it buys progressively less, since material further
+#: in is increasingly subject-specific — exactly what an index serves well.
 GUIDANCE_HEAD_BYTES = 8 * 1024
+
+#: Deepest heading level the index lists. H3 is a real tuning knob rather than
+#: an arbitrary depth: on this repository's own AGENTS.md it is the difference
+#: between 11 rows and 33, and the H3s are where the individually actionable
+#: rules live ("Never symlink one", "Read the committed ref"). Going deeper
+#: costs index size for headings too fine-grained to be worth a separate read.
+INDEX_MAX_HEADING_LEVEL = 3
 
 #: Ceiling on the streaming scan that builds the section index. The scan
 #: keeps only headings (a few hundred bytes) in memory, so this bounds I/O
@@ -124,12 +154,12 @@ def _read_bounded(path: Path) -> tuple[bytes, bool]:
 
     ``Path.is_symlink`` followed by ``open`` has a swap window. ``O_NOFOLLOW``
     makes the kernel enforce the trust boundary at the actual read, while the
-    ``MAX_FILE_BYTES + 1`` probe determines truncation without ingesting the
+    ``MAX_DIGEST_BYTES + 1`` probe determines truncation without ingesting the
     rest of an attacker-controlled file.
     """
     with _open_nofollow(path) as stream:
-        probe = stream.read(MAX_FILE_BYTES + 1)
-    return probe[:MAX_FILE_BYTES], len(probe) > MAX_FILE_BYTES
+        probe = stream.read(MAX_DIGEST_BYTES + 1)
+    return probe[:MAX_DIGEST_BYTES], len(probe) > MAX_DIGEST_BYTES
 
 
 class _Section:
@@ -152,40 +182,72 @@ class _Section:
         return f"_Section(L{self.start}-{self.end}, {'#' * self.level} {self.title})"
 
 
-def _scan_sections(path: Path, max_level: int = 3) -> tuple[list[_Section], int, bool]:
-    """Headings, total line count, and whether the scan hit its ceiling.
+def _split_lines_like_read(data: bytes) -> list[str]:
+    """Split exactly as the ``read`` tool does, because it is the consumer.
 
-    Streams the file line by line: the index must describe a file far larger
-    than the prompt can hold, so nothing but the headings is retained. Fenced
-    code blocks are tracked because ``#`` starts a comment in most of the
-    shell snippets these files carry, and a comment indexed as a section
-    sends a later ``read`` to the wrong range.
+    THE INDEX'S LINE NUMBERS ARE A CONTRACT WITH ``read``. That tool decodes
+    UTF-8 and calls ``str.splitlines()`` (``tools/builtin.py``
+    ``_decode_text_lines``), then slices ``lines[start - 1 : end]``. Counting
+    on ``\\n`` alone instead would disagree on SIX further separators that
+    ``splitlines`` also breaks on -- ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``,
+    NEL, LS (U+2028) and PS (U+2029) -- and every occurrence before a heading
+    shifts that heading's number by one, compounding down the file.
+
+    That failure is silent and confident: the model lands on a plausible but
+    WRONG range and follows the wrong rule, which is worse than finding
+    nothing. A form feed or NEL pasted in from a table or a word processor is
+    not exotic. So the split is not merely "similar" to read's, it is the
+    same call on the same bytes; ``test_line_numbering_matches_the_read_tool``
+    pins the two together so a change to either side breaks loudly.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = data.decode("utf-8", errors="replace")
+    return text.splitlines()
+
+
+def _scan_sections(
+    path: Path, max_level: int = INDEX_MAX_HEADING_LEVEL
+) -> tuple[list[_Section], int, bool, bool]:
+    """Headings, total line count, whether the scan hit its ceiling, and
+    whether a code fence was left open at EOF.
+
+    Reads the file in bounded chunks and splits with :func:`_split_lines_like_read`
+    so the emitted ranges resolve under ``read``. Only headings are retained,
+    because the index must describe a file far larger than the prompt can
+    hold. Fenced code blocks are tracked because ``#`` starts a comment in
+    most of the shell snippets these files carry, and a comment indexed as a
+    section sends a later ``read`` to the wrong range.
     """
     sections: list[_Section] = []
     total_lines = 0
-    scanned = 0
     truncated_scan = False
     fence: str | None = None
 
     with _open_nofollow(path) as stream:
-        for raw in stream:
-            scanned += len(raw)
-            if scanned > MAX_SCAN_BYTES:
-                truncated_scan = True
-                break
-            total_lines += 1
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+        raw_bytes = stream.read(MAX_SCAN_BYTES + 1)
+    if len(raw_bytes) > MAX_SCAN_BYTES:
+        truncated_scan = True
+        raw_bytes = raw_bytes[:MAX_SCAN_BYTES]
+
+    def collect(track_fences: bool) -> list[_Section]:
+        """One pass. ``track_fences=False`` is the recovery pass below."""
+        found: list[_Section] = []
+        nonlocal fence
+        fence = None
+        for number, line in enumerate(lines, 1):
             stripped = line.lstrip()
             # ``` or ~~~ toggles; the closing fence must match the opener so a
             # ```python block containing ``` in prose does not end it early.
-            if stripped.startswith("```") or stripped.startswith("~~~"):
+            if track_fences and (stripped.startswith("```") or stripped.startswith("~~~")):
                 marker = stripped[:3]
                 if fence is None:
                     fence = marker
                 elif fence == marker:
                     fence = None
                 continue
-            if fence is not None or not line.startswith("#"):
+            if (track_fences and fence is not None) or not line.startswith("#"):
                 continue
             level = len(line) - len(line.lstrip("#"))
             if level > max_level or not line[level:].startswith(" "):
@@ -193,7 +255,26 @@ def _scan_sections(path: Path, max_level: int = 3) -> tuple[list[_Section], int,
             title = line[level:].strip()
             if not title:
                 continue
-            sections.append(_Section(level, title, total_lines))
+            found.append(_Section(level, title, number))
+        return found
+
+    lines = _split_lines_like_read(raw_bytes)
+    total_lines = len(lines)
+    sections = collect(track_fences=True)
+    unterminated_fence = fence is not None
+
+    # A fence still open at EOF is far more often a formatting slip -- a
+    # snippet whose closing ``` was forgotten -- than a genuine multi-KB code
+    # block running to the end of a rules file. Believing it swallows every
+    # heading after the slip and strands that whole tail unnamed, which is the
+    # silent-loss failure this module exists to prevent. So when the file ends
+    # mid-fence AND that cost us headings, re-scan ignoring fences: a spurious
+    # row pointing at a shell comment is a far cheaper error than an
+    # unreachable half of the operator's rules.
+    if unterminated_fence:
+        recovered = collect(track_fences=False)
+        if len(recovered) > len(sections):
+            sections = recovered
 
     # A section's span ends where the next same-or-higher heading begins.
     for index, section in enumerate(sections):
@@ -203,10 +284,10 @@ def _scan_sections(path: Path, max_level: int = 3) -> tuple[list[_Section], int,
                 end = later.start - 1
                 break
         section.end = end
-    return sections, total_lines, truncated_scan
+    return sections, total_lines, truncated_scan, unterminated_fence
 
 
-def _open_nofollow(path: Path):
+def _open_nofollow(path: Path) -> BinaryIO:
     """``open`` that the kernel refuses to point at a symlink."""
     if path.is_symlink():
         raise OSError(f"refusing symlinked guidance: {path}")
@@ -252,6 +333,11 @@ def discover_context_files(cwd: str | Path) -> list[Path]:
                 digest_state = hashlib.sha256()
                 digest_state.update(bounded)
                 digest_state.update(b"\x01" if truncated else b"\x00")
+                # Length is folded in because only the first MAX_DIGEST_BYTES
+                # are hashed: without it, two oversized files sharing a 64KiB
+                # prefix but differing in length dedup to one, and the survivor
+                # would carry an index describing the wrong file.
+                digest_state.update(str(found_here.stat().st_size).encode())
                 digest = digest_state.hexdigest()
             except OSError:
                 digest = None  # unreadable/link/non-regular: never inject
@@ -281,27 +367,74 @@ def _read_head(path: Path) -> tuple[str, int, bool]:
         probe = stream.read(GUIDANCE_HEAD_BYTES + 1)
     if len(probe) <= GUIDANCE_HEAD_BYTES:
         text = probe.decode("utf-8", errors="replace")
-        return text, text.count("\n") + (0 if text.endswith("\n") or not text else 1), False
+        return text, len(_split_lines_like_read(probe)), False
     head = probe[:GUIDANCE_HEAD_BYTES]
+    # ``cut > 0``, not ``>= 0``: a file whose FIRST byte is a newline has its
+    # only boundary at 0, and cutting there would empty the head entirely. In
+    # that case the raw byte cut is the lesser evil, and the head is one
+    # partial line -- which is why the count below is taken from the text that
+    # actually ships rather than assumed to be whole lines.
     cut = head.rfind(b"\n")
     if cut > 0:
         head = head[:cut]
     text = head.decode("utf-8", errors="replace")
-    return text, text.count("\n") + 1, True
+    # Counted with read's own splitter so head_lines and the index's numbering
+    # come from one basis; see _split_lines_like_read.
+    return text, len(_split_lines_like_read(head)), True
+
+
+def _render_bare_pointer(shown: str, head_lines: int, total_lines: int | None) -> str:
+    """Disclosure for an oversized file that yielded no listable sections.
+
+    The floor this module must never fall below: the reader learns the file
+    continues, where it is, and what to read. Without a section list the range
+    is simply everything after the head.
+    """
+    if total_lines is not None and total_lines > head_lines:
+        where = (
+            f"`{shown}` ({total_lines} lines); the part not shown is "
+            f"L{head_lines + 1}-{total_lines}"
+        )
+    else:
+        where = f"`{shown}`; the part not shown begins at L{head_lines + 1}"
+    return (
+        f"\nThe rest of this file is NOT included above. It has no further "
+        f"headings to index, so it cannot be listed by section. It is on disk "
+        f"at {where}.\n\n"
+        f"Before acting or answering on anything this file governs, you MUST "
+        f"`read` that range \u2014 even when you believe you already know the "
+        f"answer, and even when the part shown above seems to cover it. "
+        f"Unlisted does not mean unimportant: this project's specific gates "
+        f"and landmines may be stated only in the part you have not read."
+    )
 
 
 def _render_index(path: Path, shown: str, head_lines: int) -> str:
-    """The section index that makes the non-resident remainder reachable."""
+    """The section index that makes the non-resident remainder reachable.
+
+    NEVER returns ``""`` for a file that has more content than the head. The
+    caller appends whatever this returns, so an empty string there would ship
+    a bare head with no path, no line count and no hint that the file
+    continues -- content silently dropped AND unnamed, which is the exact
+    failure this module exists to invert, and strictly worse than the byte cut
+    it replaced (that at least said "truncated"). When there is nothing to
+    list, this degrades to a bare pointer rather than to silence.
+    """
     try:
-        sections, total_lines, scan_truncated = _scan_sections(path)
+        sections, total_lines, scan_truncated, unterminated = _scan_sections(path)
     except OSError:
-        return ""
+        # The head still shipped, so say the file continues even though its
+        # shape is unknown; total_lines is unavailable, hence the bare form.
+        return _render_bare_pointer(shown, head_lines, None)
     # Level 1 is the document's title, not a section: it spans the whole file,
     # so an index row for it says nothing the path and line count do not. Its
     # span is still scanned, because an H2's range must end at the next H1 too.
     remaining = [s for s in sections if s.end > head_lines and s.level >= 2]
     if not remaining:
-        return ""
+        # H1-only files, heading-free files, and files whose every heading sits
+        # inside the head all land here. Nothing to index, but the tail is
+        # still real and must stay reachable.
+        return _render_bare_pointer(shown, head_lines, total_lines)
     rows = []
     for section in remaining:
         # A section that STARTS inside the head is still listed: the model saw
@@ -316,6 +449,25 @@ def _render_index(path: Path, shown: str, head_lines: int) -> str:
         if scan_truncated
         else ""
     )
+    # Belt and braces against the silent-loss class generally: if the listed
+    # rows do not actually reach the end of the file, say so with the range
+    # that does. A row set can be non-empty and still leave a tail unlisted
+    # (e.g. every heading sits inside the head, or the scan stopped early), and
+    # an unreachable tail is the one outcome this module must never produce.
+    covered_to = max(section.end for section in remaining)
+    if covered_to < total_lines:
+        note += (
+            f"\n(L{covered_to + 1}-{total_lines} is not under any listed "
+            f"heading; read it directly)"
+        )
+    if unterminated:
+        # Disclosed rather than silently absorbed: the reader should know the
+        # index was built through a formatting slip, so a surprising-looking
+        # row is explainable rather than mistaken for a real section.
+        note += (
+            "\n(this file ends inside an unclosed code fence; headings after "
+            "it were indexed anyway so the tail stays reachable)"
+        )
     # The imperative is deliberately as strong as the one <guides> carries,
     # and for the same reason: a section the model believes it already knows
     # is exactly the section whose local amendment it is about to violate.
