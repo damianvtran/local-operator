@@ -37,16 +37,48 @@ DEFAULT_MAX_RUNNING_JOBS = 15
 DEFAULT_RETENTION_MS = 5 * 60_000
 
 
-def retention_expired(job: Any, retention_ms: int, *, now: float | None = None) -> bool:
-    """Has this row outlived its retention window?
+#: Terminal statuses that leave the USER with something still to do. They are
+#: the reason :func:`roster_expired` exists as a separate question from
+#: :func:`retention_expired`: retention's clock measures how long ago a job
+#: stopped, which cannot express whether anyone still needs the row.
+#:
+#: * ``failed`` — a failure asks for action, and its child page (the
+#:   trajectory that says WHY) is reachable only from a roster row. The panel
+#:   already holds this law everywhere else: ``_EVICTION_RANK`` ranks failures
+#:   above quietly-settled rows so the collapsed preview never drops the row
+#:   asking for attention, and ``note_child_failed`` re-opens a panel the user
+#:   deliberately hid for a single failure. Expiring a failure on the
+#:   quiet-success timer inverted both (design round 1, D1).
+#: * ``interrupted`` — a run cut off mid-flight, which is resumable and
+#:   therefore unfinished. In practice these rows also carry ``restored`` (the
+#:   only producer is :meth:`AsyncJobManager.restore`) and are exempt twice
+#:   over; naming it here keeps the RULE complete rather than relying on that
+#:   coincidence holding.
+#:
+#: ``cancelled`` is deliberately NOT here, and the omission is load-bearing:
+#: cancelling is the user saying "I am not coming back for this". Comms leans
+#: on exactly that reading — ``SubagentComms.cancel`` on a PAUSED child clears
+#: ``record.paused`` to record abandonment — so a cancelled row that never
+#: expired would make that clearing meaningless. ``completed`` is the base
+#: case the window was designed around.
+UNRESOLVED_TERMINAL_STATUSES = frozenset({"failed", "interrupted"})
 
-    THE one definition of "past retention", used by
-    :meth:`AsyncJobManager._sweep_due` (which evicts) and by the readers that
-    merely present a row (the TUI dock's roster resolver). Both have to answer
-    identically: a panel that applied its own arithmetic would eventually
-    disagree with the ledger it claims to be a view over, and the disagreement
-    would show up as a row that either lingers past the sweep or vanishes
-    before it — the two failure modes this function exists to make impossible.
+
+def retention_expired(
+    job: Any,
+    retention_ms: int,
+    *,
+    now: float | None = None,
+    settled_at: float | None = None,
+) -> bool:
+    """Has this row outlived its retention window? — the LEDGER's question.
+
+    Strictly "has the clock run out", which is what bounds a long session's
+    memory: :meth:`AsyncJobManager._sweep_due` evicts on exactly this answer.
+    It deliberately does NOT ask whether anyone still wants to see the row —
+    that is :func:`roster_expired`, and keeping the two apart is what lets the
+    ledger release execution evidence on schedule while the dock goes on
+    showing a failure the user has not looked at yet.
 
     Three exemptions, and each is load-bearing:
 
@@ -59,18 +91,75 @@ def retention_expired(job: Any, retention_ms: int, *, now: float | None = None) 
       window, so treating them normally would evict every resumed child on the
       first pass — the exact rows resume exists to keep visible.
 
-    Accepts any row-shaped object (``AsyncJob`` on an owner, a ``JobState`` DTO
-    on a follower) via ``getattr``, because both reach the dock.
+    Accepts any row-shaped object via ``getattr`` rather than requiring an
+    ``AsyncJob``, because the dock resolves rows through the comms graph and a
+    reduced host may hand it something else entirely.
+
+    ``settled_at`` overrides the row's own stamp. The exemptions above still
+    decide first, so an override can never expire a row the rules protect; it
+    exists so a READER may age a row against an adjusted instant (the dock
+    buckets stamps so a batch leaves together) without reimplementing any of
+    this. The ledger never passes it, and sweeps on the true stamp.
     """
     if bool(getattr(job, "restored", False)):
         return False
     if str(getattr(job, "status", "") or "") == "running":
         return False
-    settled_at = getattr(job, "settled_at", None)
-    if settled_at is None:
+    stamp = getattr(job, "settled_at", None) if settled_at is None else settled_at
+    if stamp is None:
         return False
     reference = time.time() if now is None else now
-    return float(settled_at) < reference - retention_ms / 1000.0
+    return float(stamp) < reference - retention_ms / 1000.0
+
+
+def roster_expired(
+    job: Any,
+    retention_ms: int,
+    *,
+    paused: bool = False,
+    now: float | None = None,
+    settled_at: float | None = None,
+) -> bool:
+    """May a ROSTER READER stop showing this row? — the dock's question.
+
+    THE RULE, stated once so the next reader knows what the window means:
+    **retention is a timer on quiet resolutions, not on unfinished business.**
+    A row the user must still act on or come back to — a failure to review, a
+    child they paused precisely to return to — does not age out on the same
+    clock as a success nobody needs to look at again. Everything else expires
+    when :func:`retention_expired` says the clock has run out.
+
+    Two exemptions on top of the ledger's, and they are one mistake, not two:
+    before this, visibility was decided from ``status`` + ``settled_at`` alone,
+    and neither field can express intent.
+
+    * :data:`UNRESOLVED_TERMINAL_STATUSES` (see it for why ``cancelled`` is
+      excluded) — the row is the only entry to the child's page, so dropping
+      it drops the trajectory that explains the failure.
+    * ``paused`` — passed in rather than read off the row, because
+      ``AsyncJob`` has no such field and cannot get one honestly.
+      ``SubagentComms.pause`` is MECHANICALLY A CANCEL (its own docstring says
+      so): it stamps ``status == "cancelled"`` and records the intent on
+      ``_ChildRecord.paused``, which the comms record owns and mutates in
+      three places (pause sets it, cancel and resume clear it). Copying that
+      onto the job row would create a second, independently-mutable source of
+      truth for one fact — the drift this PR exists to remove — so the reader
+      consults the owner instead. The caller already holds the comms node, so
+      this costs nothing to supply.
+
+    The asymmetry with the ledger is deliberate and cheap: the manager may
+    still sweep an exempt row out of ``_jobs`` (bounded memory is its job),
+    and the dock keeps rendering it through ``_ChildRecord.job_ref``, the same
+    surviving reference the whole two-layer fix rests on. So an unbounded pile
+    of failures cannot grow the ledger, and what the panel DRAWS is bounded by
+    its own density controls (``_EVICTION_RANK``, ``+N more``, ``ctrl+g``),
+    which already rank failures first.
+    """
+    if paused:
+        return False
+    if str(getattr(job, "status", "") or "") in UNRESOLVED_TERMINAL_STATUSES:
+        return False
+    return retention_expired(job, retention_ms, now=now, settled_at=settled_at)
 
 
 #: Cap on a job's retained live-output tail (``AsyncJob.output_tail``). Sized

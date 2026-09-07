@@ -4,6 +4,7 @@ systems get wrong — owner-scoped delivery with dead-lettering."""
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -14,6 +15,8 @@ from local_operator.harness.jobs import (
     AsyncJob,
     AsyncJobManager,
     JobStatus,
+    retention_expired,
+    roster_expired,
 )
 from local_operator.harness.types import Usage
 
@@ -1086,3 +1089,92 @@ async def test_read_output_handles_a_cursor_from_another_job() -> None:
     assert (text, gap) == ("", False)
     assert seq == 5
     await manager.dispose()
+
+
+def test_the_ledger_clock_expires_every_terminal_status_alike():
+    """``retention_expired`` is strictly "has the clock run out". It is the
+    LEDGER's question, so it must not acquire opinions about intent: bounding
+    a long session's memory is its whole job, and a status it refused to
+    expire would be an unbounded leak in ``_jobs``."""
+    stale = time.time() - 86_400.0
+    statuses: tuple[JobStatus, ...] = ("completed", "failed", "cancelled", "interrupted")
+    for status in statuses:
+        row = AsyncJob(
+            id=status, type="task", status=status, start_time=1.0, settled_at=stale, label=status
+        )
+        assert retention_expired(row, 300_000) is True, status
+
+    running = AsyncJob(
+        id="r", type="task", status="running", start_time=1.0, settled_at=stale, label="r"
+    )
+    assert retention_expired(running, 300_000) is False
+    restored = AsyncJob(
+        id="x",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=stale,
+        restored=True,
+        label="x",
+    )
+    assert retention_expired(restored, 300_000) is False
+
+
+def test_the_roster_window_keeps_rows_the_user_has_unfinished_business_with():
+    """THE RULE: retention is a timer on quiet resolutions, not on unfinished
+    business. ``roster_expired`` is the reader's question and differs from the
+    ledger's on exactly the statuses a user must still act on or return to."""
+    stale = time.time() - 86_400.0
+
+    def row(status: JobStatus) -> AsyncJob:
+        return AsyncJob(
+            id=status, type="task", status=status, start_time=1.0, settled_at=stale, label=status
+        )
+
+    # Unfinished business: kept on screen however old.
+    assert roster_expired(row("failed"), 300_000) is False
+    assert roster_expired(row("interrupted"), 300_000) is False
+    assert roster_expired(row("cancelled"), 300_000, paused=True) is False
+
+    # Resolved: the window applies, and a plain cancel IS resolved — the user
+    # said they were not coming back for it (``SubagentComms.cancel`` clears a
+    # pause for exactly this reason).
+    assert roster_expired(row("completed"), 300_000) is True
+    assert roster_expired(row("cancelled"), 300_000) is True
+
+    # The ledger's own exemptions still hold through the reader.
+    assert roster_expired(row("running"), 300_000) is False
+
+    # A reader may age a row against an ADJUSTED stamp (the dock buckets them
+    # so a batch leaves together) without that override ever defeating an
+    # exemption: a failure stays whatever stamp it is handed.
+    ancient = 1.0
+    assert roster_expired(row("completed"), 300_000, settled_at=ancient) is True
+    assert roster_expired(row("failed"), 300_000, settled_at=ancient) is False
+    assert retention_expired(row("completed"), 300_000, settled_at=time.time()) is False
+    inside = AsyncJob(
+        id="fresh",
+        type="task",
+        status="completed",
+        start_time=1.0,
+        settled_at=time.time(),
+        label="fresh",
+    )
+    assert roster_expired(inside, 300_000) is False
+
+
+def test_an_exempt_row_is_still_swept_from_the_ledger():
+    """The asymmetry is deliberate and is what keeps the exemption cheap: the
+    manager still evicts a failure on time (bounded memory), while the dock
+    goes on drawing it through ``_ChildRecord.job_ref`` — the same surviving
+    reference the two-layer fix already rests on. So an unbounded pile of
+    failures cannot grow ``_jobs``."""
+    manager = AsyncJobManager(retention_ms=1)
+    stale = time.time() - 86_400.0
+    exempt: tuple[JobStatus, ...] = ("failed", "interrupted")
+    for status in exempt:
+        manager._jobs[status] = AsyncJob(
+            id=status, type="task", status=status, start_time=1.0, settled_at=stale, label=status
+        )
+
+    assert manager.list() == []  # the LEDGER releases them on schedule
