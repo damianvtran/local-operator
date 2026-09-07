@@ -17,6 +17,7 @@ time (AGENTS.md "Timing, flakes").
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from pathlib import Path
@@ -37,6 +38,7 @@ from lop_osworld_v2_adapter.providers.aws import (
     ttl_seconds_for,
 )
 
+from local_operator import computer_input
 from local_operator.evaluation.adapters.api import ScopedInfraValue
 from tests.unit.evaluation.adapters.osworld import fixtures
 
@@ -1347,12 +1349,18 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         provider._public_ip = "127.0.0.1"
         await provider.execute(["pyautogui.click(1, 2)"])
         await provider.execute([])
-        assert stubs.guest_posts == [
-            {
-                "command": ["python", "-c", "import pyautogui; pyautogui.click(1, 2)"],
-                "shell": False,
-            }
-        ]
+        # The statement crosses as base64 (see ``python_source_argv``), so assert
+        # the endpoint contract and decode the payload rather than pinning a
+        # literal argv -- the literal shape is the argv exposure this encoding
+        # exists to remove.
+        assert len(stubs.guest_posts) == 1
+        post = stubs.guest_posts[0]
+        assert post["shell"] is False
+        command = post["command"]
+        assert command[:3] == ["python", "-c", computer_input._SOURCE_BOOTSTRAP]
+        assert base64.b64decode("".join(command[3:])).decode("utf-8") == (
+            "import pyautogui; pyautogui.click(1, 2)"
+        )
         assert "executed" not in env.kwargs
         assert stubs.slept == [3.0, 3.0]
         assert await provider.respond("?") is None

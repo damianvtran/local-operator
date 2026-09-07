@@ -161,19 +161,52 @@ def paste_text_source(text: str, keys: Sequence[str]) -> str:
     return f"exec({source!r})"
 
 
-def python_source_argv(source: str) -> list[str]:
-    """Keep one guest exec without exceeding Linux's per-argument byte limit.
+# The only program that ever reaches the guest's argv. It is a fixed constant:
+# it names no action, carries no agent text, and is byte-identical for every
+# statement we run, so nothing an agent writes can appear in it.
+_SOURCE_BOOTSTRAP = (
+    "import base64, sys; "
+    "exec(base64.b64decode(''.join(sys.argv[1:])).decode('utf-8'))"
+)
 
-    The clipboard accepts 100k Unicode characters (up to 400KB UTF-8), so even
-    one base64 payload exceeds MAX_ARG_STRLEN. Splitting *source*, not actions,
-    preserves the single-shot mutation boundary. Small legacy commands retain
-    their exact argv; each large-source chunk is at most 64KB in UTF-8.
+# Linux caps a single argv entry at MAX_ARG_STRLEN (32 pages = 128KB). Base64 is
+# ASCII, so one character is one byte and this character bound IS the byte bound.
+_MAX_ARGUMENT_CHARACTERS = 16_000
+
+
+def python_source_argv(source: str) -> list[str]:
+    """Carry one guest exec as base64, so our own argv never quotes the agent.
+
+    *source* is base64-encoded rather than passed literally because argv is a
+    PUBLIC channel: ``/proc/<pid>/cmdline`` is what ``pkill -f``, ``pgrep -f``
+    and ``ps | grep`` match against, and the guest process running a statement is
+    itself a running process. An agent cleaning up after itself with
+    ``pkill -f "ffmpeg -y -f x11grab"`` — routine, legitimate, and its own
+    recording to kill — used to match the very process typing that text and
+    SIGTERM it, which is the observed ``exit -15`` that killed ep-0ce67ac2d3a1.
+    Encoding removes the false match at its source; the alternative of screening
+    the agent's text for process-matching commands is both incomplete and not
+    ours to impose.
+
+    Base64 also subsumes the byte-limit problem this function already solved. The
+    clipboard accepts 100k Unicode characters (up to 400KB UTF-8, 533KB encoded),
+    which no single argv entry can hold, so the encoded form is split across
+    trailing arguments that the bootstrap rejoins. Splitting the *source*, never
+    the actions, is what preserves the single-shot mutation boundary: the guest
+    still performs exactly one exec, so a batch cannot half-commit.
+
+    There is deliberately no short-source fast path emitting ``python -c
+    <source>``. That shape is precisely the exposure, and a size threshold would
+    reinstate it for every statement small enough to fit — which is all of them
+    that matter here, since a ``pkill`` line is a few dozen characters.
     """
-    if len(source.encode("utf-8")) <= 64_000:
-        return ["python", "-c", source]
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
     return [
         "python",
         "-c",
-        "import sys; exec(''.join(sys.argv[1:]))",
-        *(source[offset : offset + 16_000] for offset in range(0, len(source), 16_000)),
+        _SOURCE_BOOTSTRAP,
+        *(
+            encoded[offset : offset + _MAX_ARGUMENT_CHARACTERS]
+            for offset in range(0, len(encoded), _MAX_ARGUMENT_CHARACTERS)
+        ),
     ]
