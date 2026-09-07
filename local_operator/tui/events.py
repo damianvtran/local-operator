@@ -79,15 +79,22 @@ FLUSH_INTERVAL_S = 1.0 / 30.0
 # Each wraps the engine event so the app can mutate widgets on its own thread.
 
 
-class StartFlushTimer(Message):
+class SessionEvent(Message):
+    """Queued events retain the viewer that emitted them across navigation."""
+
+    origin: EventController | None = None
+    projection: bool = False
+
+
+class StartFlushTimer(SessionEvent):
     """Internal: start the 30 Hz flush timer on the app thread (TUI-024)."""
 
 
-class TurnStarted(Message):
+class TurnStarted(SessionEvent):
     """An ``agent_start`` for the CURRENT generation."""
 
 
-class TurnEnded(Message):
+class TurnEnded(SessionEvent):
     """An ``agent_end`` that matched the current generation."""
 
     def __init__(
@@ -107,7 +114,7 @@ class TurnEnded(Message):
         self.context_is_estimate = context_is_estimate
 
 
-class TurnAbandoned(Message):
+class TurnAbandoned(SessionEvent):
     """A turn whose worker returned without a terminal ``agent_end`` reaching us.
 
     Posted by the APP's turn worker, not by the controller — the controller
@@ -134,6 +141,8 @@ class TurnAbandoned(Message):
     real outcome from the end arriving behind it (review R4).
     """
 
+    operation: int | None = None
+
     def __init__(
         self,
         epoch: int,
@@ -149,7 +158,7 @@ class TurnAbandoned(Message):
         self.outcome_known = outcome_known
 
 
-class ContextUsageReported(Message):
+class ContextUsageReported(SessionEvent):
     """One model call reported how large the context was when it ran.
 
     Separate from :class:`TurnEnded` because it fires per CALL, not per turn.
@@ -175,15 +184,15 @@ class ContextUsageReported(Message):
         self.usage = usage
 
 
-class TurnBoundaryStart(Message):
+class TurnBoundaryStart(SessionEvent):
     """A ``turn_start`` engine event: one model call is beginning."""
 
 
-class TurnBoundaryEnd(Message):
+class TurnBoundaryEnd(SessionEvent):
     """A ``turn_end`` engine event: one model call finished."""
 
 
-class AssistantDelta(Message):
+class AssistantDelta(SessionEvent):
     """Flushed, coalesced assistant text (full accumulated text)."""
 
     def __init__(self, text: str) -> None:
@@ -191,11 +200,11 @@ class AssistantDelta(Message):
         self.text = text
 
 
-class AssistantMessageStart(Message):
+class AssistantMessageStart(SessionEvent):
     """A new assistant message began streaming."""
 
 
-class UserMessageStart(Message):
+class UserMessageStart(SessionEvent):
     """A user message reached the session from ANY front end. Carries the
     prompt (and image count) so the TUI can paint it — the mobile→TUI half of
     keeping the two surfaces in step. The TUI's own prompt path already paints
@@ -223,7 +232,7 @@ class UserMessageStart(Message):
         self.image_count = images if isinstance(images, int) else len(images)
 
 
-class AssistantMessageEnd(Message):
+class AssistantMessageEnd(SessionEvent):
     """The streaming assistant message is complete."""
 
     def __init__(self, text: str, message_id: str = "") -> None:
@@ -232,7 +241,7 @@ class AssistantMessageEnd(Message):
         self.message_id = message_id
 
 
-class HistoryRowsSettled(Message):
+class HistoryRowsSettled(SessionEvent):
     """Durable rows that settled while no frontend painted them (reconnect gap).
 
     Carries the rows verbatim so the app projects them through the SAME
@@ -243,12 +252,13 @@ class HistoryRowsSettled(Message):
     (review round 3, MAJOR-1/U7/D1).
     """
 
-    def __init__(self, messages: list[Any]) -> None:
+    def __init__(self, messages: list[Any], *, reset: bool = False) -> None:
         super().__init__()
         self.messages = messages
+        self.reset = reset
 
 
-class ToolComposing(Message):
+class ToolComposing(SessionEvent):
     """The model is still dictating a tool call's arguments."""
 
     def __init__(self, event: ToolCallComposeEvent) -> None:
@@ -256,7 +266,7 @@ class ToolComposing(Message):
         self.event = event
 
 
-class ToolStarted(Message):
+class ToolStarted(SessionEvent):
     """A tool execution started; a buffered completion may follow."""
 
     def __init__(self, event: ToolExecutionStartEvent) -> None:
@@ -264,7 +274,7 @@ class ToolStarted(Message):
         self.event = event
 
 
-class ToolEnded(Message):
+class ToolEnded(SessionEvent):
     """A tool execution finished."""
 
     def __init__(self, event: ToolExecutionEndEvent) -> None:
@@ -272,7 +282,7 @@ class ToolEnded(Message):
         self.event = event
 
 
-class ToolUpdated(Message):
+class ToolUpdated(SessionEvent):
     """A running tool streamed a partial result."""
 
     def __init__(self, event: ToolExecutionUpdateEvent) -> None:
@@ -280,7 +290,7 @@ class ToolUpdated(Message):
         self.event = event
 
 
-class WakeDelivered(Message):
+class WakeDelivered(SessionEvent):
     """A scheduled wake's prompt was delivered — render the expandable receipt."""
 
     def __init__(self, text: str, catchup: bool, wake_id: str = "", occurrence: int = 0) -> None:
@@ -291,7 +301,7 @@ class WakeDelivered(Message):
         self.occurrence = occurrence
 
 
-class PeerMessageDelivered(Message):
+class PeerMessageDelivered(SessionEvent):
     """A message from another local lop session (`lop send`) was delivered.
 
     Carries the raw body and the advisory sender identity so the app can paint
@@ -307,7 +317,7 @@ class PeerMessageDelivered(Message):
         self.message_id = message_id
 
 
-class NoticePosted(Message):
+class NoticePosted(SessionEvent):
     """A notice to surface in the transcript."""
 
     def __init__(self, text: str, kind: NoticeKind, headline: str = "") -> None:
@@ -325,7 +335,7 @@ class NoticePosted(Message):
         self.headline = headline
 
 
-class CompactionStarted(Message):
+class CompactionStarted(SessionEvent):
     """Context compaction began."""
 
     def __init__(self, reason: str) -> None:
@@ -333,7 +343,7 @@ class CompactionStarted(Message):
         self.reason = reason
 
 
-class CompactionEnded(Message):
+class CompactionEnded(SessionEvent):
     """Context compaction finished.
 
     Carries what the pass achieved (the history size either side of it, and the
@@ -361,7 +371,7 @@ class CompactionEnded(Message):
         self.detail = detail
 
 
-class RetryStarted(Message):
+class RetryStarted(SessionEvent):
     """A provider call is being retried."""
 
     def __init__(self, attempt: int, error: str, fallback_model: str | None) -> None:
@@ -371,7 +381,7 @@ class RetryStarted(Message):
         self.fallback_model = fallback_model
 
 
-class EffectiveModelChanged(Message):
+class EffectiveModelChanged(SessionEvent):
     """The model actually serving requests changed (fallback or recovery).
 
     What the status band repaints its model segment from: ``provider`` and
@@ -398,7 +408,7 @@ class EffectiveModelChanged(Message):
         self.is_fallback = is_fallback
 
 
-class RetryEnded(Message):
+class RetryEnded(SessionEvent):
     """A provider retry resolved."""
 
     def __init__(self, success: bool) -> None:
@@ -406,7 +416,7 @@ class RetryEnded(Message):
         self.success = success
 
 
-class SteeringDelivered(Message):
+class SteeringDelivered(SessionEvent):
     """Queued mid-turn messages reached the model's context.
 
     The receipt the ``queued — sends when this step finishes`` row was missing:
@@ -431,7 +441,7 @@ class SteeringDelivered(Message):
         self.origin = origin
 
 
-class SubagentStarted(Message):
+class SubagentStarted(SessionEvent):
     """A child session was registered as a background ``task`` job."""
 
     def __init__(self, job_id: str, label: str, agent_id: str | None = None) -> None:
@@ -441,7 +451,7 @@ class SubagentStarted(Message):
         self.agent_id = agent_id
 
 
-class SubagentProgress(Message):
+class SubagentProgress(SessionEvent):
     """A throttled relay of a child session's activity (tool starts/ends,
     message ends — never per-token deltas; the relay bounds that)."""
 
@@ -452,7 +462,7 @@ class SubagentProgress(Message):
         self.progress = progress
 
 
-class SubagentEnded(Message):
+class SubagentEnded(SessionEvent):
     """A child session settled; the app repaints the band's subagent row.
 
     The band is the only surface this touches — the row flips from its
@@ -502,8 +512,54 @@ class EventController:
         self._assistant_seen: str = ""
         self._flush_timer = None
         self._unsubscribe: Callable[[], Any] | None = None
+        self._restoring_projection = False
 
     # -- lifecycle ----------------------------------------------------------
+    def restore_live_projection(
+        self, state: Any, rendered_ids: set[str], settled_tools: set[str]
+    ) -> None:
+        """Rebuild a newly visible viewport from the owner's canonical seed.
+
+        A hidden context reduced events without retaining widgets. Replaying
+        the seed paints its in-flight state, but is not a new source turn or a
+        completion acknowledgement.
+        """
+        from local_operator.harness.types import AgentStartEvent
+        from local_operator.session.remote import deserialize_event
+
+        if not getattr(state, "streaming", False):
+            return
+        self._restoring_projection = True
+        try:
+            self._on_event(AgentStartEvent(generation=state.generation))
+            for data in state.live_events:
+                event = deserialize_event(data)
+                identity = str(getattr(getattr(event, "message", None), "id", "") or "")
+                if identity and identity in rendered_ids:
+                    continue
+                if getattr(event, "tool_call_id", None) in settled_tools:
+                    continue
+                self._on_event(event)
+            # A prepared attachment's first frame must include the current
+            # partial answer, not wait another coalescer interval for a token.
+            self._flush_assistant()
+        finally:
+            self._restoring_projection = False
+
+    def register_restored_tools(self, call_ids: set[str]) -> None:
+        """A replayed call row is a valid start counterpart for a later result.
+
+        A gate may precede tool_execution_start, and the owner can omit already
+        durable call messages from its live seed. Without this registration the
+        controller buffers the eventual end forever despite a real card already
+        being present in the restored viewport.
+        """
+        self._started_tools.update(call_ids)
+        for call_id in call_ids:
+            buffered = self._pending_tool_ends.pop(call_id, None)
+            if buffered is not None:
+                self._post(ToolEnded(buffered))
+
     def subscribe(self) -> None:
         """Register with the session; the returned callable unsubscribes."""
         self._unsubscribe = self._session.subscribe(self._on_event)
@@ -696,7 +752,7 @@ class EventController:
         # Settled history, not a live stream: nothing here touches the
         # assistant buffer or the flush timer, because these rows were never
         # streaming in THIS frontend. The app owns the role-aware projection.
-        self._post(HistoryRowsSettled(list(event.messages)))
+        self._post(HistoryRowsSettled(list(event.messages), reset=event.reset))
 
     def _handle_tool_compose(self, event: ToolCallComposeEvent) -> None:
         self._post(ToolComposing(event))
@@ -862,5 +918,9 @@ class EventController:
         self._assistant_seen = self._assistant_buffer
         self._post(AssistantDelta(self._assistant_buffer))
 
-    def _post(self, message: Message) -> None:
+    def _post(self, message: SessionEvent) -> None:
+        # Unsubscribe cannot retract messages already in Textual's queue.
+        # The consumer rejects this origin after committing another session.
+        message.origin = self
+        message.projection = self._restoring_projection
         self._app.post_message(message)

@@ -13,6 +13,8 @@ from collections.abc import Awaitable, Callable, Sequence
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
+from local_operator.harness.comms import HUB_MESSAGE_TYPE
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -4229,6 +4231,153 @@ async def test_arriving_work_clears_a_stale_abort(tmp_path):
     await wait_for(lambda: not session.is_streaming and not session._turn_lock.locked())
 
     # The arrival ran a real turn, and cleared the stale stop while doing it.
+    assert len(stream.requests) == spent_before + 1
+    assert session._abort_requested is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_does_not_pay_for_its_children_reporting_in(tmp_path):
+    """THE MONEY TEST. A stop must stop the spend, not just the current turn.
+
+    The incident: the operator aborted, was acked, and the meter kept running
+    because live subagents kept reporting in. Each report looked like fresh
+    intent, cleared the sticky abort and bought a full provider call — measured
+    at 39 paid calls in the 2 s after an acked abort, one per child report.
+
+    A child's report is the ECHO of the work being stopped, not a new
+    instruction, so it must be held rather than run. Held, not dropped: the row
+    stays durable and the model reads it on the next real turn.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(12)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("delegate some work")
+    spent_before = len(stream.requests)
+
+    session.abort("interrupted")
+
+    # Ten children reporting in after the stop, the incident's cadence.
+    for n in range(10):
+        message = CustomMessage(
+            custom_type=HUB_MESSAGE_TYPE,
+            attribution="user",
+            details={
+                "direction": "to_parent",
+                "job_id": "child",
+                "text": f"<subagent-message>progress {n}</subagent-message>",
+            },
+        )
+        await session._prompt_messages([message])
+
+    # NOT ONE provider call. This is the whole bar: a stop the user sent must
+    # end the spending, however many children are still talking.
+    assert len(stream.requests) == spent_before
+    # The stop is still in force, so the eleventh report is just as cheap.
+    assert session._abort_requested is True
+    # And nothing was lost on the way: every report is durable.
+    hub_rows = [
+        entry
+        for entry in session._transcript.entries()
+        if entry.type == "message" and entry.payload.get("custom_type") == HUB_MESSAGE_TYPE
+    ]
+    assert len(hub_rows) == 10
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_cannot_restart_a_stopped_session(tmp_path):
+    """A background job finishing is the end of stopped work, not a new order.
+
+    Same class as the hub report above and the other half of the producer set
+    QA measured: a `wait` returning on its own deadline re-opened a turn on a
+    session the user had stopped.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session.abort("interrupted")
+
+    await session._prompt_messages(
+        [
+            CustomMessage(
+                custom_type=JOB_RESULT_MESSAGE_TYPE,
+                attribution="user",
+                details={"job_id": "j1", "text": "background job 'build' completed"},
+            )
+        ]
+    )
+
+    assert len(stream.requests) == spent_before
+    assert session._abort_requested is True
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_users_own_wake_still_revives_a_stopped_session(tmp_path):
+    """The guard against over-fixing the money bug.
+
+    Holding subagent residue must not make a stopped session unreachable. A
+    wake is the user's own "remind me" and a peer message is another human
+    reaching in: both are fresh intent, both must still clear the stop, or the
+    cure is a session that can only be recovered by restarting it — which is a
+    worse bug than the one being fixed.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("hello")
+    spent_before = len(stream.requests)
+    session.abort("interrupted")
+
+    await session._prompt_messages(
+        [
+            CustomMessage(
+                custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+                attribution="user",
+                details={"text": "the reminder you asked for", "schedule_id": "w1"},
+            )
+        ]
+    )
+
+    assert len(stream.requests) == spent_before + 1
+    assert session._abort_requested is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_batch_carrying_real_intent_is_not_held(tmp_path):
+    """Residue is an ALL-of test, and the asymmetry is deliberate.
+
+    A batch that mixes a child's report with a user-driven arrival contains
+    fresh intent. The safe reading of a mixed batch is the one that still lets
+    the user's work through: holding it would trade the money bug for an
+    "Esc broke my session" bug.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("hello")
+    spent_before = len(stream.requests)
+    session.abort("interrupted")
+
+    await session._prompt_messages(
+        [
+            CustomMessage(
+                custom_type=HUB_MESSAGE_TYPE,
+                attribution="user",
+                details={"direction": "to_parent", "job_id": "c", "text": "progress"},
+            ),
+            CustomMessage(
+                custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+                attribution="user",
+                details={"text": "and the user's own wake", "schedule_id": "w1"},
+            ),
+        ]
+    )
+
     assert len(stream.requests) == spent_before + 1
     assert session._abort_requested is False
     await session.dispose()

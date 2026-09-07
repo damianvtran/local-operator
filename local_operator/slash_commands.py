@@ -249,6 +249,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
         desktop_destination="settings",
     ),
     SlashCommand(
+        "sidebar",
+        "Show or hide active and recent conversations",
+        desktop_destination="sessions.sidebar",
+    ),
+    SlashCommand(
         "search",
         "Configure web search providers and load balancing",
         desktop_destination="settings.search",

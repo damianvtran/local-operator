@@ -1362,7 +1362,10 @@ class TestTheWindowTitleNamesTheFork:
         fork = _build_session(tmp_path / "sessions" / fork_id)
         assert fork.wears_inherited_title is True
 
+        from local_operator.tui.session_interaction import SessionInteraction
+
         app = OperatorApp.__new__(OperatorApp)
+        app._interaction = SessionInteraction(fork)
         app._session = fork
         app._provisional_name = ""
         app._status = _titled_band(forked=True)

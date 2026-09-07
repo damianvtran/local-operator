@@ -205,8 +205,12 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
 
 # A projection is replaceable state. If a peer cannot accept one within this
 # bound, dropping that peer is safer than blocking authority-bearing ACKs for
-# every healthy front end.
+# every healthy front end. Daemon and legacy attach clients still receive
+# full projections; full-TUI clients (events + frontend_state) do not, so
+# they get a longer bound — a 1 s stall on a TUI reflow was dropping a
+# healthy viewer and synthesising a false "interrupted".
 _SEND_TIMEOUT_S = 1.0
+_TUI_SEND_TIMEOUT_S = 5.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
@@ -224,7 +228,16 @@ _EVENT_QUEUE_MAX = 64
 #: frame degrades to the pre-announcement behaviour; the stop is unaffected.
 _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 
-_PAYLOAD_OPS = {"slash_result", "cancel_subagents", "job_trajectory", "fork_snapshot", "credential"}
+_PAYLOAD_OPS = {
+    "slash_result",
+    "cancel_subagents",
+    "job_trajectory",
+    "fork_snapshot",
+    "credential",
+    "history_page",
+    "frontend_sync",
+    "record_shell",
+}
 
 
 def _accepts_kw(fn: Any, name: str) -> bool:
@@ -536,17 +549,17 @@ class RuntimeServer:
             model_label=seed.model_label,
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
-            # Three independent capabilities, each gated by its own condition.
-            # The desktop watch surface is unconditional (this server always
-            # serves it), while the frontend and completion-ack capabilities
-            # are advertised only when the handle actually implements them --
-            # advertising one the handle cannot honour is worse than omitting
-            # it, because the client then negotiates a surface that is not
-            # there.
+            # Independent capabilities, each gated by its own condition. The
+            # desktop watch surface is unconditional (this server always serves
+            # it), while the rest are advertised only when the handle actually
+            # implements them -- advertising one the handle cannot honour is
+            # worse than omitting it, because the client then negotiates a
+            # surface that is not there.
             capabilities=(
                 [DESKTOP_WATCH_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
+                + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
             ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
@@ -929,7 +942,7 @@ class RuntimeServer:
             self._server.close()
         clients = list(self._clients.values())
         for conn in clients:
-            self._drop_client(conn)
+            self._drop_client(conn, reason="runtime shutdown")
         await self._await_push_shutdown()
         heartbeat = self._heartbeat_task
         if heartbeat is not None:
@@ -986,9 +999,20 @@ class RuntimeServer:
                 # missed publish can get to one heartbeat. A 15 s-stale bit is
                 # still wrong for the picker; it is right for a `lop sessions`
                 # run hours later, which is the case the hook's absence cost.
-                is_busy = getattr(self._handle, "is_busy", None)
-                if callable(is_busy):
-                    self.set_busy(bool(is_busy()))
+                #
+                # Reads the same predicate the handle publishes
+                # (``is_conversationally_active``) rather than ``is_busy``:
+                # this loop runs every 15 s forever, so a floor that disagreed
+                # with the turn-boundary publisher would not merely be stale,
+                # it would OVERWRITE the correct value within one heartbeat and
+                # re-pin the spinner on every idle session holding a background
+                # job. Falls back to ``is_busy`` only for a handle predating the
+                # split, where the older answer is the only one available.
+                probe = getattr(self._handle, "is_conversationally_active", None)
+                if not callable(probe):
+                    probe = getattr(self._handle, "is_busy", None)
+                if callable(probe):
+                    self.set_busy(bool(probe()))
                 # A dead renderer can leave its main-process socket alive.
                 # Expiring the lease must reroute a parked gate even when no
                 # TCP disconnect arrives to trigger the ordinary detach path.
@@ -1075,7 +1099,7 @@ class RuntimeServer:
             for other in [
                 c for c in self._clients.values() if c.kind == "daemon" and c.writer is not writer
             ]:
-                self._drop_client(other)
+                self._drop_client(other, reason="daemon replaced")
         else:
             # Attach cap with LRU eviction: the least-recently-seen follower
             # goes. Sending on the evicted socket first (a goodbye) is not
@@ -1085,8 +1109,7 @@ class RuntimeServer:
             attaches = [c for c in self._clients.values() if c.kind == "attach"]
             if len(attaches) >= ATTACH_MAX_CLIENTS:
                 victim = min(attaches, key=lambda c: c.last_seen)
-                logger.info("mobile control: evicting attach client %s (cap)", peer)
-                self._drop_client(victim)
+                self._drop_client(victim, reason="attach cap")
 
         conn = _ClientConn(
             writer=writer,
@@ -1115,7 +1138,7 @@ class RuntimeServer:
         if conn.wants_frontend:
             subscribe_frontend = getattr(self._handle, "subscribe_frontend", None)
             if not callable(subscribe_frontend):
-                self._drop_client(conn)
+                self._drop_client(conn, reason="frontend requested but unsupported")
                 return
 
             def on_update(update: Any) -> None:
@@ -1130,7 +1153,14 @@ class RuntimeServer:
                 sync_wire_payload,
             )
 
-            outcome = subscribe_frontend(on_update)
+            window_requested = bool(frame.get("display_window")) and (
+                "display-history-window-v1" in self._record.capabilities
+            )
+            outcome = (
+                subscribe_frontend(on_update, display_window=True)
+                if window_requested
+                else subscribe_frontend(on_update)
+            )
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             subscription = cast(FrontendSubscription, outcome)
@@ -1152,6 +1182,21 @@ class RuntimeServer:
             # the next unbounded list is one log line to find rather than a
             # profiling session.
             oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None and sync.display_history is not None:
+                # The budget covers the WHOLE frame, not just history. A busy
+                # canonical state may leave too little room even for our page.
+                # Request the existing exact local replay, never truncate prose.
+                fallback = sync.display_history.model_copy(
+                    update={
+                        "status": "full_required",
+                        "messages": [],
+                        "durable_seed_ids": [],
+                        "before_token": None,
+                        "snapshot_token": None,
+                    }
+                )
+                sync_payload["display_history"] = fallback.model_dump(mode="json")
+                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
                 logger.error("session runtime: frontend_sync will not fit — %s", oversize)
             await self._send_to(conn, sync_frame)
@@ -1167,6 +1212,7 @@ class RuntimeServer:
             while not self._closed.is_set():
                 line = await reader.readline()
                 if not line:
+                    self._drop_client(conn, reason="reader eof")
                     return  # client hung up
                 try:
                     frame = json.loads(line.decode("utf-8", "replace"))
@@ -1175,11 +1221,12 @@ class RuntimeServer:
                 conn.last_seen = time.monotonic()
                 await self._on_request(frame, conn)
         except (ConnectionResetError, BrokenPipeError):
+            self._drop_client(conn, reason="reader reset")
             return
         finally:
-            self._drop_client(conn)
+            self._drop_client(conn, reason="reader eof")
 
-    def _drop_client(self, conn: _ClientConn) -> None:
+    def _drop_client(self, conn: _ClientConn, *, reason: str = "unspecified") -> None:
         """Remove one connection from the registry and close its socket.
 
         The ONLY removal path: reader-loop exit, shutdown, daemon eviction,
@@ -1193,6 +1240,20 @@ class RuntimeServer:
         # SERVER-GLOBAL state has to honour that contract, or the late second
         # call reaches across to whatever connection replaced this one.
         was_registered = self._clients.pop(id(conn.writer), None) is not None
+        # One INFO per actual removal. The reader loop's ``finally`` always
+        # calls again after a send-path drop; that second call is a no-op and
+        # must not look like a second failure (DEBUG only).
+        peer = conn.writer.get_extra_info("peername")
+        log = logger.info if was_registered else logger.debug
+        log(
+            "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s",
+            conn.kind,
+            peer,
+            conn.wants_events,
+            conn.wants_frontend,
+            conn.surface,
+            reason,
+        )
         # The other half of the ``detached`` transition: the last terminal
         # leaving is precisely when the picker must start saying "nobody is
         # watching this". Published from the ONE removal path so no exit route
@@ -2064,6 +2125,71 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result if isinstance(result, int) else 0
+        if op == "record_shell":
+            from local_operator.harness.types import ToolResult
+
+            record = getattr(h, "record_shell", None)
+            command = frame.get("command")
+            if not callable(record) or not isinstance(command, str) or not command.strip():
+                raise ValueError("invalid shell receipt")
+            result = ToolResult.model_validate(frame.get("result"))
+            if (
+                result.tool_name != "bash"
+                or not result.tool_call_id
+                or len(result.tool_call_id) > 128
+            ):
+                raise ValueError("invalid shell receipt identity")
+            outcome = record(command, result)
+            if inspect.isawaitable(outcome):
+                await outcome
+            return "accepted"
+        if op == "frontend_sync":
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                oversized_frame_report,
+                sync_wire_payload,
+            )
+
+            capture = getattr(h, "subscribe_frontend", None)
+            if not callable(capture):
+                raise ValueError("canonical history refresh is unavailable")
+            outcome = capture(lambda _update: None, display_window=True)
+            subscription = cast(
+                FrontendSubscription, await outcome if inspect.isawaitable(outcome) else outcome
+            )
+            try:
+                payload = sync_wire_payload(subscription.sync)
+                # Keep the existing live subscription. This temporary capture
+                # only supplies an atomic cut; it must not multiply observers.
+                response = {"op": "result", "req": frame.get("req"), "data": payload}
+                if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
+                    window = subscription.sync.display_history
+                    if window is not None:
+                        payload["display_history"] = window.model_copy(
+                            update={
+                                "status": "full_required",
+                                "messages": [],
+                                "durable_seed_ids": [],
+                                "durable_seed_tool_ids": [],
+                                "before_token": None,
+                                "snapshot_token": None,
+                            }
+                        ).model_dump(mode="json")
+                    if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
+                        raise ValueError("canonical refresh exceeds the transport frame limit")
+                return payload
+            finally:
+                subscription.unsubscribe()
+        if op == "history_page":
+            fetch = getattr(h, "history_page", None)
+            before = frame.get("before")
+            anchor = frame.get("anchor", "")
+            if not callable(fetch) or not isinstance(before, str) or not isinstance(anchor, str):
+                raise ValueError("invalid history page request")
+            if len(before) > 4096 or len(anchor) > 512:
+                raise ValueError("invalid history page request")
+            result = fetch(before, anchor)
+            return await result if inspect.isawaitable(result) else result
         if op == "job_trajectory":
             # The other half of the frame-size fix: the attach snapshot omits
             # trajectories, so a viewer opening a child page pulls that one
@@ -2110,7 +2236,7 @@ class RuntimeServer:
                 # A join that cannot install its boundary before this many
                 # canonical edges is already stale. Drop and let it reconnect
                 # to one fresh snapshot rather than retain an unbounded suffix.
-                self._drop_client(conn)
+                self._drop_client(conn, reason="frontend pending overflow before ready")
                 return
             conn.frontend_pending.append(data)
             return
@@ -2142,7 +2268,7 @@ class RuntimeServer:
                 except asyncio.QueueFull:
                     compacted = False
             if not compacted:
-                self._drop_client(conn)
+                self._drop_client(conn, reason=f"event queue overflow ({_EVENT_QUEUE_MAX} frames)")
                 return
         if conn.event_writer_task is None:
             task = asyncio.create_task(self._drain_event_queue(conn))
@@ -2349,19 +2475,39 @@ class RuntimeServer:
         finally:
             self._push_scheduled = False
 
+    def _projection_recipients(self) -> list[_ClientConn]:
+        """Who still wants projection *repaints*.
+
+        A client that declared ``events`` AND ``frontend_state`` is a full-TUI
+        viewer: it consumes ``frontend_sync`` / ``frontend_update`` / ``event``
+        and discards projections (``RemoteSession._dial`` installs
+        ``lambda _projection: None``). Pushing 100–900 KB × ~20 Hz onto that
+        socket is what filled the kernel buffer and tripped ``_SEND_TIMEOUT_S``.
+        The welcome (``_push_to``) still goes to everyone — ``AttachClient.connect``
+        reads it as the identity check. Daemon and legacy v3/v4-only attach
+        clients keep receiving repaints byte-for-byte.
+
+        Desktop uses the same two flags and the same no-op projection
+        callback (confirmed: ``desktop_sessions.py`` consumes events +
+        frontend_state, nothing keys on ``op == "projection"`` after welcome).
+        """
+        return [
+            conn
+            for conn in self._clients.values()
+            if not (conn.wants_events and conn.wants_frontend)
+        ]
+
     async def _push(self) -> None:
         """Broadcast projection repaints, preserving daemon bytes exactly.
 
-        Event clients may need a follower-only gate overlay (currently a TUI
-        approval). Build the ordinary projection once for daemon and legacy
-        attach clients; only event subscribers get the overlaid copy. This is
-        the protocol-v4 promise that phone frames remain byte-identical.
+        Full-TUI attach clients are skipped (see ``_projection_recipients``).
+        Phone daemon frames stay byte-identical.
         """
         ordinary = self._projection_payload()
         await asyncio.gather(
             *(
                 self._send_to(conn, self._projection_frame(conn, ordinary))
-                for conn in list(self._clients.values())
+                for conn in self._projection_recipients()
             )
         )
 
@@ -2410,12 +2556,17 @@ class RuntimeServer:
         """One frame to one connection. A failed send drops ONLY that client
         from the registry (never retried — the reader loop will observe the
         close and its finally is a no-op second removal)."""
+        timeout = (
+            _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
+        )
         async with conn.send_lock:
             try:
                 conn.writer.write(json.dumps(frame).encode() + b"\n")
-                await asyncio.wait_for(conn.writer.drain(), timeout=_SEND_TIMEOUT_S)
-            except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
-                self._drop_client(conn)
+                await asyncio.wait_for(conn.writer.drain(), timeout=timeout)
+            except TimeoutError:
+                self._drop_client(conn, reason=f"send timeout ({timeout:.1f}s)")
+            except (ConnectionResetError, BrokenPipeError, OSError) as exc:
+                self._drop_client(conn, reason=f"send failed: {type(exc).__name__}")
 
     async def _send(self, frame: dict[str, Any]) -> None:
         """Broadcast alias kept for the pre-v2 call shape (tests, hosts that
