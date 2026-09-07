@@ -428,16 +428,22 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     needs-you outranks everything (a person is blocked), then wedged (broken),
     then busy, then an ARMED wake, then the runtime's own presence.
 
-    **An armed wake outranks the presence glyphs**, which is a change from the
+    **An armed wake outranks the IDLE glyph**, which is a change from the
     original ordering and is what the user asked for: "show the wake symbol if
     it's just scheduled wakes, or the circle icon that there's a runtime but no
-    activity". Presence (``○``/``●``) is the least informative thing true of a
-    row — every resident session has it — while "this one will act on its own
-    at some point" is a fact about the future that nothing else on the row
-    conveys. Under the old order the wake glyph was unreachable for any live
-    session, because a session with a wake armed is by definition resident and
+    activity". ``●`` idle is the least informative thing true of a row — every
+    resident session has it — while "this one will act on its own at some
+    point" is a fact about the future that nothing else on the row conveys.
+    Under the old order the wake glyph was unreachable for any live session,
+    because a session with a wake armed is by definition resident and
     ``idle``/``attached`` matched first; it could only ever appear on a COLD
     row, i.e. one whose wake had no runtime to fire in.
+
+    **``attached`` stays ABOVE the wake**, because the "least informative"
+    argument does not extend to it (round 1, D2). ``○`` does not mean merely
+    "resident"; it means *a terminal is watching this session*, which on a list
+    the user is scanning is the one mark that answers "where am I?". A wake is
+    worth more than bare residency and less than presence.
 
     **A DORMANT wake does not**, and stays below presence. ``wakes_dormant``
     means the session was deliberately stopped, so the schedule is not going to
@@ -460,10 +466,10 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         return WEDGED_MARKER, "danger"
     if row.live_state == "busy":
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
-    if row.wakes and not row.wakes_dormant:
-        return WAKE_MARKER, "muted"
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
+    if row.wakes and not row.wakes_dormant:
+        return WAKE_MARKER, "muted"
     if row.live_state == "idle":
         return IDLE_MARKER, "muted"
     if row.wakes:

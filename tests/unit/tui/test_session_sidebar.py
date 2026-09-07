@@ -1167,6 +1167,7 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
     wake glyph.
     """
     from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
         IDLE_MARKER,
         WAKE_MARKER,
         row_state_mark,
@@ -1180,12 +1181,28 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
     single = CatalogEntry(SessionRow("wake00000002", now, "one", live_state="idle", wakes=1))
     assert single.status == "Scheduled (1 wake)", "the count must not be pluralised at 1"
 
-    # A dormant wake does not win the glyph, so it must not win the words.
+    # A dormant wake does not win the glyph on a LIVE row, so it must not win
+    # the words there either.
     dormant = CatalogEntry(
         SessionRow("dorm00000001", now, "stopped", live_state="idle", wakes=1, wakes_dormant=True)
     )
     assert row_state_mark(dormant.row, 0)[0] == IDLE_MARKER
     assert dormant.status == "Ready"
+
+    # ...but on a COLD row it IS the glyph, so it must be the words (D1).
+    cold_dormant = CatalogEntry(
+        SessionRow("dorm00000002", now, "cold+stopped", wakes=1, wakes_dormant=True)
+    )
+    assert row_state_mark(cold_dormant.row, 0)[0] == WAKE_MARKER
+    assert cold_dormant.status == "Stopped (1 wake paused)"
+
+    # Presence outranks an armed wake: "a terminal is watching this" answers
+    # "where am I?", which bare residency does not (D2).
+    watched = CatalogEntry(
+        SessionRow("att000000001", now, "watched", live_state="attached", wakes=2)
+    )
+    assert row_state_mark(watched.row, 0)[0] == ATTACHED_MARKER
+    assert watched.status == "Open"
 
     # And the states above wakes are unchanged.
     busy = CatalogEntry(SessionRow("busy00000001", now, "working", live_state="busy", wakes=4))
@@ -1194,3 +1211,62 @@ def test_the_tooltip_never_names_a_different_state_from_the_glyph():
         SessionRow("gate00000001", now, "waiting", live_state="idle", pending="approval", wakes=4)
     )
     assert gate.status == "Approval needed"
+
+
+def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
+    """The invariant itself, over EVERY reachable combination.
+
+    The two round-1 design findings were both a glyph and its description
+    disagreeing in a state no frame happened to cover: a cold row with a
+    stopped schedule drew the wake mark while the tooltip said "Recent" (D1),
+    and the individual glyph and status assertions above each passed. Testing
+    the pairing one hand-picked row at a time is what let that through, so this
+    enumerates the product of every live state, wake count and dormancy and
+    asserts the two renderings agree by construction.
+    """
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        IDLE_MARKER,
+        NEEDS_YOU_MARKER,
+        WAKE_MARKER,
+        WEDGED_MARKER,
+        row_state_mark,
+    )
+
+    #: Which descriptions may accompany each glyph. A status not listed for the
+    #: glyph a row drew is a contradiction the user would have to resolve.
+    ALLOWED = {
+        NEEDS_YOU_MARKER: {"Approval needed", "Answer needed"},
+        WEDGED_MARKER: {"Not responding"},
+        ATTACHED_MARKER: {"Open"},
+        IDLE_MARKER: {"Ready"},
+        WAKE_MARKER: {"Scheduled", "Stopped"},
+        "": {"Recent"},
+    }
+    now = time.time()
+    checked = 0
+    for state in ("", "idle", "attached", "busy", "wedged"):
+        for pending in (None, "approval", "ask"):
+            for wakes, dormant in ((0, False), (1, False), (3, False), (1, True), (2, True)):
+                row = SessionRow(
+                    "x" * 12,
+                    now,
+                    "a conversation",
+                    live_state=state,
+                    pending=pending,
+                    wakes=wakes,
+                    wakes_dormant=dormant,
+                )
+                glyph = row_state_mark(row, 0)[0]
+                status = CatalogEntry(row).status
+                if glyph in SPINNER_FRAMES:
+                    assert status == "Working", (state, pending, wakes, dormant, status)
+                else:
+                    allowed = ALLOWED[glyph]
+                    assert any(status.startswith(prefix) for prefix in allowed), (
+                        f"glyph {glyph!r} paired with {status!r} "
+                        f"(state={state!r} pending={pending!r} wakes={wakes} dormant={dormant})"
+                    )
+                checked += 1
+    assert checked == 75, checked

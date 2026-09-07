@@ -9,13 +9,22 @@ an idle runtime, an attached viewer, an armed wake, a dormant wake, a parked
 gate, a wedged runtime and cold rows — so a single frame answers both questions
 this change is about:
 
-* **Which rows animate.** Only a session whose CONVERSATION is working may
-  carry the spinner. The rows named "…(bg job)" and "…(subagent)" are the
-  regression under test: they hold work that keeps the runtime resident while
-  the conversation itself is finished, and before the fix they were
-  indistinguishable from a live turn.
+* **Which glyph each state draws**, across every mark the list can produce.
 * **How much of a title survives.** The names here are real-length generated
   titles, so the frame shows the title budget rather than a curated short one.
+
+**What this script can and cannot prove.** It renders from a FIXED catalog of
+``SessionRow``s, so it exercises the display layer only. The rows named
+"…(bg job)" and "…(subagent)" carry ``live_state="idle"`` because that is what
+the fixed runtime now publishes for them — which means they render ``●`` in
+this script against BOTH trees, and a before/after pair of these frames is not
+evidence for the activity fix (round 1, D3). The change those rows stand for
+happens upstream, where ``OwnedSessionHandle`` decides whether to publish
+``busy`` at all; it is proven by
+``tests/unit/session/runtime/test_activity_vs_residency.py`` and by the live
+probe described on the PR, not here. To see the pre-fix rendering of those
+rows, set ``LO_SIDEBAR_SHOT_STALE_BUSY=1``, which restores the state the OLD
+record would have published for a session holding background work.
 
 The frame is deterministic: the spinner is pinned to a known frame and the
 catalog is fixed, so before/after captures differ only where the change does.
@@ -24,6 +33,7 @@ catalog is fixed, so before/after captures differ only where the change does.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from pathlib import Path
@@ -50,12 +60,19 @@ NOW = time.time()
 #: Titles are real generated-length names, several of them sharing a prefix,
 #: because "Article-search-svc s…" vs "Article search servi…" is exactly the
 #: discrimination the list failed to support at the base width.
+#: Rows whose live_state models a session HOLDING BACKGROUND WORK with a
+#: finished conversation. Under the old runtime these published ``busy``; under
+#: the fixed one they publish idle. ``LO_SIDEBAR_SHOT_STALE_BUSY=1`` renders
+#: them the old way so the two can be compared in one tree.
+STALE_BUSY = os.environ.get("LO_SIDEBAR_SHOT_STALE_BUSY") == "1"
+HOLDING_WORK = "busy" if STALE_BUSY else "idle"
+
 ROWS = [
     ("aaaaaaaaaaa1", "Fix sidebar activity indicator accuracy", 1, "busy", None, 0, False),
     ("aaaaaaaaaaa2", "Update Provider Onboarding and OAuth UX", 4, "attached", None, 0, False),
-    ("aaaaaaaaaaa3", "Article-search-svc schema review (bg job)", 11, "idle", None, 0, False),
+    ("aaaaaaaaaaa3", "Article-search-svc schema review (bg job)", 11, HOLDING_WORK, None, 0, False),
     ("aaaaaaaaaaa4", "Article search service integration rollout", 6, "idle", None, 0, False),
-    ("aaaaaaaaaaa5", "OSWorld benchmark evaluation (subagent)", 8, "idle", None, 0, False),
+    ("aaaaaaaaaaa5", "OSWorld benchmark evaluation (subagent)", 8, HOLDING_WORK, None, 0, False),
     ("aaaaaaaaaaa6", "Auto-update inactive session runtimes", 13, "idle", None, 2, False),
     ("aaaaaaaaaaa7", "Debugging session cost and naming drift", 43, "idle", None, 1, True),
     ("aaaaaaaaaaa8", "Add Flavia's Adverse Media Case", 3, "idle", "approval", 0, False),

@@ -1830,7 +1830,7 @@ def test_the_signature_names_only_real_row_fields() -> None:
     assert "id" in SessionPickerScreen._SIGNATURE_FIELDS
 
 
-def test_an_armed_wake_outranks_mere_presence() -> None:
+def test_an_armed_wake_outranks_idle_but_not_attached() -> None:
     """The reported ask: "show the wake symbol if it's just scheduled wakes".
 
     Under the original precedence the wake glyph was UNREACHABLE for any live
@@ -1839,19 +1839,33 @@ def test_an_armed_wake_outranks_mere_presence() -> None:
     cold row — one with no runtime to fire it. That is backwards, because the
     cold row is the one where the schedule means least.
 
-    Presence is the least informative thing true of a row (every resident
-    session has it); "this will act on its own later" is a fact nothing else on
-    the row conveys.
+    `idle` is the least informative thing true of a row (every resident session
+    has it); "this will act on its own later" is a fact nothing else conveys.
+
+    `attached` is NOT that, and this test asserts the distinction because the
+    first cut of the change got it wrong (round 1, D2): `○` means *a terminal
+    is watching this session*, which on a list the user is scanning is the one
+    mark that answers "where am I?". A wake outranks bare residency and loses
+    to presence.
     """
     from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
         IDLE_MARKER,
         WAKE_MARKER,
         row_state_mark,
     )
 
-    for state in ("idle", "attached"):
-        row = _row("wake00000001", "armed")._replace(live_state=state, wakes=2)
-        assert row_state_mark(row, 0)[0] == WAKE_MARKER, state
+    idle = _row("wake00000001", "armed")._replace(live_state="idle", wakes=2)
+    assert row_state_mark(idle, 0)[0] == WAKE_MARKER
+
+    watched = _row("wake00000003", "armed and watched")._replace(
+        live_state="attached", wakes=2
+    )
+    assert row_state_mark(watched, 0)[0] == ATTACHED_MARKER
+
+    # A cold row with an armed wake still shows it — that never regressed.
+    cold = _row("wake00000004", "cold armed")._replace(wakes=1)
+    assert row_state_mark(cold, 0)[0] == WAKE_MARKER
 
     # And with no wake armed, presence still renders exactly as before.
     plain = _row("idle00000002", "no wake")._replace(live_state="idle")
