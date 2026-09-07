@@ -1847,3 +1847,195 @@ async def test_the_real_hosts_focus_call_runs_off_the_serving_loop():
             "server would stall the endpoint and the click would fall back to "
             "spawning the very window this feature removes"
         )
+
+
+async def _pump_until(pilot, predicate, *, what: str, turns: int = 2000) -> None:
+    """Pump Textual until ``predicate`` holds, then return immediately.
+
+    Bounded by TURNS rather than by a wall-clock budget: per-test durations here
+    vary by orders of magnitude under xdist contention, and a fixed drain both
+    flakes and taxes every run with time the work did not need. The deadline is
+    a backstop against a wedge, never the assertion — see AGENTS.md, "Wait on
+    the event, never on the clock".
+    """
+    for _ in range(turns):
+        if predicate():
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_overruns_the_bound_cannot_also_commit():
+    """Q3: never both — a click causes a switch or a spawn, never one of each.
+
+    The derived bounds fixed the CLIENT giving up first; they did not stop the
+    APP from committing behind the endpoint's back. ``wait_for`` cancels the
+    waiter, not the navigation, so a switch slower than
+    ``VIEWER_RESUME_TIMEOUT_S`` still landed on screen after the endpoint had
+    answered failure — ``deliver_click`` reported ``switched=False``,
+    ``resume_click.open_session`` spawned a window, and the session switched
+    underneath it. QA measured the threshold move rather than close: clean at
+    9.8 s, both outcomes at 10.2 s and every value above.
+
+    THE ASSERTION IS THE CONJUNCTION, not the timeout. A test that only checked
+    "the endpoint raised" passes with the defect fully present — that is the
+    whole shape of this bug. So this checks what the CALLER would do with the
+    answer against what is actually on screen: a raise means the caller spawns,
+    so the binding must not have moved; a success means it does not spawn, so
+    the binding must have. Either is correct; only the pair is the defect.
+
+    The navigation is slowed inside ``prepare`` — where a cold transcript's real
+    seconds go — so the commit is genuinely still ahead of it when the bound
+    expires, rather than being suppressed before it starts.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+
+        async def slow_prepare(session_id: str, *args, **kwargs):
+            # Comfortably longer than the patched bound, so the endpoint gives
+            # up while the switch is genuinely still in flight. Both are scaled
+            # down together: what is under test is the ORDER of the bound, the
+            # fence and the commit, which is scale-free.
+            await asyncio.sleep(1.0)
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            # What a real commit does that matters here: move the binding.
+            committed.append(session_id)
+            app._adopted_session_id = session_id
+            return None
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", slow_prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+            patch.object(
+                type(app._session),
+                "session_id",
+                property(lambda _s: committed[-1] if committed else "origin"),
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            try:
+                detail = future.result(timeout=5)
+                switched = True
+            except Exception:
+                detail = ""
+                switched = False
+
+            # The defect commits AFTER the endpoint has answered, so answering
+            # is not the end of it: settle the navigation itself before reading
+            # what landed, or a late commit is simply missed.
+            task = navigation._task
+            await _pump_until(
+                pilot,
+                lambda: task is None or task.done(),
+                what="the navigation to settle",
+            )
+
+        landed = "target-session" in committed
+        spawn_would_run = not switched
+        assert not (landed and spawn_would_run), (
+            "DOUBLE ACTION: the switch committed at "
+            f"{committed!r} while the endpoint answered failure, so the click "
+            "delivers a session switch AND a duplicate window — the exact "
+            "outcome this feature exists to prevent"
+        )
+        assert switched == landed, (
+            f"the ack must describe what happened: switched={switched} "
+            f"detail={detail!r} committed={committed!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_abandoning_an_overrun_click_leaves_the_outgoing_session_whole():
+    """Q3, the other half: the cure must not be worse than the disease.
+
+    Cancelling mid-switch was the stated reason for NOT adding cancellation in
+    round 2 — a half-swapped app is worse than a duplicate window. This asserts
+    the outcome rather than the reasoning.
+
+    THE PREPARATION HERE REFUSES TO BE CANCELLED, deliberately. That models the
+    case the endpoint's own docstring concedes — enqueued work that cannot be
+    recalled — and it is what makes this a test of the FENCE rather than of
+    ``task.cancel()``. If the guarantee rested on cancellation being delivered
+    in time it would be a race; it rests instead on the generation bump, which
+    is synchronous, and on ``SessionNavigation`` running no await between its
+    final generation check and ``_commit``. So the un-cancellable navigation
+    below runs to completion and STILL cannot commit, and its preparation is
+    released through the same path a user's own cancel uses.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._editor().load_text("half-typed thought")
+        await pilot.pause()
+        released: list[str] = []
+        committed: list[str] = []
+        prepared_fully: list[str] = []
+
+        async def stubborn_prepare(session_id: str, *args, **kwargs):
+            # Work that outlives its cancellation, as a blocking enqueue does.
+            inner = asyncio.ensure_future(asyncio.sleep(1.0))
+            while not inner.done():
+                try:
+                    await asyncio.shield(inner)
+                except asyncio.CancelledError:
+                    pass
+            prepared_fully.append(session_id)
+            return session_id
+
+        async def release(prepared) -> None:
+            released.append(prepared)
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", stubborn_prepare),
+            patch.object(navigation, "_commit", lambda *a: committed.append(a[0])),
+            patch.object(navigation, "_release", release),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            with pytest.raises(Exception):
+                future.result(timeout=5)
+            # The un-cancellable preparation must be allowed to FINISH: the
+            # property is that it cannot commit even then.
+            task = navigation._task
+            await _pump_until(
+                pilot,
+                lambda: bool(prepared_fully) and (task is None or task.done()),
+                what="the stubborn preparation to run to completion",
+            )
+
+        assert prepared_fully == ["target-session"], (
+            "precondition: the preparation must have survived cancellation and "
+            "run to completion, or this proves nothing about the fence"
+        )
+        assert committed == [], (
+            "the fence must stop a completed preparation from committing after "
+            "the endpoint answered failure"
+        )
+        assert released == [
+            "target-session"
+        ], f"the fenced preparation must be released, not leaked: {released!r}"
+        # The outgoing conversation is untouched: still bound, still typed in.
+        assert app._session is not None
+        assert (
+            app._editor().text == "half-typed thought"
+        ), "the draft the user was holding must survive an abandoned click"
+        assert navigation.requested_id == "", "the navigation boundary must be released"
+        assert not [t for t in navigation._tasks if not t.done()], "no navigation task may leak"

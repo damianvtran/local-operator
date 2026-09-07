@@ -75,10 +75,11 @@ _AUTH_TIMEOUT_S = 5.0
 #: magnitude against any real frame.
 _MAX_LINE_BYTES = 64 * 1024
 
-#: Re-exported for the callers (and tests) that reach for it here, beside the
-#: endpoint that advertises it. It is DEFINED in ``viewers`` because the client
-#: reads it too, and a capability string spelled in two modules is a capability
-#: that will eventually be spelled two ways.
+#: ``FOCUS_WINDOW_CAPABILITY`` is listed here so it stays importable from this
+#: module for the callers (and tests) that reach for it beside the endpoint
+#: advertising it. It is DEFINED in ``viewers`` because the client reads it
+#: too, and a capability string spelled in two modules is a capability that
+#: will eventually be spelled two ways.
 __all__ = ["FOCUS_WINDOW_CAPABILITY", "ViewerHost", "ViewerServer"]
 
 
