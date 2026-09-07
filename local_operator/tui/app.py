@@ -2751,6 +2751,12 @@ class OperatorApp(App[None]):
         #: first session is adopted; torn down in ``on_unmount``.
         self._mobile_registrant: Any = None
         self._mobile_handle: Any = None
+        #: The PROCESS-scoped viewer endpoint, distinct from the session-scoped
+        #: mobile registrant above and with a deliberately different lifetime:
+        #: it survives every `/resume`, because the thing a notification click
+        #: must reach is precisely the thing that outlives a session swap. See
+        #: `_viewer_adopted`.
+        self._viewer_server: Any = None
         # Separate from user inactivity: this watches the OS-backed terminal
         # reader. A mounted but untouched TUI remains alive indefinitely.
         from local_operator.session.runtime.process import _grace_seconds
@@ -15266,6 +15272,16 @@ class OperatorApp(App[None]):
         if self._notifier is not None:
             self._notifier.set_focused(True)
         self._set_animation_focused(True)
+        # Stamp when the user was last HERE. When several windows could take a
+        # notification click, this is the tiebreak that sends it to the one they
+        # were most recently working in. Only the gaining edge is recorded — a
+        # blur carries no routing information, so an alt-tab costs no write.
+        server = self._viewer_server
+        if server is not None:
+            try:
+                server.note_focused(True)
+            except Exception:  # noqa: BLE001 — focus bookkeeping is never worth an event
+                logger.debug("viewer focus stamp failed", exc_info=True)
 
     def on_app_blur(self, event: AppBlur) -> None:
         """The terminal lost OS focus \u2014 notify, and slow every animation."""
@@ -15404,6 +15420,116 @@ class OperatorApp(App[None]):
         if self._notify(kind):
             self._waiting_kind = kind
 
+    def _viewer_adopted(self, session: Any) -> None:
+        """Publish (once) and keep current the record that makes this window
+        reachable by a notification click.
+
+        WHY THIS IS NOT PART OF ``_mobile_adopted``. That method manages a
+        SESSION-scoped registrant and tears it down whenever the app follows a
+        ``RemoteSession`` — which is the normal sidebar state — because a second
+        registrant for one transcript corrupts daemon routing. Correct, and it
+        leaves a sidebar user's TUI listening on nothing, which is why a
+        notification click had no live process to route to and spawned a whole
+        new window instead.
+
+        This endpoint describes the PROCESS: which window can put a session on
+        screen. It is published once and then merely re-stamped with whichever
+        session is current, local or remote alike, so it is available in exactly
+        the state the session registrant is not. Its record lives in a separate
+        run directory, so no older binary's ``registry.scan`` can mistake it for
+        a stoppable, routable session — see ``session/runtime/viewers``.
+
+        Best-effort by contract, like the mobile bridge: click-through is chrome
+        and must never be a startup gate for the terminal.
+        """
+        session_id = str(getattr(session, "session_id", "") or "")
+        if self._viewer_server is None:
+            try:
+                from local_operator.session.runtime.viewer_server import ViewerServer
+
+                self._viewer_server = ViewerServer(self)
+                self._viewer_server.start()
+            except Exception:  # noqa: BLE001 — a viewer record is never worth the TUI
+                logger.debug("viewer endpoint failed to start", exc_info=True)
+                self._viewer_server = None
+                return
+        try:
+            self._viewer_server.note_session(session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("viewer record refresh failed", exc_info=True)
+
+    def _viewer_teardown(self) -> None:
+        """Stop serving and remove the record. Idempotent, and called on the
+        one clean-exit path so a closed window stops advertising a port."""
+        server = self._viewer_server
+        if server is None:
+            return
+        self._viewer_server = None
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001 — an exit path must not raise
+            logger.debug("viewer endpoint close failed", exc_info=True)
+
+    # -- ViewerHost: what a notification click may ask of this window ---------
+
+    async def viewer_resume_session(self, session_id: str) -> str:
+        """Display ``session_id`` here — the click's whole purpose.
+
+        Routed through the app's own ``/resume`` on Textual's thread, which is
+        the SAME path the user's sidebar keystroke takes. That is deliberate:
+        it inherits the sidebar's invariants wholesale (a switch never answers
+        a gate, never cancels a turn, never redirects its result) rather than
+        creating a second way to change which session is on screen.
+
+        Called on the viewer endpoint's own loop, so the hop to Textual is made
+        here and bounded — an app inside a modal's nested pump would otherwise
+        wedge this dispatch indefinitely, and the click's caller is waiting on
+        the ack to decide whether to spawn a window.
+        """
+        # The same set-once helper the mobile handle's app hop uses, imported
+        # rather than re-declared: two spellings of "resolve this future unless
+        # a cancellation already did" is exactly the duplication that lets one
+        # of them drift into swallowing an error.
+        from local_operator.mobile.tui_handle import _set_unless_done
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+
+        def apply() -> None:
+            try:
+                self._run_slash_command(f"/resume {session_id}")
+                loop.call_soon_threadsafe(_set_unless_done, future, None, None)
+            except Exception as exc:  # noqa: BLE001 — the error IS the answer
+                loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
+
+        self.call_from_thread(apply)
+        await asyncio.wait_for(future, timeout=10.0)
+        return f"displayed {session_id}"
+
+    async def viewer_focus_window(self) -> str:
+        """Bring this window forward. Best-effort, bounded, off the event loop.
+
+        THE SUBPROCESS RUNS IN A THREAD, and that is not incidental. This is an
+        OS call on a path whose whole contract is that a notification is chrome:
+        a blocking `subprocess.run` on Textual's loop would freeze the UI for as
+        long as the window server took to answer, which is the frozen-event-loop
+        class ``tests/e2e/watchdog.py`` exists to catch and which a Python-level
+        probe cannot see. It runs on the viewer endpoint's thread instead, and
+        the helper bounds it with a timeout regardless.
+
+        Solicited focus only: this is reachable exclusively from a click the
+        user made. Nothing else in the codebase may call it.
+        """
+        from local_operator.tui.window_focus import activate_window
+
+        activated = await asyncio.to_thread(activate_window)
+        if not activated:
+            # An honest "no" rather than a lie: the session is switched and the
+            # user finds the window themselves. The client treats this as a
+            # non-failure precisely because the switch already succeeded.
+            raise ValueError("no window activation available here")
+        return "activated"
+
     def _mobile_adopted(self, session: Any) -> None:
         """Bring the mobile bridge up (once) or re-point it at a new session.
 
@@ -15422,6 +15548,10 @@ class OperatorApp(App[None]):
         # transcript and corrupt daemon routing. If this process previously
         # owned a local session, tear its record down while following remotely;
         # takeover calls this again with a real Session and starts a fresh owner.
+        # The viewer endpoint is published for EVERY session, remote included —
+        # that is the whole point of it being process-scoped, and it is what the
+        # teardown below would otherwise take away in the normal sidebar state.
+        self._viewer_adopted(session)
         if bool(getattr(session, "is_remote", False)):
             self._mobile_teardown()
             return
@@ -15563,6 +15693,12 @@ class OperatorApp(App[None]):
         # the common case so the phone list drops the session immediately
         # rather than at the next scan.
         self._mobile_teardown()
+        # And the viewer record, for the same reason and with an extra one of
+        # its own: it advertises a LISTENING PORT, so a record left behind
+        # costs the next notification click its full dial timeout before it
+        # falls back to a spawn. A killed process leaves the file, which the
+        # reader reaps on the pid-liveness check.
+        self._viewer_teardown()
         # Alongside the mobile record and for the same reason: this is a clean
         # exit, so the pane must stop advertising a session the user has just
         # closed. A crash never reaches this line, which is what leaves the
