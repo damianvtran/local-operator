@@ -8071,10 +8071,21 @@ _JSON_LITERAL_TEXT: dict[Any, str] = {True: "true", False: "false", None: "null"
 
 #: Recursion bound for the nested-list unwrap below. A model emitting an id
 #: nests one or two levels at most; 20 is far past any real payload while
-#: staying far below CPython's ~1000-frame limit, where the escaping
-#: ``RecursionError`` is NOT a ``ValueError`` and so slips past the parse
-#: guard (review round 1, MINOR-1). Over-deep input degrades to "no ids
-#: found", which every caller already handles, rather than to an exception.
+#: staying far below CPython's ~1000-frame limit.
+#:
+#: This is the SECOND of two independent guards, and they cover different
+#: paths -- deleting either one because the other looks sufficient would
+#: reopen a hole (review round 2, NIT-2). The ``except (ValueError,
+#: RecursionError)`` around each ``json.loads`` is what contains a deeply
+#: nested payload that REACHES the parser, and on its own it carries depths
+#: past 1 000 000. This counter bounds THIS module's own ``_parse_str``
+#: recursion on the bracket-split fallback: an unterminated ``'[[[[...'`` is
+#: not valid JSON, so every level's ``json.loads`` fails immediately with
+#: ``ValueError`` and the descent continues in OUR frames, which no ``except``
+#: around the parser can bound. Measured: an unterminated payload nested
+#: 200 000 deep makes 21 parse attempts (this cap plus one) and returns
+#: normally. Over-deep input degrades to "no ids found", which every caller
+#: already handles, rather than to an exception.
 _MAX_TARGET_NEST_DEPTH = 20
 
 
@@ -8261,7 +8272,31 @@ def _coerce_job_targets(value: Any) -> Any:
 
 
 def _coerce_single_job_id(value: Any) -> Any:
-    """Unwrap a single job ID from string, bracketed string, or list."""
+    """Unwrap a single job ID from string, bracketed string, or list.
+
+    Carries the same no-fabrication rule as ``_coerce_job_targets``: a value
+    that is not already id-shaped is handed back untouched so the field's own
+    validation reports it, never stringified into something that merely looks
+    like an id.
+
+    That mattered on the one-element-array shape this whole change exists to
+    accept. This wrapper used to end with an unconditional
+    ``str(coerced[0])``, so a model emitting ``{"job_id": [13190e419943]}``
+    -- decoded to ``[inf]`` by the outer tool-argument decode before any
+    coercion runs -- got back the string ``'inf'``, and ``[7019316393e2]``
+    became ``'701931639300.0'``: precisely the two fabricated ids
+    ``_json_scalar_text`` exists to prevent, reached one wrapper away from it
+    (review round 2, MAJOR-2). The failure was pre-existing rather than
+    introduced here, but it left ``JobsParams`` fabricating an id while
+    ``WaitParams``, which lacks this wrapper, honestly refused the identical
+    input -- and the field that fabricated was the one with the friendlier
+    wrapper.
+
+    Non-``str`` values in this position -- a ``float``, a ``dict``, a nested
+    ``list`` -- are therefore all returned as-is now, which is also uniform:
+    the branch previously stringified ``[{'a': 1}]`` into ``"{'a': 1}"``, a
+    "job id" that could never match anything either.
+    """
     if value is None:
         return None
     coerced = _coerce_job_targets(value)
@@ -8270,8 +8305,10 @@ def _coerce_single_job_id(value: Any) -> Any:
             return coerced[0]
         if len(coerced) == 0:
             return ""
-        # If multiple were somehow provided to a single-id field, pick the first
-        return coerced[0] if isinstance(coerced[0], str) else str(coerced[0])
+        # If multiple were somehow provided to a single-id field, pick the
+        # first -- but only when it is genuinely a string. Anything else goes
+        # back untouched for the field to reject; see the docstring.
+        return coerced[0]
     return coerced
 
 
@@ -9172,6 +9209,25 @@ def _coerce_hub_to(value: Any) -> Any:
     deliberate: a ``to`` target is resolved against live peers rather than
     looked up as an id, so only genuine ids -- strings, and the numeric
     literals that are really ids in disguise -- are worth recovering.
+
+    The drop is an ``isinstance(item, str)`` filter, so it reaches WIDER than
+    those three literals and the divergence is correspondingly wider than
+    "null/true/false" suggests (review round 2, MINOR-3). Side by side::
+
+        input                    _coerce_job_targets      _coerce_hub_to
+        '[null]'                 'null'                   []
+        '[{"a":1}]'              '[{"a":1}]'              []
+        '[[["x"]]]'              'x'                      []
+        '[true, 920883861377]'   ['true','920883861377']  ['920883861377']
+
+    Two consequences worth knowing before changing this. A NESTED list is
+    dropped here where ``_coerce_job_targets`` unwraps it; and a MIXED payload
+    resolves PARTIALLY -- the real ids come through while the non-string items
+    vanish without an error, so "a named target never silently disappears"
+    holds for the list as a whole but not item by item. Both are unchanged
+    from base and neither is reachable for a real job id (``uuid4().hex[:12]``
+    cannot spell ``null``, nest, or carry a dict); they only surface for a
+    user-chosen label.
     """
     if not isinstance(value, str):
         return value

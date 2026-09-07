@@ -214,3 +214,66 @@ Only two id-coercion boundaries exist and both are now fixed. The remaining
 payload, and `_iter_json_objects` parses cmux handshake output. `SendParams`
 (`target`/`pid`/`session`) has no before-validator and takes `pid` as a typed
 `int`, so it never round-trips an id through JSON. **No third instance.**
+
+
+## Round 2 remediation
+
+Review round 2 confirmed MAJOR-1, MINOR-1, MINOR-2 and NIT-1 closed (the
+recursion work verified to depth 1,000,000 across six entry points, and the
+`int`-losslessness claim held against a 300k-id corpus measuring 0.675%
+numeric-looking ids). It raised one MAJOR and two comment-only MINORs.
+
+### MAJOR-2 — the identical fabrication survived one wrapper away
+
+`_coerce_single_job_id` ended with an unconditional `str(coerced[0])`, so the
+**one-element array** shape — decoded by the outer tool-argument decode before
+any coercion runs — produced exactly the ids `_json_scalar_text` refuses:
+
+| model emitted | outer decode | before | now |
+| --- | --- | --- | --- |
+| `{"job_id": [7019316393e2]}` | `[701931639300.0]` | `'701931639300.0'` ❌ | refused |
+| `{"job_id": [13190e419943]}` | `[inf]` | `'inf'` ❌ | refused |
+| `{"job_id": [{"a":1}]}` | `[{'a': 1}]` | `"{'a': 1}"` ❌ | refused |
+| `{"job_id": [920883861377]}` | `[920883861377]` | `'920883861377'` | `'920883861377'` ✅ |
+
+**Pre-existing on `main`, not introduced by this PR** — verified on
+`d017115dd` and `196304cb0`, both of which also return `'701931639300.0'` and
+`'inf'`. It is fixed here rather than deferred because this PR's own docstring
+states the guarantee that path was breaking, and because it left the two id
+fields disagreeing: `WaitParams` (no such wrapper) correctly refused the same
+input while `JobsParams` fabricated. They now agree on every shape:
+
+```
+[7019316393e2]     Jobs=refused          Wait=refused          AGREE
+[13190e419943]     Jobs=refused          Wait=refused          AGREE
+[920883861377]     Jobs='920883861377'   Wait='920883861377'   AGREE
+[{"a":1}]          Jobs=refused          Wait=refused          AGREE
+```
+
+### MINOR-3 — the hub divergence is wider than "null/true/false"
+
+The drop is an `isinstance(item, str)` filter, so it also swallows nested
+lists and partially resolves a mixed payload. Documented at the site and
+pinned by `test_hub_and_job_coercion_diverge_exactly_as_documented`:
+
+| input | `_coerce_job_targets` | `_coerce_hub_to` |
+| --- | --- | --- |
+| `'[null]'` | `'null'` | `[]` |
+| `'[{"a":1}]'` | `'[{"a":1}]'` | `[]` |
+| `'[[["x"]]]'` | `'x'` | `[]` (nested list dropped) |
+| `'[true, 920883861377]'` | `['true','920883861377']` | `['920883861377']` (partial) |
+
+Unchanged from base, and unreachable for a real `uuid4().hex[:12]` id — it
+only surfaces for a user-chosen label.
+
+### NIT-2 — which of the two recursion guards does what
+
+The comment implied the depth counter exists because `RecursionError` escapes
+the parse guard, which the `except (ValueError, RecursionError)` now handles by
+itself past depth 1,000,000. Corrected: the two guards cover **different
+paths**, and deleting either would reopen a hole. The `except` contains a
+deeply nested payload that reaches the parser; the counter bounds this module's
+own `_parse_str` recursion on the bracket-split fallback, where an unterminated
+`'[[[[...'` fails `json.loads` instantly at every level and the descent
+continues in our frames. Measured: an unterminated payload nested 200,000 deep
+makes 21 parse attempts (the cap plus one) and returns normally.

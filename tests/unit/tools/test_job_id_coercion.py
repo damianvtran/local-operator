@@ -34,6 +34,7 @@ from pydantic import ValidationError
 from local_operator.tools.builtin import (
     HubParams,
     JobsParams,
+    WaitParams,
     _coerce_hub_to,
     _coerce_job_targets,
     _coerce_single_job_id,
@@ -214,6 +215,61 @@ def test_bare_float_is_refused_rather_than_turned_into_a_different_id(literal, d
         JobsParams(op="peek", job_id=decoded)
 
 
+@pytest.mark.parametrize(
+    ("literal", "decoded"),
+    [
+        ("[7019316393e2]", 701931639300.0),
+        ("[177650473e52]", 1.77650473e60),
+        ("[13190e419943]", float("inf")),
+        ("[1e5]", 100000.0),
+    ],
+)
+def test_single_id_wrapper_refuses_a_float_instead_of_fabricating(literal, decoded):
+    """MAJOR-2 (review round 2): the same fabrication one wrapper away.
+
+    ``_coerce_single_job_id`` ended with an unconditional ``str(coerced[0])``,
+    so the ONE-ELEMENT ARRAY shape this change exists to accept -- decoded to
+    ``[inf]`` or ``[701931639300.0]`` by the outer tool-argument decode --
+    produced exactly the fabricated ids ``_json_scalar_text`` refuses. That
+    left ``JobsParams`` inventing an id while ``WaitParams``, which has no such
+    wrapper, honestly rejected the identical input.
+
+    Pre-existing on ``main`` rather than introduced by this change, but the
+    guarantee the surrounding code now states has to hold on every path that
+    reaches it.
+    """
+    payload = json.loads(literal)
+    assert payload == [decoded]  # the outer decode really is lossy
+    # Unwrapped from the one-element list but NOT stringified: still a float,
+    # so the field rejects it instead of matching a job that never existed.
+    unwrapped = _coerce_single_job_id(payload)
+    assert isinstance(unwrapped, float) and unwrapped == decoded
+    with pytest.raises(ValidationError, match="valid string"):
+        JobsParams(op="peek", job_id=payload)
+    # The two id fields must agree; WaitParams already refused this input.
+    with pytest.raises(ValidationError):
+        WaitParams(job_id=payload)
+
+
+@pytest.mark.parametrize("payload", [[{"a": 1}], [[1, 2]]])
+def test_single_id_wrapper_refuses_other_non_ids_uniformly(payload):
+    """The same branch used to stringify a dict into ``\"{'a': 1}\"`` -- a "job
+    id" that could never match anything. Non-``str`` values now go back
+    untouched for the field to reject, whatever their type."""
+    with pytest.raises(ValidationError):
+        JobsParams(op="peek", job_id=payload)
+
+
+def test_single_id_wrapper_still_serves_every_shape_it_should(id_corpus):
+    """The refusal above must not cost the wrapper its actual job: unwrapping a
+    real id from a string, a bracketed string, or a one-element list."""
+    for job_id in id_corpus[:400]:
+        assert _coerce_single_job_id(job_id) == job_id
+        assert _coerce_single_job_id(f"[{job_id}]") == job_id
+        assert _coerce_single_job_id([job_id]) == job_id
+        assert JobsParams(op="peek", job_id=f"[{job_id}]").job_id == job_id
+
+
 @pytest.mark.parametrize("depth", [5, 30, 999, 1001, 5000, 20000])
 def test_deep_nesting_is_bounded_and_never_raises(depth):
     """MINOR-1 (review round 1): no ``RecursionError`` escapes at any depth.
@@ -368,3 +424,27 @@ def test_hub_ask_reaches_a_child_whose_id_is_all_digits():
     params = HubParams(op="ask", to=bracketed, message="are you there?")
     assert params.to == [minted]
     assert params.op == "ask"
+
+
+@pytest.mark.parametrize(
+    ("payload", "job_result", "hub_result"),
+    [
+        ("[null]", "null", []),
+        ('[{"a":1}]', '[{"a":1}]', []),
+        ('[[["x"]]]', "x", []),
+        ("[true, 920883861377]", ["true", "920883861377"], ["920883861377"]),
+    ],
+)
+def test_hub_and_job_coercion_diverge_exactly_as_documented(payload, job_result, hub_result):
+    """MINOR-3 (review round 2): pin the FULL asymmetry, not just the literals.
+
+    ``_coerce_hub_to`` drops via ``isinstance(item, str)``, which reaches wider
+    than ``null``/``true``/``false``: a nested list is dropped here but
+    unwrapped by ``_coerce_job_targets``, and a mixed payload resolves
+    PARTIALLY -- real ids come through while non-string items vanish with no
+    error. Both are unchanged from base and unreachable for a real
+    ``uuid4().hex[:12]`` id, but a future reader should find the difference
+    asserted rather than inferred from a docstring.
+    """
+    assert _coerce_job_targets(payload) == job_result
+    assert _coerce_hub_to(payload) == hub_result
