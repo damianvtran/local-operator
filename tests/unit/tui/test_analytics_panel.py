@@ -16,12 +16,15 @@ from rich.cells import cell_len
 from local_operator.analytics.model import COMPONENT_KEYS, UsageAggregate, UsagePeriod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
+    _MAX_NAME_COL,
     _MIN_NAME_COL,
     _WIDE_TABLE_MIN,
     METRIC_COST,
     METRIC_TOKENS,
     AnalyticsScreen,
+    _forest_labels,
     _row_overhead,
+    _row_prefix,
     build_report,
     format_cost,
     format_percent,
@@ -1182,3 +1185,155 @@ def test_legend_is_drawn_for_a_plus_that_only_the_rollup_produces():
     text = "\n".join(line.plain for line in build_report(agg, 120))
     assert "$1.00+" in text
     assert "lower bound" in text
+
+
+# -- convergence: the nesting and the label budget must both hold --------------
+# These pin the INTERACTION between two changes that landed from different
+# branches on the same table (#716 nested the rows; #717 budgeted their labels
+# and measured the columns). Each was verified against a fixture that did not
+# exercise the other, and the failure mode is invisible to both: a nested label
+# composed to the full budget and THEN given its ``└ `` prefix is over the
+# column it is padded into, so the paint cuts it back off without a marker.
+
+
+def _deep_named_aggregate(name: str = "Toggleable Sidebar for Session Switching in the TUI"):
+    """A root and a child that both carry LONG names, so the budget actually binds.
+
+    The nesting fixtures above name only the root, which is the real-ledger shape
+    but cannot see a prefix overrunning the budget — an unnamed child renders a
+    12-hex id that fits at any width.
+    """
+
+    def scope(micro, calls=1):
+        return UsageAggregate(
+            calls=calls,
+            ok_calls=calls,
+            context_tokens=micro,
+            cost_micro=micro,
+            cost_known_calls=calls,
+        )
+
+    agg = scope(6_000_000, calls=4)
+    agg.by_session = {
+        "rootsession": scope(1_000_000),
+        "kid1session": scope(2_000_000),
+        "grandkidses": scope(3_000_000),
+    }
+    setattr(
+        agg,
+        "session_names",
+        {"rootsession": name, "kid1session": f"reviewer · {name}", "grandkidses": f"qa · {name}"},
+    )
+    setattr(agg, "session_parents", {"kid1session": "rootsession", "grandkidses": "kid1session"})
+    return agg
+
+
+def test_a_nested_label_pays_for_its_own_indent():
+    """The child's ``└ `` prefix comes OUT of the label budget, not on top of it.
+
+    Asserted on ``prefix + label`` against the budget directly, because the
+    symptom is NOT a row that overruns the frame: ``name_col`` is sized to the
+    widest label present, so an over-budget nested label simply widens the
+    column and every row still fits. What is lost is a CHARACTER — the label was
+    composed to the full budget, the prefix pushed it past the column, and the
+    paint's truncation takes the tail back off without a marker. Measuring the
+    rendered row therefore cannot see this; measuring the label against the
+    budget it was promised can.
+
+    Verified to fail against the mutant (``budget = name_cap``): at a 48-cell cap
+    a depth-2 label renders 50 cells.
+    """
+    # The aggregate is irrelevant here — only the id and the depth decide a
+    # label's budget — but it is a real one so the row shape matches the paint.
+    scope = UsageAggregate(calls=1, ok_calls=1, context_tokens=1, cost_micro=1, cost_known_calls=1)
+    structure = [("rootsession", 0, scope), ("kid1session", 1, scope), ("grandkidses", 2, scope)]
+    long_name = "Toggleable Sidebar for Session Switching in the TUI"
+    names = {
+        "rootsession": long_name,
+        "kid1session": f"reviewer · {long_name}",
+        "grandkidses": f"qa · {long_name}",
+    }
+    for cap in range(_MIN_NAME_COL, _MAX_NAME_COL + 1):
+        labels = _forest_labels(structure, names, cap)
+        for sid, depth, _ in structure:
+            rendered = _row_prefix(depth) + labels[sid]
+            assert cell_len(rendered) <= cap, (
+                f"cap {cap}, depth {depth}: {rendered!r} is {cell_len(rendered)} cells — "
+                "the indent was not paid for out of the budget"
+            )
+
+
+def test_no_session_row_is_cut_without_a_marker_at_any_width():
+    """Every name the reader sees is either COMPLETE or ends in ``…``.
+
+    The third state is the defect: a name that is a strict prefix of the real
+    one with no marker, which reads as a complete title and is not. Nested rows
+    are the case that matters here, because their prefix is what pushes a label
+    over the column that then cuts it.
+    """
+    aggregate = _deep_named_aggregate()
+    known = set((getattr(aggregate, "session_names", {}) or {}).values())
+    for width in range(96, 161):
+        lines = [line.plain for line in build_report(aggregate, width)]
+        block = "\n".join(lines).split("By session", 1)[-1]
+        for row in (r.rstrip() for r in block.splitlines() if " tokens" in r):
+            # The name field is everything up to the run of spaces padding it to
+            # ``name_col``; strip the indent and glyph a nested row leads with.
+            name = row.strip().lstrip("└").strip().split("   ")[0].rstrip()
+            if name.endswith("…"):
+                continue  # a MARKED cut is exactly what this fix produces
+            assert name in known, (
+                f"width {width}: {name!r} is neither a complete name nor marked as cut "
+                f"— it is a silent fragment"
+            )
+
+
+def test_the_budget_is_measured_over_subtree_totals_not_own_spend():
+    """A root row paints its SUBTREE total, so that is what the columns must fit.
+
+    Budgeting against ``by_session``'s own aggregates understates the cost and
+    calls columns by however much the children add, which is the D8/D11 clipping
+    one rollup later.
+    """
+    aggregate = _deep_named_aggregate()
+    own = _row_overhead(list(aggregate.by_session.items()), 120)
+    # what the table actually paints: the root carries 1+2+3 == 6, not 1
+    rolled = _row_overhead([("rootsession", aggregate)], 120)
+    assert rolled >= own, "the subtree total cannot need LESS room than one part"
+    text = "\n".join(line.plain for line in build_report(aggregate, 120))
+    rows = [r.rstrip() for r in text.split("By session", 1)[-1].splitlines() if " tokens" in r]
+    assert all(truncate_cells(r, 120) == r for r in rows)
+
+
+def test_two_children_of_one_parent_never_render_the_same_label():
+    """Sibling subagents compose byte-identical names; the rows must still differ.
+
+    ``<role> · <parent title>`` is the real composed shape, so every sibling
+    delegated under one parent with one role collides by construction — the
+    operator's ledger has parents with 46, 29 and 24 such children. Nesting does
+    not excuse the collision: the indent says "child of the row above", not
+    "a different session from the one below".
+    """
+
+    def scope(micro):
+        return UsageAggregate(
+            calls=1, ok_calls=1, context_tokens=micro, cost_micro=micro, cost_known_calls=1
+        )
+
+    agg = scope(4_000_000)
+    kids = ["aa01000000c1", "aa02000000c2", "aa03000000c3"]
+    agg.by_session = {"rootsession": scope(1_000_000), **{k: scope(1_000_000) for k in kids}}
+    shared = "reviewer · Toggleable Sidebar for Session Switching"
+    setattr(agg, "session_names", {"rootsession": "Root", **{k: shared for k in kids}})
+    setattr(agg, "session_parents", {k: "rootsession" for k in kids})
+
+    text = "\n".join(line.plain for line in build_report(agg, 120))
+    rows = [r.rstrip() for r in text.split("By session", 1)[-1].splitlines() if " tokens" in r]
+    # The name field is everything before the run of spaces that pads it out to
+    # ``name_col``; a child row leads with its ``└ `` prefix, so strip that off
+    # first rather than splitting on it.
+    names = [
+        r.strip().lstrip("└").strip().split("   ")[0].strip() for r in rows if _is_child_row(r)
+    ]
+    assert len(names) == len(kids), names
+    assert len(set(names)) == len(names), f"sibling rows collide: {names}"
