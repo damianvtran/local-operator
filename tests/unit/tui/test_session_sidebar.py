@@ -1364,13 +1364,19 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
     Raised as M2 in code review round 1: `CatalogEntry.status` returns "Unseen
     completion" ahead of every state branch, so pairing it with
     ``row_state_mark``'s answer would show `◷` beside those words. That pairing
-    never reaches a user — the sidebar substitutes its own `✓`/`✗` for an
+    never reaches a user — the sidebar substitutes its own mark for an
     unseen row — but the only thing establishing that is the render, so the
     render is what this test reads.
 
     Written as a pilot test rather than as a call to ``row_state_mark`` for
     exactly that reason: the helper's answer is not what is painted here, and a
     unit-level assertion would describe a surface that does not exist.
+
+    The row here is ``idle`` with a wake armed, which is the case M2 named AND
+    is now also the case where the mark still WINS. The states where live
+    activity outranks it (``busy``, ``wedged``) are enumerated by
+    ``test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words`` below,
+    which walks the whole product rather than these three hand-picked rows.
     """
     from textual.geometry import Region
 
@@ -1378,7 +1384,8 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
     cases = [
         ("complete", "✓", "Unseen completion"),
         ("error", "✗", "Unseen error"),
-        ("interrupted", "✗", "Unseen interruption"),
+        # `⊘`, not `✗`: an interruption is unfinished work, not a failure.
+        ("interrupted", "⊘", "Unseen interruption"),
     ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 30)) as pilot:
@@ -1410,3 +1417,186 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
             assert entry.status == words, (kind, entry.status)
             # The wake glyph must NOT be what a user sees on an unseen row.
             assert "◷" not in row, (kind, row)
+
+
+@pytest.mark.asyncio
+async def test_a_busy_row_keeps_its_spinner_while_a_completion_is_unacknowledged():
+    """The operator's reported bug, as a test: a resumed session drew ``✗``.
+
+    ``unseen`` is a LEVEL, not an edge — it stays true from the moment a turn
+    completes until somebody READS that session, and resuming a session does
+    not acknowledge it (``AttentionStore`` clears it only when
+    ``receipts.acknowledged`` catches up to ``completions.sequence``). The
+    sidebar's unseen override sat unconditionally above the live-state mark,
+    so a session the operator had already resumed — actively streaming, its
+    runtime publishing ``busy`` — kept painting the mark from its PREVIOUS
+    turn over its own spinner. Seven such rows read as a screen of failures
+    while every one of them was working.
+
+    The row is asserted as still-unseen, because the fix is a precedence
+    change and not an acknowledgement: the completion is still unread, and
+    the moment the turn finishes the mark must come back.
+    """
+    from textual.geometry import Region
+
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+
+    now = time.time()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        _quiesce_sidebar_refresh(app)
+        sidebar = app._session_sidebar
+        for kind in ("complete", "error", "interrupted"):
+            entry = CatalogEntry(
+                SessionRow("b" * 12, now, f"resumed {kind}", live_state="busy"),
+                unseen=True,
+                completion_kind=kind,
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.stop()
+                sidebar._timer = None
+            sidebar._frame = 2
+            sidebar.refresh()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            row = next(line for line in painted if f"resumed {kind}" in line)
+            assert SPINNER_FRAMES[2] in row, (kind, row)
+            # None of the completion marks may survive on a working row.
+            for stale in ("✓", "✗", "⊘"):
+                assert stale not in row, (kind, stale, row)
+            assert entry.status == "Working", (kind, entry.status)
+            # The completion is still UNREAD — this is precedence, not a receipt.
+            assert entry.unseen, kind
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_row_draws_its_own_glyph_and_not_the_error_mark():
+    """``✗`` is errors only; an interruption is not a failure.
+
+    The operator's store held 526 ``complete`` and 41 ``interrupted`` rows and
+    ZERO ``error`` rows, so before this every ``✗`` ever rendered in the
+    sidebar was an interruption wearing the failure glyph.
+    """
+    from textual.geometry import Region
+
+    now = time.time()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        _quiesce_sidebar_refresh(app)
+        sidebar = app._session_sidebar
+        painted_by_kind = {}
+        for kind in ("complete", "error", "interrupted"):
+            entry = CatalogEntry(
+                SessionRow("c" * 12, now, f"idle {kind}", live_state="idle"),
+                unseen=True,
+                completion_kind=kind,
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            painted_by_kind[kind] = next(line for line in painted if f"idle {kind}" in line)
+        assert "⊘" in painted_by_kind["interrupted"], painted_by_kind["interrupted"]
+        assert "✗" not in painted_by_kind["interrupted"], painted_by_kind["interrupted"]
+        assert "✗" in painted_by_kind["error"], painted_by_kind["error"]
+        assert "⊘" not in painted_by_kind["error"], painted_by_kind["error"]
+        assert "✓" in painted_by_kind["complete"], painted_by_kind["complete"]
+
+
+@pytest.mark.asyncio
+async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
+    """The ``unseen`` product, exhaustively, on the RENDERED row.
+
+    The sibling ``test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words``
+    excludes ``unseen`` on the grounds that it short-circuits ``status`` ahead
+    of every branch that function enumerates. That reasoning was sound and the
+    exclusion still cost us the reported bug: with the fourth dimension tested
+    only through three hand-picked rows, "unseen AND busy" — the combination
+    the operator actually hit, on seven rows at once — was covered by nothing.
+
+    So this is the same exhaustive treatment applied to the dimension that was
+    left out, driven through the real render because the sidebar's override is
+    the only place the pairing becomes real.
+    """
+    from textual.geometry import Region
+
+    from local_operator.tui.terminal_title import SPINNER_FRAMES
+
+    #: Which words may accompany each glyph on an unseen row.
+    ALLOWED = {
+        "✓": {"Unseen completion"},
+        "✗": {"Unseen error", "Not responding"},
+        "⊘": {"Unseen interruption"},
+        "!": {"Approval needed", "Answer needed"},
+    }
+    now = time.time()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    checked = 0
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        _quiesce_sidebar_refresh(app)
+        sidebar = app._session_sidebar
+        for kind in ("complete", "error", "interrupted"):
+            for state in ("", "idle", "attached", "busy", "wedged"):
+                for pending in (None, "approval", "ask"):
+                    for wakes, dormant in ((0, False), (2, False), (1, True)):
+                        entry = CatalogEntry(
+                            SessionRow(
+                                "d" * 12,
+                                now,
+                                "pairing probe",
+                                live_state=state,
+                                pending=pending,
+                                wakes=wakes,
+                                wakes_dormant=dormant,
+                            ),
+                            unseen=True,
+                            completion_kind=kind,
+                        )
+                        sidebar.set_entries([entry])
+                        if sidebar._timer is not None:
+                            sidebar._timer.stop()
+                            sidebar._timer = None
+                        sidebar._frame = 2
+                        sidebar.refresh()
+                        await pilot.pause()
+                        painted = [
+                            "".join(segment.text for segment in line)
+                            for line in sidebar.render_lines(
+                                Region(0, 0, sidebar.size.width, sidebar.size.height)
+                            )
+                        ]
+                        row = next(line for line in painted if "pairing probe" in line)
+                        status = entry.status
+                        case = (kind, state, pending, wakes, dormant, row, status)
+                        glyph = next((g for g in ALLOWED if g in row), "")
+                        if SPINNER_FRAMES[2] in row:
+                            # Working outranks the mark, and says so.
+                            assert status == "Working", case
+                            assert not glyph, case
+                        else:
+                            assert glyph, case
+                            assert status in ALLOWED[glyph], case
+                        checked += 1
+    # 3 kinds x 5 states x 3 gates x 3 wake shapes.
+    assert checked == 135, checked
