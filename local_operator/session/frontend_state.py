@@ -233,8 +233,32 @@ _SHAREABLE_STATE_FIELDS = frozenset(
 #: total" is the same defect one level up, and call count per turn has no cap.
 #: The floor keeps every retained end legible — a card that says how it ended
 #: is what stops the retirement pass marking it interrupted.
+#:
+#: The budget is spent against each row's MEASURED serialized size, not against
+#: the length of the fields this module happens to know about. The first cut of
+#: this bound clipped ``content[].text`` and so was blind to every payload that
+#: carries no ``text`` key: an ``ImageContent`` block holds base64 in ``data``
+#: (one permitted image is ~1.4 MB encoded — larger than the whole line limit
+#: by itself, and 3 image ``read`` calls measured a 1,524,116-byte frame), and
+#: ``result.details`` holds the MCP bridge's full ``server_result`` dump (50
+#: calls measured 2,619,443 B). Both sailed through a bound that was looking at
+#: a different key. Measuring the row is what makes the NEXT payload-bearing
+#: field bounded on the day it is added rather than on the day it overflows.
 LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 60_000
 LIVE_EVENT_TEXT_FLOOR_CHARS = 200
+
+#: Placeholder for a result block too big to ride the reconnect seed.
+#:
+#: A dropped block still leaves the card settleable — ``on_tool_ended`` needs
+#: the id and outcome, not the payload — but a block that VANISHES reads as a
+#: tool that returned nothing. The stand-in keeps the block's own shape (a
+#: valid ``TextContent``) so the viewer renders it as an ordinary row, and says
+#: what happened, because "the reconnect dropped this" and "the tool returned
+#: nothing" are different facts and only one of them is about the tool.
+#:
+#: The full payload is never lost: it is in the durable transcript, and a
+#: viewer that stayed connected received it untouched over the live relay.
+LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER = "[dropped from the reconnect snapshot — see the transcript]"
 
 #: Cap on retained ``tool_execution_end`` rows in the seed, newest kept.
 #:
@@ -1886,33 +1910,86 @@ def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
     # Only ``tool_execution_end`` retains a payload; starts and message rows
     # are already small and are folded by phase, so they are not counted into
     # the share they would otherwise dilute.
-    texts: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-    for item in events:
-        if not isinstance(item, dict) or item.get("type") != "tool_execution_end":
-            continue
-        result = item.get("result")
-        if not isinstance(result, dict):
-            continue
-        blocks = [
-            block
-            for block in (result.get("content") or [])
-            if isinstance(block, dict) and isinstance(block.get("text"), str)
-        ]
-        if blocks:
-            texts.append((result, blocks))
-    if not texts:
+    results = [
+        result
+        for item in events
+        if isinstance(item, dict) and item.get("type") == "tool_execution_end"
+        if isinstance(result := item.get("result"), dict)
+    ]
+    if not results:
         return
-    share = max(LIVE_EVENT_TEXT_FLOOR_CHARS, LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS // len(texts))
-    for _result, blocks in texts:
-        # Per ROW, not per block: a result of many blocks would otherwise
-        # multiply its own share and reinstate the unbounded shape one level
-        # further down.
-        remaining = share
-        for block in blocks:
-            text = block["text"]
-            if len(text) > remaining:
-                block["text"] = text[:remaining] + "…" if remaining > 0 else "…"
-            remaining = max(0, remaining - len(text))
+    share = max(LIVE_EVENT_TEXT_FLOOR_CHARS, LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS // len(results))
+    for result in results:
+        _bound_live_result_in_place(result, share=share)
+
+
+def _live_row_cost(value: Any) -> int:
+    """Serialized size of one payload, which is the only honest unit here.
+
+    ``len(str)`` was the round-3 defect: it measures the fields this module
+    thought to look at, so a payload under a different key was not "small", it
+    was UNMEASURED. Serializing is what makes the budget total.
+    """
+    try:
+        return len(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        # A payload that will not serialize cannot be sized, so it is treated
+        # as too big to keep rather than waved through unmeasured — the exact
+        # mistake this function exists to stop making.
+        return LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
+
+
+def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
+    """Spend one retained end's share across everything it actually carries.
+
+    Driven by MEASURED cost rather than by key names, so a payload-bearing
+    field cannot escape by not being a string (see
+    :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` for the two that did).
+
+    Order matters and is deliberate. ``details`` goes first: it is machine
+    detail for a card the viewer is only settling, so it is the cheapest thing
+    to lose and dropping it often buys the whole share back. Text is clipped
+    next, because a clipped preview still tells the user what the tool said.
+    Whole blocks are dropped last and only when they still do not fit, since a
+    dropped block is the biggest loss of the three.
+
+    Every branch keeps the row itself, and the row is what settles the card —
+    dropping the row would strand the card live and re-open the
+    ``⊘ interrupted`` artefact this retention exists to close.
+    """
+    if _live_row_cost(result) <= share:
+        return
+    # ``details`` is not rendered on the card at all (``on_tool_ended`` reads
+    # it only for the write/edit counters), so an oversized one is pure weight
+    # on a frame that must fit. The MCP bridge's ``server_result`` dump reached
+    # 2.6 MB across 50 calls.
+    details = result.get("details")
+    if details is not None and _live_row_cost(details) > share // 4:
+        result["details"] = None
+    blocks = [block for block in (result.get("content") or []) if isinstance(block, dict)]
+    remaining = share
+    for block in blocks:
+        cost = _live_row_cost(block)
+        if cost <= remaining:
+            remaining -= cost
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            # Clip in CHARACTERS against the remaining budget, less the fixed
+            # overhead of the block's own envelope, so a clipped block lands
+            # under the share rather than merely smaller than it was.
+            envelope = cost - len(text)
+            allowance = max(LIVE_EVENT_TEXT_FLOOR_CHARS, remaining - envelope)
+            if len(text) > allowance:
+                block["text"] = text[:allowance] + "…"
+        else:
+            # No text to clip — an image's base64, or any future block whose
+            # payload lives under a key this function has never heard of. It is
+            # replaced rather than emptied so the row still reads as a block.
+            block.clear()
+            block["type"] = "text"
+            block["text"] = LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+        remaining = max(0, remaining - _live_row_cost(block))
 
 
 def _bound_job_text_in_place(job: dict[str, Any], *, share: int) -> None:

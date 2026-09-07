@@ -30,6 +30,7 @@ from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
+    LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
     LIVE_EVENT_END_ROWS_MAX,
     LIVE_EVENT_TEXT_FLOOR_CHARS,
     LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS,
@@ -649,6 +650,15 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # contributing 2 MB to a 1 MiB frame. A retained `tool_execution_end`
         # is the row that grows one-per-call with a full tool result attached;
         # this fixture is what makes `assert_frame_fits` able to see it.
+        #
+        # Each row carries all THREE payload shapes a real turn produces, because
+        # a bound written against one of them silently misses the others. The
+        # first cut of this bound clipped `content[].text` and let both of the
+        # rest through: an image block keeps its base64 under `data` (one
+        # permitted image is ~1.4 MB encoded, over the whole line limit by
+        # itself) and `details` carries the MCP bridge's `server_result` dump
+        # (50 calls measured 2.6 MB). A fixture that only holds text can only
+        # ever catch the bug that was already fixed.
         "live_events": [
             row
             for index in range(1_000)
@@ -666,7 +676,15 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
                     "result": {
                         "tool_call_id": f"call-{index}",
                         "tool_name": "read",
-                        "content": [{"type": "text", "text": "e" * 60_000}],
+                        "content": [
+                            {"type": "text", "text": "e" * 60_000},
+                            {
+                                "type": "image",
+                                "data": "A" * 1_400_000,
+                                "mime_type": "image/png",
+                            },
+                        ],
+                        "details": {"server_result": {"blob": "D" * 50_000}},
                         "is_error": False,
                     },
                 },
@@ -1673,7 +1691,15 @@ async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
     seed: list[dict[str, Any]] = []
     for index in range(600):
         seed.append(_live_start(f"call-{index}"))
-        seed.append(_live_end(f"call-{index}", text="R" * 20_000))
+        # Every payload shape a real turn produces, not just text: an image
+        # block alone is over the line limit, and `details` is what the MCP
+        # bridge fills. A seed of pure text cannot prove the socket survives.
+        end = _live_end(f"call-{index}", text="R" * 20_000)
+        end["result"]["content"].append(
+            {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+        )
+        end["result"]["details"] = {"server_result": {"blob": "D" * 50_000}}
+        seed.append(end)
     handle._frontend.mutate(jobs=_jobs(200, 500), live_events=seed)
 
     registrant = RuntimeServer(handle, kind="tui")
@@ -1696,3 +1722,95 @@ async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+def _live_image_end(call_id: str, *, b64: str) -> dict[str, Any]:
+    """A completed `read` of a PNG — the shape with no ``text`` key at all."""
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "image", "data": b64, "mime_type": "image/png"}],
+            "is_error": False,
+        },
+    }
+
+
+def test_an_image_result_cannot_ride_the_seed_verbatim() -> None:
+    """A block with no ``text`` key must still be bounded.
+
+    ``ImageContent`` carries base64 under ``data``. One permitted image is
+    ~1.4 MB encoded — larger than the whole socket line limit on its own — so
+    a bound that inspects ``text`` does not merely clip it badly, it never
+    sees it. The row survives (it is what settles the card) and the block is
+    replaced by a marker rather than deleted, so the card does not read as a
+    tool that returned nothing.
+    """
+    survivors = _bounded_live_events([_live_image_end("img", b64="A" * 1_400_000)])
+
+    end = survivors[0]
+    assert end["tool_call_id"] == "img" and end["is_error"] is False
+    block = end["result"]["content"][0]
+    assert LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER in block["text"]
+    assert "A" * 1_000 not in json.dumps(end), "the base64 payload must not reach the wire"
+    assert len(json.dumps(end)) < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS
+
+
+def test_fat_result_details_cannot_ride_the_seed_verbatim() -> None:
+    """``result.details`` is bounded too — the MCP bridge fills it.
+
+    ``details`` holds the bridge's whole ``server_result`` dump and is not
+    rendered on the card, so it is the cheapest thing to shed and the first
+    thing dropped. 50 such calls measured 2.6 MB before this.
+    """
+    row = _live_end("mcp", text="ok")
+    row["result"]["details"] = {"server_result": {"blob": "D" * 500_000}}
+
+    end = _bounded_live_events([row])[0]
+
+    assert end["result"]["details"] is None
+    assert "D" * 1_000 not in json.dumps(end)
+    # The card still settles and still shows what the tool said.
+    assert end["result"]["content"][0]["text"] == "ok"
+
+
+def test_a_small_ordinary_result_is_left_exactly_alone() -> None:
+    """The bound is a ceiling, not a rewrite: the common row must be untouched.
+
+    Worth asserting because every other test here drives the clipping paths;
+    without this, a bound that mangled ordinary results would look correct.
+    """
+    row = _live_end("ok", text="3 files changed")
+    row["result"]["details"] = {"added": 3, "removed": 1}
+
+    end = _bounded_live_events([row])[0]
+
+    assert end["result"]["content"][0]["text"] == "3 files changed"
+    assert end["result"]["details"] == {"added": 3, "removed": 1}
+
+
+def test_the_headline_of_a_clipped_result_survives_beside_an_image() -> None:
+    """A mixed result keeps its text preview AND settles, in one row.
+
+    The realistic shape after a browser screenshot or an image ``read``: text
+    the user wants to read, plus a payload that cannot ride. Both paths run on
+    the same row here, which is what the round-3 defect got wrong.
+    """
+    row = _live_end("mixed", text="HEADLINE. " + "z" * 300_000)
+    row["result"]["content"].append(
+        {"type": "image", "data": "B" * 1_400_000, "mime_type": "image/png"}
+    )
+    row["result"]["details"] = {"server_result": {"blob": "D" * 200_000}}
+
+    end = _bounded_live_events([row])[0]
+    text_block, image_block = end["result"]["content"]
+
+    assert text_block["text"].startswith("HEADLINE. ")
+    assert text_block["text"].endswith("…")
+    assert LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER in image_block["text"]
+    assert end["result"]["details"] is None
+    assert len(json.dumps(end)) < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1_000
