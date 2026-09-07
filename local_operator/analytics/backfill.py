@@ -34,6 +34,17 @@ TITLE OF THE CONVERSATION THAT DELEGATED IT, which the ledger already knows via
 a real title, giving ``reviewer · Fix usage data not updating`` — a row a reader
 can place. The remainder fall back to the opener excerpt.
 
+THIS SCHEME CANNOT SEPARATE SIBLINGS ON ITS OWN, and that is by construction:
+every subagent delegated under one parent with one role composes the same string
+(the real ledger has parents with 46, 29 and 24 unnamed children, and 401 of the
+473 recovered rows shared a label with another). The information that would tell
+them apart is not in the ledger. Distinguishing them is therefore the RENDERING
+layer's job, not this sweep's: ``model.session_table_labels`` appends a short id
+fragment to the rows of a collision group, so ``coder · Update Provider O · c4f7``
+is addressable while the composed part still says what the work was. What this
+module owes that layer is a label that is *meaningful*; uniqueness is added
+where the table is built, against the session id it is keyed by.
+
 Written at ``SESSION_NAME_RANK_BACKFILL``, which cannot displace a real title.
 The sweep reads a session's title off disk and cannot tell whether it was
 user-set, so ranking it any higher would let a startup pass overwrite a rename
@@ -66,7 +77,7 @@ logger = logging.getLogger("local_operator.analytics.backfill")
 #: sidecar: this runs over hundreds of directories at startup, and the opener is
 #: already in hand from ``session_name``.
 _ROLE_RE = re.compile(
-    r"\[role:\s*([^\]]{1,32}?)\s*\]|You are (?:an? |the )?([a-z][a-z\-]{1,20}) on this team",
+    r"\[role:\s*([^\]]{1,32}?)\s*\]|You are (?:an? |the )?([a-zA-Z][a-zA-Z\-]{1,20}) on this team",
     re.IGNORECASE,
 )
 
@@ -123,9 +134,16 @@ def backfill_analytics_session_names(
 
     sessions = config_dir / "sessions"
     written = 0
-    # Sorted so a store too large for one pass makes deterministic progress
-    # rather than re-drawing a random subset each launch.
-    for session_id in sorted(pending):
+    # PARENTS BEFORE CHILDREN, then sorted. A child composes its label from its
+    # parent's ledger title, so a child processed before its own parent reads a
+    # title that is not written yet and degrades to ``role · <hex parent id>``
+    # — and that is not self-correcting, because the child now HAS a name and
+    # drops out of the next launch's worklist permanently. Ordering the pass by
+    # depth costs nothing and closes it; ``known`` is refreshed as rows are
+    # written below so the parent's new title is visible to its children.
+    # Sorted within a depth so a store too large for one pass makes
+    # deterministic progress rather than re-drawing a random subset each launch.
+    for session_id in _parents_first(pending, parents):
         if written >= limit:
             break
         directory = sessions / session_id
@@ -144,8 +162,33 @@ def backfill_analytics_session_names(
         if not name:
             continue
         store.upsert_session_name(session_id, name, rank=SESSION_NAME_RANK_BACKFILL)
+        # Publish into the snapshot so a child later in THIS pass composes from
+        # the title its parent just received rather than from a hex id.
+        known[session_id] = name
         written += 1
     return written
+
+
+def _parents_first(pending: set[str], parents: dict[str, str]) -> list[str]:
+    """``pending`` ordered so a session precedes any of its descendants.
+
+    Depth is counted by walking ``parent_session_id`` links, with a visited set
+    so a cycle (which the tree should never contain, but which a corrupt ledger
+    could present) is bounded rather than hanging the maintenance thread. Ties
+    are broken by id, keeping the pass deterministic.
+    """
+
+    def depth(session_id: str) -> int:
+        seen: set[str] = set()
+        steps = 0
+        current = parents.get(session_id, "")
+        while current and current not in seen:
+            seen.add(current)
+            steps += 1
+            current = parents.get(current, "")
+        return steps
+
+    return sorted(pending, key=lambda sid: (depth(sid), sid))
 
 
 def _compose_label(

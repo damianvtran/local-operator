@@ -661,3 +661,57 @@ def test_toggle_hint_shown_only_with_series():
             assert "t cost/tokens" not in hint3
 
     asyncio.run(run())
+
+
+def _sub(cost_micro: int, calls: int = 1) -> UsageAggregate:
+    """A minimal per-session aggregate carrying a distinguishable cost."""
+    return UsageAggregate(
+        calls=calls,
+        input_tokens=1_000,
+        output_tokens=500,
+        context_tokens=1_500,
+        cost_micro=cost_micro,
+        cost_known_calls=calls,
+    )
+
+
+def test_sessions_sharing_a_rendered_label_each_get_their_own_row():
+    """N sessions with one label render N rows, not one (round-1 F1).
+
+    The table used to be a dict keyed by the RENDERED label, so a collision did
+    not merge rows — it dropped every row but the last, taking its tokens, calls
+    and cost off the screen. On the operator's ledger that hid 355 sessions and
+    $3,913. The label is display text; the row's identity is the session id.
+    """
+    agg = _agg()
+    spend = {"aa11bb22cc33": 900_000, "dd44ee55ff66": 500_000, "1122334455aa": 250_000}
+    agg.by_session = {sid: _sub(cost) for sid, cost in spend.items()}
+    # One shared name, exactly what the backfill mints for sibling subagents.
+    shared = "reviewer · Article-search-svc schema review"
+    setattr(agg, "session_names", {sid: shared for sid in spend})
+
+    lines = build_report(agg, width=140)
+    body = "\n".join(line.plain for line in lines)
+    session_block = body.split("By session", 1)[1]
+
+    # Every session is on screen, with ITS OWN cost — not one merged row.
+    for cost in spend.values():
+        assert f"${cost / 1_000_000:.2f}" in session_block, session_block
+    # ...and each row is separately addressable rather than three identical ones.
+    rows = [ln for ln in session_block.splitlines() if "tokens" in ln]
+    assert len(rows) == len(spend)
+    assert len({ln.strip() for ln in rows}) == len(spend), rows
+
+
+def test_a_unique_session_label_is_left_exactly_as_it_was():
+    """The disambiguator is paid only where it buys something."""
+    agg = _agg()
+    agg.by_session = {"aa11bb22cc33": _sub(900_000), "dd44ee55ff66": _sub(500_000)}
+    setattr(
+        agg,
+        "session_names",
+        {"aa11bb22cc33": "Fix the analytics rollup", "dd44ee55ff66": "Rename the sessions"},
+    )
+    body = "\n".join(line.plain for line in build_report(agg, width=140))
+    assert "Fix the analytics rollup " in body
+    assert "·" not in body.split("By session", 1)[1].split("Fix the analytics rollup")[1][:40]

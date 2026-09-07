@@ -636,14 +636,91 @@ def usage_component_chars_json(chars: Mapping[str, int]) -> str:
 _WS_RE = re.compile(r"\s+")
 
 
+#: Width the per-session table renders a label at. Named because the collision
+#: disambiguator below has to budget against it: a suffix that is truncated away
+#: does not disambiguate anything.
+SESSION_LABEL_CHARS = 32
+
+#: Shortest id fragment a disambiguating suffix may use. Grown per collision
+#: group until the group's members are actually distinguishable, so the common
+#: case stays short and a 22-way collision still resolves.
+_MIN_SUFFIX_CHARS = 4
+
+
 def short_session_label(session_id: str, name: str = "") -> str:
     """A compact label for a session in the per-session table.
 
     Prefers a human name when one exists, falling back to the 12-hex id. Kept
     here so the store and the TUI agree on how a session is named without the
     store importing a widget.
+
+    NOT unique across sessions, by construction — two sessions with the same
+    name, or whose names agree in their first ``SESSION_LABEL_CHARS``, render
+    the same string. Anything building a per-session TABLE must therefore key
+    it by session id and treat this as display text only; see
+    :func:`session_table_labels`.
     """
     name = _WS_RE.sub(" ", (name or "").strip())
     if name:
-        return name[:32]
+        return name[:SESSION_LABEL_CHARS]
     return (session_id or "unknown")[:12]
+
+
+def session_table_labels(names_by_id: Mapping[str, str]) -> dict[str, str]:
+    """Per-session-id display labels, disambiguated where they would collide.
+
+    A row that renders the same string as another row is not just ugly, it is
+    unusable: the reader cannot say WHICH session spent the money, and the two
+    rows are indistinguishable in a way two hex ids never are. That is the
+    failure the naming work set out to remove, and composed subagent labels
+    (``<role> · <parent title>``) reintroduce it by construction — every sibling
+    delegated under one parent with one role composes byte-identically, and the
+    real ledger has parents with 46, 29 and 24 such children.
+
+    So a label shared by more than one session gets a ``· <id fragment>``
+    suffix, and the name is cut to make ROOM for it rather than letting the
+    suffix fall off the 32-char edge — a truncated disambiguator disambiguates
+    nothing. The fragment is the shortest prefix (>= 4) that separates the
+    members of that collision group, so the ordinary case stays short and a
+    22-way collision still resolves; it is a prefix of the session id precisely
+    so it can be matched against the id every other surface shows.
+
+    An UNNAMED row's label is already an id prefix, so it is widened in place
+    rather than given a suffix that would repeat the id back to itself.
+
+    Rows whose label is already unique are left EXACTLY as
+    :func:`short_session_label` renders them — the suffix is a cost paid only
+    where it buys something.
+    """
+    base: dict[str, str] = {
+        sid: short_session_label(sid, name) for sid, name in names_by_id.items()
+    }
+    groups: dict[str, list[str]] = {}
+    for sid, label in base.items():
+        groups.setdefault(label, []).append(sid)
+
+    labels: dict[str, str] = {}
+    for label, sids in groups.items():
+        if len(sids) == 1:
+            labels[sids[0]] = label
+            continue
+        # Widen the fragment until it actually separates this group. Bounded by
+        # the longest id present, so ids sharing a full value (which cannot
+        # happen for a primary key) terminate rather than loop.
+        longest = max((len(sid) for sid in sids), default=0)
+        width = _MIN_SUFFIX_CHARS
+        while width < longest and len({sid[:width] for sid in sids}) < len(sids):
+            width += 1
+        for sid in sids:
+            if not (names_by_id.get(sid) or "").strip():
+                # UNNAMED rows already render an id prefix, so appending a
+                # second copy of that id would read ``abc123 · abc1``. Widen the
+                # prefix in place instead: it is the same fallback, just far
+                # enough along the id to be unambiguous.
+                labels[sid] = (sid or "unknown")[: max(width, 12)][:SESSION_LABEL_CHARS]
+                continue
+            fragment = (sid or "unknown")[:width]
+            suffix = f" · {fragment}"
+            room = max(0, SESSION_LABEL_CHARS - len(suffix))
+            labels[sid] = f"{label[:room].rstrip()}{suffix}"
+    return labels

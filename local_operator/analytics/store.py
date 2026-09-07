@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS session_names (
   session_id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
   updated_at_ms INTEGER NOT NULL,
-  rank INTEGER NOT NULL DEFAULT 20
+  rank INTEGER NOT NULL DEFAULT {SESSION_NAME_RANK_TITLE}
 );
 
 -- Calendar ROLLUP tables. These are NOT a second source of truth: every row is
@@ -854,12 +854,22 @@ class AnalyticsStore:
         title, which is precisely the precedence ``session/naming.py`` protects
         on the live holder. The ``WHERE excluded.rank >= session_names.rank``
         clause makes the same rule true of the ledger: a same-or-better source
-        may correct the row, a weaker one may only fill an empty slot.
+        may correct the row, a weaker one may only fill an empty slot — and an
+        EMPTY incumbent name counts as an empty slot at any rank (see the
+        ``session_names.name = ''`` arm of the gate below).
 
         Equal rank still overwrites, deliberately: a re-title is the same rank
         as the title it replaces and MUST be able to replace it.
+
+        An empty ``name`` is rejected outright rather than written. Storing one
+        creates a row that is simultaneously PRESENT (so it pins a rank) and
+        MISSING (``sessions_missing_names`` selects on ``name = ''``), which the
+        startup backfill would re-derive and re-attempt on every launch forever
+        while the rank gate rejected it — unbounded work that can never
+        converge. The recorder already guards this; the store is the shared
+        surface, so the guard belongs here too.
         """
-        if not session_id:
+        if not session_id or not name:
             return
         conn = self._connect()
         if conn is None:
@@ -869,8 +879,9 @@ class AnalyticsStore:
                 "INSERT INTO session_names (session_id, name, updated_at_ms, rank) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
                 "name=excluded.name, updated_at_ms=excluded.updated_at_ms, "
-                "rank=excluded.rank WHERE excluded.rank >= session_names.rank",
-                (session_id, name or "", self._now_ms(), int(rank)),
+                "rank=excluded.rank WHERE excluded.rank >= session_names.rank "
+                "OR session_names.name = ''",
+                (session_id, name, self._now_ms(), int(rank)),
             )
             conn.commit()
         except Exception:  # noqa: BLE001

@@ -908,3 +908,62 @@ def test_sessions_missing_names_is_scoped_to_sessions_the_ledger_knows(tmp_path)
     store.upsert_session_name("named", "Has a title", rank=SESSION_NAME_RANK_TITLE)
     assert store.sessions_missing_names() == {"bare"}
     store.close()
+
+
+def test_an_empty_name_is_never_stored(tmp_path):
+    """An empty name would create a row that is present AND missing.
+
+    Round-1 F3: ``sessions_missing_names`` selects on ``name = ''``, so a stored
+    empty name pins a rank while still appearing in the backfill's worklist —
+    the sweep re-derives it every launch and the rank gate rejects it every
+    launch, forever. The recorder already guarded this; the store is the shared
+    surface, so it guards it too.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    store.upsert_session_name("s1", "", rank=SESSION_NAME_RANK_TITLE)
+    conn = store._connect()
+    assert conn is not None
+    assert conn.execute("SELECT COUNT(*) FROM session_names").fetchone()[0] == 0
+    store.close()
+
+
+def test_an_empty_incumbent_name_can_still_be_filled_by_a_weaker_rank(tmp_path):
+    """A pre-existing empty row must be repairable, not permanently stuck.
+
+    The guard above stops NEW empty rows, but a ledger migrated from an older
+    schema can already hold one at TITLE rank. Without the ``name = ''`` arm of
+    the upsert gate, a backfill-rank recovery could never fill it.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    conn = store._connect()
+    assert conn is not None
+    # Exactly the state a migrated legacy row can be in: empty, at TITLE rank.
+    conn.execute(
+        "INSERT INTO session_names (session_id, name, updated_at_ms, rank) VALUES (?,?,?,?)",
+        ("s2", "", 1, SESSION_NAME_RANK_TITLE),
+    )
+    conn.commit()
+
+    store.upsert_session_name("s2", "Recovered Name", rank=SESSION_NAME_RANK_BACKFILL)
+    row = conn.execute("SELECT name FROM session_names WHERE session_id='s2'").fetchone()
+    assert row[0] == "Recovered Name"
+    store.close()
+
+
+def test_the_rank_default_agrees_between_a_fresh_and_a_migrated_database(tmp_path):
+    """F5: the schema DDL and the migration must not drift apart.
+
+    A literal in one and an interpolated constant in the other means changing
+    the constant silently gives a fresh database a different default from a
+    migrated one.
+    """
+    fresh = AnalyticsStore(tmp_path / "fresh.db")
+    conn = fresh._connect()
+    assert conn is not None
+    default = [
+        row[4]
+        for row in conn.execute("PRAGMA table_info(session_names)").fetchall()
+        if row[1] == "rank"
+    ]
+    assert default == [str(SESSION_NAME_RANK_TITLE)]
+    fresh.close()

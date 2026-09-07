@@ -14,7 +14,11 @@ import json
 import time
 
 from local_operator.analytics.backfill import backfill_analytics_session_names
-from local_operator.analytics.model import CallSnapshot
+from local_operator.analytics.model import (
+    SESSION_LABEL_CHARS,
+    CallSnapshot,
+    session_table_labels,
+)
 from local_operator.analytics.store import (
     SESSION_NAME_RANK_BACKFILL,
     SESSION_NAME_RANK_TITLE,
@@ -228,4 +232,102 @@ def test_backfill_survives_an_unreadable_session_directory(tmp_path):
 
     assert backfill_analytics_session_names(tmp_path, store=store) == 1
     assert _names(store)["good"] == "A readable opener"
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# RENDERED-LABEL properties across SIBLING sessions.
+#
+# The gap round 1 found: every test above asserts on the name the sweep WRITES,
+# and none on the string the table actually RENDERS across a set of siblings.
+# That is precisely where the damage was — the panel keyed its table by the
+# rendered label, so N siblings composing one label collapsed to a single row
+# and N-1 sessions' spend vanished from the screen. These pin the end state.
+# ---------------------------------------------------------------------------
+
+
+def test_sibling_sessions_render_distinct_labels_and_never_collapse(tmp_path):
+    """N siblings under one parent+role must stay N addressable rows.
+
+    This is the F1 regression in its natural habitat: the backfill mints
+    byte-identical names for siblings by construction (their opener is a shared
+    role prompt and their parent title is the same), so the rendering layer is
+    what has to keep them apart.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    store.record_batch([_snap("parentaaa")])
+    store.upsert_session_name("parentaaa", "Article-search-svc schema review")
+    # Hex-shaped ids like the real ones: they differ in their first characters,
+    # so a short fragment separates them. (Ids sharing a long prefix simply grow
+    # the fragment until they do not — the property under test is distinctness,
+    # not a fixed suffix width.)
+    siblings = [f"{index:x}a7c9d2e4b6{index:x}" for index in range(12)]
+    for session_id in siblings:
+        store.record_batch([_snap(session_id, parent="parentaaa")])
+        _session(tmp_path, session_id, "[team: lopdev] You are reviewer on this team")
+
+    backfill_analytics_session_names(tmp_path, store=store)
+    names = _names(store)
+    # The written names ARE identical — that is expected and not the bug.
+    assert len({names[s] for s in siblings}) == 1
+
+    labels = session_table_labels({sid: names.get(sid, "") for sid in names})
+    rendered = [labels[s] for s in siblings]
+    assert len(set(rendered)) == len(siblings), rendered
+    assert all(len(label) <= SESSION_LABEL_CHARS for label in rendered)
+    # The role and the parent are still legible; only the tail is spent on the
+    # disambiguator.
+    assert all(label.startswith("reviewer · Article") for label in rendered)
+    store.close()
+
+
+def test_colliding_siblings_keep_their_own_spend_in_the_table(tmp_path):
+    """N sessions sharing a label produce N rows, each with ITS OWN cost.
+
+    The blocker was not only that rows disappeared but that their money went
+    with them, so this asserts per-row spend rather than only row count.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    store.record_batch([_snap("parentbbb")])
+    store.upsert_session_name("parentbbb", "Update Provider Onboarding and OAuth UX")
+    spend = {"kidaaaaaaaa1": 3, "kidbbbbbbbb2": 7, "kidccccccc33": 11}
+    for session_id, calls in spend.items():
+        store.record_batch([_snap(session_id, parent="parentbbb") for _ in range(calls)])
+        _session(tmp_path, session_id, "[role: coder] implement the slice")
+
+    backfill_analytics_session_names(tmp_path, store=store)
+    aggregate = store.aggregate()
+    names = getattr(aggregate, "session_names", {}) or {}
+    labels = session_table_labels({sid: names.get(sid, "") for sid in aggregate.by_session})
+
+    rows = {labels[sid]: agg for sid, agg in aggregate.by_session.items()}
+    # No row is lost to a label collision...
+    assert len(rows) == len(aggregate.by_session)
+    # ...and each sibling still carries its own call count, not a merged one.
+    by_id = {sid: aggregate.by_session[sid].calls for sid in spend}
+    assert by_id == spend
+    store.close()
+
+
+def test_a_parent_named_in_the_same_pass_is_visible_to_its_children(tmp_path):
+    """F4: a child must not degrade to a hex parent id its own pass repaired.
+
+    The child's label is composed from the parent's LEDGER name, and both can be
+    unnamed when the pass begins. Ordering parents first is what stops the child
+    from being permanently stamped ``role · <hex>`` — permanently, because it
+    then has a name and never returns to the worklist.
+    """
+    store = AnalyticsStore(tmp_path / "analytics.db")
+    # Neither has a ledger name; the parent's own title is recoverable from disk.
+    store.record_batch([_snap("zzparent0001")])
+    store.record_batch([_snap("aachild00001", parent="zzparent0001")])
+    _session(tmp_path, "zzparent0001", "Investigate the analytics hex ids")
+    # The child sorts BEFORE its parent by id, so a plain sorted() pass would
+    # compose the child's label first.
+    _session(tmp_path, "aachild00001", "[role: qa-tester] verify the slice")
+
+    backfill_analytics_session_names(tmp_path, store=store)
+    names = _names(store)
+    assert names["aachild00001"] == "qa-tester · Investigate the analytics hex ids"
+    assert "zzparent0001" not in names["aachild00001"]
     store.close()
