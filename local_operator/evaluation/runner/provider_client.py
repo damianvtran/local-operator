@@ -47,12 +47,19 @@ from local_operator.evaluation.runner.model import (
 )
 from local_operator.evaluation.runner.public_reply import (
     MAX_PUBLIC_OBSERVATIONS_CHARS,
+    PUBLIC_REPLY_TOOL_DESCRIPTION,
     REJECTED_PUBLIC_REPLY,
     REPLY_VERSION,
     decode_public_reply,
     is_public_reply,
     looks_like_public_reply,
     public_reply_contract,
+    public_reply_schema,
+)
+from local_operator.harness.reply_channel import (
+    REPLY_CHANNEL_TOOL_NAME,
+    envelope_from_tool_call,
+    reply_channel_tools,
 )
 from local_operator.logger import get_logger
 
@@ -983,7 +990,28 @@ class ProviderModelClient:
                 )
             ],
             messages=list(messages),
-            tool_choice="none",
+            # The decision envelope, offered as the model's OWN tool channel
+            # when the spec supports one. A model trained hard on tool calling
+            # otherwise answers on that channel anyway — as native call syntax
+            # inside the text — and the strict decoder rejects a reply whose
+            # intent was right and whose channel was wrong, at the price of a
+            # full round trip. Both channels carry the same envelope and are
+            # validated by the same decoder; see harness/reply_channel.py.
+            #
+            # Built from frozen schema metadata and the static description, so
+            # the tools array (the FRONT of the provider cache prefix) is
+            # byte-identical on every step of the episode.
+            tools=reply_channel_tools(
+                self._model_spec,
+                public_reply_schema(),
+                description=PUBLIC_REPLY_TOOL_DESCRIPTION,
+            ),
+            # Still "none" in intent for every OTHER tool: the episode drives
+            # the environment through the action protocol, never through
+            # harness tools. ``auto`` here because the one tool on offer IS the
+            # reply, and "none" would forbid the channel we just offered — the
+            # exact contradiction that produced the rejections.
+            tool_choice="auto" if self._model_spec.supports_tools else "none",
             prompt_cache_key=self._prompt_cache_key,
         )
         (
@@ -994,7 +1022,14 @@ class ProviderModelClient:
             provider_request_id,
             context_tokens,
             stream_error,
+            channel_reply,
+            tool_call_count,
         ) = await self._stream(request)
+        if channel_reply is not None:
+            # The model answered on the offered channel. Its arguments ARE the
+            # envelope, so the raw JSON goes to the same decoder the prose path
+            # uses: no second parser, no salvage, identical rejections.
+            text = channel_reply
         self._last_request_ms = _now_ms()
         if context_tokens is not None:
             # A figure reported FOR the request just sent is measured against
@@ -1048,6 +1083,11 @@ class ProviderModelClient:
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
                 action_surface=action_surface,
+                # Was hardcoded to 0 while the runner sent no tools and read no
+                # call. Now that the reply channel exists, the bundle records
+                # how the model actually answered — which is the measurement
+                # that says whether offering the channel is paying off.
+                tool_call_count=tool_call_count,
             )
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.
@@ -1151,7 +1191,10 @@ class ProviderModelClient:
             # whether an unsummarizable context is a provider failure or a
             # harness one (``ContextUnrecoverableError``), which is a different
             # question from this change's.
-            text, usage, cost, _stop, _rid, _ctx, _err = await self._stream(
+            # The summary request offers no tools (``_summary_request`` sends
+            # ``tool_choice="none"`` with an empty list), so the channel fields
+            # are inert here — a summary is prose by definition.
+            text, usage, cost, _stop, _rid, _ctx, _err, _channel, _calls = await self._stream(
                 self._summary_request(prompt)
             )
             summary_usage = usage
@@ -1350,7 +1393,7 @@ class ProviderModelClient:
 
     async def _stream(
         self, request: Any
-    ) -> tuple[str, ModelUsage, int, str, str, int | None, str | None]:
+    ) -> tuple[str, ModelUsage, int, str, str, int | None, str | None, str | None, int]:
         text = ""
         usage = ModelUsage()
         cost_micros = 0
@@ -1360,9 +1403,20 @@ class ProviderModelClient:
         provider_request_id = "unknown"
         context_tokens: int | None = None
         stream_error: str | None = None
+        # Reply-channel calls, accumulated per stream index because a provider
+        # delivers a call's name and its arguments across many deltas. Assembly
+        # is the harness loop's, so the two agree on what a provider's fragments
+        # add up to (``LoopRunner._assemble_tool_call``).
+        channel_calls: dict[int, dict[str, Any]] = {}
         async for event in self._stream_fn(request, None):
             if event.type == "text_delta":
                 text += event.delta
+            elif event.type == "tool_call_delta":
+                state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
+                if event.name:
+                    state["name"] += event.name
+                if event.argument_delta:
+                    state["arg_parts"].append(event.argument_delta)
             elif event.type == "usage":
                 usage, cost_micros = _usage_from(event.usage)
                 context_tokens = _context_tokens_from(event.usage)
@@ -1385,6 +1439,19 @@ class ProviderModelClient:
                 # normalized stop. Dropping this field is what left a refused
                 # episode's evidence blaming the model's JSON.
                 stream_error = event.error
+        from local_operator.harness.types import ToolCall
+
+        calls = [
+            ToolCall(
+                name=state["name"],
+                raw_arguments="".join(state["arg_parts"]).strip() or None,
+            )
+            for _, state in sorted(channel_calls.items())
+        ]
+        # ``None`` when the model did not use the channel (read the prose
+        # instead); the empty string when it did and sent nothing usable, which
+        # is a rejection the decoder must still report.
+        channel_reply = envelope_from_tool_call(calls, name=REPLY_CHANNEL_TOOL_NAME)
         return (
             text,
             usage,
@@ -1393,6 +1460,12 @@ class ProviderModelClient:
             provider_request_id,
             context_tokens,
             stream_error,
+            channel_reply,
+            # Every call the stream carried, including any the model made to a
+            # name we never offered. Recorded in the evidence bundle rather
+            # than acted on: a model reaching for a tool that does not exist is
+            # a signal about the prompt, not something to salvage.
+            len(calls),
         )
 
 

@@ -40,11 +40,13 @@ from local_operator.evaluation.runner.provider_client import (
     build_system_prompt,
     parse_decision,
 )
+from local_operator.harness.reply_channel import REPLY_CHANNEL_TOOL_NAME
 from local_operator.harness.types import (
     ImageContent,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
+    StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
     Usage,
@@ -453,9 +455,13 @@ async def test_client_sends_the_system_prompt_as_a_cacheable_block() -> None:
     request = stream.requests[0]
     assert len(request.system_blocks) == 1
     assert request.messages[0].role == "user"
-    # The episode drives the environment through the protocol, not through
-    # harness tools, so the provider must not be offered any.
-    assert request.tool_choice == "none"
+    # The episode still drives the environment through the protocol, never
+    # through harness tools: the ONLY function offered is the reply channel,
+    # which nothing executes. ``auto`` rather than the old ``none`` because
+    # forbidding the channel we just offered is the contradiction that made a
+    # tool-trained model's reply unparseable — see harness/reply_channel.py.
+    assert request.tool_choice == "auto"
+    assert [tool.name for tool in request.tools] == [REPLY_CHANNEL_TOOL_NAME]
 
 
 @pytest.mark.asyncio
