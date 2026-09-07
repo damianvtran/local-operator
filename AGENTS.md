@@ -632,6 +632,24 @@ Warnings that still hold, each of which has already cost a release:
   `version-bump-guard` CI job now catches this on the PR, but it does **not**
   block an `--admin` merge, because `main`'s ruleset configures no required
   status checks and admins hold a bypass. The pre-tag check is the backstop.
+- **A shard failure on your branch alone is not evidence your diff caused it.**
+  CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
+  `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
+  re-shards every file after it in sort order**. Verified: adding one file
+  early in the ordering moves `tests/unit/tui/test_app_pilot.py` from index 252
+  to 253, i.e. shard 2 to shard 3. A test in the file that moved then fails on
+  your branch and nowhere else, reading exactly like "your diff broke the TUI"
+  when the diff touches no TUI file at all. It is load-sensitive and mostly
+  appears under coverage. Before concluding you caused a suspect shard failure,
+  reproduce it on clean `origin/main` **with** `--cov=local_operator` (several
+  of these pass 3/3 bare and fail intermittently under coverage) and check
+  whether your branch changed that file's shard index. Diagnosing this as a
+  real regression has already cost a review round.
+- **A red `cli-sanity`/`server-sanity` across several PRs at once is the
+  provider, not your diff.** Those jobs call a live model, so a third-party
+  429 reddens every open PR simultaneously — including heads that touch
+  neither surface. The tell is shared fate: check whether sibling PRs went red
+  in the same window, and rerun the job before debugging your change.
 - **Never pre-create a bare tag** (`git tag vX.Y.Z && git push --tags`) and
   then make a release from it. The publish workflow triggers on the *release*
   being published, so a bare tag publishes nothing, and `gh release create`
