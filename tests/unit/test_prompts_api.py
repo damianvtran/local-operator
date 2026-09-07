@@ -162,12 +162,38 @@ def test_system_md_states_harness_identity() -> None:
 
 def test_system_md_requires_owned_browser_cleanup_before_final_response() -> None:
     """Long-lived interactive sessions do not dispose between turns, so the
-    packaged invariant must make normal cleanup the agent's responsibility."""
-    text = render_template("system.md", {})
+    packaged invariant must make normal cleanup the agent's responsibility.
+
+    Rendered with ``has_browser`` because the browser sections are gated: the
+    invariant only has to reach a session that actually has the tool.
+    """
+    text = render_template("system.md", {"has_browser": True})
     assert "action=close" in text
     assert "BEFORE the final response" in text
     assert "Never close another" in text
     assert "session teardown is a fallback" in text
+
+
+def test_browser_prose_is_gated_on_the_tool_being_present() -> None:
+    """~1,500 characters of browser instruction must not ship to a host whose
+    `browser` builder returned None — and the two halves must not both ship.
+
+    The setup playbook ("the extension can be set up in a minute") is the
+    mirror image of the usage prose, so exactly one of them is correct for any
+    given session.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "When the `browser` tool is NOT in your tool list"
+
+    with_browser = render_template("system.md", {"has_browser": True, "no_browser": False})
+    assert usage in with_browser
+    assert setup not in with_browser
+
+    without = render_template("system.md", {"has_browser": False, "no_browser": True})
+    assert usage not in without
+    assert setup in without
+    # The gating is only worth doing if it actually removes weight.
+    assert len(without) < len(with_browser)
 
 
 def test_system_md_teaches_eval_digest_pipeline() -> None:
@@ -406,9 +432,11 @@ def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     assert DATE not in instructions
     assert "Darwin" not in instructions
 
-    # block 1: tool inventory ONLY — skills never leak in here
-    assert "- bash: Run a shell command." in inventory
-    assert "- read: Read a file." in inventory
+    # block 1: tool NAMES only — the descriptions are already in the provider
+    # tools array, and repeating them here cost ~9,995 chars per request.
+    assert "- bash" in inventory
+    assert "- read" in inventory
+    assert "Run a shell command." not in inventory
     assert "secret" not in inventory
     assert "demo" not in inventory
     assert DATE not in inventory and "Darwin" not in inventory
@@ -460,7 +488,7 @@ def test_no_skills_keeps_fixed_arity_with_placeholder() -> None:
     # blocks).
     blocks = build_system_blocks(TOOLS, "", ENV, DATE)
     assert len(blocks) == 4
-    assert "- bash: Run a shell command." in blocks[1]
+    assert "- bash" in blocks[1]
     assert blocks[2].startswith(f"Today is {DATE}.")
     assert blocks[3] == "<skills/>"
 
@@ -521,6 +549,29 @@ def test_inventory_block_matches_default_tool_order() -> None:
     lines = [line for line in blocks[1].splitlines() if line.startswith("- ")]
     expected = list(DEFAULT_TOOL_NAMES)  # scheduler attached -> wake included
     assert [line.split(":")[0][2:] for line in lines] == expected
+
+
+def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> None:
+    """The inventory is an ANCHOR ("these tools exist"), not a second copy of
+    the tool descriptions.
+
+    Regression guard for the reduction: ``tool.description`` is serialized
+    verbatim into the provider tools array for every tool, so emitting it here
+    too shipped the same bytes twice on every request — measured at 9,995
+    characters (~3,600 billed tokens) across the 24-tool default surface. A
+    future change that "helpfully" restores the descriptions must fail here.
+    """
+    descriptive = [
+        _tool("bash", "Run a shell command."),
+        _tool("read", "Read a file."),
+        _tool("browser", "Drive the user's real browser."),
+    ]
+    inventory = build_system_blocks(descriptive, SKILLS, ENV, DATE)[1]
+    for tool in descriptive:
+        assert f"- {tool.name}" in inventory
+        assert tool.description not in inventory
+    # The header stays: it is what makes the bare list legible as an inventory.
+    assert inventory.startswith("## Available tools")
 
 
 def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole() -> None:

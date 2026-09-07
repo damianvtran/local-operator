@@ -52,16 +52,23 @@ INTENT_FIELD = "i"
 #: every event and every session dump.
 INTENT_MAX_CHARS = 200
 
-#: What the model is told the field is for, in the schema itself. oh-my-pi
-#: ships the bare ``"concise intent"`` here and puts the real instruction in
-#: its system prompt; we spend ~30 tokens (once, in the prompt-cached tools
-#: array) on a self-sufficient description instead, because the failure this
-#: field exists to fix IS the model describing the mechanism, and the schema
-#: description is the text closest to the point of emission.
-INTENT_DESCRIPTION = (
-    "Concise intent: present participle, 2-6 words, no period, capitalized. "
-    'What you are accomplishing, not the tool ("Auditing merged MRs", not "Running bash").'
-)
+#: What the model is told the field is for, in the schema itself.
+#:
+#: A POINTER, not the rule. The description is declared on every tool, so its
+#: cost is multiplied by the size of the tool surface: the previous
+#: self-sufficient wording ran ~41 tokens x 24 tools = ~980 tokens of the
+#: tools array, restating what ``prompts_md/system.md`` ("Most tools take
+#: `i`...") already says at greater length and with the negative examples.
+#: One copy in the system prompt and a pointer here costs a fraction of that
+#: and contradicts nothing.
+#:
+#: Deliberately NOT reduced to oh-my-pi's bare ``"concise intent"``: the
+#: failure this field exists to fix IS the model narrating the mechanism, and
+#: the schema description is the text closest to the point of emission, so it
+#: keeps the shape of the rule ("2-6 words, present participle") and delegates
+#: only the elaboration. Keep the full rule in system.md; do not re-inline it
+#: here.
+INTENT_DESCRIPTION = "Concise intent: 2-6 words, present participle. See the system prompt."
 
 #: The exact property injected into every tool schema. Compared by VALUE in
 #: :func:`intent_is_injected` to tell our field apart from a tool that
@@ -86,6 +93,35 @@ INTENT_SCAN_LIMIT = 512
 _LEADING_INTENT_RE = re.compile(r'\s*\{\s*"i"\s*:\s*"((?:[^"\\\x00-\x1f]|\\.)*)"')
 
 
+def _strip_titles(value: Any) -> Any:
+    """Recursively drop pydantic's generated ``title`` keys from a schema.
+
+    ``BaseModel.model_json_schema()`` emits ``"title": "Path"`` beside every
+    property and ``"title": "ReadParams"`` on every model — a restatement of a
+    name the schema already carries as its key. No provider requires it (this
+    tree's wire clients never read the field) and no model needs it, but it is
+    serialized into the tools array on every request: measured at 2,289
+    characters (~820 billed tokens) across the 24-tool default surface.
+
+    Only ``title`` goes. ``description`` on a property is the adherence
+    surface — it is what makes the model pass the right thing — and stripping
+    it would trade tokens for correctness.
+
+    Applied here, at the one choke point every AgentTool's schema passes
+    through, so MCP tools (``mcp/tool_bridge.py``) are covered by the same
+    pass rather than needing their own. Recursion covers nested objects,
+    ``$defs`` and array ``items``, where pydantic puts titles too.
+
+    Non-destructive: builds new containers, so a caller's schema dict (and a
+    params model's cached ``model_json_schema()``) is never mutated.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_titles(v) for k, v in value.items() if k != "title"}
+    if isinstance(value, list):
+        return [_strip_titles(item) for item in value]
+    return value
+
+
 def apply_intent_schema(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return ``parameters`` with the intent property declared.
 
@@ -102,11 +138,17 @@ def apply_intent_schema(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
     Optional, never ``required``: under ``extra="forbid"`` a required field
     the model omitted would turn a missing narration into a failed call.
 
-    A schema that already declares ``i`` is returned untouched, so a tool that
-    owns that name keeps it (and :func:`intent_is_injected` then reports
-    ``False``, which keeps the loop from lifting the value away from it).
+    A schema that already declares ``i`` keeps its own ``i``, so a tool that
+    owns that name is not robbed of a real argument (and
+    :func:`intent_is_injected` then reports ``False``, which keeps the loop
+    from lifting the value away from it).
+
+    Pydantic's generated ``title`` keys are stripped on the way through — see
+    :func:`_strip_titles`. This is the right place for it because it is the
+    one point EVERY tool schema passes, builtin and MCP alike, so the saving
+    cannot develop holes as tools are added.
     """
-    schema: dict[str, Any] = dict(parameters) if parameters else {}
+    schema: dict[str, Any] = _strip_titles(dict(parameters)) if parameters else {}
     properties = schema.get("properties")
     if isinstance(properties, dict) and INTENT_FIELD in properties:
         return schema

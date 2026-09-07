@@ -221,14 +221,27 @@ _CLOSING_TAG_RE = re.compile(
 
 
 def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
-    """One compact line per visible tool; schemas ride in the provider tools
-    array, so the prompt only needs name + one-line description."""
-    lines = [
-        f"- {tool.name}: {tool.description}"
-        for tool in tools
-        if not tool.hidden and tool.description
-    ]
-    return "\n".join(lines)
+    """One line per visible tool: the NAME only, deliberately.
+
+    NAMES ONLY — do not "restore" the descriptions here. This block used to
+    emit ``- {name}: {tool.description}``, which shipped every description a
+    SECOND time: the provider tools array already carries ``tool.description``
+    verbatim for each tool, and it is the copy the model actually dispatches
+    against. Measured on the 24-tool default surface, all 24 descriptions were
+    byte-identical duplicates, costing 9,995 characters (~3,600 billed tokens
+    at this surface's measured 2.78 chars/token) on every single request for
+    text the model had already been given.
+
+    The names are kept rather than dropping the block outright. Deleting it
+    saves only a further ~200 characters and forfeits the one thing the tools
+    array does not present as prose: a single flat "these tools exist" anchor
+    the model can scan when deciding whether a capability is available at all.
+
+    Note the descriptions are NOT one-line and never were — ``browser`` and
+    ``ask`` run to several hundred tokens each — which is why duplicating them
+    was expensive rather than merely redundant.
+    """
+    return "\n".join(f"- {tool.name}" for tool in tools if not tool.hidden and tool.description)
 
 
 #: Appended to the tool inventory when the session has no browser tool. The
@@ -287,7 +300,26 @@ def build_system_blocks(
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
     """
-    instructions = render_template("system.md", {})
+    # Membership, not visibility: a hidden tool is still callable, and telling
+    # the model a browser does not exist while one answers would be worse than
+    # saying nothing. Computed BEFORE the template renders because the packaged
+    # prompt's browser sections are gated on it (see below).
+    has_browser = any(tool.name == "browser" for tool in tools)
+    # The browser prose is conditional rather than unconditional because it is
+    # ~1,500 characters of instruction for a tool that is createIf-gated: a
+    # host with no cmux and no extension paid for three paragraphs about a
+    # `browser` tool that is not in its tool list. The two flags are passed
+    # separately (rather than one negated in the template) because the engine
+    # is deliberately tiny — `{{#if}}` has no `else` and no negation.
+    #
+    # NOTE the asymmetry, and keep it: when the browser is ABSENT the prose is
+    # gated out but `_NO_BROWSER_NOTE` still ships on the inventory block. They
+    # are not two copies of one thing. The gated-out prose explains how to USE
+    # the tool; the note records a measured failure (a session spent 23s on
+    # `playwright install`) and is the only text that names the wrong turn.
+    instructions = render_template(
+        "system.md", {"has_browser": has_browser, "no_browser": not has_browser}
+    )
     instructions += (
         "\n\n## Session state updates\n\n"
         "The host may append [session-state] records containing current tool, "
@@ -322,10 +354,7 @@ def build_system_blocks(
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
-    # Membership, not visibility: a hidden tool is still callable, and telling
-    # the model a browser does not exist while one answers would be worse than
-    # saying nothing.
-    if not any(tool.name == "browser" for tool in tools):
+    if not has_browser:
         inventory = f"{inventory}{_NO_BROWSER_NOTE}"
     env_block = f"Today is {date_str}."
     if env_details:

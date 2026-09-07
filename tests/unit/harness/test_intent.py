@@ -103,6 +103,67 @@ def test_injection_puts_intent_first_and_optional() -> None:
     assert INTENT_DESCRIPTION in schema["properties"][INTENT_FIELD]["description"]
 
 
+def test_injection_strips_pydantic_titles_but_keeps_descriptions() -> None:
+    """``title`` is a restatement of the key; ``description`` is the adherence
+    surface.
+
+    Pydantic emits ``"title": "Path"`` beside every property and a model title
+    on every ``$defs`` entry. No provider requires it and no model needs it,
+    but it rides the tools array on every request — 2,289 characters across
+    the default surface. Stripping happens here because this is the one point
+    every schema passes, builtin and MCP alike.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "title": "ReadParams",
+            "properties": {
+                "path": {"type": "string", "title": "Path", "description": "File to read."},
+                "opts": {
+                    "type": "object",
+                    "title": "Opts",
+                    "properties": {"deep": {"type": "boolean", "title": "Deep"}},
+                },
+                "tags": {"type": "array", "items": {"type": "string", "title": "Tag"}},
+            },
+            "$defs": {"Item": {"type": "object", "title": "Item"}},
+        }
+    )
+
+    def titles(value: object) -> list[str]:
+        if isinstance(value, dict):
+            found = ["title"] if "title" in value else []
+            for sub in value.values():
+                found += titles(sub)
+            return found
+        if isinstance(value, list):
+            return [t for item in value for t in titles(item)]
+        return []
+
+    assert titles(schema) == []
+    # Nested/array/$defs shapes survive the walk intact apart from the titles.
+    assert schema["properties"]["path"]["description"] == "File to read."
+    assert schema["properties"]["opts"]["properties"]["deep"] == {"type": "boolean"}
+    assert schema["properties"]["tags"]["items"] == {"type": "string"}
+    assert schema["$defs"]["Item"] == {"type": "object"}
+
+
+def test_injection_does_not_mutate_a_nested_input_schema() -> None:
+    """Title stripping must build new containers, never edit the caller's.
+
+    A params model's ``model_json_schema()`` is reused across builds, so an
+    in-place strip would corrupt a shared object.
+    """
+    original = {
+        "type": "object",
+        "title": "P",
+        "properties": {"path": {"type": "string", "title": "Path"}},
+    }
+    apply_intent_schema(original)
+    assert original["title"] == "P"
+    assert original["properties"]["path"]["title"] == "Path"
+
+
 def test_injection_does_not_mutate_the_input_schema() -> None:
     original = {"type": "object", "properties": {"path": {"type": "string"}}}
     apply_intent_schema(original)
