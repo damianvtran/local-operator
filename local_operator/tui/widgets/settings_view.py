@@ -125,6 +125,48 @@ _SUGGEST_KEYS = frozenset({_HOSTING_KEY, _MODEL_KEY})
 _SUGGEST_ROWS = 8
 
 
+class _RowStyles(NamedTuple):
+    """The five inks every row is painted from, resolved ONCE per paint.
+
+    WHY THIS EXISTS
+    ===============
+
+    ``_row_text`` used to build these five ``Style`` objects at the top of its
+    body, before it examined the row's kind — so a header row paid for the
+    ``accent`` and ``faint`` styles it never uses, and the page paid 5×N of them
+    on every keypress. Profiled at 96 rows that was 480 of the 553
+    ``semantic_color`` calls a single arrow press made, and 13.2% of the
+    widget's own time.
+
+    The measured subtlety is that MEMOISING ``semantic_color`` does not fix it:
+    that variant saved 1.3%, because the lookup is already a dict hit. The cost
+    is CONSTRUCTING the ``Style`` objects, so the fix has to build fewer of
+    them rather than resolve colours faster.
+
+    A per-paint lifetime is what makes invalidation free: a theme switch
+    repaints the page, and the next paint resolves the new ramp because these
+    are rebuilt from scratch every time. Nothing caches them across paints, so
+    there is no epoch to track.
+    """
+
+    dim: Style
+    muted: Style
+    fg: Style
+    accent: Style
+    faint: Style
+
+    @classmethod
+    def resolve(cls) -> "_RowStyles":
+        """Build the bundle from the ACTIVE theme."""
+        return cls(
+            dim=Style(color=theme_mod.semantic_color("dim")),
+            muted=Style(color=theme_mod.semantic_color("muted")),
+            fg=Style(color=theme_mod.semantic_color("fg")),
+            accent=Style(color=theme_mod.semantic_color("accent")),
+            faint=Style(color=theme_mod.semantic_color("faint")),
+        )
+
+
 class _Suggestion(NamedTuple):
     """One row of the inline suggestion dropdown.
 
@@ -2555,10 +2597,14 @@ class SettingsView(Vertical):
     def _paint_list(self) -> None:
         width = self._list_width()
         text = Text(no_wrap=True, overflow="ellipsis")
+        # ONE ink bundle for the whole list. Resolved here rather than inside
+        # `_row_text` because the five `Style` constructions were 5xN per paint
+        # and N is the row count — see `_RowStyles`.
+        styles = _RowStyles.resolve()
         for index, row in enumerate(self._rows):
             if index:
                 text.append("\n")
-            line = self._row_text(row, index, width)
+            line = self._row_text(row, index, width, styles)
             # Clipped rather than allowed to wrap. A wrapped row breaks the
             # one-row-per-setting contract the cursor and the click handler
             # both depend on: `_index_at` maps a click's y to a row index, so a
@@ -2573,24 +2619,34 @@ class SettingsView(Vertical):
         # it to the handed content with no room to scroll.
         self._list.styles.height = max(len(self._rows), 1)
 
-    def _row_text(self, row: "_Row", index: int, width: int) -> Text:
+    def _row_text(
+        self, row: "_Row", index: int, width: int, styles: "_RowStyles | None" = None
+    ) -> Text:
+        """Compose one painted line.
+
+        ``styles`` is the per-paint ink bundle (:class:`_RowStyles`). It is
+        OPTIONAL so the many call sites that paint a single row — and any
+        caller outside this module — keep working unchanged; passing it is what
+        lets ``_paint_list`` resolve the five theme colours once for the whole
+        list instead of once per row (see :class:`_RowStyles`).
+        """
         selected = index == self._selected
         hovered = index == self._hovered
         line = Text(no_wrap=True, overflow="ellipsis")
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        fg = Style(color=theme_mod.semantic_color("fg"))
-        accent = Style(color=theme_mod.semantic_color("accent"))
-        faint = Style(color=theme_mod.semantic_color("faint"))
+        if styles is None:
+            styles = _RowStyles.resolve()
+        dim = styles.dim
+        muted = styles.muted
+        fg = styles.fg
+        accent = styles.accent
+        faint = styles.faint
 
         if row.kind == "header" and row.section is not None:
             # The scope tag rides the SECTION header, right-aligned and dim: it
             # answers "when does this take effect" once per group rather than
             # fifty times down the page. See the module docstring.
             head = Text(no_wrap=True)
-            head.append(
-                row.section.title, style=Style(color=theme_mod.semantic_color("fg"), bold=True)
-            )
+            head.append(row.section.title, style=fg + Style(bold=True))
             # The tag sheds its PREFIX before it sheds the scope itself: on a
             # narrow body "takes effect: new sessions" does not fit beside the
             # title, and the half that carries the meaning is the scope. Dropped
