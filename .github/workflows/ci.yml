@@ -360,17 +360,26 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Partition test suite
+        # Balanced by MEASURED per-file duration (tests/durations.json), not by
+        # sort position. The old `i % 5` split balanced the file COUNT, which in
+        # a suite whose per-file cost spans four orders of magnitude produced a
+        # 4.16x spread: the heaviest shard projected 81.7 test-min against 19.6
+        # for the lightest, and ran 19.2 min against this job's 20-minute cap.
+        #
+        # Worse, the index was positional, so adding ONE test file re-dealt
+        # every later file and the slow cluster MIGRATED between shards. A PR
+        # adding one file was reported as a failure with `3693 passed` in its
+        # log (cancelled at the cap), while one adding six files finished in
+        # 8m46s. Risk was uncorrelated with what the author did.
+        #
+        # `--dist worksteal` in addopts cannot fix this: it rebalances within
+        # one pytest process, and this split happens across five machines
+        # before pytest starts. The full reasoning, the determinism argument,
+        # and why a file missing from the manifest still runs are in
+        # scripts/shard_tests.py.
         run: |
-          python -c "
-          import glob, sys
-          files = sorted(glob.glob('tests/unit/**/test_*.py', recursive=True))
-          shard = ${{ matrix.shard }}
-          total = 5
-          selected = [f for i, f in enumerate(files) if i % total == shard]
-          with open('shard_tests.txt', 'w') as f:
-              f.write('\n'.join(selected) + '\n')
-          print(f'Shard {shard+1}/{total} collected {len(selected)} test files')
-          "
+          python scripts/shard_tests.py \
+            --shard ${{ matrix.shard }} --total 5 --out shard_tests.txt
 
       - name: Run test shard with coverage
         run: |
