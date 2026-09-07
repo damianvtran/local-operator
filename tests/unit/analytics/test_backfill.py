@@ -23,7 +23,9 @@ from local_operator.analytics.store import (
     SESSION_NAME_RANK_BACKFILL,
     SESSION_NAME_RANK_TITLE,
     AnalyticsStore,
+    default_db_path,
 )
+from local_operator.paths import CONFIG_DIR_ENV
 
 
 def _snap(session_id: str, parent: str = "") -> CallSnapshot:
@@ -331,3 +333,105 @@ def test_a_parent_named_in_the_same_pass_is_visible_to_its_children(tmp_path):
     assert names["aachild00001"] == "qa-tester · Investigate the analytics hex ids"
     assert "zzparent0001" not in names["aachild00001"]
     store.close()
+
+
+def test_backfill_writes_into_the_config_dir_it_was_given_not_the_default_ledger(
+    tmp_path, monkeypatch
+):
+    """The sweep's reads and its writes must resolve to ONE root.
+
+    Regression for a footgun that silently wrote a sandbox's recovered names
+    into the operator's live ledger: the pass honoured ``config_dir`` for its
+    transcript reads but built its default store from ``default_db_path()``,
+    so an isolated call read transcripts out of ``/tmp/...`` and wrote the
+    names it derived from them into ``~/.local-operator/analytics.db`` — 612
+    real rows, observed on the operator's own ledger from one such call. Only
+    the production caller, which passes the real config dir where the two roots
+    agree, was ever correct.
+
+    The arrangement reproduces that exact shape: BOTH ledgers carry the same
+    unnamed session id, and only the isolated root has the transcript on disk.
+    Under the defect the default store supplies the worklist, the isolated
+    directory supplies the name, and the default ledger takes the write.
+    ``LOCAL_OPERATOR_CONFIG_DIR`` points at a second tmp root so the "default"
+    ledger here is a stand-in and never the developer's own.
+    """
+    default_root = tmp_path / "default-config"
+    (default_root / "sessions").mkdir(parents=True)
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(default_root))
+    default_store = AnalyticsStore(default_db_path())
+    default_store.record_batch([_snap("aaaisolated1")])
+    default_store.close()
+
+    isolated = tmp_path / "isolated-config"
+    isolated.mkdir()
+    isolated_store = AnalyticsStore(isolated / "analytics.db")
+    isolated_store.record_batch([_snap("aaaisolated1")])
+    isolated_store.close()
+    # The transcript exists ONLY in the sandbox, so any name that reaches the
+    # default ledger provably came from the isolated root.
+    _session(isolated, "aaaisolated1", "Work done inside the sandbox")
+
+    assert backfill_analytics_session_names(isolated) == 1
+
+    # Asserted FIRST because it is the actual harm: a name derived from the
+    # sandbox landing in the ledger the operator uses for real.
+    default_reopened = AnalyticsStore(default_db_path())
+    leaked = _names(default_reopened).get("aaaisolated1", "")
+    default_reopened.close()
+    assert not leaked, (
+        f"the sweep wrote {leaked!r} — a name derived from the isolated config "
+        "dir — into the DEFAULT ledger; reads and writes must share one root"
+    )
+
+    reopened = AnalyticsStore(isolated / "analytics.db")
+    assert _names(reopened)["aaaisolated1"] == "Work done inside the sandbox"
+    reopened.close()
+
+
+def test_the_production_config_dir_still_resolves_to_the_default_ledger(tmp_path, monkeypatch):
+    """Deriving the store from ``config_dir`` must not move the real ledger.
+
+    The production caller (``session_factory``'s store-maintenance pass) hands
+    this function the config dir ``paths.config_dir()`` resolves to, so the
+    sweep's write must land in the exact file ``default_db_path()`` names —
+    otherwise the fix for the isolation bug would silently strand months of the
+    operator's own history in a ledger nothing reads.
+
+    ASSERTED ON THE ACTUAL WRITE, never on a rebuilt path expression. The first
+    version of this test compared ``real_config_dir / "analytics.db"`` to
+    ``default_db_path()`` and never called the function under test at all: it
+    pinned ``default_db_path``'s own definition, and review demonstrated it
+    still PASSED when the production line was mutated to ``analytics2.db`` —
+    the exact stranding scenario this docstring claims to guard. So the unnamed
+    row is seeded in the file ``default_db_path()`` names and read back from
+    that same file, with no ``store`` argument so the sweep must resolve one
+    itself. A wrong filename now fails on both assertions below.
+    """
+    real_config_dir = tmp_path / "config"
+    real_config_dir.mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(real_config_dir))
+
+    # Seed the worklist through default_db_path() — the ledger production reads
+    # — so a sweep resolving anywhere else finds nothing to do (returns 0) and a
+    # sweep WRITING anywhere else leaves this row unnamed.
+    ledger = default_db_path()
+    seeded = AnalyticsStore(ledger)
+    seeded.record_batch([_snap("aaaproduction")])
+    seeded.close()
+    _session(real_config_dir, "aaaproduction", "The operator's own history")
+
+    assert backfill_analytics_session_names(real_config_dir) == 1
+
+    reopened = AnalyticsStore(ledger)
+    named = _names(reopened)
+    reopened.close()
+    assert named.get("aaaproduction") == "The operator's own history", (
+        f"the sweep did not name the row in {ledger}, the file default_db_path() "
+        "resolves to for this config dir — production history would be stranded "
+        "in whatever ledger it wrote instead"
+    )
+
+    # And no SECOND ledger appeared beside it: a wrong filename in the same
+    # directory would otherwise slip past a check on the named row alone.
+    assert sorted(p.name for p in real_config_dir.glob("analytics*.db")) == ["analytics.db"]
