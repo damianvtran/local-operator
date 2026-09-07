@@ -2399,6 +2399,24 @@ class TranscriptView(ScrollableContainer):
         #: clamped against it.
         self._on_user_scroll: UserScrollHook | None = None
         self._on_tail_requested: Callable[[], None] | None = None
+        #: Fired from :meth:`_size_updated` whenever the scrollable EXTENT or
+        #: the viewport changes. Same shape as ``on_clear``: optional,
+        #: app-owned, never required for the widget.
+        #:
+        #: It exists because a copy that describes GEOMETRY goes stale for
+        #: reasons that are not events anyone thought to instrument. The
+        #: resume head notice is decided from two terms — is more history
+        #: held, and can this frame reach it — and the second one moves when
+        #: the terminal is resized or a live turn lengthens the content,
+        #: neither of which passes through a fill exit or a page mount. So the
+        #: app was told about the mounts it caused and never about the
+        #: geometry it did not, and the row went on telling a reader to scroll
+        #: up in a frame with no scrollbar (design review round 2, D1).
+        #:
+        #: Keyed on the extent for exactly the reason :meth:`_size_updated`
+        #: gives for the tail anchor: a rule keyed on the measurement rather
+        #: than on a particular event holds for growth nobody enumerated.
+        self._on_extent_changed: Callable[[], None] | None = None
         # The ledger's shared name column, recomputed lazily. Cached because it
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
@@ -2423,6 +2441,13 @@ class TranscriptView(ScrollableContainer):
         #: in one call. `None` outside one, which is how `append_block` tells
         #: the two modes apart.
         self._pending_mounts: list[TranscriptBlock] | None = None
+        #: The reader's position through an in-flight top insert, as
+        #: ``(anchor_block, gap)`` where ``gap`` is the distance from the
+        #: anchor's top to the viewport's top. Held for the whole settle, not
+        #: just its last frame, and honoured by :meth:`_size_updated` — see
+        #: :meth:`insert_blocks` for why a single late restore is not enough.
+        #: ``None`` when no insert is settling.
+        self._insert_anchor: tuple[TranscriptBlock, float] | None = None
 
     def on_mount(self) -> None:
         """Give the system vertical scrollbar an open-hand hover cursor.
@@ -2462,6 +2487,15 @@ class TranscriptView(ScrollableContainer):
         mount cannot re-acquire following for a reader who just left the tail.
         """
         self._on_user_scroll = hook
+
+    def set_on_extent_changed(self, hook: Callable[[], None] | None) -> None:
+        """Install the hook fired whenever the scrollable extent changes.
+
+        Installed and cleared alongside the other transcript hooks, so a
+        cached view that has been swapped out of the layout stops reporting
+        geometry the app is no longer showing.
+        """
+        self._on_extent_changed = hook
 
     def set_on_tail_requested(self, callback: Callable[[], None] | None) -> None:
         """Let a bounded history window materialize its latest rows on End."""
@@ -2601,11 +2635,33 @@ class TranscriptView(ScrollableContainer):
         AND the anchor restore's own non-animated scroll has landed — which is
         the earliest moment a caller that gates work on "the reader is back
         where they were" can safely re-open that gate. Running it from the
-        anchor restore rather than the settle itself is load-bearing: between
-        the two, the offset still sits where the inserted rows pushed it. It
-        runs INSIDE the restore's programmatic-scroll guard so the gate never
-        opens on a frame where this widget's own scroll could still be
-        reported as a reader's (see ``restore_anchor``).
+        anchor restore rather than the settle itself is load-bearing: the
+        restore is the last thing that touches the offset. It runs INSIDE the
+        restore's programmatic-scroll guard so the gate never opens on a frame
+        where this widget's own scroll could still be reported as a reader's
+        (see ``restore_anchor``).
+
+        THE INVARIANT, and why the restore alone did not deliver it: mounting
+        rows ABOVE the viewport moves the reader's content down the virtual
+        canvas by the inserted extent, so the offset must move by exactly the
+        same amount for the content under the reader's eyes to stay still.
+        Those two happen at different times. The extent grows as each mounted
+        block authors its height (``_set_authored_height``), over SEVERAL
+        layout passes; a restore scheduled for the end of that sequence leaves
+        every intermediate frame painted at the old offset against a taller
+        canvas — the reader watches the transcript lurch down and snap back.
+        Measured on a 401-message resume before this change: the anchor gap
+        (anchor top minus ``scroll_y``, invariant under a correct insert)
+        excursed to **120 rows on a 31-row viewport** — nearly four screens —
+        across three painted frames before the restore returned it to 0.
+
+        So the anchor is held for the WHOLE settle in ``_insert_anchor`` and
+        re-applied by :meth:`_size_updated` on every extent change, which is
+        the same frame the growth lands in. The deferred restore is kept as
+        the final correction (and as the ``on_settled`` seam), but by the time
+        it runs the offset is already right and it is a no-op. This is the
+        same class of bug ``_land_on_tail`` documents for the tail direction:
+        one late correction against an extent that is still moving.
         """
         additions = list(blocks)
         if not additions:
@@ -2617,6 +2673,27 @@ class TranscriptView(ScrollableContainer):
             self._blocks[-1] if self._blocks else None,
         )
         anchor_gap = anchor_block.virtual_region.y - old_scroll if anchor_block is not None else 0.0
+        # A reader who is FOLLOWING THE TAIL is not holding a position for this
+        # insert to preserve — they are holding the END, and `_size_updated`'s
+        # first branch already carries them there on every extent change. Two
+        # rules for one offset is one too many, and this is the direction that
+        # loses: the held anchor targets `max(0, anchor_y - gap)`, so an insert
+        # that lands while the frame is not yet scrollable (`scroll_y` and
+        # `max_scroll_y` both 0, which is exactly the initial resume fill) pins
+        # the reader to row 0 and keeps re-pinning them there as the extent
+        # grows beneath them. Measured before this guard: a resumed 401-message
+        # conversation at 120x200 settled at `scroll_y=0` against
+        # `max_scroll_y=210` — the reader opened ~120 messages BEHIND the
+        # newest, on a session they opened to see the latest state.
+        #
+        # Anchoring only when NOT following keeps the jitter fix exactly where
+        # it was written for (a reader who scrolled up to read history) and
+        # hands the tail case back to the one rule that owns it.
+        following_tail = self._tail_anchor.following
+        # Armed BEFORE the mount so the very first extent change this insert
+        # causes is already corrected; `_size_updated` fires during mount.
+        if anchor_block is not None and not following_tail:
+            self._insert_anchor = (anchor_block, anchor_gap)
         before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
@@ -2624,13 +2701,35 @@ class TranscriptView(ScrollableContainer):
             self.mount(*additions, before=before)
         self._blocks[index:index] = additions
         self._name_col_cache = None
+        # The mount itself may not have triggered a resize yet; correct now so
+        # no frame can be painted at the displaced offset even once.
+        self._reanchor_insert()
+        if following_tail:
+            # Same reasoning in the tail direction, and for the same frame: the
+            # extent grew above the reader, so the end moved, and a follower is
+            # entitled to it on THIS frame rather than one refresh later.
+            self._scroll_to_tail()
 
         def settle_then_restore() -> None:
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
             def restore_anchor() -> None:
+                # Release the held anchor whatever happens next: the settle is
+                # over, and leaving it armed would have `_size_updated` pin the
+                # reader against ordinary later growth (a streaming message, a
+                # card unfolding) that has nothing to do with this insert.
+                self._insert_anchor = None
                 if anchor_block is None or anchor_block.parent is not self:
+                    if on_settled is not None:
+                        on_settled()
+                    return
+                if self._tail_anchor.following:
+                    # The reader is on the tail (see the arming guard above):
+                    # restoring a held offset here would drag them off the end
+                    # they never left. Land them on it instead, and only then
+                    # hand the gate back.
+                    self._scroll_to_tail()
                     if on_settled is not None:
                         on_settled()
                     return
@@ -2642,9 +2741,34 @@ class TranscriptView(ScrollableContainer):
                 # zone by construction: the rows above were just inserted, so
                 # the anchor lands where it was, which was the top.
                 with self._tail_anchor.programmatic_scroll():
+                    # `immediate=True` for the SAME reason `_reanchor_insert`
+                    # needs it, and its omission here was the deeper half of
+                    # that defect. Textual's `scroll_to` defers the offset
+                    # change with `call_after_refresh` unless `immediate`, so
+                    # the deferred `_scroll_to` runs AFTER this `with` block
+                    # has exited — outside the very guard that marks the
+                    # scroll as this widget's own. `watch_scroll_y` then reads
+                    # `programmatic == False` and treats the insert's own
+                    # restore as a READER's scroll, with two measured
+                    # consequences: it resyncs the tail anchor to
+                    # `at_end=False` (so a resume whose fill inserted at y=0
+                    # stops following the tail and lands the reader on the
+                    # OLDEST row instead of the newest), and it drives the
+                    # resume page-back hook, which spends `_resume_in_zone` on
+                    # a scroll no human made and leaves a wheel reader parked
+                    # at the top unable to earn another page.
+                    #
+                    # Traced on a 401-message resume at 120x200:
+                    #   scroll_to y=0 programmatic=True   <- inside the guard
+                    #   APPLY     y=0 programmatic=False  <- deferred, outside
+                    #
+                    # Applying inside the guard makes that window not exist
+                    # rather than not matter — the same trade the `on_settled`
+                    # placement below already documents.
                     self.scroll_to(
                         y=max(0, anchor_block.virtual_region.y - anchor_gap),
                         animate=False,
+                        immediate=True,
                     )
                     # INSIDE the guard, not after it: `on_settled` re-opens the
                     # caller's page gate, and the guard is what keeps THIS
@@ -3025,6 +3149,11 @@ class TranscriptView(ScrollableContainer):
         # working line is mounted again.
         self._name_col_cache = None
         self._tail = None
+        # An insert settling into the transcript that just went away has no
+        # reader to hold. `_reanchor_insert` would notice the anchor is
+        # unparented and drop it anyway, but clearing at the source keeps the
+        # invariant local to the thing that broke it.
+        self._insert_anchor = None
         # A cleared transcript IS at its own end, so the anchor re-arms: the
         # next turn streams into a reader who is, by construction, at the
         # bottom of an empty column.
@@ -3199,9 +3328,61 @@ class TranscriptView(ScrollableContainer):
         line as the user types, the terminal being resized.
         """
         changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if changed and self._on_extent_changed is not None:
+            # Announced BEFORE the anchor work below, and unconditionally on
+            # every extent change: a listener describing the geometry has to
+            # hear about the frame it is describing whether or not the reader
+            # is following the tail.
+            self._on_extent_changed()
         if changed and self._tail_anchor.following:
             self._scroll_to_tail()
+        elif changed:
+            # A top insert is settling: the extent just grew under the reader,
+            # so move the offset by the same amount IN THIS FRAME. Only when
+            # not following — a reader at the tail wants the tail, and the
+            # branch above already gave it to them.
+            self._reanchor_insert()
         return changed
+
+    def _reanchor_insert(self) -> None:
+        """Re-pin the reader to the block they were on, if an insert is settling.
+
+        The one line that holds :meth:`insert_blocks`'s invariant: rows mounted
+        above the viewport change the scroll EXTENT and the reader's absolute
+        offset by the same amount, so the content under their eyes does not
+        move. Called from the mount and from every extent change until the
+        settle's restore disarms it, so there is no painted frame in between
+        where only the extent has moved.
+
+        Silent no-op when no insert is in flight, which is the common case —
+        this must not touch the offset for ordinary appends.
+        """
+        held = self._insert_anchor
+        if held is None:
+            return
+        anchor_block, anchor_gap = held
+        if anchor_block.parent is not self:
+            # The anchor was removed mid-settle (a clear, a mode switch).
+            # Nothing to hold the reader to; drop it rather than guess.
+            self._insert_anchor = None
+            return
+        target = max(0.0, anchor_block.virtual_region.y - anchor_gap)
+        if abs(self.scroll_y - target) < 0.5:
+            return
+        # Programmatic: this is the widget's own correction, not a reader's
+        # scroll, so it must neither release the tail anchor nor be reported
+        # to the resume page-back hook as an arrival at the top.
+        #
+        # `immediate=True` is the whole point and not a micro-optimisation.
+        # Textual's `scroll_to` defaults to `immediate=False`, which defers the
+        # offset change with `call_after_refresh` — i.e. until AFTER the next
+        # compositor refresh. That refresh is a real paint, and it would be
+        # painted with the extent already grown and the offset not yet moved:
+        # exactly the displaced frame this method exists to remove. Measured
+        # against the deferred form on a 401-message resume, the deferred
+        # correction still left 3 painted frames at a 60-row excursion.
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=target, animate=False, immediate=True)
 
     # -- user scroll gestures ------------------------------------------------
     # Enumerated rather than funnelled through `scroll_to`, because the funnel
