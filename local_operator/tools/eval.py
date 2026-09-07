@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
     TRACEBACK_TAIL_CHARS,
@@ -505,7 +506,19 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         spawn_options["executable"] = str(link)
         argv0 = procname.branded_argv0(procname.LABEL_EVAL, id=_label_id(session_key))
     process = await asyncio.create_subprocess_exec(
+        # ``SAFE_PATH_FLAG`` even though this worker is the one child that WANTS
+        # the cwd importable: this spawn passes ``cwd=`` explicitly, so without
+        # the flag a session whose directory is a checkout of this project would
+        # load the harness protocol module from that checkout and could speak a
+        # different protocol version than the parent. The worker restores its
+        # own cwd for USER code after its own imports have resolved — see
+        # ``eval_worker._enable_cwd_imports``, which is what keeps
+        # ``import my_module`` working in a cell.
+        # ``argv0`` above is the process LABEL and replaces only argv[0]; the
+        # flag must follow it, since interpreter options are recognised only
+        # before ``-m``. Both properties are required on this one spawn.
         argv0,
+        SAFE_PATH_FLAG,
         "-u",
         "-m",
         "local_operator.tools.eval_worker",
