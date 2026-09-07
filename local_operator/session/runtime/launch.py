@@ -92,10 +92,23 @@ _CONSTRUCTING_POLL_S = 0.01
 #: wedged, slow, or a contender doing something we cannot see — and continuing
 #: to poll it 100 times a second for the rest of a 30-second deadline would be
 #: a spin. Sized at ~2.5x the ~1.2 s a full cold session construction takes
-#: **as measured on an M-series dev box**; a slower host lapses the window
-#: mid-construction and degrades to the open-ended grid, which is exactly
-#: ``main``'s behaviour, so the failure mode is one-sided. Nothing asserts on
-#: this value — it is a poll-frequency heuristic, not a correctness bound.
+#: **as measured on an M-series dev box**.
+#:
+#: The one-sidedness of that calibration was MEASURED, not argued: modelling a
+#: slower host by lengthening the construction, dead time is 11.1/11.7/7.4 ms
+#: at 0.4/1.2/2.5 s (window covers it), 67.0 ms at 3.5 s (window lapses
+#: mid-construction), and 716.3 vs 726.2 ms at 5.0 s and 726.1 vs 778.6 ms at
+#: 8.0 s (fully degraded). Past the window the new shape CONVERGES to the old
+#: one and never exceeds it, because the fallback restarts the exponential
+#: from ``_POLL_INITIAL_S`` rather than from a value that decayed while we
+#: were watching (QA round 1, Q2). So a host 3x slower than this one gets
+#: today's behaviour, not a regression.
+#:
+#: Deliberately NOT structural. Deriving it from an observed construction time
+#: needs a measurement the loop does not have on a process's first ``/new``,
+#: and buys nothing over a heuristic whose worst case is the status quo.
+#: Nothing asserts on this value — it is a poll-frequency heuristic, not a
+#: correctness bound.
 _CONSTRUCTING_WINDOW_S = 3.0
 #: How many runtimes one engage may spawn before it stops trying. Only the
 #: FIRST spawn is ordinary; the rest are respawns after a candidate proved to
@@ -660,17 +673,35 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     The totals clustered bimodally at ~540 ms and ~990 ms precisely because
     they were quantized to that grid.
 
+    **What this change controls is the dead time, and only that.** An
+    independent QA round reproduced the collapse in every one of three
+    interleaved A/B runs (~94-136 ms down to ~10-16 ms) but measured the
+    TOTAL attach improving by 2.1%, 15.0% and 16.6% \u2014 not the 34.9% an idle
+    box shows. The child's own construction dominates the total and varies far
+    more than the dead time removed here, so the percentage is a property of
+    how loaded the machine is, not of this code. State the dead time when
+    quoting this change; the total is a consequence, and a variable one.
+
     WHY DENSE POLLING IS AFFORDABLE HERE
     ====================================
     The backoff was protecting against a cost that does not exist at these
-    timescales. One full poll iteration — ``find_owner_record`` (a miss scan
-    over a run directory holding 11 records), ``_lease_holder``, and
-    ``Popen.poll`` — measures a median of 339 µs. At 10 ms that is a 3.4%
+    timescales. One full poll iteration — ``find_owner_record`` (a miss scan),
+    ``_lease_holder``, and ``Popen.poll`` — measures 23-30 µs against a run
+    directory of 200 real records, and is FLAT from 0 to 200 because
+    ``find_owner_record`` returns before ``scan()`` when there is no owner
+    marker (QA round 1, Q3; an earlier author estimate of 339 µs on an
+    11-record dir was pessimistic). At a 10 ms interval that is a 0.2-0.3%
     duty cycle on one thread, for at most ``_CONSTRUCTING_WINDOW_S``, and only
-    while a session is genuinely starting. The dense window is bounded rather
-    than open-ended for exactly the reason the backoff exists: a construction
-    still unfinished after 3 s is not about to publish, so the loop stops
-    guessing and falls back to the open-ended shape.
+    while a session is genuinely starting.
+
+    The nominal 100 Hz is also not what the loop achieves: real work per
+    iteration plus scheduling put the measured rate at ~42 Hz (126 dense wakes
+    in 3033 ms), so "10 ms" overstates how often the parent actually looks.
+
+    The dense window is bounded rather than open-ended for exactly the reason
+    the backoff exists: a construction still unfinished after 3 s is not about
+    to publish, so the loop stops guessing and falls back to the open-ended
+    shape.
 
     **That 339 µs assumes a tidy run directory, and record COUNT is not what
     threatens it.** ``scan()`` forks ``ps`` for any record whose heartbeat is
