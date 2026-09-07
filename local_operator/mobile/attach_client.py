@@ -628,6 +628,7 @@ class AttachClient:
     async def history_page(self, before: str, anchor: str = "") -> Any:
         """Read a signed canonical display page on the authenticated socket."""
         return await self._request_payload("history_page", before=before, anchor=anchor)
+
     async def request_refresh(self) -> str:
         """Ask a STALE owner to retire now if it is idle, so the next engage
         runs the build on disk.
