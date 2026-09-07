@@ -741,3 +741,69 @@ async def test_resume_replays_a_clean_history_in_write_order(tmp_path):
         )
     )["messages"]
     assert _dangling_tool_use(body) == [], "a resumed session replays an illegal body"
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_is_parked_the_same_way(tmp_path):
+    """The third door: ``journal_mcp_recovery`` shares the guard.
+
+    This is the brick-prevention guard for the recovery notice. The recovery
+    fires from ``McpManager._register_connection``, which runs on the manager's
+    own connect path — a backoff reconnect landing mid-tool-batch is the
+    ordinary case, not a corner one, because the reconnect timer has no idea a
+    turn is in flight. Splicing it in there would produce
+    ``assistant(tool_use) -> user -> tool_result`` and brick the session for
+    good, exactly as the ``/model`` press did in session 5187e748833c.
+
+    Driven through ``_on_mcp_recovery`` so the real manager-facing trigger is
+    covered, not just the journal method. The notice must land AFTER both tool
+    results, and the follow-up request must carry no dangling ``tool_use``.
+    """
+    holder: dict[str, Session] = {}
+    stream = _tool_then_text()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        session = holder["session"]
+        # Only the FIRST call of the batch recovers, for the same reason as the
+        # incident test: the expected shape must depend on the guard, not on
+        # how many tools happened to be in the batch.
+        if tool_call_id == "toolu_A":
+            session._on_mcp_recovery("files", 3)
+            await _drain_background(session)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
+        )
+
+    tool = AgentTool(name="echo", parameters={"type": "object"}, execute=execute)
+    session = make_session(tmp_path, stream, tools=[tool], model=MODEL)
+    holder["session"] = session
+    try:
+        await session.prompt("go")
+    finally:
+        await session.dispose()
+
+    assert _roles(session) == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "custom:session_mcp_recovery",
+        "assistant",
+    ], f"unexpected live shape: {_roles(session)}"
+    assert len(stream.requests) >= 2
+    wire = _wire_messages(stream.requests[1])
+    assert (
+        _dangling_tool_use(wire) == []
+    ), "journal_mcp_recovery spliced its notice into the open batch, orphaning it"
+    # The notice reaches the model as a user turn carrying the supersede
+    # sentence — the whole point of the feature, verified on the wire and not
+    # merely in the live list.
+    texts = [
+        block.get("text", "")
+        for message in wire
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    assert any(
+        "[mcp recovery]" in text and "supersedes" in text for text in texts
+    ), f"the recovery never reached the provider as readable text: {texts}"
