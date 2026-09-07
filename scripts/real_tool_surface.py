@@ -119,18 +119,27 @@ def _forced_browser_backend() -> Iterator[None]:
     machine while CI stays green. That is precisely the green-by-fiction this
     benchmark was rewritten to eliminate, reintroduced one layer down.
 
-    Patched on the ``builtin`` module (not the browser_bridge internals)
-    because that is where ``build_browser_tool`` resolves both names.
+    Patched into ``build_browser_tool.__globals__`` rather than by setting
+    attributes on an imported module object. The two are normally the same
+    dict, but only the former is guaranteed to be the namespace the function
+    actually resolves its names from: a checkout that is BOTH on ``sys.path``
+    and pip-installed can hold two distinct module objects for
+    ``local_operator.tools.builtin``, and patching the copy this script
+    imported then leaves the copy the builder reads untouched. That is not
+    hypothetical — it is how this forcing silently did nothing on CI while
+    working on the developer box, which the tool-count assertion in
+    ``bench_context_budget`` caught.
     """
-    from local_operator.tools import builtin
+    from local_operator.tools.builtin import build_browser_tool
 
-    saved = (builtin.cmux_browser_available, builtin.bridge_browser_advertisable)
-    builtin.cmux_browser_available = lambda: True  # type: ignore[assignment]
-    builtin.bridge_browser_advertisable = lambda: True  # type: ignore[assignment]
+    namespace = build_browser_tool.__globals__
+    names = ("cmux_browser_available", "bridge_browser_advertisable")
+    saved = {n: namespace[n] for n in names}
+    namespace.update({n: (lambda: True) for n in names})
     try:
         yield
     finally:
-        builtin.cmux_browser_available, builtin.bridge_browser_advertisable = saved
+        namespace.update(saved)
 
 
 def build_real_tools(cwd: str) -> list[AgentTool]:
