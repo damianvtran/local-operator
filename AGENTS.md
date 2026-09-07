@@ -1284,6 +1284,25 @@ the sample, check whether the same test fails on `main` and on unrelated
 branches, and confirm the work under the probe is the legitimate kind. Widening
 a bound because it went red is how a guard stops guarding.
 
+### A pytest run that STOPS EARLY with exit 0 is not a pass
+
+Check the count, not just the exit code. `main()` is called in-process by the
+suite (`assert main() == 7`), so anything `main()` does to *its own process*
+happens to pytest. A change that added an `os.execv` early in `main()` replaced
+the running pytest with a fresh interpreter: the file printed dots to 57%, then
+stopped, and the shell reported **exit 0**. No failure, no traceback, no
+summary line — 42 of 98 tests simply never ran, and every gate looked green.
+
+It surfaced only because the summary line was missing from the output. So:
+`98 passed` is evidence; a bare exit code is not. The same shape hides behind
+`| tail`, which reports the *pipeline's* status — see the `rc=126` note in the
+Environment section, which is this hazard's twin.
+
+Anything a process can do to itself — `execv`, `os._exit`, `chdir`, signal
+handlers, `sys.exit` in a library path — needs a guard proving it is a real
+launch before it fires. `procname.is_own_launch()` is that guard for the
+branded re-exec, and its test is the one that pins this.
+
 ### Prove the test can still fail
 
 A guard that cannot go red is worse than no guard, because it is believed. That

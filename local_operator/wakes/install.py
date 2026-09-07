@@ -33,6 +33,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_operator import procname
+
 logger = logging.getLogger(__name__)
 
 #: LaunchAgent label, matching ``mobile.install``'s spelling so the two
@@ -127,7 +129,11 @@ def render_plist(config_dir: Path) -> dict[str, object]:
     """
     return {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "local_operator.wakes.supervisor"],
+        # Branded interpreter image when one can be planted: macOS names this
+        # background item by the basename of ProgramArguments[0], so a bare
+        # `sys.executable` is what makes installing a supervised unit notify
+        # 'python3 is running in the background'. Falls back to sys.executable.
+        "ProgramArguments": procname.launchd_program("local_operator.wakes.supervisor"),
         "RunAtLoad": True,
         # SELF-RETIREMENT, and the reason this key is not optional: the
         # supervisor exits 0 when the index empties. Keying restarts on
