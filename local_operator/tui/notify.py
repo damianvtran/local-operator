@@ -117,25 +117,37 @@ APP_NAME = "Local Operator"
 CONTEXT_COMPLETE = "Complete"
 CONTEXT_INPUT_REQUIRED = "Input required"
 CONTEXT_ATTENTION = "Needs attention"
+CONTEXT_INTERRUPTED = "Interrupted"
 BODY_COMPLETE = "Task complete"
 BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
+BODY_INTERRUPTED = "Stopped before finishing"
 
 #: Short state categories for notification surfaces with a title/subtitle/body
 #: split. Approval and ask intentionally share the category: both mean the turn
 #: cannot advance until the user returns, while the body says what it needs.
+#:
+#: ``interrupted`` is its OWN category, not a synonym for ``error``. The
+#: attention store constrains a completion's kind to exactly
+#: ``complete``/``error``/``interrupted``, and on the maintainer's real store
+#: those are 318 / 0 / 14 — so folding interrupted into error made EVERY
+#: non-success banner this feature can raise today assert that a session failed
+#: when it did not (design round 1, D3). A glyph may fold two states because it
+#: is a pointer that invites you to look; prose on a lock screen is an
+#: assertion read once, with nothing beside it to check it against.
 CONTEXTS: dict[str, str] = {
     "complete": CONTEXT_COMPLETE,
     "approval": CONTEXT_INPUT_REQUIRED,
     "ask": CONTEXT_INPUT_REQUIRED,
     "error": CONTEXT_ATTENTION,
+    "interrupted": CONTEXT_INTERRUPTED,
 }
 
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
 #: separated — see :func:`urgency_for`.
-NotifyKind = Literal["complete", "approval", "ask", "error"]
+NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted"]
 
 #: Bodies keyed by kind, so a call site names the event rather than the prose.
 BODIES: dict[str, str] = {
@@ -143,7 +155,30 @@ BODIES: dict[str, str] = {
     "approval": BODY_APPROVAL,
     "ask": BODY_ASK,
     "error": BODY_ERROR,
+    "interrupted": BODY_INTERRUPTED,
 }
+
+#: Title for a background completion whose session has no STORED name, and the
+#: sentence the routing design specifies for exactly this case.
+#:
+#: Not :data:`APP_NAME`: macOS already attributes the banner to Local Operator
+#: by name and icon, so spending the title on the brand identifies nothing, and
+#: it rendered pixel-identical to the banner a user gets when they have opted
+#: OUT of session names — two different meanings in one frame (design round 1,
+#: D2). It also contradicted the sidebar, which paints these same rows as
+#: ``Untitled conversation``.
+BACKGROUND_FALLBACK_TITLE = "A session finished"
+
+#: The observer path's body line, keyed by ROUTE rather than by state — which
+#: is why it is a single constant and not another entry in :data:`BODIES`.
+#:
+#: The state already owns the subtitle (:data:`CONTEXTS`), so repeating it in
+#: the body spent the two most valuable lines under the title saying the same
+#: word twice — ``Complete`` over ``Task complete`` (design round 1, D5). What
+#: the body can say that the subtitle cannot is why this banner exists at all:
+#: the session that finished is not the one on screen. One string for all three
+#: kinds, because it describes the ROUTING decision, not the outcome.
+BODY_BACKGROUND = "You were in another session"
 
 #: BEL. Every terminal ever made honours it; it carries no text, but it is what
 #: raises tmux's ``monitor-bell``, Zellij's ``[!]`` flag and X11 urgency hints,
@@ -215,6 +250,14 @@ def session_names_in_notifications() -> bool:
     showing — so the name is the only thing distinguishing it, and it is also
     the thing macOS repeats on a lock screen. Defaults to ``True``, which is
     what every notification here has always done.
+
+    Governs BOTH notification legs — the observer path AND the attached
+    session's own :class:`Notifier` — so the promise the settings copy makes
+    ("a session's name appears on banners, including the lock screen") is true
+    of every banner and not merely of the newest one. Governing only the
+    observer path left the majority of a user's toasts still carrying the name
+    they had just opted out of showing, which is worse than a flag that is
+    clearly scoped, because the copy reads as a guarantee (review round 1, M2).
     """
     return bool(settings_get("display.notification_session_name", True))
 
@@ -896,7 +939,11 @@ class Notifier:
             return False
         if self._focused:
             return False
-        title = self._label or APP_NAME
+        # The privacy flag governs THIS leg too, not only the observer's. Read
+        # per send rather than cached at construction: `/settings` writes it
+        # live, and a notifier resolved once at boot would keep leaking the
+        # name for the rest of a session that had just turned it off.
+        title = (self._label if session_names_in_notifications() else "") or APP_NAME
         subtitle = CONTEXTS.get(kind, CONTEXT_COMPLETE)
         body = BODIES.get(kind, BODY_COMPLETE)
 
