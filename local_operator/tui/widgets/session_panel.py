@@ -33,8 +33,10 @@ would attribute other sessions' spend to this one).
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Sequence
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -129,6 +131,21 @@ class SessionDiagnostics:
     context_is_estimate: bool | None = None
     generation: int | None = None
     epoch: str | None = None
+    #: Whether the status band is showing a RESTORED spend floor (its ``≥``
+    #: mark). App state, not session state, so it is passed at the call site
+    #: rather than read by ``capture``.
+    #:
+    #: This is a DIFFERENT deficit from the ledger's ``+`` and the two must not
+    #: be merged: ``+`` means "every call was counted, some had no published
+    #: price", while ``≥`` means "this figure includes money restored from a
+    #: resumed conversation, where only the last reported turn's usage survived
+    #: in priceable form". The ledger has no ``≥`` state and should not grow one
+    #: — for a resumed session it holds the actual retained rows, which is
+    #: usually MORE complete than the restored figure. ``/session`` is where the
+    #: two are reconciled, in prose; ``UsageAggregate`` stays free of a
+    #: transcript-restoration concept it has no way to know about (and which the
+    #: desktop HTTP route that also consumes it has no notion of).
+    spend_is_floor: bool = False
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -596,23 +613,61 @@ class _Body:
     def blank(self) -> None:
         self.lines.append(Text())
 
-    def kv(self, name: str, value: str, note: str = "") -> None:
-        """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly."""
+    def kv(self, name: str, value: str, note: str = "", *, notes: Sequence[str] = ()) -> None:
+        """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly.
+
+        ``notes`` is a ladder of progressively shorter spellings of the SAME
+        qualifier, widest first; the first one that fits the row uncropped is
+        drawn. It exists because the plain ``note`` path has exactly two
+        outcomes on a narrow frame and both are wrong for a load-bearing
+        qualifier: cropped mid-word above ``_NOTE_MIN``, or shed wholesale below
+        it (design D1 / QA Q1). A note that says WHICH QUESTION the value
+        answered is not sheddable chrome — dropping it leaves a correct figure
+        that looks like a wrong one, which is the defect this screen exists to
+        fix. Cropping a qualifier is fine; cropping the scope is not.
+
+        Callers with a purely decorative qualifier keep passing ``note`` and keep
+        the old shed-below-``_NOTE_MIN`` behaviour.
+        """
         row = Text()
         row.append(f"  {name:<22}", style=semantic_style("dim"))
         row.append(f"{value:<{_VALUE_CELL}}", style=semantic_style("fg"))
-        # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50 columns
-        # the note wraps onto its own unindented line and reads as a new record.
-        if note and self.width >= _NOTE_MIN:
+        if notes:
+            # Budget measured from the row as actually built, not from a
+            # restated literal: a change to _VALUE_CELL or the label column
+            # cannot silently reintroduce the crop this ladder removes.
+            budget = self.width - row.cell_len - 2
+            for candidate in notes:
+                if len(candidate) <= budget:
+                    row.append(f"  {candidate}", style=semantic_style("dim"))
+                    break
+        elif note and self.width >= _NOTE_MIN:
+            # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50
+            # columns the note wraps onto its own unindented line and reads as a
+            # new record.
             row.append(f"  {note}", style=semantic_style("dim"))
         row.truncate(self.width, overflow="crop")
         self.lines.append(row)
 
     def note(self, text: str) -> None:
-        """A dim footnote. Wrapped, not cropped — it is prose, not a table row."""
-        row = Text(overflow="fold")
-        row.append(f"  {text}", style=semantic_style("dim"))
-        self.lines.append(row)
+        """A dim footnote, wrapped — it is prose, not a table row.
+
+        Wrapped HERE, one emitted line per visual line, rather than handed to
+        the container's ``fold``: folding applies the ``"  "`` indent to the
+        first line only, so a continuation lands at column 0 and reads as a new
+        record in the middle of a block (design D2). The codebase already names
+        this failure mode in ``kv`` above and in ``header``; the panel sheds
+        columns elsewhere specifically to avoid it, so a footnote must not
+        reintroduce it. Indenting every line keeps a wrapped footnote visibly
+        subordinate to the block it belongs to.
+        """
+        # Guard the arithmetic rather than the caller: a pre-mount width can be
+        # small or absent, and textwrap raises on a non-positive width.
+        body_width = max(1, self.width - 2)
+        for line in textwrap.wrap(text, body_width) or [""]:
+            row = Text(no_wrap=True, overflow="crop")
+            row.append(f"  {line}", style=semantic_style("dim"))
+            self.lines.append(row)
 
     def header(self, title: str, meta: str = "", short: str = "") -> None:
         """A section header, shedding its meta to ``short`` on a narrow frame.
@@ -698,7 +753,7 @@ def build_session_report(
         # ledger — a fresh session's one true visual.
         _draw_context_gauge(body, gauge, _measure_columns([gauge] if gauge else [], width), width)
     else:
-        _draw_recorded_usage(body, report, gauge, width, metric)
+        _draw_recorded_usage(body, report, runtime, gauge, width, metric)
 
     _draw_runtime_and_scope(body, report, runtime)
     return body.to_text()
@@ -780,6 +835,7 @@ def _shared_columns(
 def _draw_recorded_usage(
     body: _Body,
     report: SessionReport,
+    runtime: SessionDiagnostics,
     gauge: _BarRow | None,
     width: int,
     metric: str,
@@ -793,7 +849,20 @@ def _draw_recorded_usage(
     meta = f"{aggregate.calls} requests"
     if aggregate.ok_calls != aggregate.calls:
         meta += f" ({aggregate.calls - aggregate.ok_calls} failed)"
-    body.header("Totals", meta + " · measured", meta)
+    # SCOPE LABEL, not chrome. Est. cost below is the whole TREE while every
+    # other row and section here is this session alone, and an unlabelled
+    # asymmetry is just the next inconsistency report. Only said when the
+    # session actually has subagents — on a childless session the two scopes are
+    # identical and the distinction would be noise.
+    scope = " · cost incl. subagents" if report.has_descendants else ""
+    # The scope rides the SHORT meta too, so a narrow frame sheds "measured"
+    # (a qualifier) and keeps "incl. subagents" (the scope). Before design D1
+    # the header's whole meta was replaced by ``meta`` below _NOTE_MIN, which
+    # dropped the scope label at exactly the widths where the Est. cost note had
+    # already gone — leaving a 70-column terminal with no statement anywhere
+    # that the figure covers subagents.
+    short = meta + (" · incl. subagents" if report.has_descendants else "")
+    body.header("Totals", meta + " · measured" + scope, short)
     body.kv(
         "Total billed",
         format_tokens(aggregate.total_tokens) + " tokens",
@@ -813,17 +882,63 @@ def _draw_recorded_usage(
         f"{format_tokens(aggregate.reasoning_tokens)} thinking",
     )
     body.kv("Cache hit rate", format_percent(aggregate.cache_hit_rate), "of context from cache")
-    body.kv(
-        "Est. cost",
-        format_cost(aggregate),
-        "≈ list price × tokens" if aggregate.cost_is_known else "no published price",
-    )
+    # The HEADLINE is the tree: this row answers "what has this session cost
+    # me", and a session that spent through 20 subagents did not spend only its
+    # own $31.28 of it. The split goes in the note slot the row already has — no
+    # new layout, no width risk — so the own figure every other section here is
+    # scoped to stays legible beside the total. Falls back to the own scope
+    # verbatim when there are no children or the ledger could not be walked.
+    subtree = report.subtree_aggregate
+    if report.has_descendants:
+        own = format_cost(aggregate)
+        subs = format_cost(report.descendants_aggregate or aggregate)
+        # A LADDER of the same qualifier, widest first, because this note says
+        # which question the headline answered and must therefore never be
+        # cropped mid-word or shed wholesale (design D1 / QA Q1). The old single
+        # string needed a 66-cell card but ``_NOTE_MIN`` admitted it from 60, so
+        # 75-80 column terminals — including the canonical 80 — painted
+        # "$71.06 subagent", and below 75 the split vanished entirely, leaving a
+        # tree figure that looks like the own figure it replaced. Every rung
+        # still says the scope; the narrow ones trade the breakdown for it,
+        # which is the right thing to lose last.
+        body.kv(
+            "Est. cost",
+            format_cost(subtree),
+            notes=(
+                f"{own} own · {subs} subagents",
+                f"{own} + {subs} subagents",
+                "incl. subagents",
+            ),
+        )
+        # Kept under ~70 characters so it does not wrap at the common widths.
+        # The 103-character version wrapped at every width from 70 to ~128 and
+        # — because a folded continuation loses the body indent — dropped an
+        # orphan fragment at column 0 between the figure and the next section
+        # header, where it read as a stray row of the table (design D2).
+        # ``_Body.note`` now indents continuations too, so this is belt and
+        # braces: short enough not to wrap, and harmless if it does.
+        body.note(
+            f"Includes {len(report.descendant_ids)} subagent sessions; "
+            "other sections are this session only."
+        )
+    else:
+        note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
+        body.kv("Est. cost", format_cost(subtree), note)
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:
         body.note(
             f"{report.missing_usage_calls:,} requests missing usage · "
             f"{report.unknown_usage_calls:,} unknown"
+        )
+    if runtime.spend_is_floor:
+        # Reconcile the band's ≥ against this screen's figure instead of copying
+        # the mark over. They measure different deficits (see
+        # ``SessionDiagnostics.spend_is_floor``), and the ledger figure is
+        # usually the better one — saying which is which is the honest move.
+        body.note(
+            "The status band shows ≥ (a restored floor from a resumed "
+            "conversation); this figure is what the ledger actually retained."
         )
     body.blank()
 
@@ -853,10 +968,28 @@ def _draw_recorded_usage(
     # so the three sources below are exhaustive. A future section rendering a
     # cost cell from a scope outside them would silently suppress the legend
     # for a ``+`` or ``$—`` that is on screen; add its scopes here.
-    scopes = [aggregate, *report.by_model.values(), *report.by_purpose.values()]
+    # ``subtree`` is listed because the Est. cost row now renders IT, not the
+    # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
+    # own scope has no reason to report, and omitting it here would put that
+    # mark on screen with its footnote suppressed.
+    scopes = [aggregate, subtree, *report.by_model.values(), *report.by_purpose.values()]
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()
+
+
+def _own_scope(report: SessionReport) -> str:
+    """The ``share of ...`` prefix, naming the scope when it could be ambiguous.
+
+    These sections are THIS session's calls only, while the Totals block's Est.
+    cost row above them is the whole tree. That split is deliberate — by_model
+    and by_purpose answer "where did MY context go", and folding a child's model
+    mix in would corrupt a diagnostic that is currently correct — but a reader
+    who just saw a tree figure needs telling, or the next row they read looks
+    like it disagrees with it. Said only when the session HAS subagents; with no
+    children the two scopes are the same and the longer wording is noise.
+    """
+    return "share of this session only" if report.has_descendants else "share of session"
 
 
 def _unpriced_note(body: _Body, metric: str, priced: bool) -> bool:
@@ -880,7 +1013,7 @@ def _draw_by_model(
         return
     groups = [(f"{provider}/{model}", agg) for (provider, model), agg in report.by_model.items()]
     rows, priced = _group_rows(groups, metric)
-    body.header("By model", _metric_meta(metric, "share of session"), _metric_meta(metric, ""))
+    body.header("By model", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     _unpriced_note(body, metric, priced)
     body.extend(_render_rows(rows, cols, width))
     body.blank()
@@ -900,7 +1033,7 @@ def _draw_by_purpose(
     if not report.by_purpose:
         return
     rows, priced = _group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))
-    body.header("By purpose", _metric_meta(metric, "share of session"), _metric_meta(metric, ""))
+    body.header("By purpose", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     # Only when there is a contrast to explain: the legend defines ``turn``
     # against the harness's own purposes, so it is noise when the rows are all
     # ``turn``, and meaningless on a legacy ledger whose single row is

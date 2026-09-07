@@ -34,6 +34,18 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _submit
 
 
+def flowed(text: str) -> str:
+    """The report's text with wrapping collapsed, for asserting on PROSE.
+
+    ``_Body.note`` wraps a footnote at build time and indents every line, so a
+    sentence spans several lines with a two-space indent on each (design D2 —
+    folding instead put the continuation at column 0, where it read as a stray
+    table row). A test about WORDING should not therefore depend on where the
+    line broke; a test about LAYOUT asserts on the raw lines instead.
+    """
+    return " ".join(text.split())
+
+
 def runtime():
     return SessionDiagnostics(
         "sess",
@@ -70,7 +82,7 @@ def test_report_empty_unavailable_and_cost_knowledge():
         report = SessionReport(
             "sess", aggregate=UsageAggregate(calls=2, cost_micro=cost, cost_known_calls=known)
         )
-        text = build_session_report(report, runtime()).plain
+        text = flowed(build_session_report(report, runtime()).plain)
         assert expected in text
         assert "input, output and tool dollars are not recorded separately" in text
         assert "list-price estimate" in text
@@ -881,3 +893,153 @@ def test_sequence_chart_never_renders_an_absent_duration_as_zero():
     )
     assert sum("█" in r for r in rows) == 1
     assert any("4,000 ms" in r for r in rows) and any("unknown" in r for r in rows)
+
+
+def _tree_report(**kw):
+    """A session that spent $31.28 itself and $71.06 through 20 subagents —
+    the operator's real numbers, which is what makes the assertions readable."""
+    return SessionReport(
+        "sess",
+        aggregate=UsageAggregate(
+            calls=248,
+            ok_calls=248,
+            context_tokens=47_000_000,
+            cost_micro=31_276_032,
+            cost_known_calls=248,
+        ),
+        descendants_aggregate=UsageAggregate(
+            calls=896,
+            ok_calls=896,
+            context_tokens=200_000_000,
+            cost_micro=71_059_322,
+            cost_known_calls=896,
+        ),
+        descendant_ids=tuple(f"kid{n:02d}" for n in range(20)),
+        **kw,
+    )
+
+
+def test_est_cost_headline_is_the_tree_with_the_split_beneath_it():
+    """The defect: /session showed $31.28 while the composer showed $102.60 for
+    the same session. The headline becomes the tree; the split explains it."""
+    text = build_session_report(_tree_report(), runtime(), width=120).plain
+    assert "$102.34" in text  # the headline: what this session cost
+    assert "$31.28 own · $71.06 subagents" in text  # the split, in the note slot
+    # The asymmetry with every other section is LABELLED, not left to be found.
+    assert "cost incl. subagents" in text
+    assert "Includes 20 subagent sessions" in text
+    assert "other sections are this session only" in text
+
+
+def test_scope_is_never_silently_dropped_at_any_width():
+    """Design D1 / QA Q1: the scope is load-bearing, not sheddable chrome.
+
+    Before this, the split note needed a 66-cell card but ``_NOTE_MIN`` admitted
+    it from 60, so 75-80 column terminals (including the canonical 80) painted
+    "$71.06 subagent" mid-word, and below 75 the note AND the header's scope
+    label both vanished — leaving a bare $102.34 where main showed $31.28 with
+    nothing on screen saying the scope had changed. That is the reported defect's
+    own shape (a right number that looks wrong) relocated to narrow terminals.
+
+    So the requirement is not "the note fits" but "no width shows a tree figure
+    without saying it is one", checked across the ladder rather than at one width.
+    """
+    report = _tree_report()
+    for width in range(50, 161):
+        lines = build_session_report(report, runtime(), width=width).plain.split("\n")
+        cost_row = next(line for line in lines if "Est. cost" in line)
+        flat = flowed("\n".join(lines))
+
+        # 1. The headline is always the tree figure.
+        assert "$102.34" in cost_row, width
+        # 2. The scope is stated SOMEWHERE on screen at every width.
+        assert ("subagent" in flat) or ("subs" in flat), width
+        # 3. Nothing is cropped mid-word. Every rung of the ladder ends in a
+        #    COMPLETE word, so a truncated "subagent"/"sub" tail can only mean a
+        #    crop — which is the Q1 bisection, generalised to the whole ladder.
+        tail = cost_row.rstrip()
+        if "subagent" in tail:
+            assert tail.endswith("subagents"), (width, cost_row)
+        # 4. The row never overflows the frame it was built for.
+        assert len(cost_row) <= width, (width, len(cost_row))
+
+
+def test_the_scope_note_does_not_orphan_wrap_into_the_block():
+    """Design D2: a wrapped footnote must stay indented under its block.
+
+    The 103-character prose note wrapped at every width from 70 to ~128 and,
+    because ``fold`` applies the body indent to the first line only, dropped
+    "this session alone." at column 0 between the Est. cost figure and the next
+    section header — where it read as an orphan row of the table. ``_Body.kv``'s
+    own comment already names this failure mode.
+    """
+    report = _tree_report()
+    for width in (70, 76, 80, 100, 128, 160):
+        lines = build_session_report(report, runtime(), width=width).plain.split("\n")
+        # Every non-blank body line is indented. Section headers legitimately
+        # start at column 0 (the ▌ accent bar IS the left edge), so they are
+        # the one exception; anything else at column 0 is an orphaned wrap.
+        for line in lines[2:]:
+            if line.strip() and not line.startswith("▌"):
+                assert line.startswith("  "), (width, repr(line))
+        # And the sentence survives the wrap intact, wherever it broke.
+        assert "other sections are this session only" in flowed("\n".join(lines)), width
+
+
+def test_own_only_sections_say_they_are_own_only():
+    """by_model/by_purpose stay this session's calls — they answer "where did MY
+    context go" — so their meta must say so once the headline is a tree."""
+    report = _tree_report(
+        by_model={("anthropic", "claude"): UsageAggregate(calls=248, context_tokens=47_000_000)},
+        by_purpose={"turn": UsageAggregate(calls=248, context_tokens=47_000_000)},
+    )
+    text = build_session_report(report, runtime(), width=120).plain
+    assert "share of this session only" in text
+
+    # A childless session has one scope, so the longer wording would be noise.
+    solo = SessionReport(
+        "sess",
+        aggregate=UsageAggregate(calls=2, context_tokens=100, cost_micro=5, cost_known_calls=2),
+        descendants_aggregate=UsageAggregate(),
+        by_model={("anthropic", "claude"): UsageAggregate(calls=2, context_tokens=100)},
+    )
+    solo_text = build_session_report(solo, runtime(), width=120).plain
+    assert "share of session" in solo_text
+    assert "share of this session only" not in solo_text
+    assert "own ·" not in solo_text
+
+
+def test_tree_total_carries_the_lower_bound_mark_from_a_child():
+    """Sum the counters, not the booleans: a fully-priced parent whose child
+    used an unpriced model has a tree total that IS a lower bound — and the
+    legend explaining the ``+`` must not be suppressed."""
+    report = SessionReport(
+        "sess",
+        aggregate=UsageAggregate(
+            calls=2, context_tokens=10, cost_micro=1_000_000, cost_known_calls=2
+        ),
+        descendants_aggregate=UsageAggregate(
+            calls=4, context_tokens=10, cost_micro=500_000, cost_known_calls=1
+        ),
+        descendant_ids=("kid",),
+    )
+    text = build_session_report(report, runtime(), width=120).plain
+    assert "$1.50+" in text
+    assert "lower bound" in text  # COST_LEGEND, drawn from the subtree scope
+
+
+def test_restored_floor_is_reconciled_in_prose_not_copied():
+    """``≥`` (restored transcript floor) and ``+`` (unpriced calls) are different
+    deficits. /session says which figure is which instead of merging them."""
+    text = flowed(
+        build_session_report(
+            _tree_report(), replace(runtime(), spend_is_floor=True), width=120
+        ).plain
+    )
+    assert "restored floor" in text
+    assert "what the ledger actually retained" in text
+    # The mark itself is NOT copied onto the ledger figure.
+    assert "≥$" not in text
+
+    plain = build_session_report(_tree_report(), runtime(), width=120).plain
+    assert "restored floor" not in plain
