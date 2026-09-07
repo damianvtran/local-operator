@@ -118,6 +118,25 @@ VIEWER_RESUME_TIMEOUT_S = 10.0
 #: this is slack, not patience.
 VIEWER_ACK_GRACE_S = 5.0
 
+#: How long the server may spend STOPPING a switch that overran the bound
+#: above, before it answers the click.
+#:
+#: The bound alone never made "never both" true, it only moved the delay at
+#: which both happened: ``wait_for`` cancels the waiter, not the navigation, so
+#: a switch slower than ``VIEWER_RESUME_TIMEOUT_S`` still committed after the
+#: endpoint had already answered failure — the caller spawned a window AND the
+#: session switched. Measured on the derived bounds: clean at 9.8 s, both
+#: outcomes at 10.2 s and every value above it.
+#:
+#: So the timeout now cancels the navigation and reads what is on screen once
+#: it has stopped, and this is the budget for that. It is spent INSIDE the
+#: client's grace — the server has to answer before the client stops
+#: listening — which is why it is a fraction of the grace rather than a third
+#: literal: the ordering ``RESUME + ABANDON < RESUME + GRACE`` is arithmetic
+#: that cannot be edited into an inversion on one side, and the remaining half
+#: stays with the socket round trip the grace was sized for.
+VIEWER_ABANDON_SETTLE_S = VIEWER_ACK_GRACE_S / 2
+
 #: Same cadence and grace as the session runtime's, so "is this alive" reads
 #: the same way in both places and an operator debugging one has learned the
 #: other. Divergence here would be a second thing to remember for no gain.

@@ -15530,18 +15530,45 @@ class OperatorApp(App[None]):
         acceptable: it is a pooled thread rather than this endpoint's loop, so
         the endpoint keeps answering and the click falls back on time.
 
+        NEVER BOTH — A SWITCH OR A SPAWN, AT ANY DELAY. That is the property
+        this endpoint owes its caller, and the bound alone never delivered it:
+        ``wait_for`` cancels the waiter, not the navigation, so a switch slower
+        than the bound still committed *after* this had answered failure, and
+        the caller spawned a window for a session that then switched underneath
+        it. Raising the bound only moved the delay at which that happened —
+        measured clean at 9.8 s and doubled at 10.2 s.
+
+        So an overrun is now stopped rather than merely stopped waiting for.
+        The timeout hops back and calls ``SessionNavigation.abandon``, whose
+        generation bump fences the navigation out of committing, and then reads
+        what is on screen: a switch that beat the fence is reported as the
+        success it is, and one that did not can no longer land. Two outcomes,
+        never both — by construction rather than by the bound being large
+        enough. ``abandon`` is scoped to the task this call started, so a switch
+        the USER began while this one overran is not cancelled with it.
+
+        A cancelled navigation cannot half-swap the app: ``SessionNavigation``
+        commits with no await between its final generation check and
+        ``_commit_sidebar_session``, so the fence lands strictly before or
+        strictly after the swap, and preparation is discarded through the same
+        ``release``/``pending("")`` path a user's own cancel uses — leaving the
+        outgoing conversation, its draft and its suspended gates as they were.
+
         ``VIEWER_RESUME_TIMEOUT_S`` is shared with the client's ack deadline,
         which is derived from it — see ``session/runtime/viewers``. The client
-        MUST outlast this bound; when it did not, a slow switch delivered the
-        switch *and* a duplicate window, which is the exact bug this feature
-        removes.
+        MUST outlast this bound plus the abandon budget spent above; when it did
+        not, a slow switch delivered the switch *and* a duplicate window, which
+        is the exact bug this feature removes.
         """
         # The same set-once helper the mobile handle's app hop uses, imported
         # rather than re-declared: two spellings of "resolve this future unless
         # a cancellation already did" is exactly the duplication that lets one
         # of them drift into swallowing an error.
         from local_operator.mobile.tui_handle import _set_unless_done
-        from local_operator.session.runtime.viewers import VIEWER_RESUME_TIMEOUT_S
+        from local_operator.session.runtime.viewers import (
+            VIEWER_ABANDON_SETTLE_S,
+            VIEWER_RESUME_TIMEOUT_S,
+        )
 
         if threading.get_ident() == getattr(self, "_thread_id", None):
             # Preserved from before the worker-thread hop below, which would
@@ -15553,6 +15580,10 @@ class OperatorApp(App[None]):
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
 
+        # Written on Textual's thread by `apply`, read on Textual's thread by
+        # `abandon`; the hop between them is what makes that safe.
+        started: list["asyncio.Task[None]"] = []
+
         def apply() -> None:
             """On Textual's thread: start the switch and report where it landed."""
             try:
@@ -15560,6 +15591,7 @@ class OperatorApp(App[None]):
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
                 return
+            started.append(task)
 
             def settled(_task: "asyncio.Task[None]") -> None:
                 # Still on Textual's thread, so reading the binding is safe.
@@ -15587,7 +15619,41 @@ class OperatorApp(App[None]):
             await asyncio.to_thread(self.call_from_thread, apply)
             return await future
 
-        return await asyncio.wait_for(hop_and_wait(), timeout=VIEWER_RESUME_TIMEOUT_S)
+        def abandon() -> str:
+            """On Textual's thread: stop the overrun switch, then report truthfully.
+
+            Reading the binding here rather than assuming failure is the whole
+            point. The navigation may have committed in the moment between the
+            bound expiring and this callback running, and answering "failed"
+            for a switch that is on screen is exactly the lie that spawns the
+            duplicate window.
+            """
+            task = started[0]
+            self._sidebar_navigation.abandon(task)
+            current = getattr(self._session, "session_id", "") if self._session else ""
+            return f"displayed {session_id}" if current == session_id else ""
+
+        try:
+            return await asyncio.wait_for(hop_and_wait(), timeout=VIEWER_RESUME_TIMEOUT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            if not started:
+                # The bound expired inside the hop itself — a wedged app that
+                # never serviced the enqueue, so no navigation exists to stop
+                # and nothing can commit behind us.
+                raise
+            # Bounded again, and inside the client's remaining grace: this hop
+            # is enqueued behind whatever made the switch slow, so an app wedged
+            # badly enough to swallow it must not convert a duplicate window
+            # into an endpoint that never answers at all.
+            landed = await asyncio.wait_for(
+                asyncio.to_thread(self.call_from_thread, abandon),
+                timeout=VIEWER_ABANDON_SETTLE_S,
+            )
+            if landed:
+                # It committed before the fence. The switch the user asked for
+                # happened, late; saying so is what stops the second window.
+                return landed
+            raise
 
     async def viewer_focus_window(self) -> str:
         """Bring this window forward. Best-effort, bounded, off the event loop.
