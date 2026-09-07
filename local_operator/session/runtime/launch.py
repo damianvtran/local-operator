@@ -60,13 +60,14 @@ import asyncio
 import logging
 import os
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
+
+from local_operator.interpreter import SAFE_PATH_FLAG
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +299,19 @@ def _spawn_runtime(
         argv0 = procname.branded_argv0(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-            [argv0, "-m", "local_operator.session.runtime.process"],
+            # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
+            # ``python_argv``'s flag supplies import isolation: this spawn passes
+            # no ``cwd=``, so the child inherits the viewer's directory, and
+            # ``-m`` would put that directory on ``sys.path`` ahead of
+            # site-packages. A session whose cwd is a checkout of this project
+            # then runs the CHECKOUT rather than the install — which is how live
+            # runtimes ended up pinned to a superseded build. See
+            # :mod:`local_operator.interpreter`.
+            # ``argv0``/``executable`` supply the process NAME (see
+            # :mod:`local_operator.procname`). They are orthogonal: the label
+            # replaces argv[0] only, and the flag must stay at index 1, because
+            # interpreter options are recognised only before ``-m``.
+            [argv0, SAFE_PATH_FLAG, "-m", "local_operator.session.runtime.process"],
             executable=executable,
             env=env,
             stdin=subprocess.DEVNULL,

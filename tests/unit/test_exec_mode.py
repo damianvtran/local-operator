@@ -42,6 +42,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
+from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.session.naming import ConversationName
@@ -275,10 +276,13 @@ def test_build_worker_argv_roundtrip() -> None:
         model="gpt-4o",
     )
     argv = build_worker_argv("do it", args)
-    assert argv[:3] == [sys.executable, "-m", "local_operator.exec_worker"]
-    assert argv[3:5] == ["--prompt", "do it"]
+    # ``-P`` before ``-m``: interpreter options are only recognised there, and
+    # without it a background exec started inside a checkout of this project
+    # runs that checkout (see local_operator.interpreter).
+    assert argv[:4] == [sys.executable, "-P", "-m", "local_operator.exec_worker"]
+    assert argv[4:6] == ["--prompt", "do it"]
     # Every set flag serializes; parse it back through the worker parser.
-    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.prompt == "do it"
     assert parsed.json_mode is True
     assert parsed.yolo is True
@@ -292,7 +296,7 @@ def test_build_worker_argv_roundtrip() -> None:
 def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """CL-05: ExecArgs.train reaches the session-factory namespace via argv."""
     argv = build_worker_argv("t", ExecArgs(train=True))
-    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.train is True
     # And the worker's factory passes it into the session args namespace.
     seen: dict[str, Any] = {}
@@ -311,7 +315,7 @@ def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPa
 
 def test_build_worker_argv_omits_unset_flags() -> None:
     argv = build_worker_argv("bare", ExecArgs())
-    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.prompt == "bare"
     assert parsed.json_mode is False
     assert parsed.agent is None
@@ -330,7 +334,7 @@ def test_build_worker_argv_threads_control_to_the_worker() -> None:
     """
     argv = build_worker_argv("do it", ExecArgs(control=True))
     assert "--control" in argv
-    parsed = exec_worker.build_parser().parse_args(argv[3:])
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.control is True
 
 
@@ -756,16 +760,20 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     argv = popen_mock.call_args[0][0]
     kwargs = popen_mock.call_args[1]
 
-    # argv[0] is the process LABEL when a branded interpreter image exists
-    # (`executable=` then carries the real image), and the bare interpreter
-    # when it does not. Both are correct; what must never drift is the module
-    # and the request that follow it. See `local_operator.procname`.
+    # BOTH properties on the one spawn, asserted together because they are the
+    # two halves that a merge can silently drop one of: argv[0] is the process
+    # LABEL when a branded interpreter image exists (`executable=` then carries
+    # the real image) and the bare interpreter when it does not, while
+    # `SAFE_PATH_FLAG` at index 1 keeps a background exec on the installed build
+    # rather than a checkout that happens to be the user's cwd. See
+    # `local_operator.procname` and `local_operator.interpreter`.
     if kwargs.get("executable"):
         assert os.path.basename(kwargs["executable"]) == "Local Operator"
         assert argv[0].startswith("Local Operator [exec] job=")
     else:
         assert argv[0] == sys.executable
     assert argv[1:5] == [
+        SAFE_PATH_FLAG,
         "-m",
         "local_operator.exec_worker",
         "--prompt",

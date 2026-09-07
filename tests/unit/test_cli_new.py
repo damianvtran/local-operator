@@ -1558,9 +1558,12 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
     assert argv[argv.index("--resume") + 1] == "sess-abc123"
 
     # And the worker on the other side accepts what was serialized — parsed from
-    # the real argv minus the `python -m <module>` prefix, so the test breaks if
-    # the serialization and the worker's parser ever disagree.
-    assert build_parser().parse_args(argv[3:]).resume == "sess-abc123"
+    # the real argv minus the `python [flags] -m <module>` prefix, so the test
+    # breaks if the serialization and the worker's parser ever disagree.
+    # The prefix length is DERIVED rather than hardcoded: interpreter flags sit
+    # between the executable and `-m` (see local_operator.interpreter), so a
+    # fixed slice silently turns into a parser error when one is added.
+    assert build_parser().parse_args(argv[argv.index("-m") + 2 :]).resume == "sess-abc123"
 
     # Nothing is emitted when nothing was asked for.
     assert "--resume" not in build_worker_argv("hi", ExecArgs())

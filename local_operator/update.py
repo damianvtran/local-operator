@@ -39,6 +39,8 @@ from enum import Enum
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
@@ -145,82 +147,114 @@ def installed_version() -> str:
     0.46.23 it had been installed at -- and the app showed that stale number to
     users in Settings > Updates (QA Q3 / UX U13).
 
-    PRECEDENCE: the HIGHER of the checkout's ``pyproject.toml`` and the install
-    metadata, when both are readable and parseable.
+    PRECEDENCE: the checkout's ``pyproject.toml`` when that checkout IS this
+    install (an editable install, verified through ``direct_url.json`` by
+    :func:`_editable_source_version`), otherwise the install metadata.
 
-    Not "the checkout always wins". Both sources are stale in opposite
-    directions and neither is authoritative on its own:
+    Not a maximum. This used to take the HIGHER of the two, on the argument that
+    both are stale in opposite directions -- metadata never moves with the tree,
+    while a stray ``pyproject.toml`` declaring an older version produced a
+    spurious "update available" (review round 2, MINOR-2) -- and that a maximum
+    therefore failed in the SAFE direction.
 
-    * metadata is written once at install time and never moves with the tree,
-      so a checkout at 0.49.0 reported the 0.46.23 it was installed at (QA Q3 /
-      UX U13) -- the bug this function exists to fix;
-    * a ``pyproject.toml`` is merely a file that happens to sit next to the
-      package, and one naming this project but declaring an older version (a
-      fixture, a scratch tree, a hand-edited ``version = "0.1.0"``) overrode
-      correct metadata and produced a spurious "update available" (review round
-      2, MINOR-2).
+    That argument only covers a stray NEWER file. A stray OLDER one drags the
+    number DOWN, and there is no direction of ``max`` that protects against
+    both, because the real defect was never the comparison: it was trusting a
+    file whose relationship to the running code had not been established. On a
+    real install a spawned child read a 0.51.0 checkout while running 0.51.5,
+    and the maximum could not help -- the wrong input simply won or lost on
+    magnitude.
 
-    Taking the maximum resolves both: the forward-moving tree wins over stale
-    metadata, and stale-looking file loses to metadata that knows better. It
-    also fails in the SAFE direction. The residual case is a deliberate checkout
-    of an OLDER tag alongside newer install metadata: this reports the newer
-    number and the user sees no update banner while running older code. That is
-    a missed banner rather than a false one, and this module already takes that
-    side of the trade -- see :func:`parse_version`, where an unparseable version
-    is treated as "not behind" because "a banner we cannot defend is worse than
-    none".
+    Once the source side is required to prove identity, the two are no longer
+    rival guesses about one unknown: a matched checkout is the live version of
+    the code that is executing and its metadata is a snapshot of an earlier
+    state, so the checkout is authoritative outright and the ordering is
+    irrelevant. When nothing proves identity there is only one input left.
 
-    A packaged (non-editable) install has no adjacent project file, so it never
-    takes this path and reports its metadata exactly as before; there is no
-    configuration in which a released build starts reading a stray file. Both an
-    editable install and a bare ``PYTHONPATH`` checkout are covered, which
-    matters because a leftover ``*.egg-info`` in the tree shadows the installed
-    distribution entirely and made "is this editable?" the wrong question.
+    A packaged (non-editable) install has no editable ``direct_url.json``, so it
+    reports its metadata exactly as before -- including when a checkout of this
+    project is sitting in the working directory, which is the case that broke.
     """
     source = _editable_source_version()
     try:
         metadata = version("local-operator")
     except PackageNotFoundError:
         metadata = ""
-    if not source:
-        return metadata
-    if not metadata:
-        return source
-    # Compare on parsed tuples; an unparseable side cannot be ordered, so the
-    # other one is the only defensible answer.
-    source_parts, metadata_parts = parse_version(source), parse_version(metadata)
-    if source_parts is None:
-        return metadata
-    if metadata_parts is None:
-        return source
-    return source if source_parts >= metadata_parts else metadata
+    # ``source`` is non-empty only when the imported tree was proven to be this
+    # install's editable source, so it describes the running code and wins
+    # outright. No comparison: an older matched checkout is a real downgrade of
+    # the code in memory, not a stale reading to be corrected upward.
+    return source or metadata
+
+
+def _editable_install_root() -> Path | None:
+    """The source tree an EDITABLE install of this project points at, if any.
+
+    PEP 610 records the origin of an editable install in ``direct_url.json`` as
+    a ``file://`` URL with ``dir_info.editable`` true. That URL is the one piece
+    of evidence that says which checkout the installed distribution actually
+    resolves to, as opposed to which checkout merely happens to be lying around.
+
+    ``None`` whenever this is not an editable install, the marker is missing, or
+    the URL is not a readable local path — every one of which means "no checkout
+    is authoritative here", which is the safe answer for the only caller.
+    """
+    data = _direct_url_payload()
+    if data is None:
+        return None
+    dir_info = data.get("dir_info")
+    editable = data.get("editable") is True or (
+        isinstance(dir_info, dict) and dir_info.get("editable") is True
+    )
+    if not editable:
+        return None
+    url = data.get("url")
+    if not isinstance(url, str) or not url.startswith("file:"):
+        return None
+    try:
+        return Path(url2pathname(urlparse(url).path)).resolve()
+    except (OSError, ValueError):
+        return None
 
 
 def _editable_source_version() -> str:
-    """The version in the checkout's ``pyproject.toml``, when code runs FROM it.
+    """The checkout's ``pyproject.toml`` version — only when it IS the install.
 
-    Two stale-metadata layouts produce the same wrong answer, and both are
-    normal for a working tree:
+    An editable install's ``dist-info`` is written once and never moves with the
+    tree, so a checkout at 0.49.0 reported the 0.46.23 it was installed at and
+    the app showed that stale number in Settings > Updates (QA Q3 / UX U13).
+    Reading the adjacent ``pyproject.toml`` fixes that — but only if the file
+    describes the code that is actually running.
 
-    * an editable install, whose ``dist-info`` is written once at install time;
-    * a leftover ``*.egg-info`` in the checkout, which shadows the installed
-      distribution entirely and is a gitignored build artifact nothing
-      refreshes.
+    IDENTITY, NOT ADJACENCY. This previously trusted any ``pyproject.toml``
+    sitting beside the imported package, on the reasoning that a released build
+    has no adjacent project file and so could never read a stray one. That
+    reasoning was false, and the failure was measured on a real install: a
+    spawned child whose working directory was a checkout of this project
+    imported THAT checkout (``-m`` puts the cwd on ``sys.path`` ahead of
+    site-packages — the defect :mod:`local_operator.interpreter` now prevents),
+    so ``Path(__file__)`` pointed into a tree the install had nothing to do
+    with. A 0.51.5 install reported 0.51.0, and its stale ``*.egg-info``
+    shadowed the real dist-info down to 0.49.3 as well.
 
-    Rather than distinguish them, this asks the question that actually matters:
-    is the imported package sitting next to a ``pyproject.toml``? If so the
-    running code IS that checkout, and the checkout's version is the truth
-    while any metadata is a copy of some earlier state.
+    So the checkout wins only when ``direct_url.json`` names it as the editable
+    source of the installed distribution. A stray tree — a scratch clone, a
+    worktree that merely happens to be the cwd, a fixture — is now ignored, and
+    the caller falls back to metadata that at least describes a real install.
 
-    Deliberately cheap and total: any doubt (no adjacent project file, an
-    unreadable or unexpected one) returns ``""`` so the caller falls back to
-    metadata rather than inventing a number.
+    Still cheap and total: any doubt (no editable install, a mismatched root, an
+    unreadable or unexpected file) returns ``""``, and nothing here may raise.
     """
     try:
         import tomllib
 
         # local_operator/update.py -> local_operator/ -> the checkout root.
-        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        root = Path(__file__).resolve().parent.parent
+        # The imported tree must BE the tree this install was made editable
+        # from; adjacency alone proves nothing about which code is running.
+        if root != _editable_install_root():
+            return ""
+        pyproject = root / "pyproject.toml"
         if not pyproject.is_file():
             return ""
         with pyproject.open("rb") as handle:
