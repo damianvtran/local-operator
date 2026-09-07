@@ -635,9 +635,8 @@ Warnings that still hold, each of which has already cost a release:
   `Merge pull request #999 from feat` and never the substantive commit on the
   second parent, so when a merge subject is uninformative the plain log carries
   the real description and the first-parent walk does not. A release note that
-  omits a
-  merged PR is a defect in the release, not a cosmetic miss — it is the only
-  record of what changed under a user who is about to update.
+  omits a merged PR is a defect in the release, not a cosmetic miss — it is
+  the only record of what changed under a user who is about to update.
 - **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
   tagging.** A non-empty diff means a merged PR carried its own version bump
   and has silently consumed the number you are about to use. That is exactly
