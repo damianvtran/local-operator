@@ -31,6 +31,20 @@ the conversation it left instead of retiring it:
   come back, the TOAST is a transient overlay about the conversation being LEFT
   and must not travel. This frame is the second half of that pair — read it
   beside ``notice``, which shows the row surviving the return.
+
+``fork_parked`` and ``fork_return`` are the two legs of the band's ``forking``
+segment (design round 3, D3), and are only meaningful as a PAIR — each one alone
+is satisfied by a fix that breaks the other:
+
+* ``fork_parked`` parks a conversation whose ``/fork`` is still waiting for a
+  turn boundary and captures the session switched TO, which has no fork. The
+  segment must be ABSENT: it advertises ``esc``, and ``action_stop`` probes
+  ``self._session``, so a segment left standing here offers a cancel that cannot
+  reach the fork it names.
+* ``fork_return`` completes the round trip and captures the conversation that
+  owns the fork, where the segment must be PRESENT — the request is still live
+  and still cancellable, and blanking it on the park leg is what review round 2
+  raised as MAJOR-3.
 """
 
 from __future__ import annotations
@@ -92,7 +106,11 @@ async def main() -> None:
     columns, _, rows = size.partition("x")
 
     fresh = SidebarRemote("fresh-session")
-    home = SidebarRemote("home-session")
+    # The fork legs need the home conversation to REPORT a pending fork, because
+    # the band reads `has_pending_fork()` off the session rather than tracking
+    # it — which is the property the D3 frames are about: whose answer is being
+    # painted, not whether a flag was set.
+    home = SidebarRemote("home-session", pending_fork=which in ("fork_parked", "fork_return"))
     busy = SidebarRemote(
         "busy-session",
         history=[
@@ -112,7 +130,19 @@ async def main() -> None:
             for _ in range(20):
                 await pilot.pause()
 
-            if which == "toast":
+            if which in ("fork_parked", "fork_return"):
+                # The request, as `/fork` on a streaming session makes it: the
+                # session defers to a turn boundary and the band is synced from
+                # it, so the fork stays live and cancellable across the park.
+                app._sync_fork_pending()
+                for _ in range(10):
+                    await pilot.pause()
+                await _switch(app, pilot, busy)
+                if which == "fork_return":
+                    await _switch(app, pilot, home)
+                for _ in range(20):
+                    await pilot.pause()
+            elif which == "toast":
                 # Same setup as `notice`, captured one leg earlier: the toast is
                 # still up when the conversation is parked, so the frame shows
                 # what the session switched TO is wearing.
@@ -195,6 +225,15 @@ async def main() -> None:
             print(f"live_toasts={len([t for t in app.query(Toast) if t.display])}")
             print(f"screen size={tuple(app.screen.size)} virtual={tuple(app.screen.virtual_size)}")
             print(f"scrollbar={app.screen.show_vertical_scrollbar}")
+            # The D3 measurement, read off the RENDERED band rather than the
+            # flag: a code check can confirm the leave-alone is correct and
+            # still miss that the frame describes the wrong conversation.
+            from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+
+            session = app._session
+            probe = getattr(session, "has_pending_fork", None) if session is not None else None
+            print(f"band_says_forking={FORK_PENDING_TEXT in status.render_text(100).plain}")
+            print(f"session_has_pending_fork={probe() if callable(probe) else 'n/a'}")
             save_capture(app, out)
 
 

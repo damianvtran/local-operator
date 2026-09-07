@@ -4041,6 +4041,20 @@ class OperatorApp(App[None]):
             # straight back to.
             self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            # Re-derive the fork indicator from the session now in front of the
+            # user. `fork_pending` is app-scoped with no `FrontendSessionState`
+            # field, so no snapshot repaints it and the park leg deliberately
+            # leaves it alone (nothing else restores a live fork on the return).
+            # Both halves of that are correct and neither resolves the flag for
+            # the INCOMING conversation, so an adoption that changes conversation
+            # has to ask the new session itself — otherwise the outgoing
+            # conversation's `forking` stays painted here, advertising an `esc`
+            # that `action_stop` routes to `self._session` and so can never
+            # reach the fork it names. That is the lie `_schedule_fork_report`
+            # forbids, one conversation over. AFTER the adopt, never before:
+            # `_sync_fork_pending` reads `self._session`, which the line above
+            # has just swapped.
+            self._sync_fork_pending()
             self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
             history = session.display_history_window()
             total = session.history_message_count
@@ -6916,10 +6930,17 @@ class OperatorApp(App[None]):
         ``_apply_frontend_state``'s snapshot repaint) and all ten come back.
         ``fork_pending`` is the sole structural exception, which is why it needs
         the gate rather than a restore: ``FrontendSessionState`` carries no
-        fork-pending field, so no snapshot can repaint it, and the only writer of
-        the truth — :meth:`_sync_fork_pending` — is called from neither
-        ``_adopt_session`` nor ``_commit_sidebar_session``. A clear on the park
-        leg is therefore permanent for the lifetime of the pending request.
+        fork-pending field, so no snapshot can repaint it. A clear on the park
+        leg is therefore permanent for the lifetime of the pending request,
+        which is what ``retire=False`` prevents.
+
+        That gate answers the RETURN leg only. Leaving the flag alone also
+        leaves the OUTGOING conversation's value standing over the session
+        switched TO, so ``_commit_sidebar_session`` pairs this call with a
+        :meth:`_sync_fork_pending` after its adopt to re-derive the flag from
+        the incoming session. The two are a pair: neither alone gets both legs
+        right, and this method must not try to do the incoming half itself
+        because it runs BEFORE ``_adopt_session`` swaps ``self._session``.
 
         The ledger figures themselves (`_total_cost`, `_spend_is_floor`, the
         naming bookkeeping) are properties of ``self._interaction`` and are
@@ -7966,10 +7987,11 @@ class OperatorApp(App[None]):
 
         Read from the session rather than tracked here, so the band can never
         disagree with the fact that actually governs the drain. Called at the
-        three moments the answer can change — the request, the receipt, and a
-        cancel — rather than polled, because the band repaints at 12.5 Hz during
-        a turn and a poll would be doing this work eighty times a second to
-        observe a flag that changes twice a session.
+        moments the answer can change — the request, the receipt, a cancel, and
+        a sidebar switch, which changes the session the flag is read FROM rather
+        than the fork itself — rather than polled, because the band repaints at
+        12.5 Hz during a turn and a poll would be doing this work eighty times a
+        second to observe a flag that changes twice a session.
 
         Defensive on both sides: a host whose session has no ``has_pending_fork``
         (the lightweight facades, ``RemoteSession``) simply never lights the
