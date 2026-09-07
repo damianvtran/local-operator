@@ -288,9 +288,9 @@ the side effects land in the operator's real home. That is not hypothetical —
 the analytics session-name backfill did exactly this and wrote 612 rows into
 the live `~/.local-operator/analytics.db` from a sandboxed run. Production was
 unaffected, because the only production caller passes the real config dir and
-the two therefore agreed, which is precisely why nothing caught it. Two
-instances of this class have now landed in one session; when you isolate a run,
-verify where its writes actually go.
+the two therefore agreed, which is precisely why nothing caught it. When you
+isolate a run, verify where its writes actually go, not merely that its reads
+are redirected.
 
 ### Read the committed ref, not the working tree
 
@@ -453,8 +453,20 @@ been released yet is the normal state of `main`, not a problem to fix.
 
 Releases are cut by a single **release owner** for a **window**: the set of
 PRs merged since the last tag that are ready around the same time (about an
-hour). A PR that merges after the owner has started cutting simply rides the
-next window; nothing is lost, and nobody holds a merge to make a window.
+hour). Nobody holds a merge to make a window.
+
+**A PR that merges after the owner starts cutting does not reliably ride the
+next window — it may ride *this* one, unlisted.** The tag names a SHA and
+everything reachable from it ships, and the bump commit is not a barrier: in
+v0.51.4 the bump landed at 07:16 and #731 merged at 07:18 on an independent
+branch, so both were reachable from the tagged merge and #731 shipped while
+being absent from the notes. So: **if you merge while a window is open, send
+the owner your PR number and merge SHA at merge time**, not when you next
+happen to talk to them. The owner cannot poll continuously, and a peer who
+confirms a window list and then quietly merges into it has broken the protocol
+even though every individual step looked correct. The owner's matching duty —
+re-derive the window immediately before tagging — is in the release-mechanics
+warnings below.
 
 **The lock on a window is the open bump PR, not a message.** Two sessions
 that both run `lop sessions` and both announce themselves in the same minute
@@ -662,11 +674,8 @@ Warnings that still hold, each of which has already cost a release:
   git log --oneline <last-tag>..origin/main   # immediately before tagging
   ```
 
-  The other half is the merger's, not the owner's: **if you merge while a
-  window is open, send the owner your PR number and merge SHA at merge time**,
-  not when you next happen to talk to them. The owner cannot poll continuously,
-  and a peer who confirms a window list and then silently merges into it has
-  broken the protocol even though every individual step looked correct.
+  The other half of this is the merger's duty, and it is stated where a merger
+  will actually read it — see "One release owner per window" above.
 - **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
   tagging.** A non-empty diff means a merged PR carried its own version bump
   and has silently consumed the number you are about to use. That is exactly
