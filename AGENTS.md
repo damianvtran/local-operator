@@ -843,9 +843,17 @@ is exactly what lets a small new defect hide behind a large surface that was
 already approved: attention spreads over hundreds of familiar lines, and the
 twenty that changed get the same share as the rest.
 
+**Read that as a detection measure, not an efficiency measure.** This is the
+part people drop, and dropping it turns the rule into a shortcut it was never
+meant to be. A remediation also arrives with social proof attached — a
+reviewer asked for it, it is small, and it is framed as *closing* something
+rather than opening anything — and each of those makes it less scrutinised at
+exactly the moment it deserves the same scrutiny as the original.
+
 The evidence is unusually strong. In one day, eight sessions independently
-reported the same shape on different PRs: three of four rounds where the
-remediation introduced the next defect; a fix for a mislabelled banner that
+reported **eleven** instances of the same shape on different PRs: three of four
+rounds where the remediation introduced the next defect; a mislabelled-banner
+fix that
 reproduced the same mislabelling at larger scale in the digest; a fix whose two
 halves then drifted into a title and a subtitle describing different scopes; a
 remediation that reinstated the exact failure mode its own PR existed to fix; a
@@ -859,13 +867,38 @@ quantity is more dangerous than one that is obviously wrong, because nothing
 about it announces the mismatch.** A remediation is where adjacency is created,
 and the delta is the only view in which the new adjacency is visible at all.
 
-Two practical corollaries. Do not re-open dimensions the delta cannot have
+Scoping to the delta is necessary but not sufficient. Three things make the
+round conclusive rather than merely narrow:
+
+- **Run the same probe against the previous head.** "Is this new?" is only
+  answerable by comparison — otherwise a reviewer finds a defect in the delta
+  and cannot tell whether the remediation introduced it or whether they missed
+  it twice. The delta says *where* to look; the prior head says *whether it is
+  yours*.
+- **Check that the guard the remediation added can observe the defect it is
+  named for.** One round-1 fix closed a bottom-end contradiction (43,704 → 0)
+  while opening its mirror at the top (23,962 → 56,955), and the regression
+  test asserted only `at_bottom == nothing_below` — structurally incapable of
+  seeing what its own fix had introduced. The fix was right and the guard was
+  blind; those are different failures and need separate checks.
+- **Assert on what is painted, not only on the contract.** A round can verify
+  a contract is honoured and still miss that the resulting frame is wrong —
+  "a splash mounted while the user saw nothing is invisible to any assertion
+  on `_welcome_visible`."
+
+Two further corollaries. Do not re-open dimensions the delta cannot have
 touched — a backend-only remediation keeps a design round valid, and
 re-running it spends a reviewer on unchanged pixels. And when a rebase moves
-the base,
-prove the content is unchanged (`git range-diff` plus byte-identical `+`/`-`
-line sets) and then run **one** convergence round over `<old-head>..<new-head>`,
-checking semantic conflicts only in files the upstream also touched.
+the base, prove the content is unchanged (`git range-diff` plus byte-identical
+`+`/`-` line sets) and then run **one** convergence round over
+`<old-head>..<new-head>`, checking semantic conflicts only in files the
+upstream also touched.
+
+**Finally, a terminal approval is a property of a SHA, not of a PR.** If a
+round went terminal and commits landed afterwards — including commits driven
+by a *different* stream, such as a design fix after a clean code round — the
+approval is stale and the merge gate needs a fresh round on the current head.
+"Everything else is green" is precisely when this lapses.
 
 ## Security advisories
 
