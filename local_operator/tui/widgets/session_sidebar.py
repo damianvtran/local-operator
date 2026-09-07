@@ -265,6 +265,12 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def set_open(self, opened: bool) -> None:
+        if not opened and self._pressed_id is not None:
+            self.release_mouse()
+            self._pressed_id = None
+            if self._deferred is not None:
+                deferred, self._deferred = self._deferred, None
+                self.set_entries(deferred)
         self.display = opened
         self._sync_animation()
         self.refresh()
@@ -366,8 +372,18 @@ class SessionSidebar(Widget, can_focus=True):
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
-        if entry is not None:
+        if entry is not None and event.button == 1:
             self._pressed_id = entry.id
+            self.capture_mouse()
+        event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self.release_mouse()
+        if not self.region.contains(event.screen_x, event.screen_y):
+            self._pressed_id = None
+            if self._deferred is not None:
+                deferred, self._deferred = self._deferred, None
+                self.set_entries(deferred)
         event.stop()
 
     def on_click(self, event: events.Click) -> None:

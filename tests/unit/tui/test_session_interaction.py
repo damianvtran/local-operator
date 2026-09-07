@@ -10,6 +10,7 @@ import pytest
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import CompactionEnded, TurnAbandoned
+from tests.e2e.harness import wait_for_adoption
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -54,6 +55,7 @@ async def test_loop_continues_source_and_other_context_stop_does_not_cancel_it()
     second = FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         task = asyncio.create_task(app._loop_worker(3, source))
@@ -75,6 +77,7 @@ async def test_failed_source_prompt_restores_only_its_own_input():
     second = FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         app._start_turn("source A message")
@@ -98,6 +101,7 @@ async def test_hidden_compaction_delivers_held_input_exactly_once_to_source():
     second = FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         source.compaction.active = True
@@ -120,6 +124,7 @@ async def test_hidden_compaction_delivers_held_input_exactly_once_to_source():
 async def test_late_source_fallback_cannot_retire_current_turn():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         source.turn.open = True
@@ -137,6 +142,7 @@ async def test_late_source_fallback_cannot_retire_current_turn():
 async def test_source_usage_never_charges_visible_conversation():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         app._adopt_session(FakeSession(), replay_history=False)
@@ -152,6 +158,7 @@ async def test_bang_settles_and_records_on_hidden_source():
     second = FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
         await pilot.pause()
         source = app._interaction
         app._run_shell_command("sleep 0.1; printf source-A")

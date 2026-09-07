@@ -29,6 +29,10 @@ class TurnInteraction:
     accrued_cost: float = 0.0
     pending_echoes: list[Any] = field(default_factory=list)
     submitted_draft: SessionDraft | None = None
+    completion_deferred: bool = False
+    settled_child_ids: set[str] = field(default_factory=set)
+    waiting_kind: str | None = None
+    approvals_denied_epoch: int | None = None
 
 
 @dataclass
