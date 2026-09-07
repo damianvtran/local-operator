@@ -16009,10 +16009,22 @@ class OperatorApp(App[None]):
                 # nulls the binding on purpose and boots a replacement, so the
                 # viewer is legitimately sessionless for that window and the
                 # id it holds names a session that is being REPLACED, not one
-                # that ran away. Clearing the id at each unbind closes most of
-                # the window; this guard closes the rest of it, including the
-                # gap before the new session is adopted (review round 1,
-                # BLOCKER-2).
+                # that ran away.
+                #
+                # THIS GUARD IS THE ONLY THING KEEPING THAT HONEST \u2014 do not
+                # delete it expecting a belt-and-braces id-clear to cover you.
+                # An earlier fix also cleared `_adopted_session_id` at each
+                # unbind, and that clear was REMOVED on purpose: it sat inside
+                # the null\u2192adopt window and disarmed the kill switch on the
+                # strand path, where the session keeps running (for a remote,
+                # in another process, still billing) and this id is the user's
+                # only lever. See `_reload_session`/`_attach_or_refuse` for why
+                # the id must outlive that window. So the id is deliberately
+                # live for the whole transition, and this flag is the sole
+                # reason a transition does not read as a strand \u2014 including
+                # the gap before the replacement is adopted, verified by firing
+                # `/stop` from inside that window (review rounds 1-3,
+                # BLOCKER-2/BLOCKER-3).
                 watched = self._adopted_session_id
                 if (
                     watched
