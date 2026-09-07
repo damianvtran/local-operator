@@ -320,6 +320,64 @@ class _ChromeStatic(Static):
 
     ALLOW_SELECT = False
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: The (content, theme epoch) last handed to `update_if_changed`, or
+        #: None before the first one. See that method for why the epoch is
+        #: half of the key.
+        self._painted: tuple[Text, int] | None = None
+
+    def update_if_changed(self, content: Text, *, layout: bool = True) -> bool:
+        """``update`` unless this surface already holds ``content``. True if painted.
+
+        WHY THIS EXISTS
+        ===============
+
+        ``Static.update`` invalidates the widget's whole render cache, and
+        ``Widget._render_content`` then rasterises ``self.size`` — every line of
+        it — on the next paint. On ``/settings`` that is the dominant cost of an
+        arrow press. Measured over 59 consecutive real cursor transitions, the
+        title, the rule and the side pane produced BYTE-IDENTICAL ``Text`` on
+        59/59 of them, so all of that work was thrown away and repainted
+        identically (``docs/settings-keypress-profile.md`` §5.2). Eliding those
+        no-op updates measured 12-16% of a press at 96 rows.
+
+        THE COMPARISON KEY IS THE WHOLE CORRECTNESS ARGUMENT, and it is why the
+        theme epoch is in it. Rich ``Text`` equality covers the plain string and
+        the spans, which is what rasterises — but a THEME SWITCH can change what
+        this widget paints without changing the ``Text`` at all, because the
+        surface's own ``$lo-*`` styling comes from the stylesheet rather than
+        from the content. Comparing content alone would leave a stale frame on
+        screen across a theme change. ``theme_mod.get_theme_epoch()`` exists for
+        exactly this and is bumped by every ``set_theme``.
+
+        Structural equality, never identity: the painters build a fresh ``Text``
+        every time, so an ``id()`` key would never match and this would elide
+        nothing. Kept here rather than in each painter so all five surfaces
+        answer the question the same way.
+        """
+        epoch = theme_mod.get_theme_epoch()
+        if self._painted is not None:
+            last_content, last_epoch = self._painted
+            if last_epoch == epoch and last_content == content:
+                return False
+        # The Text is stored as handed over. The painters treat a composed row
+        # as immutable once painted (none of them mutates a `Text` it has
+        # already given to a widget), so holding the reference is safe and
+        # copying it on every paint would pay back part of what this saves.
+        self._painted = (content, epoch)
+        self.update(content, layout=layout)
+        return True
+
+    def forget_painted(self) -> None:
+        """Drop the elision key, so the next update always paints.
+
+        For the cases where the CONTENT is unchanged but the rasterisation is
+        not — a resize, or anything that invalidates Textual's own caches
+        underneath this widget.
+        """
+        self._painted = None
+
 
 class SettingsViewDismissed(Message):
     """The page's ``esc`` hint was clicked. The app owns leaving the mode.
@@ -607,6 +665,12 @@ class SettingsView(Vertical):
             pass
 
     def on_resize(self) -> None:
+        # Drop every elision key BEFORE the repaint. `update_if_changed` keys on
+        # CONTENT, and a resize can leave content identical while what is
+        # rasterised from it is not: the pane and the detail line are budgeted
+        # against a width, so a Static that skipped its update would keep strips
+        # measured for the old one.
+        self._invalidate_paint_caches()
         # The rule spans the page and the hints shed against a width only the
         # layout knows, so both are repainted on resize. Parking a 1-row
         # body on the selected setting has to wait until AFTER this
@@ -2594,6 +2658,16 @@ class SettingsView(Vertical):
         self._paint_detail()
         self._paint_chrome()
 
+    def _invalidate_paint_caches(self) -> None:
+        """Force the next paint to repaint from scratch.
+
+        For the changes that leave the CONTENT identical while invalidating what
+        was measured from it — a resize being the reachable one. Theme changes
+        are keyed on the epoch inside the cache itself and need no call here.
+        """
+        for surface in (self._title, self._rule, self._detail, self._pane_view):
+            surface.forget_painted()
+
     def _paint_list(self) -> None:
         width = self._list_width()
         text = Text(no_wrap=True, overflow="ellipsis")
@@ -3323,7 +3397,11 @@ class SettingsView(Vertical):
                     text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
                     break
         self._detail_text = text
-        self._detail.update(text)
+        # The one surface that legitimately changes on every move (it describes
+        # the cursor row), so this elides nothing in the common case — it is
+        # routed through the same helper so all five surfaces behave alike and
+        # a future state that DOES repeat a detail line is covered for free.
+        self._detail.update_if_changed(text)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
@@ -3634,7 +3712,10 @@ class SettingsView(Vertical):
             dim,
             roster_foldable=foldable,
         )
-        self._pane_view.update(self._pane_text)
+        # The pane is resolved once at open (providers, teams, agents) and was
+        # byte-identical on 59/59 consecutive cursor moves, so this repaints on
+        # a pane SWITCH and on nothing else.
+        self._pane_view.update_if_changed(self._pane_text)
 
     def _fit_pane(
         self,
@@ -4017,11 +4098,15 @@ class SettingsView(Vertical):
         path = self._config_path()
         title.append(truncate_cells(path, max(self._title_room(), 12)), style=dim)
         self._title_text = title
-        self._title.update(title)
+        # The title is the config path: identical on every cursor move, and
+        # changed only by a resize (the truncation budget) or a config-path
+        # change.
+        self._title.update_if_changed(title)
 
         width = max(self.size.width - 2, 1)
         self._rule_text = Text("─" * width, style=dim)
-        self._rule.update(self._rule_text)
+        # `"─" * width` — changed only by a resize.
+        self._rule.update_if_changed(self._rule_text)
         self._paint_hints()
 
     def _current_is_readonly(self) -> bool:
