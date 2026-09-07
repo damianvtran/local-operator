@@ -52,16 +52,23 @@ INTENT_FIELD = "i"
 #: every event and every session dump.
 INTENT_MAX_CHARS = 200
 
-#: What the model is told the field is for, in the schema itself. oh-my-pi
-#: ships the bare ``"concise intent"`` here and puts the real instruction in
-#: its system prompt; we spend ~30 tokens (once, in the prompt-cached tools
-#: array) on a self-sufficient description instead, because the failure this
-#: field exists to fix IS the model describing the mechanism, and the schema
-#: description is the text closest to the point of emission.
-INTENT_DESCRIPTION = (
-    "Concise intent: present participle, 2-6 words, no period, capitalized. "
-    'What you are accomplishing, not the tool ("Auditing merged MRs", not "Running bash").'
-)
+#: What the model is told the field is for, in the schema itself.
+#:
+#: A POINTER, not the rule. The description is declared on every tool, so its
+#: cost is multiplied by the size of the tool surface: the previous
+#: self-sufficient wording ran ~41 tokens x 24 tools = ~980 tokens of the
+#: tools array, restating what ``prompts_md/system.md`` ("Most tools take
+#: `i`...") already says at greater length and with the negative examples.
+#: One copy in the system prompt and a pointer here costs a fraction of that
+#: and contradicts nothing.
+#:
+#: Deliberately NOT reduced to oh-my-pi's bare ``"concise intent"``: the
+#: failure this field exists to fix IS the model narrating the mechanism, and
+#: the schema description is the text closest to the point of emission, so it
+#: keeps the shape of the rule ("2-6 words, present participle") and delegates
+#: only the elaboration. Keep the full rule in system.md; do not re-inline it
+#: here.
+INTENT_DESCRIPTION = "Concise intent: 2-6 words, present participle. See the system prompt."
 
 #: The exact property injected into every tool schema. Compared by VALUE in
 #: :func:`intent_is_injected` to tell our field apart from a tool that
@@ -86,6 +93,109 @@ INTENT_SCAN_LIMIT = 512
 _LEADING_INTENT_RE = re.compile(r'\s*\{\s*"i"\s*:\s*"((?:[^"\\\x00-\x1f]|\\.)*)"')
 
 
+#: JSON-Schema keywords whose value is a MAP of name -> subschema. Their keys
+#: are author-chosen names (a property called ``title`` is a real argument),
+#: never schema keywords, so the strip must recurse into the values without
+#: ever filtering the keys at that level. Getting this wrong deletes a real
+#: property: see :func:`_strip_titles`.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+        # draft-07 `dependencies` and 2019-09 `dependentRequired` are keyed by
+        # property name too. Their blast radius is smaller than `properties`'
+        # — they constrain what must accompany a field rather than what may be
+        # sent, so nothing is dropped from a call — but a property named
+        # `title` still loses its conditional requirement, which is the same
+        # class of silent corruption for no benefit.
+        "dependencies",
+        "dependentRequired",
+    }
+)
+
+#: Keywords whose value is INSTANCE DATA, not a schema. A ``default`` of
+#: ``{"title": "untitled"}`` is a value the model is told to send, not an
+#: annotation to strip, so these are copied through untouched rather than
+#: walked.
+_INSTANCE_DATA_KEYWORDS = frozenset({"default", "const", "enum", "examples"})
+
+
+def _strip_titles(value: Any) -> Any:
+    """Recursively drop pydantic's generated ``title`` ANNOTATIONS from a schema.
+
+    ``BaseModel.model_json_schema()`` emits ``"title": "Path"`` beside every
+    property and ``"title": "ReadParams"`` on every model — a restatement of a
+    name the schema already carries as its key. No provider requires it (this
+    tree's wire clients never read the field) and no model needs it, but it is
+    serialized into the tools array on every request: 148 keys costing 2,953
+    characters (~1,060 billed tokens) across the 24-tool default surface,
+    counting with ``json.dumps`` DEFAULT separators — 2,657 with compact
+    separators. The serializer is named because the same saving has two
+    legitimate numbers, and a figure without one becomes the next agent's
+    evidence for whichever they assume.
+
+    SCHEMA-AWARE, not key-name-blind, and that distinction is load-bearing.
+    ``title`` is both a JSON-Schema keyword AND an extremely common property
+    NAME on real MCP servers — Linear ``create_issue``, Notion ``create_page``,
+    GitHub ``create_issue``, Jira. A blind ``k != "title"`` filter at every
+    dict level deleted the property from the MODEL-FACING schema while leaving
+    it in ``required`` — a schema whose ``required`` names an undeclared
+    property, which is invalid, and which under the ``additionalProperties:
+    false`` these servers ship makes the model's own correct payload
+    unrepresentable. Measured against the broken schema with
+    ``Draft202012Validator``:
+    ``Additional properties are not allowed ('title' was unexpected)``. A
+    strict-mode provider therefore rejects the very call the model was right
+    to make, and the tool is uncallable.
+
+    Stated precisely because an earlier version of this comment claimed the
+    argument was silently DROPPED on the wire. It is not: the manager feeds
+    ``prepare_outbound_args`` the SERVER's schema
+    (``McpManager._schema_parts`` reads ``tool.input_schema``), never this
+    stripped copy, so outbound hygiene is unaffected. The harm sits upstream
+    of that — the model is never told the argument exists and cannot legally
+    send it — which is worse rather than better, since it breaks the tool for
+    every call rather than mangling one.
+
+    Hence the two keyword sets above: recurse into
+    :data:`_SCHEMA_MAP_KEYWORDS` values WITHOUT filtering their keys, and do
+    not walk :data:`_INSTANCE_DATA_KEYWORDS` at all.
+
+    Only ``title`` goes. ``description`` on a property is the adherence
+    surface — it is what makes the model pass the right thing — and stripping
+    it would trade tokens for correctness.
+
+    Applied here, at the one choke point every AgentTool's schema passes
+    through, so MCP tools (``mcp/tool_bridge.py``) are covered by the same
+    pass rather than needing their own. Recursion covers nested objects,
+    ``$defs``, array ``items`` and ``anyOf`` branches, where pydantic puts
+    titles too.
+
+    Non-destructive: builds new containers, so a caller's schema dict (and a
+    params model's cached ``model_json_schema()``) is never mutated.
+    """
+    if isinstance(value, dict):
+        stripped: dict[str, Any] = {}
+        for key, child in value.items():
+            if key == "title":
+                # The annotation. Property NAMES never reach this branch: a
+                # schema map's keys are handled below without key filtering.
+                continue
+            if key in _INSTANCE_DATA_KEYWORDS:
+                stripped[key] = child
+            elif key in _SCHEMA_MAP_KEYWORDS and isinstance(child, dict):
+                stripped[key] = {name: _strip_titles(sub) for name, sub in child.items()}
+            else:
+                stripped[key] = _strip_titles(child)
+        return stripped
+    if isinstance(value, list):
+        return [_strip_titles(item) for item in value]
+    return value
+
+
 def apply_intent_schema(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return ``parameters`` with the intent property declared.
 
@@ -102,11 +212,17 @@ def apply_intent_schema(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
     Optional, never ``required``: under ``extra="forbid"`` a required field
     the model omitted would turn a missing narration into a failed call.
 
-    A schema that already declares ``i`` is returned untouched, so a tool that
-    owns that name keeps it (and :func:`intent_is_injected` then reports
-    ``False``, which keeps the loop from lifting the value away from it).
+    A schema that already declares ``i`` keeps its own ``i``, so a tool that
+    owns that name is not robbed of a real argument (and
+    :func:`intent_is_injected` then reports ``False``, which keeps the loop
+    from lifting the value away from it).
+
+    Pydantic's generated ``title`` keys are stripped on the way through — see
+    :func:`_strip_titles`. This is the right place for it because it is the
+    one point EVERY tool schema passes, builtin and MCP alike, so the saving
+    cannot develop holes as tools are added.
     """
-    schema: dict[str, Any] = dict(parameters) if parameters else {}
+    schema: dict[str, Any] = _strip_titles(dict(parameters)) if parameters else {}
     properties = schema.get("properties")
     if isinstance(properties, dict) and INTENT_FIELD in properties:
         return schema

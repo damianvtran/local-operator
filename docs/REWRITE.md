@@ -364,13 +364,26 @@ ink) rather than from the hue.
 
 ## Performance contract (user requirements, binding)
 
-- **Start-of-session context budget**: a fresh conversation with the full
-  installed skill set (the user's configured skills directory as the
-  benchmark corpus) MUST start at ≤ 30,000 context tokens. Semantic skill
-  selection is what makes this possible — only matched skill descriptions
-  are injected. A benchmark script (`scripts/bench_context_budget.py`)
-  measures it and fails CI if the budget is blown; optimize the system
-  prompt if so.
+- **Start-of-session context budget**: a fresh conversation MUST start under
+  the ceiling enforced by `scripts/bench_context_budget.py`, which runs as its
+  own `context-budget` CI job and exits non-zero when the budget is blown.
+  Semantic skill selection is part of what makes this possible — only matched
+  skill descriptions are injected.
+
+  The target remains ≤ 30,000 **billed** tokens; the script enforces a
+  *ratchet* at the measured current figure, which is tightened by each
+  context-reduction change rather than set aspirationally. Raising it requires
+  saying in the PR what regressed.
+
+  Two measurement rules, both learned the hard way — the guard previously
+  reported a comfortable pass while the real figure was ~31,700:
+  - Measure the **real** session. Build the full tool surface (the createIf
+    gates return `None` on a bare `ToolContext`, so nine of twenty-four tools
+    silently vanish — see `scripts/real_tool_surface.py`) and include
+    `user_instructions` and `repo_guidance`, which ride the head block.
+  - Project savings in **characters**, then convert at ~2.78 chars/billed
+    token. The analytics ledger apportions billed tokens by character count;
+    a cl100k estimate (~4.22) understates a saving by roughly 45%.
 - **Cache rate target**: ≥ 90% prompt-cache hit rate on multi-turn E2E
   tasks (targeting a ~95% hit rate). Requirements that serve this: byte-stable
   system blocks (date not timestamp; deterministic skill ordering; volatile

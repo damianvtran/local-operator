@@ -308,6 +308,34 @@ jobs:
         # the paths-gated extension workflow does not run.
         run: python -m local_operator.browser_bridge.gen_ts --check
         
+  context-budget:
+    # Guards the start-of-session context contract in docs/REWRITE.md. It
+    # builds the real tool surface and renders the real prompt blocks, then
+    # fails when a fresh session's start context exceeds the ratchet in
+    # scripts/bench_context_budget.py.
+    #
+    # Its own job, deliberately, and NOT gated on `test`: this is the only
+    # thing that notices context creeping upward, and a flaky unit run must
+    # not disarm it. It needs no API key and no secrets, so it runs on forks
+    # too. Cheap — an import and some string building, no model call.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+
+      - name: Check start-of-session context budget
+        run: python scripts/bench_context_budget.py --verbose
+
   filesystem-boundaries-windows:
     # Canonical containment must use native Windows drive/junction semantics,
     # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import

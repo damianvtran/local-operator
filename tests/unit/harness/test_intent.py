@@ -103,6 +103,194 @@ def test_injection_puts_intent_first_and_optional() -> None:
     assert INTENT_DESCRIPTION in schema["properties"][INTENT_FIELD]["description"]
 
 
+def test_injection_strips_pydantic_titles_but_keeps_descriptions() -> None:
+    """``title`` is a restatement of the key; ``description`` is the adherence
+    surface.
+
+    Pydantic emits ``"title": "Path"`` beside every property and a model title
+    on every ``$defs`` entry. No provider requires it and no model needs it,
+    but it rides the tools array on every request — 148 keys costing 2,953
+    characters (~1,060 billed) across the 24-tool default surface, measured
+    with ``json.dumps`` DEFAULT separators; 2,657 with compact separators.
+    The serializer is stated because the same saving has two legitimate
+    numbers and a figure without one becomes the next agent's evidence.
+    Stripping happens here because this is the one point every schema passes,
+    builtin and MCP alike.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "title": "ReadParams",
+            "properties": {
+                "path": {"type": "string", "title": "Path", "description": "File to read."},
+                "opts": {
+                    "type": "object",
+                    "title": "Opts",
+                    "properties": {"deep": {"type": "boolean", "title": "Deep"}},
+                },
+                "tags": {"type": "array", "items": {"type": "string", "title": "Tag"}},
+            },
+            "$defs": {"Item": {"type": "object", "title": "Item"}},
+        }
+    )
+
+    def titles(value: object) -> list[str]:
+        if isinstance(value, dict):
+            found = ["title"] if "title" in value else []
+            for sub in value.values():
+                found += titles(sub)
+            return found
+        if isinstance(value, list):
+            return [t for item in value for t in titles(item)]
+        return []
+
+    assert titles(schema) == []
+    # Nested/array/$defs shapes survive the walk intact apart from the titles.
+    assert schema["properties"]["path"]["description"] == "File to read."
+    assert schema["properties"]["opts"]["properties"]["deep"] == {"type": "boolean"}
+    assert schema["properties"]["tags"]["items"] == {"type": "string"}
+    assert schema["$defs"]["Item"] == {"type": "object"}
+
+
+def test_a_property_named_title_survives_the_strip() -> None:
+    """`title` is BOTH a JSON-Schema keyword and a very common property NAME.
+
+    Regression guard for a shipped-breaking defect: a blind ``k != "title"``
+    filter at every dict level deleted the ARGUMENT on the MCP shape used by
+    Linear ``create_issue``, Notion ``create_page``, GitHub ``create_issue``
+    and Jira. Three compounding failures, all reproduced end to end through
+    ``mcp/tool_bridge.py``:
+
+    1. the property vanished from ``properties``, so the model was never told
+       the argument existed;
+    2. it remained in ``required``, making the schema internally invalid —
+       a ``required`` naming an undeclared property;
+    3. under the ``additionalProperties: false`` these servers ship, the
+       model's own correct payload then became unrepresentable. Validated
+       against the broken schema: ``Additional properties are not allowed
+       ('title' was unexpected)`` — a strict provider rejects the right call
+       and the tool is uncallable.
+
+    NOT an outbound-argument drop: the manager feeds ``prepare_outbound_args``
+    the SERVER's schema (``McpManager._schema_parts``), never this stripped
+    copy. The harm is that the model is never told the argument exists, which
+    breaks every call rather than mangling one.
+
+    The schema below is deliberately the real Linear shape.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "title": "CreateIssueInput",  # the keyword — must go
+            "additionalProperties": False,
+            "properties": {
+                # the PROPERTY named title — must survive, minus its own
+                # annotation
+                "title": {"type": "string", "description": "Issue title.", "title": "Title"},
+                "teamId": {"type": "string", "description": "Team.", "title": "Team Id"},
+                "meta": {
+                    "type": "object",
+                    "title": "Meta",
+                    "properties": {"title": {"type": "string", "title": "T"}},
+                },
+            },
+            "required": ["title", "teamId"],
+        }
+    )
+
+    props = schema["properties"]
+    assert "title" in props, "the property named `title` was deleted"
+    assert props["title"] == {"type": "string", "description": "Issue title."}
+    # An invalid schema is the failure that makes strict providers reject the
+    # tool outright, so pin the consistency rule and not merely the presence.
+    assert set(schema["required"]) <= set(props)
+    # Nested property maps get the same treatment.
+    assert "title" in props["meta"]["properties"]
+    assert props["meta"]["properties"]["title"] == {"type": "string"}
+    # The keyword is still stripped everywhere it IS an annotation.
+    assert "title" not in schema
+    assert "title" not in props["meta"]
+
+
+def test_property_name_maps_other_than_properties_are_also_protected() -> None:
+    """`dependencies`/`dependentRequired` are keyed by property name too.
+
+    Same class as the `properties` defect: the un-filtered branch deleted a
+    key literally named `title`. Narrower blast radius — these constrain what
+    must ACCOMPANY a field rather than what may be sent, so no argument is
+    dropped from a call — but a property named `title` still silently loses
+    its conditional requirement.
+
+    Note the two shapes: `dependencies` values are schemas (so a keyword
+    `title` inside one must still be stripped), while `dependentRequired`
+    values are plain arrays of names.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "teamId": {"type": "string"}},
+            "dependencies": {
+                "title": {"required": ["teamId"], "title": "DepAnnotation"},
+                "teamId": {"required": ["title"]},
+            },
+            "dependentRequired": {"title": ["teamId"]},
+        }
+    )
+
+    assert "title" in schema["dependencies"], "the `title` dependency was deleted"
+    assert schema["dependencies"]["title"] == {"required": ["teamId"]}
+    assert schema["dependencies"]["teamId"] == {"required": ["title"]}
+    assert schema["dependentRequired"] == {"title": ["teamId"]}
+    # Stripping less is not the fix: the ANNOTATION inside a schema value goes.
+    assert "title" not in schema["dependencies"]["title"]
+
+
+def test_instance_data_is_never_rewritten_by_the_strip() -> None:
+    """``default``/``const``/``enum``/``examples`` hold VALUES, not schemas.
+
+    A ``default`` of ``{"title": "untitled"}`` is data the model is told to
+    send. Walking into it edited what the default actually is — changing
+    behaviour, not just token count.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "properties": {
+                "cfg": {
+                    "type": "object",
+                    "title": "Cfg",
+                    "default": {"title": "untitled", "x": 1},
+                    "examples": [{"title": "a"}],
+                },
+                "mode": {"type": "string", "enum": ["title", "body"], "const": "title"},
+            },
+        }
+    )
+    cfg = schema["properties"]["cfg"]
+    assert cfg["default"] == {"title": "untitled", "x": 1}
+    assert cfg["examples"] == [{"title": "a"}]
+    assert "title" not in cfg  # the annotation still goes
+    mode = schema["properties"]["mode"]
+    assert mode["enum"] == ["title", "body"]
+    assert mode["const"] == "title"
+
+
+def test_injection_does_not_mutate_a_nested_input_schema() -> None:
+    """Title stripping must build new containers, never edit the caller's.
+
+    A params model's ``model_json_schema()`` is reused across builds, so an
+    in-place strip would corrupt a shared object.
+    """
+    original = {
+        "type": "object",
+        "title": "P",
+        "properties": {"path": {"type": "string", "title": "Path"}},
+    }
+    apply_intent_schema(original)
+    assert original["title"] == "P"
+    assert original["properties"]["path"]["title"] == "Path"
+
+
 def test_injection_does_not_mutate_the_input_schema() -> None:
     original = {"type": "object", "properties": {"path": {"type": "string"}}}
     apply_intent_schema(original)
