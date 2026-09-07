@@ -354,25 +354,59 @@ def test_tab_completes_into_the_tidy_label_not_a_raw_absolute_path(tmp_path: Pat
     assert screen.filter_query == "~/scripts/"
 
 
-def test_both_undiscoverable_hints_survive_on_the_opening_card() -> None:
-    """`type to filter or path` and `tab complete` are the two hints nobody
-    infers, and the card must not trade one for the other.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_cols", "expect_tab"),
+    [
+        # Measured against the REAL app, not computed: `_card_width` subtracts
+        # ten cells (screen padding 2 + PICKER_WIDTH_MARGIN 6 + card padding 4)
+        # before the footer sees anything, so the 73 cells that carry both
+        # hints need an 86-column TERMINAL.
+        (80, False),  # the standard terminal — documented to give `tab` up
+        (84, False),  # last width without it
+        (86, True),  # first width with it
+        (100, True),
+    ],
+)
+async def test_the_footer_boundary_stated_in_TERMINAL_columns(
+    tmp_path: Path, terminal_cols: int, expect_tab: bool
+) -> None:
+    """Where `tab complete` actually appears, measured end to end.
 
-    D2: `type` is the only statement that a second input mode exists, and it
-    was shed FIRST on a scrolling list — which a freshly opened picker almost
-    always is (11-12 rows against PAGE_ROWS_MAX=10), so the opening frame
-    never carried it. D7: fixing that by shedding `tab` instead swapped the
-    navigator's own gesture off the frame at every width the picker opens at,
-    which is a worse trade — `pgup/pgdn` fits in 73 cells and keeps both,
-    while dropping `tab` spends 75 to keep paging.
+    `type to filter or path` and `tab complete` are the two hints nobody
+    infers. D2: `type` was shed first, so the opening frame never carried it.
+    D7: fixing that by shedding `tab` instead swapped the navigator's own
+    gesture off the frame — a worse trade, since `pgup/pgdn` is the one hint a
+    `showing N-M of T` counter already implies.
 
-    80 cells is the card at a 100- and 150-column terminal, i.e. the width the
-    picker actually opens at. Only the cramped 68-cell card gives one up.
+    D10 is why this test drives the app rather than calling `_footer_hints`
+    with a number. The previous version passed `80` — which is 80 CARD cells,
+    a 100-column terminal — while its docstring claimed that was "the width
+    the picker actually opens at". Literally true and thoroughly misleading:
+    it never asked about an 80-column terminal, where `tab` is still absent.
+    The shed ORDER is correct and is not changed; what was wrong was the unit
+    the guard and its comment were written in.
+
+    So the boundary is pinned in the unit a user has: terminal columns.
     """
-    hints = [key for key, _ in _footer_hints(80)]
-    assert "type" in hints, f"the mode hint was shed at the opening width: {hints}"
-    assert "tab" in hints, f"the navigator gesture was shed at the opening width: {hints}"
-    assert "pgup/pgdn" not in hints, "paging should shed before either disclosure"
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(terminal_cols, 30)) as pilot:
+        await pilot.pause()
+        screen = _walking_screen(tmp_path)
+        app.push_screen(screen)
+        for _ in range(6):
+            await pilot.pause()
+        footer = screen.render_lines_for_test()[-1]
+
+    assert ("tab" in footer) is expect_tab, (
+        f"at a {terminal_cols}-column terminal (card {screen._card_width()}) the "
+        f"footer reads {footer!r}"
+    )
+    # The mode hint is never the one given up: it outlives `tab` at every width.
+    assert "type" in footer, f"the mode hint was shed at {terminal_cols} columns"
 
 
 def test_the_footer_sheds_paging_first_and_tab_only_when_truly_cramped() -> None:

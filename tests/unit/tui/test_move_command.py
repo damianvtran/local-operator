@@ -399,7 +399,7 @@ async def test_a_rebind_warns_that_the_eval_kernel_was_lost(tmp_path: Path) -> N
 
         texts = _notices(app)
         assert any(
-            "eval kernel" in t for t in texts
+            "set up in eval" in t for t in texts
         ), f"a rebind destroyed the eval namespace without saying so: {texts}"
         # The move still HAPPENS: this is narration, not a refusal.
         assert session.moves == [str(destination)]
@@ -423,7 +423,7 @@ async def test_a_session_that_never_used_eval_is_not_warned_about_it(tmp_path: P
 
         texts = _notices(app)
         assert any("runtime restarted" in t for t in texts), texts
-        assert not any("eval kernel" in t for t in texts), texts
+        assert not any("set up in eval" in t for t in texts), texts
 
 
 @pytest.mark.asyncio
@@ -443,4 +443,69 @@ async def test_a_COLD_move_never_mentions_the_eval_kernel(tmp_path: Path) -> Non
 
         texts = _notices(app)
         assert any("moved to" in t for t in texts), texts
-        assert not any("eval kernel" in t for t in texts), texts
+        assert not any("set up in eval" in t for t in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_the_eval_warning_survives_a_cleared_transcript(tmp_path: Path) -> None:
+    """`/clear` empties the VIEW while the session, the runtime and the `eval`
+    kernel all survive — and `/clear`'s own receipt promises "history is
+    untouched", so that user has every reason to believe their state is
+    intact. Deriving "did this session use eval" from `blocks()` therefore
+    lost the answer in the one direction that costs work, which the original
+    docstring ruled out as impossible (review round 3, MAJOR-1).
+
+    CLEARS THE TRANSCRIPT and still expects the warning. The three guards that
+    shipped with the feature all pass while the defect is live, because none
+    of them clears or bounds the transcript — the decoration shape AGENTS.md
+    names.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    session.is_cold = False
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
+        for _ in range(3):
+            await pilot.pause()
+
+        # The kernel is untouched by this; only the screen is emptied.
+        app._transcript_view().clear_blocks()
+        for _ in range(3):
+            await pilot.pause()
+        assert app._session_used_eval(), "the latch did not survive /clear"
+
+        await _submit(pilot, app, f"/move {destination}")
+        texts = _notices(app)
+
+    assert any(
+        "set up in eval" in t for t in texts
+    ), f"a rebind destroyed the eval namespace with no warning after /clear: {texts}"
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_session_does_not_inherit_the_eval_latch(tmp_path: Path) -> None:
+    """The latch belongs to the session that ran `eval`.
+
+    A successor has its own kernel, so carrying the flag across a session
+    swap would warn a NEW conversation about a namespace it never had — the
+    opposite error, and just as untrue.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="rebound")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._append_block(ToolCard(tool_call_id="c1", tool_name="eval"))
+        for _ in range(3):
+            await pilot.pause()
+        assert app._session_used_eval()
+
+        # What `_reload_session` does when it drops the outgoing session.
+        app._session_used_eval_latch = False
+        app._transcript_view().clear_blocks()
+        for _ in range(3):
+            await pilot.pause()
+
+        assert not app._session_used_eval(), "a fresh session inherited the warning"

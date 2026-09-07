@@ -714,10 +714,23 @@ _FOOTER_HINTS: tuple[tuple[str, str], ...] = (
 #:
 #: Shedding ``pgup/pgdn`` alone leaves 73 cells and keeps BOTH; shedding
 #: ``tab`` instead spends 75 to keep paging and lose completion, which is how
-#: the opening frame briefly lost ``tab complete`` at every width the picker
-#: opens at (design D7). Only the genuinely cramped 68-cell card has to give
-#: one up, and there ``tab`` goes because the header already names the mode
-#: the instant you type while nothing announces ``tab``.
+#: the opening frame briefly lost ``tab complete`` everywhere (design D7).
+#:
+#: THE NUMBERS ABOVE ARE CARD CELLS, AND THE CARD IS TEN CELLS NARROWER THAN
+#: THE TERMINAL — ``_card_width`` subtracts screen padding (2),
+#: ``PICKER_WIDTH_MARGIN`` (6) and its own padding (4). So 73 card cells is an
+#: **86-column terminal**, and at the very common 80-column terminal (68 card
+#: cells) ``tab`` is still given up. That is a deliberate trade, not an
+#: oversight: keeping both there would need ``type to filter or path``
+#: shortened to ``type filter/path`` to reach 67 cells, and a copy regression
+#: on the hint round 1 fought to keep is worse than losing ``tab`` at one
+#: width. ``tab`` is the one dropped because the header already names the mode
+#: the instant you type, while nothing announces ``tab``.
+#:
+#: Stated in terminal columns because that is the unit a reader has: quoting
+#: card cells with the terminal in parentheses is exactly how the guard for
+#: D7 came to assert 80 CARD cells while claiming to test an 80-column
+#: terminal (design D10).
 #:
 #: ONE order for both list shapes. A second constant existed to protect
 #: paging on a scrolling list, and paging is precisely what should shed first
