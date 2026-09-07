@@ -1,8 +1,8 @@
 """Deterministic repro for the all-digit / numeric-looking job-id defect.
 
-Run with the worktree venv:
+Run it from anywhere; it inserts the repo root on ``sys.path`` itself::
 
-    .venv/bin/python repro_job_id.py
+    .venv/bin/python docs/evidence/job-id-coercion/repro_job_id.py
 
 Prints provenance (module __file__, sha256 of that exact file, git HEAD) so the
 A/B arms cannot silently import the same tree -- this repo's editable venv has
@@ -12,14 +12,20 @@ produced false "no difference" results before.
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
 
-from local_operator.tools import builtin
-from local_operator.tools.builtin import (
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from local_operator.tools import builtin  # noqa: E402
+from local_operator.tools.builtin import (  # noqa: E402
+    JobsParams,
     _coerce_job_targets,
     _coerce_single_job_id,
     _resolve_job_target,
@@ -63,9 +69,9 @@ def provenance() -> None:
     # install. This repo's editable venv has produced false "no difference"
     # A/B results for reviewers who skipped this check.
     assert path.endswith("local_operator/tools/builtin.py"), path
-    assert str(pathlib.Path.cwd().resolve()) in str(pathlib.Path(path).resolve()), (
-        f"imported the WRONG tree: {path} (cwd {pathlib.Path.cwd()})"
-    )
+    assert (
+        _REPO_ROOT in pathlib.Path(path).resolve().parents
+    ), f"imported the WRONG tree: {path} (expected under {_REPO_ROOT})"
     print()
 
 
@@ -127,6 +133,27 @@ def main() -> int:
     ok = resolved == real_id and err is None
     failures += not ok
     print(f"  [{'PASS' if ok else 'FAIL'}] resolve('[{real_id}]') -> {resolved!r} err={err!r}")
+
+    # MAJOR-1 (review round 1): a bare unquoted scalar has already lost its
+    # source text in the outer tool-argument decode. An int survives losslessly;
+    # a float must NOT be formatted into a plausible-but-never-minted id.
+    print("\n=== bare unquoted scalars (source text already gone) ===")
+    for literal, want in [
+        ("920883861377", "920883861377"),  # int: str(int) is lossless
+        ("7019316393e2", None),  # float: unrecoverable -> must be refused
+        ("13190e419943", None),  # overflows to inf -> id destroyed
+    ]:
+        decoded = json.loads(literal)
+        try:
+            got = JobsParams(op="peek", job_id=decoded).job_id
+        except Exception:
+            got = None
+        ok = got == want
+        failures += not ok
+        shown = repr(got) if got is not None else "refused (field validation speaks)"
+        print(
+            f"  [{'PASS' if ok else 'FAIL'}] model wrote {literal:14} -> {decoded!r:18} -> {shown}"
+        )
 
     # Fleet-scale rate over real uuid4 ids, through the real function.
     print("\n=== rate over 200k real uuid4().hex[:12] ids ===")

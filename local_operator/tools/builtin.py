@@ -8069,28 +8069,58 @@ class TaskParams(BaseModel):
 _JSON_LITERAL_TEXT: dict[Any, str] = {True: "true", False: "false", None: "null"}
 
 
-def _job_target_text(item: Any) -> str | None:
+#: Recursion bound for the nested-list unwrap below. A model emitting an id
+#: nests one or two levels at most; 20 is far past any real payload while
+#: staying far below CPython's ~1000-frame limit, where the escaping
+#: ``RecursionError`` is NOT a ``ValueError`` and so slips past the parse
+#: guard (review round 1, MINOR-1). Over-deep input degrades to "no ids
+#: found", which every caller already handles, rather than to an exception.
+_MAX_TARGET_NEST_DEPTH = 20
+
+
+def _json_scalar_text(item: Any) -> str | None:
     """Return a JSON scalar as the OPAQUE TEXT it was written as, or ``None``.
 
-    A job id is an opaque token (``uuid4().hex[:12]``), never a quantity. The
-    only reason a value reaches this function as a non-``str`` is that JSON's
-    grammar claimed it -- so the job here is to undo that claim, not to format
-    a number. ``bool`` is checked before ``int`` because ``True`` IS an ``int``
-    in Python and would otherwise stringify as ``"1"``.
+    An id is an opaque token (``uuid4().hex[:12]``), never a quantity. The only
+    reason a value reaches here as a non-``str`` is that JSON's grammar claimed
+    it -- so the job is to undo that claim, not to format a number.
 
-    Returns ``None`` for anything that cannot be an id (a dict, a nested
-    object), which the caller drops -- the same outcome as before.
+    ``bool`` is checked before ``int`` because ``True`` IS an ``int`` in Python
+    and would otherwise stringify as ``"1"``.
+
+    ``float`` deliberately returns ``None`` rather than a formatted number.
+    This function is called on two very different inputs. From the STRING path
+    the parse hooks below hand it the raw source literal, so a float never
+    arrives as a ``float`` at all. From the BARE-SCALAR path the value came out
+    of the OUTER tool-argument decode, which has already destroyed the source
+    text -- and formatting what survives invents an id that was never minted:
+
+        {"job_id": 7019316393e2}  ->  701931639300.0  ->  '701931639300.0'
+        {"job_id": 13190e419943}  ->  inf             ->  'inf'
+
+    Both of those are legal ``uuid4().hex[:12]`` values, so this is reachable
+    in production at the ~0.65% rate this whole change is about, and the
+    overflow case DESTROYS the id rather than merely retyping it. Returning a
+    plausible-but-wrong id is strictly worse than failing: it is the exact
+    "syntactically perfect id that was never minted" trap this code exists to
+    close, and it is worse than the pre-fix behaviour, which at least failed
+    loudly with ``Input should be a valid string``. Where the source literal is
+    genuinely unavailable, an honest error beats a fabricated id, so the value
+    passes through untouched and the field's own validation speaks.
+
+    ``int`` is kept because ``str(int)`` is lossless: JSON forbids leading
+    zeros, ``+``, and underscores in an integer literal, so the decoded ``int``
+    round-trips to exactly the characters the model wrote.
+
+    Returns ``None`` for anything else that cannot be an id (a dict, a list, a
+    float), which each caller handles per its own contract.
     """
     if isinstance(item, str):
         return item
     if isinstance(item, bool) or item is None:
         return _JSON_LITERAL_TEXT[item]
-    if isinstance(item, (int, float)):
-        # Reached only when the value arrived as a real Python number from the
-        # OUTER tool-argument decode, which already discarded the source text
-        # (``1e5`` is indistinguishable from ``100000.0`` by then). The string
-        # path below never gets here: its parse hooks keep the literal intact.
-        return repr(item) if isinstance(item, float) else str(item)
+    if isinstance(item, int):
+        return str(item)
     return None
 
 
@@ -8118,14 +8148,24 @@ def _coerce_job_targets(value: Any) -> Any:
     number hooks below hand back the RAW SOURCE LITERAL instead of a parsed
     value, so no id shape can be reinterpreted -- all-digit at any length,
     leading zeros, exponent forms, and ``true``/``false``/``null`` all survive
-    as the exact characters the model wrote. Round-tripping through ``str()``
-    on a parsed number would not be equivalent: it normalises ``007`` to
-    ``"7"`` and ``1e5`` to ``"100000.0"``.
+    **in a bracketed payload** as the exact characters the model wrote.
+    Round-tripping through ``str()`` on a parsed number would not be
+    equivalent: it normalises ``007`` to ``"7"`` and ``1e5`` to ``"100000.0"``.
+
+    That guarantee is scoped to the string path on purpose. A BARE unquoted
+    scalar has already been through the outer tool-argument decode, which threw
+    the source text away before this function is reached, so an exponent-shaped
+    id cannot be recovered there and is refused instead of guessed -- see
+    ``_json_scalar_text``.
     """
 
-    def _parse_str(text: str) -> list[str]:
+    def _parse_str(text: str, depth: int = 0) -> list[str]:
         text = text.strip()
         if not text:
+            return []
+        if depth > _MAX_TARGET_NEST_DEPTH:
+            # Bounded rather than recursive-until-crash: see
+            # _MAX_TARGET_NEST_DEPTH. Treat the payload as unparseable.
             return []
         if text.startswith("["):
             try:
@@ -8138,18 +8178,34 @@ def _coerce_job_targets(value: Any) -> Any:
                     parse_float=str,
                     parse_constant=str,
                 )
-            except ValueError:
+            except (ValueError, RecursionError):
+                # RecursionError as well as ValueError: json.loads does its own
+                # recursive descent and blows the stack on a deeply nested
+                # payload BEFORE _MAX_TARGET_NEST_DEPTH can bound anything, and
+                # RecursionError is not a ValueError, so it would otherwise
+                # escape past this guard and past the callers' ValidationError
+                # handlers (review round 1, MINOR-1). Both mean the same thing
+                # here -- the payload is not usable JSON.
                 parsed = None
             if isinstance(parsed, list):
                 res: list[str] = []
                 for item in parsed:
                     if isinstance(item, list):
                         # A genuinely nested list, e.g. '[["a"], "b"]'.
-                        res.extend(_parse_str(json.dumps(item)))
+                        res.extend(_parse_str(json.dumps(item), depth + 1))
                         continue
-                    as_text = _job_target_text(item)
+                    as_text = _json_scalar_text(item)
                     if as_text is not None:
-                        res.extend(_parse_str(as_text))
+                        res.extend(_parse_str(as_text, depth + 1))
+                    # A non-id-shaped item (a dict) is DROPPED here, unlike the
+                    # real-list branch below which preserves it. The asymmetry
+                    # is deliberate and predates this change: a dict inside a
+                    # bracketed STRING can only come from a model serialising
+                    # something that was never an id, and there is no field
+                    # validation left to report it usefully -- the surrounding
+                    # value is one string, so preserving the dict would make
+                    # the whole payload fail as a non-id rather than resolving
+                    # the real ids beside it (review round 1, MINOR-2).
                 return res
             inner = text[1:]
             if inner.endswith("]"):
@@ -8158,7 +8214,7 @@ def _coerce_job_targets(value: Any) -> Any:
             res = []
             for item in items:
                 if item:
-                    res.extend(_parse_str(item) if item.startswith("[") else [item])
+                    res.extend(_parse_str(item, depth + 1) if item.startswith("[") else [item])
             return res
         return [text]
 
@@ -8172,20 +8228,25 @@ def _coerce_job_targets(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         items = []
         for x in value:
-            as_text = _job_target_text(x)
+            as_text = _json_scalar_text(x)
             if as_text is None:
-                # Not id-shaped (a dict, say). Preserved rather than dropped so
-                # the caller's own validation reports it instead of this
-                # function silently shortening the list.
+                # Not id-shaped (a dict, a float). Preserved rather than
+                # dropped so the field's own validation reports it, instead of
+                # this function silently shortening a REAL list the caller
+                # built. Contrast the bracketed-string branch above, which
+                # drops such an item because there is no per-item validation
+                # left to speak for it.
                 items.append(x)
             else:
                 items.extend(_parse_str(as_text))
         if len(items) == 1 and isinstance(items[0], str):
             return items[0]
         return items
-    # A bare NUMBER the model emitted unquoted: 'job_id: 920883861377' decodes
-    # to an int long before it reaches here. Hand back the text so the id
-    # survives into a 'str | list[str]' field instead of failing validation.
+    # A bare unquoted INTEGER: 'job_id: 920883861377' decodes to an int long
+    # before it reaches here. str(int) is lossless, so hand back the text and
+    # the id survives into a 'str | list[str]' field instead of failing
+    # validation. A bare FLOAT is refused by _json_scalar_text and passes
+    # through to fail validation, because its source text is already gone.
     #
     # Deliberately narrower than the in-list conversion above: at the TOP level
     # a bare ``None`` means the argument was OMITTED (``jobs``' job_id is
@@ -8195,7 +8256,7 @@ def _coerce_job_targets(value: Any) -> Any:
     # are passed through untouched so the field's own validation still speaks.
     if isinstance(value, bool) or value is None:
         return value
-    as_text = _job_target_text(value)
+    as_text = _json_scalar_text(value)
     return value if as_text is None else as_text
 
 
@@ -9089,21 +9150,49 @@ def _coerce_hub_to(value: Any) -> Any:
     shape that carries commas safely. That is an accepted leniency tradeoff on
     a path that previously hard-failed: the fragments fail resolution instead
     of the call failing validation, and the observed live shapes never carried
-    commas. Non-string items inside a parsed JSON array are dropped, so
+    commas.
+
+    **Targets are opaque text here, exactly as in ``_coerce_job_targets``.**
+    This function had the same latent defect, found by QA on round 1 while the
+    sibling was being fixed: it parsed with a plain ``json.loads`` and kept
+    only ``isinstance(item, str)``, so a subagent id that happens to be a
+    well-formed JSON number was parsed to ``int``/``float`` and then dropped --
+    ``'[920883861377]'`` coerced to ``[]``. Job ids are ``uuid4().hex[:12]``
+    and ~0.65% of them are numeric-looking (~0.31% all-digit, ~0.33%
+    exponent-shaped), so at that rate an ``op='ask'`` aimed at such a child
+    SILENTLY failed to reach it: ``to`` became empty, no recipient was
+    addressed, and a parent blocking on the answer simply never got one. The
+    number hooks keep the raw source literal, so every id shape now survives as
+    the characters the model wrote.
+
+    Non-string items inside a parsed JSON array are still dropped, so
     ``'[null]'`` coerces to ``[]`` and fails with the normal "needs a 'to'
-    target" message rather than a fabricated ``"None"`` target name.
+    target" message rather than a fabricated ``"None"`` target name. That is
+    where this function parts company with ``_coerce_job_targets``, and it is
+    deliberate: a ``to`` target is resolved against live peers rather than
+    looked up as an id, so only genuine ids -- strings, and the numeric
+    literals that are really ids in disguise -- are worth recovering.
     """
     if not isinstance(value, str):
         return value
     text = value.strip()
     if text.startswith("["):
         try:
-            parsed = json.loads(text)
-        except ValueError:
+            # parse_int/parse_float/parse_constant receive the literal's SOURCE
+            # TEXT, so a numeric-looking id stays the exact characters the
+            # model wrote instead of being parsed to a number and then dropped.
+            parsed = json.loads(text, parse_int=str, parse_float=str, parse_constant=str)
+        except (ValueError, RecursionError):
             # '[<id>]' with unquoted items is not JSON; the bracket-stripped
-            # split below recovers it.
+            # split below recovers it. RecursionError is caught for the same
+            # reason as in _coerce_job_targets: json.loads exhausts the stack on
+            # a deeply nested payload and that error is not a ValueError.
             parsed = None
         if isinstance(parsed, list):
+            # Still an isinstance(str) filter, and still the right one: with
+            # the hooks in place every NUMERIC literal already arrives as its
+            # source text, so the only items this drops are the bare literals
+            # and nested structures that were never a target name.
             return [item for item in parsed if isinstance(item, str)]
         inner = text[1:]
         if inner.endswith("]"):

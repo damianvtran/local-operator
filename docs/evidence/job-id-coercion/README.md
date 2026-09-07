@@ -11,24 +11,23 @@ filter dropped every element, so the function returned the raw bracketed string
 and the caller reported `unknown job [920883861377]` — an error in which the id
 *looks* correct, which is what made the failure expensive to diagnose.
 
-The script is renamed `.py.txt` so the repo's linters skip one-off tooling, and
-it runs against the worktree it is launched from (`sys.path` is the cwd). It
-prints `module.__file__`, the sha256 of that exact file, and the git HEAD, and
-asserts the import came from the current tree — this repo's editable venv has
-produced false "no difference" A/B results for reviewers who skipped that check.
+Both scripts are ordinary `.py` files that the repo's linters check like any
+other source (review round 1, NIT-1: the earlier `.py.txt` rename dodged every
+gate, leaving committed runnable code nothing verified). Each inserts the repo
+root on `sys.path` itself, so they run in place with no copy-to-root ritual.
+Each prints `module.__file__`, the sha256 of that exact file, and the git HEAD,
+and asserts the import came from the tree it lives in — this repo's editable
+venv has produced false "no difference" A/B results for reviewers who skipped
+that check.
 
 ```sh
-# From the root of a worktree, with its own venv:
+# Unit-level: every id shape through _coerce_job_targets, the bare-scalar
+# int/float boundary, and the measured mangle rate over 200k real uuid4 ids.
+.venv/bin/python docs/evidence/job-id-coercion/repro_job_id.py
 
-# Unit-level: every id shape through _coerce_job_targets, plus the measured
-# mangle rate over 200k real uuid4 ids.
-.venv/bin/python docs/evidence/job-id-coercion/repro_job_id.py.txt
-
-# End-to-end: the REAL wait/jobs tools against a REAL AsyncJobManager whose
-# minted job ids are forced to be all digits. Copy it to the repo root first,
-# so the editable package resolves from the tree under test.
-cp docs/evidence/job-id-coercion/e2e_jobid.py.txt e2e_jobid.py
-.venv/bin/python e2e_jobid.py && rm e2e_jobid.py
+# End-to-end: the REAL task/jobs/wait/hub tools against a REAL
+# AsyncJobManager whose minted job ids are forced to be all digits.
+.venv/bin/python docs/evidence/job-id-coercion/e2e_jobid.py
 ```
 
 ## End-to-end result (real tools, real job manager)
@@ -128,3 +127,90 @@ Two alternatives were rejected:
 
 `bool` is checked before `int` in `_job_target_text` because `True` *is* an
 `int` in Python and would otherwise stringify as `"1"`.
+
+
+## Round 1 remediation
+
+Review round 1 raised one MAJOR and two MINORs; QA round 1 passed (21/21 on
+head, 15/21 on base) and found the same defect in a sibling function.
+
+### MAJOR-1 — the bare-scalar float path fabricated an id
+
+The PR rejected `str(parsed)` on the string path as lossy, then reintroduced
+exactly that corruption on the bare-scalar path it added. `_json_scalar_text`
+formatted a parsed float, so a model emitting an unquoted exponent-shaped id
+got back an id that was never minted:
+
+| model emitted | outer decode | old result | now |
+| --- | --- | --- | --- |
+| `{"job_id": 920883861377}` | `920883861377` | `'920883861377'` | `'920883861377'` — `str(int)` is lossless |
+| `{"job_id": 7019316393e2}` | `701931639300.0` | `'701931639300.0'` ❌ | refused |
+| `{"job_id": 13190e419943}` | `inf` | `'inf'` ❌ | refused |
+
+`13190e419943` is a legal `uuid4().hex[:12]`, so this was reachable at the same
+~0.65% rate, and the overflow case **destroys** the id rather than retyping it.
+It was also *worse than base for diagnosis*: base failed loudly with `Input
+should be a valid string`, while head produced `unknown job 701931639300.0` — a
+plausible id that never existed, the precise trap this PR exists to close. Two
+independent streams reached this: the reviewer from the float path, QA from the
+`inf` overflow.
+
+`float` now returns `None` so the value passes through and the field's own
+validation speaks:
+
+```
+job_id: Input should be a valid string [type=string_type, input_value=inf, input_type=float]
+```
+
+The docstring claim that exponent forms "survive as the exact characters the
+model wrote" is now scoped to the bracketed-string path, where it is true.
+
+### MINOR-1 — unbounded recursion
+
+Two separate stack consumers needed bounding, not one: this module's own
+recursion (now capped at `_MAX_TARGET_NEST_DEPTH = 20`) **and** `json.loads`,
+which does its own recursive descent and raises before any cap of ours is
+consulted. `RecursionError` is not a `ValueError`, so it escaped the parse
+guard and the callers' `ValidationError` handlers. Both functions now catch
+`(ValueError, RecursionError)`. Verified to depth 100 000 on both.
+
+### MINOR-2 — dict policy vs comment
+
+A dict is dropped in the bracketed-string branch and preserved in the real-list
+branch. That asymmetry is intentional — a real list has per-item field
+validation to report the bad item, a string does not, and preserving it there
+would fail the whole payload instead of resolving the real ids beside it — but
+the comment promised preservation everywhere. Both behaviours are now stated
+where they happen and pinned by `test_dict_policy_matches_the_documented_asymmetry`.
+
+### NIT-1 — the `.py.txt` linter dodge
+
+Renamed to real `.py` files, made flake8/black/isort clean, and made both
+runnable in place. `docs/` is inside the flake8/black/isort scope (only `.venv`
+is excluded), so these are now genuinely checked rather than invisible.
+
+## The same defect in `_coerce_hub_to` (found by QA round 1)
+
+`hub`'s `to` field carried the identical bug and was untouched by the original
+fix: plain `json.loads` plus an `isinstance(item, str)` filter, so
+`'[920883861377]'` coerced to **`[]`**.
+
+The failure mode is worse than a bad lookup. An empty `to` is not an unknown
+target — it is *no* target, so at the same ~0.65% rate `hub op='ask'` aimed at
+a numeric-id child **silently failed to reach it** and a parent blocking on the
+answer simply never got one, with no error to explain the silence.
+
+Fixed with the same grammar-level hooks. One deliberate divergence from
+`_coerce_job_targets`: `null`/`true`/`false` stay dropped, because a `to` target
+is resolved against live peers rather than looked up as an id, and the
+pre-existing contract is that `'[null]'` yields `[]` and `execute_hub` reports
+`needs a 'to' target` rather than inventing a peer named `null`.
+
+### Audit for a third instance
+
+`rg 'def _coerce' local_operator/` plus every `json.loads` in `builtin.py`.
+Only two id-coercion boundaries exist and both are now fixed. The remaining
+`json.loads` sites are not id paths: `_probe_document` parses a cmux `eval`
+payload, and `_iter_json_objects` parses cmux handshake output. `SendParams`
+(`target`/`pid`/`session`) has no before-validator and takes `pid` as a typed
+`int`, so it never round-trips an id through JSON. **No third instance.**
