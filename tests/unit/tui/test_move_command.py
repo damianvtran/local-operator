@@ -38,11 +38,26 @@ class MovableSession(FakeSession):
         self._outcome = outcome
         self.moves: list[str] = []
         self.error: Exception | None = None
-        #: The app reads this to decide whether a move has to WAIT for a
-        #: runtime to retire, and so whether to narrate before the transition
-        #: (UX U2). Declared here rather than set ad hoc so the two states a
-        #: test can put this double in are both part of its surface.
+        #: What ``is_cold`` reads. The app must NOT consult it to decide
+        #: whether to narrate a move — a viewer with an engage in flight reads
+        #: cold while its move joins that engage and then retires the runtime
+        #: it produces (review MAJOR-1, design U6). It stays on this double
+        #: precisely so a test can set it to the reading that used to suppress
+        #: the line and prove the app is indifferent to it.
         self.is_cold: bool = True
+
+    def move_will_wait(self) -> bool:
+        """DERIVED from the outcome, so this double cannot lie about the wait.
+
+        The round-1 guard let the gate's input and the move's outcome be set
+        independently, so a gate reading an unrelated predicate could disagree
+        with what the move actually did and the test still passed — which is
+        how the ``is_cold`` gate shipped green beside the blocker that
+        established ``is_cold`` is unsound. Tying the two together here makes
+        the disagreement unrepresentable: a rebind is exactly the move that
+        retires a runtime, which is exactly the move that makes the user wait.
+        """
+        return self._outcome == "rebound"
 
     async def set_working_directory(self, cwd: str) -> str:
         self.moves.append(cwd)
@@ -265,15 +280,62 @@ async def test_choosing_a_row_in_the_picker_moves_there(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_bound_move_narrates_before_the_runtime_restarts(tmp_path: Path) -> None:
-    """The retire is an RPC to a child that must drain — ~600 ms measured —
-    during which the picker has closed, the band still reads the old directory
-    and `_session_transition_pending` swallows a typed Enter without replaying
-    it. With nothing printed the app looked like it had ignored the user
-    (UX U2). `/resume` prints its receipt BEFORE the transition; this matches.
+@pytest.mark.parametrize(
+    "is_cold",
+    [
+        # A settled bound runtime: the case that already worked.
+        False,
+        # An engage IN FLIGHT: reads cold, joins, retires, rebinds. The move
+        # takes seconds and the round-1 gate said nothing for all of them.
+        True,
+    ],
+)
+async def test_every_move_that_waits_says_so_before_it_waits(tmp_path: Path, is_cold: bool) -> None:
+    """THE INVARIANT, not the gate's input: a move that ends in ``rebound``
+    made the user wait, so it must have narrated before it did.
+
+    The round-1 guard set ``is_cold = False`` itself and asserted the line
+    appeared — so it pinned the branch that already worked and was
+    structurally incapable of seeing the one that shipped broken beside it.
+    The double returns ``rebound`` regardless of ``is_cold``, so the gate and
+    the outcome could disagree freely and the test still passed. Gating on
+    ``is_cold`` then left a joined mount engage silent for a measured 1.94 s —
+    the feature's primary case, and the same predicate this PR's own blocker
+    established is unsound (review MAJOR-1, design U6).
+
+    Parametrised over both readings of ``is_cold`` precisely because the
+    invariant must not depend on it: the double's ``move_will_wait`` is
+    derived from the outcome, so ``is_cold`` is free to say anything and a
+    gate that consults it goes red on the ``True`` case.
     """
     session = MovableSession(cwd=str(tmp_path), outcome="rebound")
-    session.is_cold = False  # a bound runtime: the path that has to wait
+    session.is_cold = is_cold
+    app = OperatorApp(lambda: _factory(session))
+    destination = tmp_path / "elsewhere"
+    destination.mkdir()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, f"/move {destination}")
+
+        assert session.moves == [str(destination)], "the move must actually have run"
+        texts = _notices(app)
+        assert any("restarting the runtime" in t for t in texts), (
+            f"a move that returned 'rebound' (is_cold={is_cold}) never told the "
+            f"user it was going to wait: {texts}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_move_that_does_not_wait_stays_quiet(tmp_path: Path) -> None:
+    """The other half of the invariant, so the fix cannot be "always narrate".
+
+    A genuinely cold viewer settles within the frame, so an in-flight line
+    would be contradicted by its own receipt a moment later. ``is_cold`` is
+    left FALSE here — the reading that used to force the line — so this half
+    is red for an "always narrate" fix and for the old gate alike.
+    """
+    session = MovableSession(cwd=str(tmp_path), outcome="cold")
+    session.is_cold = False
     app = OperatorApp(lambda: _factory(session))
     destination = tmp_path / "elsewhere"
     destination.mkdir()
@@ -282,9 +344,8 @@ async def test_a_bound_move_narrates_before_the_runtime_restarts(tmp_path: Path)
         await _submit(pilot, app, f"/move {destination}")
 
         texts = _notices(app)
-        assert any(
-            "restarting the runtime" in t for t in texts
-        ), f"no in-flight line before the rebind: {texts}"
+        assert not any("restarting the runtime" in t for t in texts), texts
+        assert any("moved to" in t for t in texts), texts
 
 
 @pytest.mark.asyncio

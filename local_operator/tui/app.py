@@ -15168,7 +15168,7 @@ class OperatorApp(App[None]):
             return
 
         if arg.strip():
-            self._apply_move(arg.strip(), notice, typed=True)
+            self._apply_move(arg.strip(), notice)
             return
 
         from local_operator.paths import config_dir
@@ -15201,18 +15201,18 @@ class OperatorApp(App[None]):
             # with nothing said: a cancelled picker is not an event worth a
             # transcript line (the rule `_cmd_resume` states).
             if path:
-                # ``typed=True`` even from the picker, so choosing the row
-                # labelled `current` says `already in ~/x` instead of closing
-                # in silence — which was byte-identical to Esc on the one row
-                # whose whole purpose is to answer "where am I?" (UX U4).
-                self._apply_move(path, notice, typed=True)
+                # The no-op receipt reaches the picker too, so choosing the
+                # row labelled `current` says `already in ~/x` instead of
+                # closing in silence — which was byte-identical to Esc on the
+                # one row whose whole purpose is to answer "where am I?" (U4).
+                self._apply_move(path, notice)
 
         self.push_screen(
             MovePickerScreen(targets, current=cwd, complete=_complete, self_target=_self_target),
             _move_choice,
         )
 
-    def _apply_move(self, raw: str, notice: NoticeFn, *, typed: bool) -> None:
+    def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.
 
         Validation happens HERE, before anything is changed, so a bad target
@@ -15220,10 +15220,14 @@ class OperatorApp(App[None]):
         rejections (absent, not a directory, unenterable) are told apart
         because they call for three different next moves.
 
-        ``typed`` says whether the path came from the composer rather than the
-        picker. Only a typed path can be a no-op worth reporting — picking the
-        row you are already on is a deliberate "stay here" — so the two produce
-        different receipts for the same situation.
+        The no-op is reported for EVERY caller. This used to take a ``typed``
+        flag so that only a composer path said "already in …", on the argument
+        that choosing the row you are on is a deliberate "stay here" — but a
+        silent close there is byte-identical to Esc on the one row whose job is
+        to answer "where am I?" (UX U4), so the picker now reports it too.
+        With both callers passing the same value the flag was a distinction the
+        code no longer drew, and a flag with one value gets misread as still
+        meaning something (design D8).
         """
         from local_operator.tui.move_targets import (
             MoveError,
@@ -15250,20 +15254,30 @@ class OperatorApp(App[None]):
 
         destination = str(target)
         if destination == self._session_cwd():
-            if typed:
-                notice(f"already in {format_label(destination)}")
+            notice(f"already in {format_label(destination)}")
             return
         # NARRATED BEFORE the transition, exactly as `/resume` does one method
-        # above, and only when a runtime actually has to be replaced. That
-        # retire is an RPC to a child process that must finish draining —
-        # ~600 ms measured — during which the picker has closed, the band still
-        # reads the old directory, and `_session_transition_pending` swallows a
-        # typed Enter without replaying it. With no line printed the app simply
-        # looked like it had ignored the user (UX U2). The cold path needs no
-        # such line: it settles within the frame, so an in-flight notice would
-        # be immediately contradicted by its own receipt.
+        # above, and only when the move actually makes the user wait. That wait
+        # is an RPC to a child process that must finish draining, or a spawn
+        # already in flight that has to be joined first — during which the
+        # picker has closed, the band still reads the old directory, and
+        # `_session_transition_pending` swallows a typed Enter without
+        # replaying it. With no line printed the app simply looked like it had
+        # ignored the user (UX U2). A genuinely cold viewer needs no such line:
+        # it settles within the frame, so an in-flight notice would be
+        # contradicted by its own receipt a moment later.
+        #
+        # ASKED OF THE SESSION, never reconstructed here. Gating this on
+        # `is_cold` is what shipped in round 1 and it was silent for exactly
+        # the case the line exists for: a viewer with a mount engage in flight
+        # reads cold, while the move joins that engage and then retires the
+        # runtime — measured at 1.94 s of untouched boot splash on a move that
+        # printed "runtime restarted there". The predicate this PR's own
+        # blocker established as unsound must not decide a user-visible line
+        # one layer up (review MAJOR-1, design U6).
         session = self._session
-        if session is not None and not getattr(session, "is_cold", True):
+        will_wait = getattr(session, "move_will_wait", None) if session else None
+        if callable(will_wait) and will_wait():
             notice(f"moving to {format_label(destination)}… restarting the runtime there")
         self._run_session_transition(self._move_session(destination, notice))
 

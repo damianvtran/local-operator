@@ -13,6 +13,9 @@ Run from the worktree root:
 * ``path`` — a path typed, COMPLETING against the filesystem. This is the
   frame worth looking at hardest: the header has to say which of the two modes
   is in force, because an empty list means different things in each.
+* ``in-flight`` — the transcript WHILE a move that has to wait is waiting.
+  The frame that shows whether the user was told anything at all during the
+  join+retire gap; a property read cannot answer that, only a painted frame.
 * ``empty`` — a path that matches nothing, so the "no directory matches" state
   is judgeable rather than inferred.
 * ``band-before`` / ``band-after`` — the status band on either side of a move.
@@ -35,6 +38,7 @@ rather than decoration: only the code under test can change what it shows.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -107,6 +111,52 @@ async def main() -> None:
             await pilot.pause()
             seed_conversation(app)
             await pilot.pause()
+
+            if state == "in-flight":
+                # The MID-GAP frame: what the user is looking at while a move
+                # that has to wait is still waiting. The line is gated on the
+                # session's own `move_will_wait`, and gating it on `is_cold`
+                # instead left a joined mount engage silent for ~2 s on the
+                # feature's primary case — visible only in a painted frame,
+                # which is why this state exists (design U6).
+                #
+                # `is_cold` is deliberately left TRUE here: this is the
+                # in-flight engage, the exact reading that used to suppress
+                # the line, so the frame is evidence rather than decoration.
+                target = home / "oss" / "oh-my-pi"
+                # POINT HOME AT THE SYNTHETIC TREE for this state only. The
+                # picker states pass `home=` explicitly into `suggest_targets`
+                # and friends, but the notice `_apply_move` prints goes through
+                # `format_label` with no `home`, which reads `Path.home()` — so
+                # the frame rendered the sandbox's raw `/var/folders/...` path
+                # where a user sees `~/oss/oh-my-pi`. That is the one string
+                # this frame exists to be read, and a raw temp path in it makes
+                # the capture look like a bug it is not.
+                os.environ["HOME"] = str(home)
+
+                class _Joining:
+                    is_cold = True
+                    disposed = False
+
+                    async def dispose(self) -> None:
+                        # The app disposes its session at teardown; without
+                        # this the shot ends in a traceback after the capture.
+                        self.disposed = True
+
+                    def move_will_wait(self) -> bool:
+                        return True
+
+                    async def set_working_directory(self, cwd: str) -> str:
+                        await asyncio.sleep(30)  # never settles within the shot
+                        return "rebound"
+
+                app._session = _Joining()  # type: ignore[assignment]
+                app._push_cwd_to_band(str(project))
+                app._apply_move(str(target), app._system_notice)
+                for _ in range(6):
+                    await pilot.pause()
+                save_capture(app, out)
+                return
 
             if state in ("band-before", "band-after"):
                 # The band pair. `_push_cwd_to_band` is the one call the move

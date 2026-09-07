@@ -270,3 +270,127 @@ async def test_a_move_repoints_an_armed_wake_at_the_new_directory(
         "spawn the unattended runtime there"
     )
     assert [s["id"] for s in entry["schedules"]] == ["w1"], "the schedule must survive"
+
+
+@pytest.mark.asyncio
+async def test_move_will_wait_answers_for_an_engage_in_flight(cold_session) -> None:
+    """``is_cold`` and "will this move make me wait" are DIFFERENT questions,
+    and the frontend must ask the second one.
+
+    They disagree on exactly one reachable input — a client connected while
+    ``_ready_for_events`` is clear, and a viewer whose engage is still in
+    flight — which is the mount engage, i.e. `/move` as the first action of a
+    session. Gating the in-flight notice on ``is_cold`` therefore stayed
+    silent for the case the notice exists for (review MAJOR-1, design U6).
+    """
+    session = await cold_session("/tmp")
+
+    # Nothing running: the move is a field assignment that settles in-frame.
+    assert session.is_cold is True
+    assert session.move_will_wait() is False
+
+    # A settled bound runtime: it has to be asked to retire.
+    client = FakeClient()
+    _bind(session, client)
+    assert session.move_will_wait() is True
+
+    # THE MISMATCH: connected but not synchronised. `is_cold` says cold; the
+    # move still retires a live runtime.
+    session._ready_for_events = False
+    assert session.is_cold is True
+    assert session.move_will_wait() is True
+
+    # A socket that is down is not a runtime to wait for.
+    client.connected = False
+    assert session.move_will_wait() is False
+
+    # THE PRIMARY CASE: no client yet, but an engage holds the bind lock, so
+    # the move joins it before doing anything.
+    session._client = None
+    await session._bind_lock.acquire()
+    try:
+        assert session.is_cold is True
+        assert session.move_will_wait() is True
+    finally:
+        session._bind_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_a_move_while_the_owner_is_recovering_is_REFUSED(cold_session) -> None:
+    """The seam refuses uniformly while ``_recovering``, and a move is no
+    exception.
+
+    ``route_shared_slash`` in the same file declines during recovery because a
+    request/response command that blocks until a replacement owner arrives
+    answers a question the user has stopped asking. A move that reported
+    success here would be worse than slow: ``_recover_owner`` binds the
+    successor at whatever cwd the owner's RECORD names, so the "cold move"
+    is silently undone and the viewer works somewhere it said it had left
+    (review MINOR-1).
+    """
+    session = await cold_session("/tmp")
+    session._recovering = True
+
+    # Nothing running: the tempting case, because the cold path looks free.
+    with pytest.raises(ConnectionError, match="reconnecting"):
+        await session.set_working_directory("/usr")
+    assert session._cwd == "/tmp", "a refused move must not leave the directory moved"
+
+    # And with a connected client, which the round-2 delta had reporting
+    # `rebound` and issuing a real retire while recovery was in progress.
+    client = FakeClient()
+    _bind(session, client)
+    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    with pytest.raises(ConnectionError, match="reconnecting"):
+        await session.set_working_directory("/usr")
+    assert session._cwd == "/tmp"
+    assert client.ops == [], "no runtime may be retired for a move that was refused"
+
+    # The narration must not promise a wait for a move that will not happen.
+    assert session.move_will_wait() is False
+
+
+@pytest.mark.asyncio
+async def test_a_CANCELLED_move_rolls_the_directory_back(cold_session) -> None:
+    """``CancelledError`` is a ``BaseException``, so an ``except Exception``
+    rollback let it through.
+
+    The optimistic assignment happens before the runtime is asked to go, so a
+    move cancelled mid-flight — the session worker torn down, a transition
+    superseded — escaped with ``_cwd`` at the NEW value and no move performed.
+    That is the divergence this method exists to prevent, in its quietest
+    form: nothing raised, nothing logged, and the next engage spawns somewhere
+    the user never went (review MINOR-2).
+    """
+    session = await cold_session("/tmp")
+
+    # Cancelled inside the retire RPC: the widest window on the bound path.
+    _bind(session, FakeClient(error=asyncio.CancelledError()))
+    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await session.set_working_directory("/usr")
+    assert session._cwd == "/tmp", "a cancelled move left the directory moved"
+
+
+@pytest.mark.asyncio
+async def test_a_move_CANCELLED_while_joining_the_engage_rolls_back(cold_session) -> None:
+    """The other cancellation window, and the reason the join sits INSIDE the
+    guarded region rather than beside it.
+
+    Joining an in-flight engage is a 1-3 s await — by some margin the longest
+    a move spends anywhere — so it is the likeliest moment for a cancel to
+    land. A rollback that only wrapped the retire would miss it entirely.
+    """
+    session = await cold_session("/tmp")
+
+    async def _cancelled_join() -> None:
+        raise asyncio.CancelledError()
+
+    session._ensure_bound = _cancelled_join  # type: ignore[method-assign]
+    await session._bind_lock.acquire()  # an engage is in flight
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await session.set_working_directory("/usr")
+    finally:
+        session._bind_lock.release()
+    assert session._cwd == "/tmp", "a move cancelled while joining left the directory moved"

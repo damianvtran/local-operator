@@ -1117,8 +1117,57 @@ class RemoteSession:
             return await client.ask_answer(request_id, value, question_index=question_index)
         raise ValueError("the answer does not match the current question")
 
+    def move_will_wait(self) -> bool:
+        """Whether :meth:`set_working_directory` is about to make the user wait.
+
+        The frontend needs this to decide whether to narrate before the move,
+        and it must NOT reconstruct the answer from ``is_cold``. That predicate
+        means "no synchronised runtime is attached", which this class already
+        establishes is a different question — and a viewer with an engage in
+        flight reads cold while the move joins that engage and then retires the
+        runtime it produces, taking seconds. Gating narration on ``is_cold``
+        therefore stayed silent for exactly the case the narration exists for:
+        `/move` as the first action of a session (review MAJOR-1, design U6).
+
+        The two waiting shapes are the two this method reports, and they are
+        the same two ``set_working_directory`` branches on:
+
+        * a live client — the runtime has to be asked to retire; and
+        * an engage already in flight — the move joins it first.
+
+        A genuinely cold viewer with nothing running returns False, because
+        that move is a field assignment that settles within the frame and an
+        in-flight line would be contradicted by its own receipt a moment later.
+
+        A RECOVERING viewer also returns False, because its move does not wait
+        either — ``set_working_directory`` refuses it outright, and promising a
+        restart one line before refusing to move at all is worse than silence.
+        """
+        if self._recovering:
+            return False
+        client = self._client
+        if client is not None and client.connected:
+            return True
+        return self._engage_in_flight()
+
+    def _engage_in_flight(self) -> bool:
+        """Whether an engage is running that a move would have to join.
+
+        ONE definition, read by both the decision to join and the decision to
+        narrate it. Two copies would let the frontend promise a wait the move
+        does not take, or stay silent through one it does — which is the
+        divergence this whole feature exists to prevent, in miniature.
+        """
+        return self._can_go_cold and self._bind_lock.locked() and not self._recovering
+
     async def set_working_directory(self, cwd: str) -> str:
         """Point this session at ``cwd``; returns what happened, for the receipt.
+
+        TRUSTS ITS CALLER on the target. ``cwd`` is not checked for existence
+        or permission here: the frontend validates through ``validate_target``
+        BEFORE calling, so a bad path costs the user one line and never a
+        half-applied state. Validating again here would put the user-facing
+        sentences in two places, which is how they drift (QA Q6).
 
         THE CWD IS BAKED IN AT SPAWN. ``_spawn_runtime`` passes it as
         ``LOP_MOBILE_CHILD_CWD`` and the child reads it once in ``amain``,
@@ -1172,7 +1221,20 @@ class RemoteSession:
         reads is set. If the retire is refused the field is put back: a viewer
         whose ``_cwd`` says one thing while its runtime works in another is
         precisely the divergence this method exists to avoid.
+
+        DURING OWNER RECOVERY it refuses, in the same words and for the same
+        reason as ``route_shared_slash`` one seam over. A recovering viewer is
+        chasing a successor that ``_recover_owner`` will bind at whatever cwd
+        the owner's record names, so a "cold move" reported here is silently
+        undone the moment that bind lands — the viewer would say it moved and
+        then work somewhere else, which is the one divergence this method
+        exists to prevent. Refusing keeps the whole seam consistent: every
+        request/response operation on this class (routed slash, compaction,
+        the answer gates) declines while ``_recovering`` rather than reporting
+        an outcome the replacement owner has not agreed to (review MINOR-1).
         """
+        if self._recovering:
+            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command="move"))
         previous = self._cwd
         # UNDER ``_bind_lock``, and that is the correctness fix rather than a
         # precaution. ``_ensure_bound`` reads ``self._cwd`` INSIDE this lock and
@@ -1206,27 +1268,37 @@ class RemoteSession:
         # bind inherits its timeouts, its ``ConnectionError`` and its vetted
         # startup sentences, and returns a viewer that is either bound or
         # honestly cold.
-        joined = self._can_go_cold and self._bind_lock.locked() and not self._recovering
-        if joined:
-            try:
-                await self._ensure_bound()
-            except Exception:  # noqa: BLE001 — a failed engage still leaves a movable cold viewer
-                # The engage failed, which is its own reported problem. The
-                # session is then genuinely cold, and the assignment above is
-                # already the whole move: the NEXT engage uses the new path.
-                logger.debug("joining the in-flight engage before a move failed", exc_info=True)
-        async with self._bind_lock:
-            try:
+        try:
+            if self._engage_in_flight():
+                try:
+                    await self._ensure_bound()
+                except Exception:  # noqa: BLE001 — a failed engage still leaves a movable viewer
+                    # The engage failed, which is its own reported problem. The
+                    # session is then genuinely cold, and the assignment above
+                    # is already the whole move: the NEXT engage uses the new
+                    # path. Deliberately narrower than the rollback below —
+                    # ``Exception`` here so a cancellation still unwinds.
+                    logger.debug("joining the in-flight engage before a move failed", exc_info=True)
+            async with self._bind_lock:
                 return await self._apply_working_directory(cwd, previous=previous)
-            except Exception:
-                # ONE rollback for every refusal, here rather than at each
-                # raise: the optimistic assignment above must not outlive a
-                # move that did not happen, and a viewer whose ``_cwd`` says
-                # one thing while its runtime works in another is exactly the
-                # divergence this method exists to prevent. Restoring in the
-                # caller means a refusal added later cannot forget to.
-                self._cwd = previous
-                raise
+        except BaseException:
+            # ONE rollback for every non-return exit, here rather than at each
+            # raise: the optimistic assignment above must not outlive a move
+            # that did not happen, and a viewer whose ``_cwd`` says one thing
+            # while its runtime works in another is exactly the divergence this
+            # method exists to prevent. Restoring in the caller means a refusal
+            # added later cannot forget to.
+            #
+            # ``BaseException``, not ``Exception``: ``asyncio.CancelledError``
+            # does not derive from ``Exception``, so an ``Exception`` clause
+            # let a cancelled move — the session worker being torn down, a
+            # transition superseded — escape with ``_cwd`` at the new value and
+            # no move performed, which is the divergence in its quietest form
+            # (review MINOR-2). The join is inside the guarded region for the
+            # same reason: a cancel while joining the engage is the wider of
+            # the two windows, not the narrower one.
+            self._cwd = previous
+            raise
 
     async def _apply_working_directory(self, cwd: str, *, previous: str) -> str:
         """The move itself, with ``_bind_lock`` already held by the caller.
