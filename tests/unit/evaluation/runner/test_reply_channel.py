@@ -40,7 +40,6 @@ from local_operator.harness.types import (
     ToolCall,
 )
 from tests.unit.evaluation.runner.test_provider_client import (
-    ROUTE,
     _client,
     _turns,
     finish_payload,
@@ -171,12 +170,12 @@ async def test_both_channels_produce_the_identical_validated_envelope() -> None:
     current = observation()
     body = envelope(finish_payload(current), "Visible status: ready")
 
-    prose = await _client(
-        ScriptedStream(body), model_spec=_spec(supports_tools=True)
-    ).decide(current, _turns(current))
-    channel = await _client(
-        ChannelStream(body), model_spec=_spec(supports_tools=True)
-    ).decide(current, _turns(current))
+    prose = await _client(ScriptedStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+    channel = await _client(ChannelStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
 
     assert isinstance(channel.action_batch, ActionBatch)
     assert channel.action_batch.to_canonical_json() == prose.action_batch.to_canonical_json()
