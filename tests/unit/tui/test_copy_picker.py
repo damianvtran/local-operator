@@ -24,6 +24,7 @@ from local_operator.tui.copy_targets import (
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.copy_picker import (
     CARD_PADDING_ROWS,
+    MIN_PREVIEW_ROWS,
     MIN_TREE_ROWS,
     CopyPickerScreen,
 )
@@ -80,15 +81,53 @@ async def test_a_short_tree_takes_only_the_rows_it_has() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_long_tree_splits_the_budget_in_half() -> None:
+async def test_a_long_tree_takes_every_row_the_preview_does_not_need() -> None:
+    """The tree used to take `available // 2` unconditionally, and this test
+    asserted that. The half share only ever LOST rows: the preview's
+    `min(len)` cap donates downward and nothing donated back, so a tree longer
+    than half the budget was starved while the preview sat padded with blanks
+    — measured at 100x30 mixed, ten of nineteen tree rows hidden under SEVEN
+    empty preview rows (design round 1, D1). Reserving the preview a floor and
+    giving the tree the rest is what recovers them.
+
+    Pinned both ways: the tree gets everything above the floor, AND the
+    preview keeps its floor rather than the tree taking the lot.
+    """
     app = _real_app()
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         screen = await _open(app, _targets(*[f"answer {i}" for i in range(40)]), pilot)
         available = screen._row_budget()
         tree_rows, preview_rows = screen._split_rows()
-        assert tree_rows == available // 2
-        assert preview_rows == available - tree_rows
+        assert tree_rows == available - MIN_PREVIEW_ROWS
+        assert preview_rows == MIN_PREVIEW_ROWS
+        # The recovered rows are real: strictly more tree than the old split.
+        assert tree_rows > available // 2
+
+
+@pytest.mark.asyncio
+async def test_the_split_does_not_move_when_the_cursor_does() -> None:
+    """The hard constraint on D1's fix. Sizing the preview from the selected
+    target's own line count would fill the pane exactly and would change the
+    TREE's height on every arrow press, shifting rows sideways under a cursor
+    the user is aiming at — `session_picker.render_rows`' documented column
+    defect moved onto the time axis, where motion draws the eye.
+
+    So the split is built only from `len(_flat)` and the row budget, and the
+    test walks the cursor across targets whose previews differ by two orders
+    of magnitude.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        long_answer = "\n".join(f"line {index}" for index in range(300))
+        screen = await _open(app, _targets("one line", long_answer, CODE_ANSWER), pilot)
+        splits = set()
+        for _ in range(len(screen.visible_rows)):
+            splits.add(screen._split_rows())
+            await pilot.press("down")
+            await pilot.pause()
+        assert len(splits) == 1, splits
 
 
 @pytest.mark.asyncio
@@ -205,13 +244,33 @@ async def test_esc_still_leaves_a_card_too_small_to_draw() -> None:
 
 @pytest.mark.asyncio
 async def test_the_footer_is_always_the_last_drawn_row() -> None:
-    """It is the only statement of how to leave the screen."""
+    """It is the only statement of how to leave the screen.
+
+    The preview hint is CONDITIONAL and both sides are asserted here. It is
+    advertised only when the preview actually overflows, on the same rule the
+    `… N more lines` remainder follows: pointing a user at a key that does
+    nothing visible reads as the key being broken rather than as the document
+    being short.
+    """
+    fits = "↑↓ move · enter copy · esc quit"
+    overflows = "↑↓ move · shift+↑↓ preview · enter copy · esc quit"
+    long_answer = "\n".join(f"line {index}" for index in range(200))
+    seen = set()
     for height in (14, 20, 30, 50):
-        app = _real_app()
-        async with app.run_test(size=(100, height)) as pilot:
-            await pilot.pause()
-            screen = await _open(app, _targets(CODE_ANSWER), pilot)
-            assert screen.render_lines_for_test()[-1] == "↑↓ move · enter copy · esc quit"
+        for body in (CODE_ANSWER, long_answer):
+            app = _real_app()
+            async with app.run_test(size=(100, height)) as pilot:
+                await pilot.pause()
+                screen = await _open(app, _targets(body), pilot)
+                # Whether the hint belongs is the pane's question, not the
+                # fixture's: a short answer overflows a 14-row card's preview
+                # too, and asserting otherwise would pin the fixture rather
+                # than the rule.
+                scrollable = screen._preview_source_lines() > screen._preview_rows
+                expected = overflows if scrollable else fits
+                assert screen.render_lines_for_test()[-1] == expected, (height, scrollable)
+                seen.add(scrollable)
+    assert seen == {True, False}, f"both sides of the gate must be exercised: {seen}"
 
 
 @pytest.mark.asyncio

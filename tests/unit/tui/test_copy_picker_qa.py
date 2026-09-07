@@ -35,7 +35,11 @@ import re
 import pytest
 
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.copy_targets import MAX_MESSAGES, build_copy_targets
+from local_operator.tui.copy_targets import (
+    MAX_MESSAGES,
+    build_copy_targets,
+    extract_blocks,
+)
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -205,7 +209,15 @@ def test_the_all_rows_appear_only_above_more_than_one_block_of_that_kind() -> No
     """`All N` is a convenience over several blocks; above one it would be a
     second row copying byte-for-byte what the row above copies. The two kinds
     are counted INDEPENDENTLY, so a message with two fences and one quote gets
-    `All 2 blocks` and no `All N quotes`."""
+    `All 2 code blocks` and no `All N quotes`.
+
+    The label names the KIND. `All 2 blocks` was built from `len(code)` alone
+    but drawn as the last sibling of a list that also held a quote, with the
+    identical connector treatment — so the frame said it copied the three rows
+    above it, and it did not. That is the frame answering a correctness
+    question wrongly (design round 1, D4), which is why five cells buy a fix
+    rather than a nicety.
+    """
     one_code_two_quotes = build_copy_targets([_answer("```py\na\n```\n\n> q1\n\ntext\n\n> q2\n")])[
         0
     ]
@@ -223,8 +235,13 @@ def test_the_all_rows_appear_only_above_more_than_one_block_of_that_kind() -> No
         "Block 1",
         "Block 2",
         "Quote 1",
-        "All 2 blocks",
+        "All 2 code blocks",
     ]
+    # The aggregate is marked as DERIVED, which is what earns it a dimmer ink
+    # in the tree: it copies a join of the rows above it rather than anything
+    # that exists in the message. A flag rather than an `id.endswith(':all')`
+    # test, so the id's shape stays an identity detail.
+    assert [c.label for c in two_code_one_quote.children if c.derived] == ["All 2 code blocks"]
 
 
 def test_the_all_blocks_row_joins_bodies_with_one_blank_line() -> None:
@@ -232,7 +249,7 @@ def test_the_all_blocks_row_joins_bodies_with_one_blank_line() -> None:
     `.join("\\n\\n")`. A single newline would weld the last line of one block
     onto the first of the next when the payload is pasted into a file."""
     target = build_copy_targets([_answer("```py\na\nb\n```\n\n```js\nc\n```\n")])[0]
-    combined = next(c for c in target.children if c.label == "All 2 blocks")
+    combined = next(c for c in target.children if c.label == "All 2 code blocks")
 
     assert combined.content == "a\nb\n\nc"
 
@@ -256,8 +273,11 @@ def test_the_all_blocks_row_joins_bodies_with_one_blank_line() -> None:
         ("unclosed", "before\n```py\nhalf written\n", []),
         # Fences mask their bodies: this `>` is code, not a quote.
         ("quote in fence", "```\n> not a quote\n```\n", [("code", "> not a quote")]),
-        # A quote run ends where the fence begins; both survive, in order.
-        ("quote then fence", "> q\n```py\nc\n```\n", [("quote", "q"), ("code", "c")]),
+        # A quote run ends where the fence begins; both survive. Listed here
+        # code-first because the CHILD ROWS are grouped by kind (see the
+        # docstring); the grammar's own document order is asserted separately
+        # below, against `extract_blocks`.
+        ("quote then fence", "> q\n```py\nc\n```\n", [("code", "c"), ("quote", "q")]),
         # `>` plus at most ONE space comes off, so a bare `>foo` de-prefixes.
         ("no space after gt", ">tight\n", [("quote", "tight")]),
         # Only one optional space: further indentation is the quote's own.
@@ -276,7 +296,21 @@ def test_the_block_grammar_holds_on_its_edges(
     block presented as whole — so the body is what distinguishes them, not an
     exception. Asserted through `build_copy_targets` rather than
     `extract_blocks` so the child `content` (what is actually copied) is what
-    is checked, not an intermediate."""
+    is checked, not an intermediate.
+
+    ``expected`` is in CHILD ROW order, which groups every `Block` before
+    every `Quote`. It used to be document order, because the two coincided:
+    children were emitted as the grammar found them, which drew
+    `Block 1 / Quote 1 / Block 2 / Quote 2` above an `All 2 code blocks` row
+    covering the first and third of those, with nothing in the frame saying
+    which rows the aggregate stood for (design round 1, D4). Grouping puts
+    each aggregate under the run it summarises.
+
+    The grammar's own document order did not change and is not abandoned
+    here: it is asserted directly against `extract_blocks`, which is where
+    that fact actually lives — the numbering the user reads (`Block 1`,
+    `Block 2`) still counts fences in the order they appear.
+    """
     target = build_copy_targets([_answer(message)])[0]
     got = [
         ("code" if child.id.split(":")[2] == "code" else "quote", child.content)
@@ -285,6 +319,14 @@ def test_the_block_grammar_holds_on_its_edges(
     ]
 
     assert got == expected, f"{name}: {got}"
+    # Same bodies, in the order the message presents them.
+    assert sorted(got) == sorted(
+        (block.kind, block.body) for block in extract_blocks(message)
+    ), f"{name}: rows and grammar disagree on the bodies"
+    assert [block.kind for block in extract_blocks("> q\n```py\nc\n```\n")] == [
+        "quote",
+        "code",
+    ], "the grammar itself still walks the message in document order"
 
 
 def test_twenty_code_blocks_all_become_rows_and_the_all_row_counts_them() -> None:
@@ -299,7 +341,7 @@ def test_twenty_code_blocks_all_become_rows_and_the_all_row_counts_them() -> Non
     assert len(blocks) == 20
     assert blocks[0].id == "msg:1:code:0" and blocks[0].label == "Block 1"
     assert blocks[-1].id == "msg:1:code:19" and blocks[-1].label == "Block 20"
-    assert combined.label == "All 20 blocks"
+    assert combined.label == "All 20 code blocks"
     assert combined.content == "\n\n".join(f"block {index}" for index in range(20))
 
 

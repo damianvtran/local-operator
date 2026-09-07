@@ -185,16 +185,35 @@ def test_a_group_node_still_copies_the_whole_message() -> None:
     assert targets[0].content == text
 
 
-def test_children_are_the_blocks_then_the_all_rows() -> None:
+def test_children_are_the_blocks_then_the_quotes_then_the_all_rows() -> None:
+    """Grouped by KIND, not interleaved in document order.
+
+    Document order put `Block 1 / Quote 1 / Block 2 / Quote 2` above an
+    `All 2 code blocks` row that covers the first and third of those, drawn
+    with the identical `├─`/`└─` connector — so nothing in the frame said
+    which rows the aggregate stood for, and the reasonable reading was that it
+    copied all four (design round 1, D4). Grouping puts each aggregate
+    directly under the run it summarises.
+
+    The NUMBERING is unchanged and is the thing to keep an eye on here:
+    `Block N` still counts fences in the order the message presents them, so
+    the labels still match the order the user read them in.
+    """
     text = "intro\n\n```py\na\n```\n\n> q1\n\n```py\nb\n```\n\n> q2"
     targets = build_copy_targets([_Assistant(text)])
     assert [child.label for child in targets[0].children] == [
         "Block 1",
-        "Quote 1",
         "Block 2",
+        "Quote 1",
         "Quote 2",
-        "All 2 blocks",
+        "All 2 code blocks",
         "All 2 quotes",
+    ]
+    # Grouping reordered the ROWS, not the bodies behind them.
+    assert [child.content for child in targets[0].children if ":code:" in child.id] == ["a", "b"]
+    assert [child.content for child in targets[0].children if ":quote:" in child.id] == [
+        "q1",
+        "q2",
     ]
 
 
