@@ -53,6 +53,26 @@ prose path the other cohorts use successfully at a ~10% rejection rate, and a
 forced call is a worse failure when a model has genuinely nothing to say. The
 channel is OFFERED (``auto``); the prompt still describes the prose envelope,
 and both are accepted.
+
+**Which callers should adopt this, and which must not.** The test is whether
+the request already sends a tool array, because this one is APPENDED to it:
+
+* **Adopt it** when the request currently sends ``tools=[]`` and asks for a
+  strict structured reply in prose. The benchmark runner's decision envelope
+  (``evaluation/runner/provider_client.py``) is the first such caller: with an
+  empty array the wire carries no ``tools`` and no ``tool_choice`` key at all,
+  so the request neither offered the channel nor forbade it, and the tool this
+  module adds is the entire prefix delta.
+* **Do NOT adopt it** in ``Session.complete_aside`` or
+  ``Session.advise_compaction``. Those deliberately send the WORKING TURN's
+  live tool schema so their request rides the turn's already-cached prefix;
+  the tools block is the front of that prefix, so appending one more function
+  would diverge it at position 0 and force a full re-process at cache-WRITE
+  price. That was measured (``scripts/measure_advisor_cache.py``: 0% hit,
+  ``cache_write=14590`` against ``cache_write=568``), and it is the economics
+  the whole advisor feature rests on. Their rejection path is also cheap —
+  ``parse_hint`` returning ``None`` costs a fallback, not a re-prompt loop —
+  so they have neither the problem nor the headroom this trades against.
 """
 
 from __future__ import annotations

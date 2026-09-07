@@ -46,7 +46,6 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
-    StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
     Usage,
