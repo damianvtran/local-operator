@@ -618,10 +618,13 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
 #: must stay — dropping the odd ones disarms the guard, dropping the even ones
 #: stops it proving the fix did not simply move the error.
 #:
-#: 86 is the lowest width that HAS a card: below it `box - card` is under
-#: `BOOT_CARD_MIN_INSET` and the app deliberately leaves the notice on the
-#: full-width spine, where there is no card column to share. A narrower
-#: terminal is covered by the spine tests instead, not by these.
+#: 86 is the lowest carded width at which the defect APPEARS, which is why the
+#: list starts there. The first carded width is 85 (`box=83`, `card=75`,
+#: `d=8 == BOOT_CARD_MIN_INSET`; 84 with `d=7` is the last uncarded one), but
+#: 85's `box - card` is even, so it sits on the parity that hides the bug.
+#: Below the threshold the app deliberately leaves the notice on the full-width
+#: spine, where there is no card column to share; a narrower terminal is
+#: covered by the spine tests instead, not by these.
 BOOT_NOTICE_WIDTHS = (86, 90, 100, 110, 120, 160)
 
 

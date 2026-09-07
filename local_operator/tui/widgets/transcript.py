@@ -1255,40 +1255,28 @@ class NoticeBlock(TranscriptBlock):
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_around(self)
 
-    def set_class(self, add: bool, *class_names: str, update: bool = True) -> "NoticeBlock":
-        """Add/remove a class, re-wrapping when the boot column comes or goes.
-
-        The class carries the card's WIDTH, so a flip changes the column the text
-        folds at even though it no longer changes the text's alignment: a notice
-        wrapped for the full-width spine has the wrong row count the moment it is
-        narrowed to the card. Rebuilding here keeps the drawn text in step with
-        the class whatever the caller (the app's reconciliation pass, a test, a
-        resize crossing the card threshold), instead of trusting each to
-        re-render.
-        """
-        had = self.has_class(BOOT_COLUMN_CLASS)
-        super().set_class(add, *class_names, update=update)
-        if self.has_class(BOOT_COLUMN_CLASS) != had:
-            self._rebuild()
-        return self
-
-    def _rebuild(self) -> None:
-        """Re-run :meth:`_build` through the finalize discipline.
-
-        The same three steps ``on_resize`` takes for a re-wrap — unfreeze,
-        rebuild, refreeze — factored out so a class change (``set_class``) can
-        share them. The gap is re-asked afterwards because the width the class
-        carries can move the row count exactly as a resize can.
-        """
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(self._build())
-        finally:
-            self._finalized = was_finalized
-        parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_around(self)
+    # NO ``set_class`` override here, deliberately — see below before adding one.
+    #
+    # There used to be one: it detected a ``boot-column`` flip and re-ran
+    # ``_build``, on the rationale that the class carries the card's WIDTH, so a
+    # flip changes the column the text folds at. That rationale died when
+    # ``_build`` stopped reading the class (the block is now offset onto the
+    # card as a whole, and every row keeps ONE left edge), and the mechanism was
+    # measurably doing nothing: ``_build`` reads ``self.size.width`` and nothing
+    # else, and the app sets the class one line BEFORE it assigns
+    # ``styles.width`` (``OperatorApp._sync_boot_column_width``), so the flip
+    # rebuild only ever saw the STALE pre-resize width. Instrumented across
+    # 100→80→100→160→86→120 with a wrapping notice: on a down-cross it rebuilt
+    # at 75 (the old card width) and Textual's own ``on_resize`` then rebuilt at
+    # 96 and 76; on an up-cross it rebuilt at 76 (stale) and ``on_resize`` at
+    # 75. ``on_resize`` is what actually re-wraps, in both directions and across
+    # the card threshold, because the width lands as a resize.
+    #
+    # So the flip rebuild was a redundant build at a width nothing draws at,
+    # explained by a mechanism that does not happen. It is removed rather than
+    # re-documented: a rebuild kept "just in case" is one no test can lose, and
+    # the resize path it duplicated is the one with the guards on it
+    # (``test_boot_layout.py``'s parametrized column tests).
 
     #: The kind field: the spine indent plus the glyph and its space. Every row
     #: reserves exactly this — :meth:`_build` writes ``indent + glyph + " "`` on

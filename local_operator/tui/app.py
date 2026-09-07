@@ -11231,11 +11231,21 @@ class OperatorApp(App[None]):
         # the distinction is the whole bug. An offset is relative to the block's
         # own parent, so the transcript's one-cell left gutter is already spent
         # before the offset applies; centring inside `box - gutter` instead
-        # centred the notice in a box the card is not centred in, and the two
-        # agreed only where `box - card` happened to be odd. Measured on the
-        # unfixed code: one cell of drift at 70, 80, 90, 100 and 110 columns,
-        # zero at 120, 140, 160 and 190 — a defect that hides at exactly the
-        # width its own regression test ran at.
+        # centred the notice in a box the card is not centred in. The old form
+        # resolved to `(box - card - 1) // 2` against this one's `(box - card)
+        # // 2`, so the two agreed only where `box - card` happened to be EVEN:
+        # `(d - 1) // 2 == d // 2 - 1` holds for even `d` alone.
+        #
+        # Measured on the unfixed code, over the CARDED widths only — below the
+        # card threshold this offset never applies at all, so 70 and 80 (no
+        # card) say nothing about it either way. One cell of drift at 86, 88,
+        # 90, 100 and 110 (`box - card` odd), zero at 85, 87, 120, 140, 160 and
+        # 190 (even) — a defect that hides at exactly the width its own
+        # regression test ran at, which is why the guard is parametrized across
+        # both parities. The threshold itself: 85 is the FIRST carded width
+        # (`box=83`, `card=75`, `d=8 == BOOT_CARD_MIN_INSET`) and 84 (`d=7`) the
+        # last uncarded one; 86 is merely the lowest carded width that drifts,
+        # since 85's `d` is even.
         offset = max(0, (box - card) // 2 - transcript.styles.gutter.left)
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
@@ -19198,8 +19208,8 @@ class OperatorApp(App[None]):
           a fresh one on its ``retiring`` frame with no notice at all. Every
           other outcome \u2014 a busy runtime, a ``kept`` answer, an old runtime
           that does not know the op \u2014 is a runtime that is STAYING on the old
-          build, and earns one ``note`` line saying it will move over when its
-          current work finishes. No notice ever asks the user to ``/stop``
+          build, and earns one ``note`` line saying it will switch over once it
+          is next idle. No notice ever asks the user to ``/stop``
           (design-runtime-autorefresh \u00a73.3/\u00a73.5).
 
         The COPY deliberately says "session" and "window" rather than
@@ -19370,7 +19380,7 @@ class OperatorApp(App[None]):
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
-                    f"will switch to the new version when it is next idle.",
+                    "will switch to the new version when it is next idle.",
                     scope,
                     notice_kind="note",
                 )
@@ -19380,7 +19390,7 @@ class OperatorApp(App[None]):
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
-                f"switch to the new version when it is next idle.",
+                "switch to the new version when it is next idle.",
                 scope,
                 notice_kind="note",
             )
@@ -19547,10 +19557,19 @@ class OperatorApp(App[None]):
                 # against whatever runtime is live by then (design review
                 # round 1, D2). Kept ``warning`` because the lost attach is
                 # still the headline; the tail states the automatic repair.
+                #
+                # "once it is next idle", NOT "when its current work finishes",
+                # for the reason the build-skew notices give at the same wording
+                # (design review round 1, D3): ``may_refresh`` gates the retire
+                # on ``is_busy()`` being false, so idleness is literally the
+                # condition, and a session that has no work in flight is told
+                # about the end of work that does not exist. This notice paints
+                # on the same runtime-refresh mechanism as those two, so it
+                # states the same promise in the same words.
                 self._notice(
                     "this session is running a version too old to attach a team "
                     "(before 0.46.25); nothing was attached. It will move to the new "
-                    "version on its own when its current work finishes.",
+                    "version on its own once it is next idle.",
                     "warning",
                 )
                 return
