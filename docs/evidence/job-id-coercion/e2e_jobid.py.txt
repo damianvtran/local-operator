@@ -1,0 +1,89 @@
+"""End-to-end: the REAL wait/jobs tools, a REAL AsyncJobManager, a job whose
+id is all digits. Proves the operator-visible behaviour, not just the helper.
+"""
+
+import asyncio
+import hashlib
+import pathlib
+import sys
+import uuid
+from typing import Any
+from unittest.mock import patch
+
+from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.types import AgentTool, ToolContext, ToolResult
+from local_operator.tools import builtin
+from local_operator.tools.registry import create_tools
+
+p = builtin.__file__
+print(f"module.__file__ = {p}")
+print(f"sha256(builtin.py)[:16] = {hashlib.sha256(open(p, 'rb').read()).hexdigest()[:16]}")
+assert str(pathlib.Path.cwd().resolve()) in str(pathlib.Path(p).resolve()), p
+print()
+
+DIGIT_IDS = ["920883861377", "468698086935"]
+
+
+async def _quick(job_id, signal, report_progress):
+    return f"done:{job_id}"
+
+
+async def _call(tools, name, args, context) -> ToolResult:
+    return await tools[name].execute("call-1", args, None, None, context)
+
+
+async def main() -> int:
+    fails = 0
+    manager = AsyncJobManager()
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        return manager.register("task", label, _quick, owner_id=None)
+
+    context = ToolContext(cwd="/tmp", session_id="s", subagent_launcher=launcher, jobs=manager)
+    tools = {t.name: t for t in create_tools(context)}
+
+    # Force uuid4 so the real manager mints the all-digit ids we care about.
+    seq = iter(DIGIT_IDS)
+
+    class _FakeUUID:
+        def __init__(self, hexval):
+            self.hex = hexval + "0" * (32 - len(hexval))
+
+    with patch.object(uuid, "uuid4", lambda: _FakeUUID(next(seq))):
+        r1 = await _call(tools, "task", {"label": "alpha", "prompt": "x"}, context)
+        r2 = await _call(tools, "task", {"label": "beta", "prompt": "y"}, context)
+
+    ids = [r1.details["job_id"], r2.details["job_id"]]
+    print(f"real job ids minted: {ids}")
+    assert ids == DIGIT_IDS, ids
+
+    async def check(desc, name, args, want_ok=True):
+        nonlocal fails
+        res = await _call(tools, name, args, context)
+        bad = res.is_error or "unknown job" in (res.text or "")
+        ok = (not bad) if want_ok else bad
+        fails += not ok
+        text = (res.text or "").replace("\n", " ")[:88]
+        print(f"  [{'PASS' if ok else 'FAIL'}] {desc:46} -> {text}")
+
+    print("\n=== jobs(op='peek') with an all-digit id ===")
+    await check("bracketed string  '[920883861377]'", "jobs", {"op": "peek", "job_id": "[920883861377]"})
+    await check("bare string       '920883861377'", "jobs", {"op": "peek", "job_id": "920883861377"})
+    await check("JSON list         '[\"920883861377\"]'", "jobs", {"op": "peek", "job_id": '["920883861377"]'})
+    await check("bare int           920883861377", "jobs", {"op": "peek", "job_id": 920883861377})
+
+    print("\n=== wait with all-digit ids (single + list) ===")
+    await check("single bracketed  '[468698086935]'", "wait", {"job_id": "[468698086935]", "wait_ms": 1500})
+    await check("LIST of two digit ids (string form)", "wait", {"job_id": "[920883861377, 468698086935]", "wait_ms": 1500})
+    await check("LIST of two digit ids (real list)", "wait", {"job_id": DIGIT_IDS, "wait_ms": 1500})
+    await check("LIST of two digit ids (JSON form)", "wait", {"job_id": '["920883861377", "468698086935"]', "wait_ms": 1500})
+
+    print("\n=== negative control: a genuinely unknown id still errors ===")
+    await check("unknown id '[111111111111]'", "wait", {"job_id": "[111111111111]", "wait_ms": 500}, want_ok=False)
+
+    await manager.dispose()
+    print(f"\nRESULT: {'ALL PASS' if fails == 0 else f'{fails} FAILED'}")
+    return 1 if fails else 0
+
+
+sys.exit(asyncio.run(main()))
