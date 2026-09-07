@@ -9,18 +9,26 @@ it is the right way to pin what the screen SAYS and that it closes.
 
 from __future__ import annotations
 
+import copy
+
+from rich.cells import cell_len
+
 from local_operator.analytics.model import COMPONENT_KEYS, UsageAggregate, UsagePeriod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
+    _MIN_NAME_COL,
+    _WIDE_TABLE_MIN,
     METRIC_COST,
     METRIC_TOKENS,
     AnalyticsScreen,
+    _row_overhead,
     build_report,
     format_cost,
     format_percent,
     format_tokens,
     proportion_bar,
 )
+from local_operator.tui.widgets.tool_card import truncate_cells
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -783,3 +791,146 @@ def test_a_wide_frame_spends_its_width_on_the_name():
     assert title not in narrow
     narrow_row = next(li for li in narrow.splitlines() if "coder · Fix" in li)
     assert "…" in narrow_row, "a cut name must say it was cut"
+
+
+def test_no_content_width_overruns_its_box_and_clips_a_column():
+    """Design D8: no width band may lose a column off the right edge.
+
+    The bug this pins was a CLIFF, not a slope. ``name_cap`` was
+    ``30 if width < 96 else min(48, width - 40)``, so one extra cell of frame
+    bought 18 cells of label while the rest of the row still needed 51-55 —
+    the widest row jumped to 103 against a 96-cell box and terminal widths
+    114-120 clipped ``% cache`` off every row, silently, because a row ending
+    in ``cach`` still looks like a row.
+
+    So this sweeps the BAND rather than sampling it. The sibling test above
+    checks 71 and 140 and is blind to everything between them, which is exactly
+    how the regression shipped: sampling cannot catch a breakpoint it does not
+    happen to land on. Both cost profiles are swept because the cost column is
+    sized to the widest figure present, so the overhead the name budget has to
+    clear is itself a function of the data — a fixed allowance is wrong for one
+    of them whichever constant is chosen.
+
+    The sweep starts where the name budget is actually free to move. Below
+    ``_MIN_NAME_COL`` + the row overhead the FLOOR wins by design — a frame too
+    narrow to hold both a readable label and every column keeps the label and
+    lets the row overrun, which is the pre-existing narrow-width behaviour the
+    review confirmed as out of scope and which is byte-identical across this
+    fix. This pins the band the budget controls; it is not a claim that a
+    60-cell card fits.
+
+    SEVERAL sessions, deliberately. One row alone does not reproduce: the name
+    column is sized to the widest label present, so a lone long name is cut to
+    the cap and the row lands exactly ON the box edge. It takes a second row
+    holding the column at the full cap for the overrun to become visible —
+    which is the ordinary shape of this table and was the shape of the ledger
+    the review bisected.
+    """
+    names = {
+        "abc123def456": "Toggleable Sidebar for Session Switching in the TUI",
+        "bbb222ccc333": "coder · Improve Support for Local Model Provider",
+        "ccc333ddd444": "short one",
+    }
+    for label, cost_micro in (("cheap", 4_200_000), ("expensive", 3_433_960_000)):
+
+        def _build(width: int) -> UsageAggregate:
+            agg = _agg()
+            base = next(iter(agg.by_session.values()))
+            agg.by_session = {}
+            for sid in names:
+                scope = copy.copy(base)
+                scope.cost_micro = cost_micro
+                agg.by_session[sid] = scope
+            setattr(agg, "session_names", dict(names))
+            return agg
+
+        floor = _MIN_NAME_COL + _row_overhead(
+            list(_build(_WIDE_TABLE_MIN).by_session.items()), _WIDE_TABLE_MIN
+        )
+        for width in range(floor, 161):
+            agg = _build(width)
+
+            text = "\n".join(line.plain for line in build_report(agg, width))
+            rows = [
+                li.rstrip()
+                for li in text.split("By session", 1)[-1].splitlines()
+                if " tokens" in li
+            ]
+            widest = max(cell_len(li) for li in rows)
+            assert widest <= width, (
+                f"{label} ledger at content width {width}: widest painted row is "
+                f"{widest} cells, so {widest - width} cells fall off the box and the "
+                f"rightmost column is clipped — {rows[0]!r}"
+            )
+            # State the consequence, not just the arithmetic. ``build_report``
+            # composes rows without cropping — the crop happens when the widget
+            # paints them into its content box — so a row that is too wide is
+            # not visibly damaged in this text and asserting on its tail here
+            # would prove nothing. Applying the box width is what turns the
+            # cell count into the thing the reader actually loses: at 96 the
+            # old rule painted 99 cells and the row ended in ``cach``.
+            assert truncate_cells(rows[0], width).endswith(" cache"), (
+                f"{label} ledger at content width {width}: the % cache column is "
+                f"cut off when the row is painted into the box — "
+                f"{truncate_cells(rows[0], width)!r}"
+            )
+
+
+def test_report_fits_the_box_the_scroll_container_actually_paints():
+    """Design D8, on the SCREEN rather than in the arithmetic.
+
+    The sweep above is a pure-function check: it compares composed row widths
+    against the width ``build_report`` was handed. That is necessary and not
+    sufficient, and the gap between the two is exactly where the first attempt
+    at this fix went wrong. ``#analytics-scroll`` sets ``scrollbar-gutter:
+    stable``, so the container reserves a column whether or not the bar is
+    drawn and paints into one cell LESS than the card. A report composed
+    against the full card width therefore passed every arithmetic assertion
+    while the rendered frame still ended in ``cach`` — the defect was one layer
+    below the one being measured.
+
+    So this drives the real ``OperatorApp`` and asserts against
+    ``scrollable_content_region``, the box Textual actually paints into. It
+    covers both frames the review asked for; 114 is the first width that
+    clipped and 120 is the ordinary terminal in the band.
+    """
+    import asyncio
+
+    async def run():
+        for width in (114, 120):
+            agg = _agg()
+            base = next(iter(agg.by_session.values()))
+            agg.by_session = {}
+            for sid in ("abc123def456", "bbb222ccc333", "ccc333ddd444"):
+                agg.by_session[sid] = copy.copy(base)
+            setattr(
+                agg,
+                "session_names",
+                {
+                    "abc123def456": "Toggleable Sidebar for Session Switching in the TUI",
+                    "bbb222ccc333": "coder · Improve Support for Local Model Provider",
+                    "ccc333ddd444": "short one",
+                },
+            )
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(width, 40)) as pilot:
+                screen = await _push(pilot, app, agg)
+                painted = screen._scroll.scrollable_content_region.width
+                assert screen._card_width() <= painted, (
+                    f"at {width} columns the report is composed against "
+                    f"{screen._card_width()} cells but the scroll container paints "
+                    f"into {painted} — the rightmost column is cut"
+                )
+                text = "\n".join(line.plain for line in build_report(agg, screen._card_width()))
+                rows = [
+                    line.rstrip()
+                    for line in text.split("By session", 1)[-1].splitlines()
+                    if " tokens" in line
+                ]
+                for row in rows:
+                    assert truncate_cells(row, painted).endswith(" cache"), (
+                        f"at {width} columns the % cache column is cut off when the "
+                        f"row is painted: {truncate_cells(row, painted)!r}"
+                    )
+
+    asyncio.run(run())
