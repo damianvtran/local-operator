@@ -1858,9 +1858,7 @@ def test_an_armed_wake_outranks_idle_but_not_attached() -> None:
     idle = _row("wake00000001", "armed")._replace(live_state="idle", wakes=2)
     assert row_state_mark(idle, 0)[0] == WAKE_MARKER
 
-    watched = _row("wake00000003", "armed and watched")._replace(
-        live_state="attached", wakes=2
-    )
+    watched = _row("wake00000003", "armed and watched")._replace(live_state="attached", wakes=2)
     assert row_state_mark(watched, 0)[0] == ATTACHED_MARKER
 
     # A cold row with an armed wake still shows it — that never regressed.

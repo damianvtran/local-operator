@@ -21,6 +21,7 @@ from local_operator.tui.session_catalog import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import (
+    APP_SCREEN_INSET,
     SIDEBAR_GUTTER,
     SIDEBAR_MAIN_COMFORT_WIDTH,
     SIDEBAR_MAIN_MIN_WIDTH,
@@ -1050,14 +1051,14 @@ def test_a_narrow_terminal_is_left_exactly_as_it_was():
     the layout, the overlay switch and every existing geometry test describe the
     same app they did before.
     """
-    threshold = SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
     for width in (60, 80, 100, threshold - 1, threshold):
         assert sidebar_content_width(width) == SIDEBAR_WIDTH, width
 
 
 def test_growth_spends_only_surplus_and_stops_at_the_cap():
     """One column of terminal buys at most one column of list, up to the cap."""
-    threshold = SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
     assert sidebar_content_width(threshold + 1) == SIDEBAR_WIDTH + 1
     assert sidebar_content_width(threshold + 5) == SIDEBAR_WIDTH + 5
     assert sidebar_content_width(threshold + 500) == SIDEBAR_MAX_WIDTH
@@ -1067,18 +1068,53 @@ def test_growth_spends_only_surplus_and_stops_at_the_cap():
 
 
 def test_the_conversation_never_pays_for_the_list_getting_wider():
-    """The structural invariant, asserted as arithmetic rather than as a frame.
+    """The structural invariant, as arithmetic over the whole width range.
 
     At every terminal width, whatever the sidebar and its gutter take must
-    leave the main lane at least its comfort width. This is the property that
-    makes the feature safe, so it is checked across the whole range rather than
-    at the two sizes a screenshot happens to use.
+    leave the main lane at least its comfort width. Checked across the range
+    rather than at the two sizes a screenshot happens to use.
+
+    The app's own outer inset is part of the sum. Leaving it out is what made
+    the documented guarantee wrong by two cells (code review round 1, M1) while
+    this test still passed — arithmetic that models the layout inaccurately
+    proves only that the arithmetic is self-consistent, which is why the
+    companion test below measures the REAL widget instead.
     """
     for width in range(40, 400):
         content = sidebar_content_width(width)
         if content == SIDEBAR_WIDTH:
             continue  # not growing: the pre-existing floors govern
-        assert width - (content + SIDEBAR_GUTTER) >= SIDEBAR_MAIN_COMFORT_WIDTH, width
+        lane = width - APP_SCREEN_INSET - (content + SIDEBAR_GUTTER)
+        assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
+
+
+@pytest.mark.asyncio
+async def test_the_measured_conversation_lane_matches_the_documented_guarantee():
+    """The same invariant, MEASURED, across the sizes where growth is active.
+
+    The arithmetic test above cannot catch a wrong model of the layout, and did
+    not: it agreed with a helper that ignored the app's inset, so the lane sat
+    at 78 cells while the constant promised 80 (M1). This drives the real app
+    and reads the real widget at every width across the growth band and past
+    the cap, which is the only assertion that can fail when the model drifts
+    from the layout again.
+
+    Sampled every third column rather than every column: each size boots a
+    Textual app, and the property is continuous in width, so the sampling
+    catches a systematic error without making the file's runtime unreasonable
+    on a loaded machine.
+    """
+    threshold = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    for width in range(threshold, threshold + 40, 3):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            lane = app.query_one("#session-conversation").size.width
+            assert lane >= SIDEBAR_MAIN_COMFORT_WIDTH, (width, lane)
+            assert app.screen.virtual_size == app.screen.size, width
+            assert not app.screen.show_vertical_scrollbar, width
 
 
 @pytest.mark.asyncio
@@ -1223,6 +1259,14 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
     the pairing one hand-picked row at a time is what let that through, so this
     enumerates the product of every live state, wake count and dormancy and
     asserts the two renderings agree by construction.
+
+    ``unseen`` is a fourth dimension and is covered SEPARATELY, below, rather
+    than folded in here (code review round 1, M2). It short-circuits ``status``
+    ahead of every branch this function enumerates, and the sidebar likewise
+    overrides the glyph for an unseen row — so the pair that actually reaches a
+    user is neither the one ``row_state_mark`` returns nor the one this table
+    describes. Enumerating it here would assert a pairing no surface renders;
+    the companion test drives the real render path instead.
     """
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
@@ -1270,3 +1314,57 @@ def test_no_reachable_row_state_pairs_a_glyph_with_the_wrong_words():
                     )
                 checked += 1
     assert checked == 75, checked
+
+
+@pytest.mark.asyncio
+async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
+    """The ``unseen`` dimension, asserted on the RENDERED row.
+
+    Raised as M2 in code review round 1: `CatalogEntry.status` returns "Unseen
+    completion" ahead of every state branch, so pairing it with
+    ``row_state_mark``'s answer would show `◷` beside those words. That pairing
+    never reaches a user — the sidebar substitutes its own `✓`/`✗` for an
+    unseen row — but the only thing establishing that is the render, so the
+    render is what this test reads.
+
+    Written as a pilot test rather than as a call to ``row_state_mark`` for
+    exactly that reason: the helper's answer is not what is painted here, and a
+    unit-level assertion would describe a surface that does not exist.
+    """
+    from textual.geometry import Region
+
+    now = time.time()
+    cases = [
+        ("complete", "✓", "Unseen completion"),
+        ("error", "✗", "Unseen error"),
+        ("interrupted", "✗", "Unseen interruption"),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        for kind, glyph, words in cases:
+            # An ARMED WAKE on the row is the case M2 names: without the
+            # override this row would draw the wake glyph beside "Unseen …".
+            entry = CatalogEntry(
+                SessionRow("u" * 12, now, f"unseen {kind}", live_state="idle", wakes=2),
+                unseen=True,
+                completion_kind=kind,
+            )
+            sidebar.set_entries([entry])
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            painted = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            row = next(line for line in painted if f"unseen {kind}" in line)
+            assert glyph in row, (kind, row)
+            assert entry.status == words, (kind, entry.status)
+            # The wake glyph must NOT be what a user sees on an unseen row.
+            assert "◷" not in row, (kind, row)

@@ -57,7 +57,20 @@ SIDEBAR_MAX_WIDTH = 44
 #: every size and the list simply stays at its base width when there is nothing
 #: spare. 80 is the conventional readable measure and the width the transcript's
 #: own wrapping is tuned around.
+#:
+#: Measured against the TERMINAL, not against the conversation widget, and the
+#: two differ by :data:`APP_SCREEN_INSET` (code review round 1, M1: the lane
+#: was measured at 78 cells where a naive reading of this constant promises
+#: 80). The inset is subtracted explicitly in :func:`sidebar_content_width` so
+#: the guarantee this constant names is the one the layout actually delivers.
 SIDEBAR_MAIN_COMFORT_WIDTH = 80
+
+#: Cells the app's own chrome takes out of the terminal before any lane is
+#: measured — the outer inset the stylesheet puts on the workspace (one cell
+#: each side). Named rather than inlined because it is the difference between
+#: "terminal width" and "width the lanes divide up", and a growth rule that
+#: forgets it over-promises by exactly this much.
+APP_SCREEN_INSET = 2
 
 #: How long a requested row waits before its state mark becomes a spinner.
 #: The tint itself is immediate — it is the acknowledgement that the click
@@ -104,8 +117,8 @@ def sidebar_content_width(terminal_width: int) -> int:
     to predict it.
 
     The rule, in one sentence: **start at the base width and spend only
-    surplus.** Surplus is whatever the terminal has beyond the base sidebar,
-    its gutter and a comfortable main lane
+    surplus.** Surplus is whatever the terminal has beyond the app's own inset,
+    the base sidebar, its gutter and a comfortable main lane
     (:data:`SIDEBAR_MAIN_COMFORT_WIDTH`); the list takes it up to
     :data:`SIDEBAR_MAX_WIDTH` and never more. Consequences worth stating
     because they are the safety argument:
@@ -113,12 +126,23 @@ def sidebar_content_width(terminal_width: int) -> int:
     * A terminal at or below the comfort threshold gets exactly today's
       layout — this cannot regress a narrow window, and the overlay behaviour
       at genuinely small sizes is untouched.
-    * The main lane never drops below its comfort width because of growth: the
-      sidebar is only ever handed columns the conversation did not need.
+    * The conversation never drops below :data:`SIDEBAR_MAIN_COMFORT_WIDTH`
+      *because of growth*: the sidebar is only ever handed columns the
+      conversation did not need. Below the threshold the lane can of course be
+      narrower — that is the terminal being small, not the list taking
+      anything.
     * Growth is monotonic in terminal width, so dragging a window wider never
       makes the list narrower.
+
+    :data:`APP_SCREEN_INSET` is subtracted because the lanes divide the
+    terminal MINUS the app's outer inset, not the terminal. Omitting it made
+    the promise wrong by two cells at every size where growth is active (code
+    review round 1, M1) — a real measurement of 78 against a documented 80,
+    which is the kind of quiet drift that makes a stated invariant untrustable
+    even when nothing visibly breaks.
     """
-    surplus = terminal_width - (SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH)
+    reserved = APP_SCREEN_INSET + SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    surplus = terminal_width - reserved
     if surplus <= 0:
         return SIDEBAR_WIDTH
     return min(SIDEBAR_MAX_WIDTH, SIDEBAR_WIDTH + surplus)
