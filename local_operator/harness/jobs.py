@@ -66,7 +66,7 @@ UNRESOLVED_TERMINAL_STATUSES = frozenset({"failed", "interrupted"})
 
 def retention_expired(
     job: Any,
-    retention_ms: int,
+    retention_ms: float,
     *,
     now: float | None = None,
     settled_at: float | None = None,
@@ -114,7 +114,7 @@ def retention_expired(
 
 def roster_expired(
     job: Any,
-    retention_ms: int,
+    retention_ms: float,
     *,
     paused: bool = False,
     now: float | None = None,
