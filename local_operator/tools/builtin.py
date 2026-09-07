@@ -8060,6 +8060,40 @@ class TaskParams(BaseModel):
         return self
 
 
+#: JSON's three bare literals, mapped back to the source text they were parsed
+#: from. ``json.loads`` has hooks for numbers (``parse_int``/``parse_float``)
+#: and for the extension constants (``parse_constant``), but none for
+#: ``true``/``false``/``null`` -- so recovering the original spelling of those
+#: three needs this table. Without it ``True``/``None`` would leak into an id
+#: position as a Python repr rather than as what the model actually wrote.
+_JSON_LITERAL_TEXT: dict[Any, str] = {True: "true", False: "false", None: "null"}
+
+
+def _job_target_text(item: Any) -> str | None:
+    """Return a JSON scalar as the OPAQUE TEXT it was written as, or ``None``.
+
+    A job id is an opaque token (``uuid4().hex[:12]``), never a quantity. The
+    only reason a value reaches this function as a non-``str`` is that JSON's
+    grammar claimed it -- so the job here is to undo that claim, not to format
+    a number. ``bool`` is checked before ``int`` because ``True`` IS an ``int``
+    in Python and would otherwise stringify as ``"1"``.
+
+    Returns ``None`` for anything that cannot be an id (a dict, a nested
+    object), which the caller drops -- the same outcome as before.
+    """
+    if isinstance(item, str):
+        return item
+    if isinstance(item, bool) or item is None:
+        return _JSON_LITERAL_TEXT[item]
+    if isinstance(item, (int, float)):
+        # Reached only when the value arrived as a real Python number from the
+        # OUTER tool-argument decode, which already discarded the source text
+        # (``1e5`` is indistinguishable from ``100000.0`` by then). The string
+        # path below never gets here: its parse hooks keep the literal intact.
+        return repr(item) if isinstance(item, float) else str(item)
+    return None
+
+
 def _coerce_job_targets(value: Any) -> Any:
     """Accept the string shapes models emit for job ids instead of a bare id or array.
 
@@ -8067,6 +8101,26 @@ def _coerce_job_targets(value: Any) -> Any:
     models pass ``job_id`` as a stringified list ``'["id1", "id2"]'`` or
     unquoted bracketed string ``'[id1, id2]'``, or a single element list / string.
     Unwraps JSON lists, unquoted bracketed strings, and lists with stringified items.
+
+    **Ids are opaque text at this boundary.** Job ids are ``uuid4().hex[:12]``,
+    and a measured 0.65% of them are also well-formed JSON *numbers*: ~0.31%
+    are all digits (``920883861377``) and ~0.33% land on the exponent form
+    (``7019316393e2``, ``177650473e52``). Parsing ``'[920883861377]'`` with a
+    plain ``json.loads`` therefore produced ``[920883861377]`` -- a list of
+    ``int`` -- and the old ``isinstance(item, str)`` filter dropped every
+    element, so the function returned the raw bracketed string unchanged and
+    the caller reported ``unknown job [920883861377]``. The id LOOKED correct
+    in the error, which is what made the ~1-run-in-150 failure so confusing.
+    The same filter also broke genuine multi-id calls whose ids happened to be
+    numeric (``'[920883861377, 468698086935]'``).
+
+    The fix is at the grammar level rather than a digit special case: the
+    number hooks below hand back the RAW SOURCE LITERAL instead of a parsed
+    value, so no id shape can be reinterpreted -- all-digit at any length,
+    leading zeros, exponent forms, and ``true``/``false``/``null`` all survive
+    as the exact characters the model wrote. Round-tripping through ``str()``
+    on a parsed number would not be equivalent: it normalises ``007`` to
+    ``"7"`` and ``1e5`` to ``"100000.0"``.
     """
 
     def _parse_str(text: str) -> list[str]:
@@ -8075,14 +8129,27 @@ def _coerce_job_targets(value: Any) -> Any:
             return []
         if text.startswith("["):
             try:
-                parsed = json.loads(text)
+                # parse_int/parse_float/parse_constant receive the literal's
+                # SOURCE TEXT, so this decodes JSON's structure (nesting,
+                # quoting, escapes) while treating every scalar as opaque.
+                parsed = json.loads(
+                    text,
+                    parse_int=str,
+                    parse_float=str,
+                    parse_constant=str,
+                )
             except ValueError:
                 parsed = None
             if isinstance(parsed, list):
                 res: list[str] = []
                 for item in parsed:
-                    if isinstance(item, str):
-                        res.extend(_parse_str(item))
+                    if isinstance(item, list):
+                        # A genuinely nested list, e.g. '[["a"], "b"]'.
+                        res.extend(_parse_str(json.dumps(item)))
+                        continue
+                    as_text = _job_target_text(item)
+                    if as_text is not None:
+                        res.extend(_parse_str(as_text))
                 return res
             inner = text[1:]
             if inner.endswith("]"):
@@ -8105,14 +8172,31 @@ def _coerce_job_targets(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         items = []
         for x in value:
-            if isinstance(x, str):
-                items.extend(_parse_str(x))
-            else:
+            as_text = _job_target_text(x)
+            if as_text is None:
+                # Not id-shaped (a dict, say). Preserved rather than dropped so
+                # the caller's own validation reports it instead of this
+                # function silently shortening the list.
                 items.append(x)
+            else:
+                items.extend(_parse_str(as_text))
         if len(items) == 1 and isinstance(items[0], str):
             return items[0]
         return items
-    return value
+    # A bare NUMBER the model emitted unquoted: 'job_id: 920883861377' decodes
+    # to an int long before it reaches here. Hand back the text so the id
+    # survives into a 'str | list[str]' field instead of failing validation.
+    #
+    # Deliberately narrower than the in-list conversion above: at the TOP level
+    # a bare ``None`` means the argument was OMITTED (``jobs``' job_id is
+    # ``str | None`` and ``op='list'`` takes no id), and a bare ``True`` is not
+    # an id in any shape a model emits. Only inside a bracketed payload does
+    # ``null``/``true`` mean "the model typed those characters as an id". Both
+    # are passed through untouched so the field's own validation still speaks.
+    if isinstance(value, bool) or value is None:
+        return value
+    as_text = _job_target_text(value)
+    return value if as_text is None else as_text
 
 
 def _coerce_single_job_id(value: Any) -> Any:
