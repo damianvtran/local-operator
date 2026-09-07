@@ -274,7 +274,37 @@ _PRE_ABORT_DROP_NOTICE_AT = 3
 #: ``job_result`` is in the set for both job kinds deliberately. A background
 #: job's completion is the finish of work the stopped turn launched, never a
 #: fresh instruction from the user, so it may not re-open a turn on a session
-#: that has been stopped.
+#: that has been stopped. It is also the type that carries the fix in
+#: PRODUCTION: every live ``hub_message`` producer routes through
+#: :meth:`Session.queue_aside`, so ``HUB_MESSAGE_TYPE`` is defensive here
+#: rather than load-bearing (review round 1, MINOR-1) — kept because a future
+#: producer reaching ``_prompt_messages`` with one would otherwise reopen the
+#: money loop silently.
+#:
+#: THE BOUNDARY, STATED (review round 1, MAJOR-2). Everything NOT in this set
+#: — a typed prompt, a wake, a peer message, a resume catch-up — still clears a
+#: pending abort and may buy a turn on a stopped session. That is deliberate
+#: and it is what "stopped" means here: this session's own work is halted, but
+#: the session stays REACHABLE, so a human (or their own reminder) can revive
+#: it without restarting the process. Adding those types would make one Esc
+#: mean "ignore the user until they restart me", which is a worse failure than
+#: the one this set fixes.
+#:
+#: What keeps that carve-out safe is that none of it is a SELF-SUSTAINING loop
+#: the session can drive on its own:
+#:
+#: * a wake is rate-limited by ``MIN_WAKE_INTERVAL_MS`` (60 s), so the worst
+#:   case is a turn a minute from a schedule the user can see and cancel, not
+#:   an unbounded burn;
+#: * a peer message needs another session or a human to send it, and mailbox
+#:   mode (the default) spends nothing at all;
+#: * a typed prompt is the user asking for work.
+#:
+#: The residue types are the ones the STOPPED SESSION'S OWN CHILDREN generate,
+#: at whatever cadence they choose, with no floor and no human in the loop —
+#: which is exactly why they are the ones that must not clear a stop. A caller
+#: that needs everything to stop regardless has the stronger rung: the ``abort``
+#: control op cancels the children, and ``lop stop`` ends the process.
 _STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
 
 #: The builtin tools whose createIf gate reads a field only a SESSION can fill
