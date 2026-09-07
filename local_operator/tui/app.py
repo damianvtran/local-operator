@@ -1846,6 +1846,18 @@ class OperatorApp(App[None]):
         #: swap: the row belongs to the PANE and the process, and a ``/new``
         #: only changes the session-id metadata it carries.
         self._herdr_reporter: HerdrReporter | None = None
+        #: Latch and change-detector for the OBSERVER notification leg — the
+        #: one that announces OTHER sessions finishing (see
+        #: `_notify_background_completions`). The latch keeps one off-loop scan
+        #: in flight at a time; the revision is the attention store's own cheap
+        #: `(max_sequence, sum_acknowledged)` detector, so the 1 s poll does a
+        #: catalog scan only when something actually changed. ``None`` rather
+        #: than ``(0, 0)`` so the FIRST tick always scans: an empty store
+        #: genuinely reads ``(0, 0)``, and seeding with it would make a
+        #: completion published before this app started invisible until the
+        #: next unrelated change.
+        self._background_notify_pending = False
+        self._background_notify_revision: tuple[int, int] | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -13464,9 +13476,197 @@ class OperatorApp(App[None]):
                 return top is block or block in top.ancestors
         return False
 
+    def _background_completion_identity(self, session_id: str) -> str:
+        """The attention-store key for another session's directory.
+
+        Goes through ``conversation_identity`` rather than formatting the
+        string here, because that helper encodes the agent-vs-session
+        namespace split that keeps an agent profile from aliasing a session's
+        conversation.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.attention import conversation_identity
+
+        return conversation_identity(config_dir() / "sessions" / session_id)
+
+    def _deliver_background_completion(self, entry: CatalogEntry, identity: str) -> bool:
+        """Announce one finished background session; report whether a toast went out.
+
+        Runs OFF the event loop (see :meth:`_notify_background_completions`):
+        every route here spawns a process, and the cmux route shells out.
+
+        THE CLAIM COMES FIRST. Every running frontend polls attention for every
+        session, so eleven windows would otherwise announce one completion
+        eleven times. ``claim_delivery`` is the cross-process arbitration and
+        exactly one caller wins it; a route that then fails to deliver hands
+        the claim back rather than leaving the watermark asserting a toast
+        nobody received.
+
+        ``detached_notify`` rather than an in-band escape, even though this app
+        has a terminal to write into. Two reasons, and the second is the
+        operator's actual request:
+
+        - The toast is about a session this terminal is NOT showing, so
+          attributing it to this pane is simply wrong.
+        - It has to be CLICKABLE. ``detached_notify`` carries ``session_id``
+          through the signed macOS bundle to ``lop resume-click``, which
+          replays that transcript and idles. The in-band alternative cannot:
+          Ghostty implements no OSC 99 at all, and its OSC 9 is title-only with
+          no id, action or payload — an in-band toast for another session would
+          be unclickable, which is the opposite of what was asked for.
+
+        cmux stays first where a cmux surface genuinely exists, matching the
+        precedence every other delivery path here uses.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.proc import spawn_detached
+        from local_operator.session.attention import AttentionStore
+        from local_operator.tui.notify import (
+            APP_NAME,
+            BODIES,
+            CONTEXTS,
+            cmux_command,
+            cmux_surface_id,
+            detached_notify,
+            sanitize_text,
+            session_names_in_notifications,
+        )
+
+        # `interrupted` folds to `error` for the same reason the sidebar paints
+        # both with `✗`: the user's question is "did it finish or not", and a
+        # third word on a banner they read in under a second does not answer it.
+        kind = "error" if entry.completion_kind in ("error", "interrupted") else "complete"
+        surface = cmux_surface_id()
+        backend = "cmux" if surface is not None else "detached"
+        store = AttentionStore(config_dir() / "attention.db")
+        if not store.claim_delivery(identity, entry.completion_token, backend):
+            return False
+        # Falls back to the brand rather than to a bare directory name: the
+        # point of the title is that the user can tell WHICH session finished,
+        # and a name they opted out of showing is not improved by a worse one.
+        title = sanitize_text(entry.row.name) if session_names_in_notifications() else ""
+        title = title or APP_NAME
+        try:
+            if surface is not None:
+                delivered = bool(
+                    spawn_detached(
+                        cmux_command(surface, title, CONTEXTS.get(kind, ""), BODIES.get(kind, ""))
+                    )
+                )
+            else:
+                delivered = detached_notify(
+                    title,
+                    BODIES.get(kind, ""),
+                    session_id=entry.id,
+                    subtitle=CONTEXTS.get(kind, ""),
+                )
+        except Exception:  # noqa: BLE001 — a toast must never affect the poll
+            logger.debug("background completion notification failed", exc_info=True)
+            delivered = False
+        if not delivered:
+            # The backend reported nothing went out (notifications disabled
+            # between the two calls, no notifier on PATH, a refused spawn).
+            # Give the claim back so the next observer, or the next poll, can
+            # try again — a watermark that lies about a delivered toast is a
+            # silent hole of exactly the kind this feature exists to close.
+            store.release_delivery(identity, entry.completion_token)
+        return delivered
+
+    def _notify_background_completions(self) -> None:
+        """Tell the user about sessions that finished while they were elsewhere.
+
+        THE GAP THIS CLOSES. A completion published by a detached
+        ``kind=daemon`` runtime already crosses the process boundary correctly
+        (`AttentionStore`) and is already read by this process on every catalog
+        poll — the sidebar paints its `✓` from exactly that. Nothing converted
+        the fact into a notification, so a background session finishing while
+        the operator watched a different session in the same window produced no
+        signal of any kind. The fact was held, rendered, and discarded.
+
+        RIDES THE POLL THAT ALREADY RUNS. No new timer, no new IPC: this is
+        called from `_poll_completion_attention`'s 1 s tick and gated on
+        `AttentionStore.revision()`, the store's documented cheap change
+        detector, so the catalog scan behind it happens only when a completion
+        was actually published or acknowledged — not once a second.
+
+        THE FOCUS GATE IS THE ATTACHED-SESSION CHECK, and that is the whole
+        point of the fix rather than an omission. OS terminal focus is the
+        wrong predicate at this granularity: the operator WAS looking at their
+        terminal, just at another session, and suppressing on that is precisely
+        the bug. The correct rule — suppress only when the user is demonstrably
+        looking at the session that PRODUCED the event — is the conjunction the
+        acknowledgement path below already applies (`terminal_is_foreground`
+        AND `_completion_anchor_visible`), and for a row that is not the
+        attached session that conjunction is false by construction: this app
+        renders one session's transcript, so another session's completion
+        anchor is not on screen and cannot be. So the attached-session skip IS
+        that rule, evaluated. The attached row keeps its existing owner (the
+        in-app `Notifier` on `TurnEnded`), which is what stops one completion
+        being announced twice by one process.
+
+        Never raises and never blocks the loop: a notification is chrome, and
+        the work below is a SQLite read plus a directory scan plus a spawn.
+        """
+        if getattr(self, "_background_notify_pending", False):
+            return
+        from local_operator.tui.notify import notifications_enabled
+
+        if not notifications_enabled():
+            return
+        self._background_notify_pending = True
+
+        def collect() -> None:
+            from local_operator.paths import config_dir
+            from local_operator.session.attention import AttentionStore
+            from local_operator.tui.session_catalog import load_catalog
+
+            directory = config_dir()
+            store = AttentionStore(directory / "attention.db")
+            revision = store.revision()
+            if revision == self._background_notify_revision:
+                # Nothing published or acknowledged anywhere on this machine
+                # since the last look, so no row's unseen state can have
+                # changed and the catalog scan is pure waste.
+                return
+            # Recorded BEFORE the scan, not after: a completion published while
+            # this scan runs bumps the revision again, and recording the newer
+            # value afterwards would skip the next poll and lose that event.
+            self._background_notify_revision = revision
+            current = str(getattr(self._session, "session_id", "") or "")
+            for entry in load_catalog(directory):
+                if (
+                    not entry.unseen
+                    or not entry.completion_token
+                    or entry.row.pending
+                    or entry.id == current
+                ):
+                    # A pending row is a GATE, not a finished turn: the runtime
+                    # already announces those itself (`_announce_pending`), and
+                    # a second toast for one parked question is the duplicate
+                    # that routing was built to avoid.
+                    continue
+                self._deliver_background_completion(
+                    entry, self._background_completion_identity(entry.id)
+                )
+
+        async def run() -> None:
+            try:
+                await asyncio.to_thread(collect)
+            except Exception:
+                logger.debug("background completion notification skipped", exc_info=True)
+            finally:
+                self._background_notify_pending = False
+
+        self.run_worker(run(), group="background-notify")
+
     async def _poll_completion_attention(self) -> None:
         from local_operator.tui.attention import terminal_is_foreground
 
+        # BEFORE the guards below, which are about the ATTACHED session's read
+        # receipt: a session that has no attention API, or a poll already in
+        # flight for it, must not also silence every other session's
+        # completion. This leg has a pending latch of its own.
+        self._notify_background_completions()
         if getattr(self, "_attention_poll_pending", False):
             return
         session = self._session

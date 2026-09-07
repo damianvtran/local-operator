@@ -82,6 +82,14 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # UNFOCUSED, so a user watching the session is never interrupted; the env
     # kill switch is `LOCAL_OPERATOR_NO_NOTIFICATIONS`.
     "display.notifications": True,
+    # Whether a toast is TITLED with the conversation's own name. Defaults ON,
+    # which is what every notification here has always done. It earns a flag of
+    # its own because the observer path (a BACKGROUND session finishing while
+    # you are looking at a different one) widens where a model-written session
+    # name appears — including on a lock screen, where macOS repeats banner
+    # titles. Off falls back to the brand name, which still says a session
+    # finished without saying which work it was.
+    "display.notification_session_name": True,
     # The dock subagent panel's density when a session STARTS: `full` (one
     # row per child), `summary` (one row of counts) or `hidden`. Defaults to
     # full, today's shape. It seeds the panel and nothing more — `ctrl+g`

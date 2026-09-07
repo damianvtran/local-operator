@@ -206,6 +206,19 @@ def notifications_enabled() -> bool:
     return bool(settings_get("display.notifications", True))
 
 
+def session_names_in_notifications() -> bool:
+    """Whether a toast may be TITLED with the conversation's own name.
+
+    Separate from :func:`notifications_enabled` because it answers a different
+    question: not "may we interrupt" but "may we say what about". It exists for
+    the observer path, which announces a session the terminal is not currently
+    showing — so the name is the only thing distinguishing it, and it is also
+    the thing macOS repeats on a lock screen. Defaults to ``True``, which is
+    what every notification here has always done.
+    """
+    return bool(settings_get("display.notification_session_name", True))
+
+
 def sanitize_text(value: str | None, limit: int = MAX_TITLE_CHARS) -> str:
     """``value`` with control characters removed and whitespace collapsed.
 

@@ -5,12 +5,21 @@ completion token advances the watermark. Tokens are conversation-bound and do
 not depend on a process epoch, a wall clock, or transcript modification time.
 SQLite serializes the short transactions across TUI, relay and server processes;
 callers on an event loop run these operations in a worker thread.
+
+TWO WATERMARKS, DELIBERATELY SEPARATE. ``receipts.acknowledged`` says a human
+demonstrably READ a result; ``deliveries.delivered`` says somebody already
+NOTIFIED them about it. They ride the same monotonic ``completions.sequence``
+but must never be conflated: notifying is cheap and reversible, marking-read is
+destructive, and ``docs/SESSION_SIDEBAR.md`` pins the rule that routing a
+notification never marks anything read. A session can be delivered-and-unread
+forever, which is correct — the sidebar's checkmark stays until it is opened.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from collections.abc import Iterable
 from contextlib import closing
@@ -21,6 +30,30 @@ from local_operator.paths import config_dir
 
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
+
+#: The delivery watermark. `delivered` is a highwater mark on the SAME
+#: `completions.sequence` that `receipts.acknowledged` uses, which is what makes
+#: the two comparable and the arbitration clock-free: sequence is assigned by
+#: SQLite AUTOINCREMENT under BEGIN IMMEDIATE, so it is a total order across
+#: every process on this machine. `delivered_at` and `backend` are DIAGNOSTICS
+#: ONLY and no decision may read them \u2014 in particular, a wall clock must never
+#: enter the claim, or two observers whose clocks disagree would both deliver.
+_CREATE_DELIVERIES = (
+    "CREATE TABLE deliveries ("
+    "conversation TEXT PRIMARY KEY, delivered INTEGER NOT NULL, "
+    "delivered_at REAL NOT NULL, backend TEXT NOT NULL)"
+)
+
+#: The no-flood rule, as one statement: everything already published counts as
+#: already delivered. Runs once, inside the transaction that creates the table
+#: (see `_connect`), so a machine upgrading into background-completion
+#: notifications starts from "nothing outstanding" rather than announcing its
+#: entire history.
+_BASELINE_DELIVERIES = (
+    "INSERT INTO deliveries(conversation,delivered,delivered_at,backend) "
+    "SELECT conversation, MAX(sequence), ?, 'baseline' FROM completions "
+    "GROUP BY conversation"
+)
 
 
 def conversation_identity(directory: Path) -> str:
@@ -114,13 +147,41 @@ class AttentionStore:
                         "CREATE TABLE receipts ("
                         "conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
                     )
+                    # A store being created here has no completions yet, so
+                    # there is no backlog to baseline against — an empty
+                    # delivery watermark IS the correct starting point.
+                    conn.execute(_CREATE_DELIVERIES)
                 else:
                     # Missing tables/columns in an established database are
                     # corruption, not permission to rebuild an empty watermark.
+                    #
+                    # `deliveries` IS DELIBERATELY ABSENT FROM THIS PROBE, and
+                    # adding it is the one "tidy-up" that would brick every
+                    # existing machine: a database written by any release
+                    # before the background-completion notifier legitimately
+                    # lacks the table, so probing for it would read every one
+                    # of them as corrupt. The probe stays byte-identical to
+                    # what shipped, which is what keeps the meaning of an
+                    # established database unchanged.
                     conn.execute(
                         "SELECT sequence,conversation,token,anchor,kind FROM completions LIMIT 0"
                     )
                     conn.execute("SELECT conversation,acknowledged FROM receipts LIMIT 0")
+                    # Additive migration, and the baseline rides the SAME
+                    # transaction as the CREATE so no concurrent reader can
+                    # ever observe an unbaselined table. `unseen` is a LEVEL,
+                    # not an edge: without this, the first observer to upgrade
+                    # would claim every historical completion still unread and
+                    # fire a banner for each one (measured: 8 on this machine's
+                    # live store). Baselining at creation also means the
+                    # eleventh observer to start INHERITS the baseline rather
+                    # than re-deriving one of its own — the watermark is a
+                    # property of the database, not of a process.
+                    if not conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deliveries'"
+                    ).fetchone():
+                        conn.execute(_CREATE_DELIVERIES)
+                        conn.execute(_BASELINE_DELIVERIES, (time.time(),))
             return conn
         except BaseException:
             conn.close()
@@ -285,3 +346,95 @@ class AttentionStore:
                 (conversation, row[0]),
             )
             return self._state(conn, conversation)
+
+    def claim_delivery(self, conversation: str, token: str, backend: str) -> bool:
+        """True iff THIS caller may notify about ``token``. Exactly one ever wins.
+
+        The arbitration point for N observer processes watching one shared
+        store. Every frontend polls attention for every session, so without a
+        claim, eleven running sessions would each announce the same completion
+        eleven times. `BEGIN IMMEDIATE` is the serialization: both racers take
+        the write lock, and the loser reads the winner's already-advanced
+        watermark from inside its own transaction. This is the identical
+        argument `receipts` already rests on, which is why the table lives here
+        rather than beside the store in a lock file of its own.
+
+        NEVER ACKNOWLEDGES. Delivering a toast about a session says nothing
+        about whether the human read it, so this touches `deliveries` only and
+        the sidebar's unseen mark survives untouched.
+
+        CLAIM-THEN-DELIVER, deliberately. A process dying between the claim and
+        the spawn loses that one toast; delivering first and claiming after
+        would instead give a crash-looping process a repeating banner. The lost
+        signal is only the transient nudge \u2014 `unseen` stays true, the checkmark
+        stays in the sidebar, and `lop sessions` still reports it \u2014 whereas a
+        duplicate is visible and repeats. Backends that can report their own
+        failure hand the claim back through :meth:`release_delivery`.
+
+        A store that does not exist yet holds no completion to claim, so this
+        never creates one: an arbitration read must not be the thing that
+        materialises the database.
+        """
+        if not self.path.exists():
+            return False
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT sequence FROM completions WHERE conversation=? AND token=?",
+                (conversation, token),
+            ).fetchone()
+            if row is None:
+                # An unknown token is never invented into the watermark: a
+                # caller racing a store that was cleared behind it must not be
+                # able to write a sequence no completion ever had.
+                return False
+            sequence = int(row[0])
+            current = conn.execute(
+                "SELECT delivered FROM deliveries WHERE conversation=?", (conversation,)
+            ).fetchone()
+            if current is not None and int(current[0]) >= sequence:
+                return False
+            conn.execute(
+                "INSERT INTO deliveries(conversation,delivered,delivered_at,backend) "
+                "VALUES(?,?,?,?) ON CONFLICT(conversation) DO UPDATE SET "
+                "delivered=MAX(deliveries.delivered,excluded.delivered), "
+                "delivered_at=excluded.delivered_at, backend=excluded.backend",
+                (conversation, sequence, time.time(), backend),
+            )
+            # MAX on conflict mirrors `acknowledge` exactly, so reordered
+            # writes converge upward instead of regressing the watermark.
+            return True
+
+    def release_delivery(self, conversation: str, token: str) -> bool:
+        """Hand a claim back when the backend that took it delivered nothing.
+
+        Without this, a backend failing AFTER the claim (notifications turned
+        off between the two, `osascript` missing, a spawn refused) leaves the
+        watermark asserting a toast that never reached anyone \u2014 a silent hole
+        of exactly the kind this feature exists to close.
+
+        Compare-and-swap, not `MAX`: rolling a watermark BACK is the one
+        operation monotonic convergence cannot express. The update fires only
+        while `delivered` is still the sequence this caller claimed, so an
+        observer that has since claimed something newer is never clobbered.
+        Rolling back to ``sequence - 1`` rather than deleting the row keeps
+        every OLDER completion of this conversation delivered (their sequences
+        are lower still), so a released claim re-opens exactly one event.
+        """
+        if not self.path.exists():
+            return False
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT sequence FROM completions WHERE conversation=? AND token=?",
+                (conversation, token),
+            ).fetchone()
+            if row is None:
+                return False
+            sequence = int(row[0])
+            cursor = conn.execute(
+                "UPDATE deliveries SET delivered=?, delivered_at=?, backend='released' "
+                "WHERE conversation=? AND delivered=?",
+                (sequence - 1, time.time(), conversation, sequence),
+            )
+            return cursor.rowcount > 0
