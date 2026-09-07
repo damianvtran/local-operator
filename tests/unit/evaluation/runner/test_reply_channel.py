@@ -332,3 +332,138 @@ def test_the_channel_schema_is_the_published_contract_schema() -> None:
     tool = build_reply_channel_tool(public_reply_schema(), description="d")
 
     assert tool.parameters == published
+
+
+# ---------------------------------------------------------------------------
+# Round 1 review: the channel must not accept what prose refuses, and the
+# schema it offers must be one every provider can actually read.
+# ---------------------------------------------------------------------------
+
+
+class TwoCallStream:
+    """A provider that names the reply channel TWICE for one observation."""
+
+    def __init__(self, first: str, second: str) -> None:
+        self.first = first
+        self.second = second
+        self.requests: list[Any] = []
+
+    def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        return self._events()
+
+    async def _events(self) -> AsyncIterator[Any]:
+        for index, arguments in enumerate((self.first, self.second)):
+            yield StreamToolCallDelta(index=index, id=f"call-{index}", name=REPLY_CHANNEL_TOOL_NAME)
+            yield StreamToolCallDelta(index=index, argument_delta=arguments)
+        yield StreamEndEvent(stop_reason="toolUse")
+
+
+class NamedButEmptyCallStream:
+    """Prose carries a COMPLETE envelope; the channel is named with no arguments.
+
+    A length stop mid-call produces the same shape, which is why this is a
+    regression risk rather than a curiosity: the model did answer, in prose.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.requests: list[Any] = []
+
+    def __call__(self, request: Any, signal: Any) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        return self._events()
+
+    async def _events(self) -> AsyncIterator[Any]:
+        yield StreamTextDelta(delta=self.text)
+        yield StreamToolCallDelta(index=0, id="call-1", name=REPLY_CHANNEL_TOOL_NAME)
+        yield StreamEndEvent(stop_reason="toolUse")
+
+
+@pytest.mark.asyncio
+async def test_two_channel_calls_are_refused_exactly_as_two_prose_batches_are() -> None:
+    """The channel may not accept an ambiguity the prose decoder rejects.
+
+    Taking the first call would execute a decision the model may have
+    superseded — the precise reason the prose path refuses a second batch for
+    the same observation. Both channels must reach the same verdict, or the
+    channel has become a lenient second contract.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+
+    client = _client(TwoCallStream(body, body), model_spec=_spec(supports_tools=True))
+    with pytest.raises(DecisionRejected) as raised:
+        await client.decide(current, _turns(current))
+
+    assert "second action batch for the same observation" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_channel_call_leaves_a_valid_prose_reply_standing() -> None:
+    """Naming the channel without arguments must not destroy a good prose answer.
+
+    Preferring the channel unconditionally turned a turn the harness would have
+    accepted into "not valid JSON: Expecting value" — the very rejection the
+    channel exists to remove.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    client = _client(NamedButEmptyCallStream(body), model_spec=_spec(supports_tools=True))
+
+    decision = await client.decide(current, _turns(current))
+
+    assert isinstance(decision.action_batch, ActionBatch)
+    decision.action_batch.validate_for(current)
+
+
+def test_the_offered_schema_avoids_constructs_providers_reject() -> None:
+    """The schema goes on the wire as a function declaration, so it must be portable.
+
+    Gemini's ``FunctionDeclaration.parameters`` accepts a narrow OpenAPI subset:
+    ``$ref``, ``$defs``, ``oneOf`` and ``discriminator`` are rejected with 400
+    INVALID_ARGUMENT, which would fail EVERY request of a Gemini-routed episode
+    rather than degrading. This was previously unreachable only because the
+    runner sent no tools at all.
+    """
+
+    serialized = json.dumps(public_reply_schema())
+
+    for construct in ("$ref", "$defs", "oneOf", "discriminator"):
+        assert construct not in serialized, f"{construct} reaches the provider verbatim"
+
+
+def test_the_offered_schema_advertises_only_what_the_surface_accepts() -> None:
+    """Offering an action the surface rejects invites the model into a rejection.
+
+    The prose prompt is surface-aware, so an unfiltered schema would present a
+    different contract than the prompt — and a model following the schema would
+    be refused by ``validate_batch``.
+    """
+
+    from dataclasses import replace
+
+    from local_operator.evaluation.runner.provider_client import LEGACY_ACTION_SURFACE
+
+    legacy = json.dumps(public_reply_schema(LEGACY_ACTION_SURFACE))
+    assert "paste_text" not in legacy
+
+    without_ask = replace(LEGACY_ACTION_SURFACE, ask_user=False)
+    assert "ask_user" not in json.dumps(public_reply_schema(without_ask))
+
+    # Unchanged for the published contract, which describes the protocol rather
+    # than one adapter's negotiated subset.
+    assert "paste_text" in json.dumps(public_reply_schema())
+
+
+def test_the_surface_scoped_schema_is_still_byte_stable_across_turns() -> None:
+    """The surface is fixed for an episode, so the cache prefix must not move."""
+
+    from local_operator.evaluation.runner.provider_client import LEGACY_ACTION_SURFACE
+
+    first = json.dumps(public_reply_schema(LEGACY_ACTION_SURFACE), sort_keys=True)
+    second = json.dumps(public_reply_schema(LEGACY_ACTION_SURFACE), sort_keys=True)
+
+    assert first == second

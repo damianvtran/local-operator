@@ -525,6 +525,7 @@ def parse_decision(
     stop_reason: str = "stop",
     provider_request_id: str = "unknown",
     tool_call_count: int = 0,
+    offered_tool_count: int = 0,
     prompt_cache_key: str | None = None,
     context_tokens: int | None = None,
     compaction: CompactionRecord | None = None,
@@ -606,6 +607,7 @@ def parse_decision(
         stop_reason=stop_reason,
         provider_request_id=provider_request_id,
         tool_call_count=tool_call_count,
+        offered_tool_count=offered_tool_count,
         prompt_cache_key=prompt_cache_key,
         context_tokens=context_tokens,
         compaction=compaction,
@@ -1001,9 +1003,16 @@ class ProviderModelClient:
             # Built from frozen schema metadata and the static description, so
             # the tools array (the FRONT of the provider cache prefix) is
             # byte-identical on every step of the episode.
+            # Built from the NEGOTIATED surface, not the full ActionBatch. The
+            # prose prompt is surface-aware, so offering the unfiltered schema
+            # would advertise actions (``paste_text``, or ``ask_user`` on an
+            # adapter without it) that the surface then rejects -- inviting the
+            # model into exactly the rejection this change exists to prevent.
+            # The surface is fixed for the episode, so this stays byte-identical
+            # across steps and the cache prefix is unaffected.
             tools=reply_channel_tools(
                 self._model_spec,
-                public_reply_schema(),
+                public_reply_schema(action_surface),
                 description=PUBLIC_REPLY_TOOL_DESCRIPTION,
             ),
             # Still "none" in intent for every OTHER tool: the episode drives
@@ -1025,10 +1034,20 @@ class ProviderModelClient:
             channel_reply,
             tool_call_count,
         ) = await self._stream(request)
-        if channel_reply is not None:
+        if channel_reply:
             # The model answered on the offered channel. Its arguments ARE the
             # envelope, so the raw JSON goes to the same decoder the prose path
             # uses: no second parser, no salvage, identical rejections.
+            #
+            # Truthiness, not ``is not None``, and the distinction is a real
+            # regression rather than style. A model that answers in prose AND
+            # emits a name-only channel call -- no arguments, or an argument
+            # stream cut short by a length stop -- yields an EMPTY channel
+            # reply. Preferring it unconditionally would overwrite a complete,
+            # valid prose envelope with "", producing the exact
+            # "not valid JSON: Expecting value" rejection this change exists to
+            # remove, on a turn that previously succeeded. An empty channel
+            # reply carries no decision, so the prose text still stands.
             text = channel_reply
         self._last_request_ms = _now_ms()
         if context_tokens is not None:
@@ -1088,6 +1107,11 @@ class ProviderModelClient:
                 # how the model actually answered — which is the measurement
                 # that says whether offering the channel is paying off.
                 tool_call_count=tool_call_count,
+                # How many tools the REQUEST offered, so the request payload can
+                # say so rather than asserting a constant zero. Since the reply
+                # channel may now put one tool on the wire, a hardcoded 0 would
+                # describe a request the wire never carried.
+                offered_tool_count=len(request.tools or ()),
             )
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.

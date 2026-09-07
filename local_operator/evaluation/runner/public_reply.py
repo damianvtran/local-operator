@@ -8,11 +8,12 @@ text path as interactive sessions; private reasoning is never an input here.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, get_args
 from urllib.parse import unquote
 
+from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import canonical_bytes, canonical_digest
-from local_operator.evaluation.protocol import ActionBatch
+from local_operator.evaluation.protocol import ComputerAction
 from local_operator.evaluation.receipts import RedactionSet
 
 REPLY_VERSION = "1.0"
@@ -140,7 +141,13 @@ def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
     return canonical_bytes(value).decode("utf-8")
 
 
-def public_reply_schema() -> dict[str, Any]:
+#: Every action kind the protocol defines, used when no surface is supplied.
+#: The published contract describes the protocol, not one adapter's negotiated
+#: subset, so it advertises them all.
+_ALL_ACTION_MODELS = get_args(get_args(ComputerAction)[0])
+
+
+def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str, Any]:
     """The envelope's JSON Schema, shared by the contract and the reply channel.
 
     One definition with two readers. It is published in the evidence bundle's
@@ -149,14 +156,22 @@ def public_reply_schema() -> dict[str, Any]:
     envelope it may write are provably the same shape rather than two hand-kept
     copies that drift apart.
 
-    Derived from :class:`ActionBatch` on every call rather than cached: it is
-    built from frozen model metadata, so it is deterministic — which is what
-    lets it ride in the prompt-cache prefix unchanged across an episode's
-    turns — and recomputing keeps a new action kind from drifting out.
+    ``action_surface`` filters the admitted action kinds to the ones the
+    NEGOTIATED surface actually accepts. Passing it is what keeps the offered
+    schema honest: the prose prompt is surface-aware, so an unfiltered schema
+    would advertise ``paste_text`` — or ``ask_user`` on an adapter without it —
+    and the model following the schema would then be rejected by
+    ``validate_batch``. Omitting it keeps the full batch, which is what the
+    published contract wants.
+
+    Derived from the models on every call rather than cached: they are frozen
+    metadata, so the result is deterministic — which is what lets it ride in the
+    prompt-cache prefix unchanged across an episode's turns, the surface being
+    fixed for the episode — and recomputing keeps a new action kind from
+    drifting out.
     """
-    batch_schema = ActionBatch.model_json_schema()
+    models = action_surface.models if action_surface is not None else _ALL_ACTION_MODELS
     return {
-        "$defs": batch_schema["$defs"],
         "type": "object",
         "additionalProperties": False,
         "required": sorted(_ENVELOPE_KEYS),
@@ -166,11 +181,56 @@ def public_reply_schema() -> dict[str, Any]:
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["actions"],
-                "properties": {"actions": batch_schema["properties"]["actions"]},
+                "properties": {
+                    "actions": {
+                        "type": "array",
+                        # ``anyOf`` over INLINED member schemas, not a ``$ref``
+                        # into ``$defs`` with a ``oneOf``/``discriminator``.
+                        #
+                        # This schema is handed to a provider as a function's
+                        # parameters, and Gemini's ``FunctionDeclaration``
+                        # accepts only a narrow OpenAPI 3.0 subset: ``$ref``,
+                        # ``$defs``, ``oneOf`` and ``discriminator`` are all
+                        # rejected with 400 INVALID_ARGUMENT, which would fail
+                        # EVERY request of a Gemini-routed episode rather than
+                        # degrading. ``tools/builtin.py`` carries the same
+                        # warning for the same reason. The discriminated union
+                        # is therefore flattened here: ``anyOf`` over concrete
+                        # member schemas is the same admitted set, expressed in
+                        # a shape every provider accepts.
+                        "items": {"anyOf": [_inlined_action_schema(m) for m in models]},
+                    }
+                },
             },
             "public_observations": {"type": "string", "maxLength": MAX_PUBLIC_OBSERVATIONS_CHARS},
         },
     }
+
+
+def _inlined_action_schema(model: Any) -> dict[str, Any]:
+    """One action model's schema with its ``$defs`` resolved into place.
+
+    Pydantic emits ``$ref``/``$defs`` for nested models. A provider that rejects
+    those constructs cannot read the result, so the references are substituted
+    for the definitions they name and the ``$defs`` block is dropped.
+    """
+
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                target = defs.get(ref.rsplit("/", 1)[-1], {})
+                merged = {k: v for k, v in node.items() if k != "$ref"}
+                return {**resolve(target), **merged}
+            return {key: resolve(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        return node
+
+    return resolve(schema)
 
 
 def public_reply_contract() -> dict[str, Any]:

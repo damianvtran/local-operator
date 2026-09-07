@@ -185,11 +185,36 @@ def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | 
     used the channel and sent garbage" is a rejection to report, while "the
     model did not use the channel" means read the prose instead.
     """
-    for call in calls:
-        if call.name != name:
-            continue
-        raw = call.raw_arguments
-        if raw is not None:
-            return raw
-        return json.dumps(call.arguments) if call.arguments else ""
-    return None
+    matched = [call for call in calls if call.name == name]
+    if not matched:
+        return None
+
+    # Two calls naming the channel is the SAME ambiguity the prose decoder
+    # refuses -- "which one did the model mean?" -- and taking the first would
+    # execute a decision the model may have superseded.
+    #
+    # Rather than inventing a second rejection, hand the decoder BOTH envelopes
+    # concatenated. Its competing-batch rule keys on ``observation_id``, so two
+    # batches for one observation produce its own "send exactly one action
+    # batch" message, and two for DIFFERENT observations stay tolerated exactly
+    # as they are in prose. One notion of a well-formed reply, one set of
+    # rejections -- which is the property this channel exists to preserve.
+    if len(matched) > 1:
+        return "\n".join(_call_text(call) for call in matched)
+
+    call = matched[0]
+    return _call_text(call)
+
+
+def _call_text(call: "ToolCall") -> str:
+    """The envelope text one channel call carries, empty when it carries none.
+
+    ``raw_arguments`` is preferred over the parsed ``arguments`` because it is
+    what the provider actually sent; re-serializing would quietly REPAIR a
+    duplicate key or trailing-comma artefact the strict decoder must reject.
+    """
+
+    raw = call.raw_arguments
+    if raw is not None:
+        return raw
+    return json.dumps(call.arguments) if call.arguments else ""
