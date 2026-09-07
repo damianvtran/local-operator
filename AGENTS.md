@@ -1202,6 +1202,15 @@ extension's popup and options page are the other user-visible surface here, and
 they are captured out of a real Chrome rather than out of a pilot. **Any Chrome
 an agent launches for testing, capture, or CDP work runs `--headless=new`.**
 
+**This section is for people and agents developing the extension itself**, where
+the artifact under test is `extension/dist` and it has to be loaded into a
+browser that does not have it yet. It is not how anyone *uses* the browser tool:
+a user — or an agent doing ordinary browser work in any repository — drives the
+browser that is already paired, per `guide://browser`, and never starts a second
+one. Keep the two apart in both directions. Do not send contributors to the user
+guide for harness flags, and do not let this recipe leak into the guide and read
+as advice to spin up Chrome for everyday browsing.
+
 This is not a preference. On 2026-09-07 agent test harnesses driving the
 extension launched *headful* Chrome, and the windows took focus from the
 operator repeatedly while he was working in another application. The whole
@@ -1210,7 +1219,9 @@ creates its tab with `active: false`, every cmux command passes `--focus false`,
 and `guide://browser` carries a "Focus safety — never steal the user's focus"
 section. A harness that pops a window on screen violates the same principle the
 product spends real effort upholding, and "it is only a quick check" is exactly
-the reasoning that produced the incident.
+the reasoning that produced the incident. **Never stealing focus is the general
+rule for every browser this project starts, in any context**; headless is simply
+how a harness satisfies it, and `open -g` is how a real-browser launch does.
 
 New headless is not the old one: it is the same browser binary with no window,
 so extensions, DevTools/CDP, screenshots and synthetic input all work. Measured
@@ -1292,6 +1303,12 @@ already background-launched by `-g`. It is correct as written; do not
 "headless" it. The distinction is the profile: the operator's logged-in browser
 is woken in the background and never given debug flags, while a harness browser
 is a throwaway profile that is headless, debug-ported and torn down.
+
+And it does not cover verifying a change *through* the extension once it is
+loaded — a rendered page, a flow, a screenshot for a PR. That is ordinary
+browser work: use the `browser` tool against the paired browser like any other
+session. Reach for a harness only when you need a browser that does not yet
+have the build you are testing.
 
 ### 7. Evidence goes on the PR, never into the repository
 
