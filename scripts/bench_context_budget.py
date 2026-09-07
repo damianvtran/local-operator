@@ -12,10 +12,11 @@ This script used to measure a FICTION, and the fiction was optimistic in three
 separate ways — which is worse than no guard, because a guard that cannot go
 red is believed:
 
-1. It built tools from a bare ``ToolContext``, so the createIf gates returned
-   ``None`` for nine of the twenty-four default tools. It measured a surface
-   no user has, and undercounted the single largest payload after the system
-   prompt. It now builds the full surface via ``scripts/real_tool_surface``.
+1. It built tools from a bare ``ToolContext``, so the createIf gates dropped a
+   third of the default tools. It measured a surface no user has, and
+   undercounted the single largest payload after the system prompt. It now
+   builds the full surface via ``scripts/real_tool_surface``, which owns the
+   exact counts and the reason for each gate — one place, not two.
 2. It passed no ``user_instructions`` and no ``repo_guidance``. Both ride the
    HEAD block of a real session and both are commonly kilobytes. They are now
    included, at representative sizes.
@@ -47,8 +48,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+import local_operator  # noqa: E402
 from local_operator.harness.types import AgentTool  # noqa: E402
 from local_operator.prompts_api import build_system_blocks  # noqa: E402
+from local_operator.tools.registry import DEFAULT_TOOL_NAMES  # noqa: E402
 from scripts.real_tool_surface import build_real_tools  # noqa: E402
 
 #: Measured chars-per-billed-token for this prompt surface. See the module
@@ -80,11 +83,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: Headroom is deliberately small (~2%): enough that an incidental wording
 #: edit does not trip it, tight enough that a new paragraph or a new tool has
 #: to be a decision rather than a surprise.
+#:
+#: Measured on the full 24-tool surface (see ``real_tool_surface``); on
+#: ``origin/main`` with this same script the figure was 31,100.
 BUDGET_BILLED_TOKENS = 26_500
 
-#: Measured on ``origin/main`` with THIS script, for comparison: 31,100 billed
-#: tokens. Kept as a comment rather than asserted, because it is a historical
-#: datum and re-measuring it needs the old tree.
+#: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
+#:
+#: This is what stops the ceiling above from being aspirational. A comment
+#: asking future agents to lower the budget enforces nothing; a failing build
+#: that names the new number does. Set to roughly double the current headroom
+#: so incidental wording edits stay quiet, while a real saving — the smallest
+#: individual optimization in this PR was ~600 billed tokens — opens enough
+#: slack to require the ratchet to follow it down.
+#:
+#: Suppressed under ``--inflate``, which deliberately measures a fiction.
+TIGHTEN_WHEN_HEADROOM_EXCEEDS = 1_200
 
 #: Stand-ins for the operator-supplied text that rides the head block of a
 #: real session. Fixed sizes, because a guard whose threshold moves with the
@@ -113,9 +127,24 @@ def measure_start_context(
     *,
     user_instructions: str = _SAMPLE_USER_INSTRUCTIONS,
     repo_guidance: str = _SAMPLE_REPO_GUIDANCE,
+    inflate_schemas: int = 0,
 ) -> dict[str, int]:
-    """Character cost of everything a fresh session puts on the wire."""
+    """Character cost of everything a fresh session puts on the wire.
+
+    ``inflate_schemas`` pads the TOOL SCHEMAS specifically. The fail-proof
+    lever has to reach the largest component — the schemas are ~56% of the
+    total and are what this PR is about — not only the operator text, or
+    "prove it can fail" demonstrates the guard over the wrong half.
+    """
     tools = build_real_tools(str(REPO))
+    if inflate_schemas:
+        # A new property on the first tool: the shape a real schema regression
+        # takes (a tool grows an argument), rather than opaque filler.
+        padded = dict(tools[0].parameters or {})
+        props = dict(padded.get("properties") or {})
+        props["_bench_filler"] = {"type": "string", "description": "x" * inflate_schemas}
+        padded["properties"] = props
+        tools = [tools[0].model_copy(update={"parameters": padded}), *tools[1:]]
     blocks = build_system_blocks(
         tools,
         skills_block="<skills/>",
@@ -154,17 +183,59 @@ def main() -> int:
             "is worse than none (AGENTS.md, 'Prove the test can still fail')."
         ),
     )
+    parser.add_argument(
+        "--inflate-schemas",
+        type=int,
+        default=0,
+        help=(
+            "grow a TOOL SCHEMA by N characters. The schemas are the largest "
+            "component, so the fail-proof lever must reach them too."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    # A measurement tool that can silently measure the WRONG TREE is the same
+    # defect class as one that measures the wrong surface. `sys.path.insert(0,
+    # REPO)` above does not win against a cwd that already holds a
+    # `local_operator/` package (under `python -c`, cwd precedes PYTHONPATH),
+    # so a reviewer comparing two checkouts can get two numbers from one tree
+    # and no error. Assert what we actually imported, and say it out loud.
+    resolved = Path(local_operator.__file__).resolve().parent
+    expected = (REPO / "local_operator").resolve()
+    if resolved != expected:
+        print(
+            f"PROVENANCE MISMATCH: measuring {resolved}\n"
+            f"                     expected  {expected}\n"
+            "      Refusing to report a figure for a tree this script does not live in."
+        )
+        return 2
+    print(f"measuring: {resolved}")
+
     parts = measure_start_context(
-        user_instructions=_SAMPLE_USER_INSTRUCTIONS + ("x" * args.inflate)
+        user_instructions=_SAMPLE_USER_INSTRUCTIONS + ("x" * args.inflate),
+        inflate_schemas=args.inflate_schemas,
     )
     total_chars = parts["TOTAL"]
     billed = round(total_chars / CHARS_PER_BILLED_TOKEN)
 
-    if args.verbose or args.inflate:
-        print(f"tool surface: {parts['n_tools']} tools")
+    # The surface is stated ALWAYS, not only under --verbose: a silent drop
+    # from the full tool set is exactly how this guard would go back to
+    # measuring a machine no user has. See real_tool_surface._forced_browser_backend.
+    n_tools = parts["n_tools"]
+    expected_tools = len(DEFAULT_TOOL_NAMES)
+    print(f"tool surface: {n_tools}/{expected_tools} tools")
+    if n_tools != expected_tools:
+        print(
+            f"FAIL: measured {n_tools} of {expected_tools} default tools.\n"
+            "      The benchmark must measure the FULL surface on every host, or it "
+            "reports headroom a real session does not have.\n"
+            "      If a tool was deliberately removed, update DEFAULT_TOOL_NAMES; "
+            "otherwise fix the gate that dropped it."
+        )
+        return 1
+
+    if args.verbose or args.inflate or args.inflate_schemas:
         for key in ("instructions", "tool_inventory", "environment", "knowledge", "tool_schemas"):
             chars = parts[key]
             print(f"  {key:16} {chars:>8,} chars  ({chars / CHARS_PER_BILLED_TOKEN:>7,.0f} billed)")
@@ -180,7 +251,30 @@ def main() -> int:
             "or state in the PR what regressed before raising the budget."
         )
         return 1
-    print(f"PASS ({args.budget - billed:,} billed tokens of headroom)")
+
+    # SELF-TIGHTENING. Without this the ratchet is aspirational: a comment
+    # saying "each reduction should lower this line" enforces nothing, so the
+    # likeliest outcome is that today's number becomes the permanent ceiling
+    # and the docs/REWRITE.md target is never revisited. Slack beyond the band
+    # is therefore also a failure — a loud, trivially-fixed one that hands the
+    # next agent the exact number to write down.
+    #
+    # It is a BAND rather than a hard equality so ordinary wording edits do not
+    # trip it; only a real reduction (or a deliberate tool removal) opens
+    # enough slack to require the ratchet to follow it down.
+    headroom = args.budget - billed
+    inflating = bool(args.inflate or args.inflate_schemas)
+    if not inflating and headroom > TIGHTEN_WHEN_HEADROOM_EXCEEDS:
+        print(
+            f"FAIL: {headroom:,} billed tokens of headroom exceeds the "
+            f"{TIGHTEN_WHEN_HEADROOM_EXCEEDS:,}-token slack band.\n"
+            "      The context got smaller — good. Tighten the ratchet so the saving "
+            "is defended:\n"
+            f"      set BUDGET_BILLED_TOKENS = {billed + TIGHTEN_WHEN_HEADROOM_EXCEEDS // 2:,} "
+            "in scripts/bench_context_budget.py."
+        )
+        return 1
+    print(f"PASS ({headroom:,} billed tokens of headroom)")
     return 0
 
 

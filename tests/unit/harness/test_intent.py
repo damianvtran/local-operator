@@ -109,9 +109,13 @@ def test_injection_strips_pydantic_titles_but_keeps_descriptions() -> None:
 
     Pydantic emits ``"title": "Path"`` beside every property and a model title
     on every ``$defs`` entry. No provider requires it and no model needs it,
-    but it rides the tools array on every request — 2,289 characters across
-    the default surface. Stripping happens here because this is the one point
-    every schema passes, builtin and MCP alike.
+    but it rides the tools array on every request — 148 keys costing 2,953
+    characters (~1,060 billed) across the 24-tool default surface, measured
+    with ``json.dumps`` DEFAULT separators; 2,657 with compact separators.
+    The serializer is stated because the same saving has two legitimate
+    numbers and a figure without one becomes the next agent's evidence.
+    Stripping happens here because this is the one point every schema passes,
+    builtin and MCP alike.
     """
     schema = apply_intent_schema(
         {
@@ -146,6 +150,90 @@ def test_injection_strips_pydantic_titles_but_keeps_descriptions() -> None:
     assert schema["properties"]["opts"]["properties"]["deep"] == {"type": "boolean"}
     assert schema["properties"]["tags"]["items"] == {"type": "string"}
     assert schema["$defs"]["Item"] == {"type": "object"}
+
+
+def test_a_property_named_title_survives_the_strip() -> None:
+    """`title` is BOTH a JSON-Schema keyword and a very common property NAME.
+
+    Regression guard for a shipped-breaking defect: a blind ``k != "title"``
+    filter at every dict level deleted the ARGUMENT on the MCP shape used by
+    Linear ``create_issue``, Notion ``create_page``, GitHub ``create_issue``
+    and Jira. Three compounding failures, all reproduced end to end through
+    ``mcp/tool_bridge.py``:
+
+    1. the property vanished from ``properties``, so the model was never told
+       the argument existed;
+    2. it remained in ``required``, making the schema internally invalid —
+       strict-mode providers reject a ``required`` naming an undeclared
+       property, so the tool becomes uncallable;
+    3. with ``additionalProperties: false``, ``prepare_outbound_args`` then
+       silently DROPPED a title the model supplied anyway, so the server got a
+       create-issue call with no title. A wrong result with no error.
+
+    The schema below is deliberately the real Linear shape.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "title": "CreateIssueInput",  # the keyword — must go
+            "additionalProperties": False,
+            "properties": {
+                # the PROPERTY named title — must survive, minus its own
+                # annotation
+                "title": {"type": "string", "description": "Issue title.", "title": "Title"},
+                "teamId": {"type": "string", "description": "Team.", "title": "Team Id"},
+                "meta": {
+                    "type": "object",
+                    "title": "Meta",
+                    "properties": {"title": {"type": "string", "title": "T"}},
+                },
+            },
+            "required": ["title", "teamId"],
+        }
+    )
+
+    props = schema["properties"]
+    assert "title" in props, "the property named `title` was deleted"
+    assert props["title"] == {"type": "string", "description": "Issue title."}
+    # An invalid schema is the failure that makes strict providers reject the
+    # tool outright, so pin the consistency rule and not merely the presence.
+    assert set(schema["required"]) <= set(props)
+    # Nested property maps get the same treatment.
+    assert "title" in props["meta"]["properties"]
+    assert props["meta"]["properties"]["title"] == {"type": "string"}
+    # The keyword is still stripped everywhere it IS an annotation.
+    assert "title" not in schema
+    assert "title" not in props["meta"]
+
+
+def test_instance_data_is_never_rewritten_by_the_strip() -> None:
+    """``default``/``const``/``enum``/``examples`` hold VALUES, not schemas.
+
+    A ``default`` of ``{"title": "untitled"}`` is data the model is told to
+    send. Walking into it edited what the default actually is — changing
+    behaviour, not just token count.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "properties": {
+                "cfg": {
+                    "type": "object",
+                    "title": "Cfg",
+                    "default": {"title": "untitled", "x": 1},
+                    "examples": [{"title": "a"}],
+                },
+                "mode": {"type": "string", "enum": ["title", "body"], "const": "title"},
+            },
+        }
+    )
+    cfg = schema["properties"]["cfg"]
+    assert cfg["default"] == {"title": "untitled", "x": 1}
+    assert cfg["examples"] == [{"title": "a"}]
+    assert "title" not in cfg  # the annotation still goes
+    mode = schema["properties"]["mode"]
+    assert mode["enum"] == ["title", "body"]
+    assert mode["const"] == "title"
 
 
 def test_injection_does_not_mutate_a_nested_input_schema() -> None:

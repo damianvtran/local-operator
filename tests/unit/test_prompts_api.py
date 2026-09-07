@@ -181,6 +181,11 @@ def test_browser_prose_is_gated_on_the_tool_being_present() -> None:
     The setup playbook ("the extension can be set up in a minute") is the
     mirror image of the usage prose, so exactly one of them is correct for any
     given session.
+
+    Asserts the TEMPLATE's branching only. The wiring — what
+    ``build_system_blocks`` actually passes — is pinned separately below,
+    because a test that hand-writes the flags cannot observe a caller that
+    passes the wrong ones.
     """
     usage = "Browser work goes through the `browser` tool"
     setup = "When the `browser` tool is NOT in your tool list"
@@ -574,12 +579,35 @@ def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> Non
     assert inventory.startswith("## Available tools")
 
 
-def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole() -> None:
+def test_a_tool_without_a_description_still_appears_in_the_inventory() -> None:
+    """MCP allows an optional description; a callable tool must not vanish.
+
+    Skipping these made sense while a line was `- name: description` (the line
+    would have trailed a bare colon). Now that the line is just the name, the
+    filter would hide a real tool from the only list that says what exists.
+    """
+    tools = [_tool("bash", "Run a shell command."), _tool("mcp__notion_search", "")]
+    inventory = build_system_blocks(tools, SKILLS, ENV, DATE)[1]
+    assert "- mcp__notion_search" in inventory
+    # Hidden is still the thing that removes a tool from the list.
+    hidden = [*tools, _tool("secret", "", hidden=True)]
+    assert "secret" not in build_system_blocks(hidden, SKILLS, ENV, DATE)[1]
+
+
+def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole(monkeypatch) -> None:
     """The browser builder is createIf-gated on a reachable cmux, so on a host
     without one the model can only see an ABSENCE — and an absence reads as
     "arrange your own". A real session answered a screenshot request by writing
     a playwright script and downloading a Chromium that could not carry the
-    user's logins. The inventory says the capability is missing and why."""
+    user's logins. The inventory says the capability is missing and why.
+
+    Both probes are forced OFF here (the autouse fixture forces cmux ON for the
+    ordering test): this case is specifically the HOST having no backend, which
+    is what makes the "no cmux CLI is reachable" diagnosis true. A host that
+    HAS a backend gets a different note — see the role-restricted test below.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
     blocks = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
 
     inventory = blocks[1]
@@ -598,6 +626,99 @@ def test_inventory_note_is_absent_when_a_browser_tool_exists() -> None:
     inventory = build_system_blocks(tools, SKILLS, ENV, DATE)[1]
     assert "NO browser tool" not in inventory
     assert "playwright" not in inventory
+
+
+def test_build_system_blocks_wires_the_browser_flags_it_renders_with(monkeypatch) -> None:
+    """Pins the WIRING, not the template's branching.
+
+    The template test above hand-writes the flags, so it cannot see a caller
+    that passes the wrong ones. Three mutations at the render call were tried
+    against the template-only test and ALL of them stayed green: hardcoding
+    ``has_browser=True`` (usage prose ships to a browserless host), inverting
+    the flags (the two sections swap), and passing ``{}`` (BOTH sections
+    vanish silently — `{{#if}}` on a missing key drops its body with no
+    marker, and several call sites in this tree already render with ``{}``).
+
+    This test kills all three, because it goes through the real entry point
+    with a real tool list and asserts on what actually ships.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    # Browser present: usage prose, no playbook, no inventory note.
+    with_browser = build_system_blocks(
+        [*TOOLS, _tool("browser", "Drive the user's real browser.")], SKILLS, ENV, DATE
+    )
+    assert usage in with_browser[0]
+    assert setup not in with_browser[0]
+    assert "browser tool" not in with_browser[1].split("## Available tools")[1].split("\n\n")[0]
+
+    # Host genuinely has no backend: playbook, no usage prose, and the note
+    # still ships on the inventory — the asymmetry the code comment protects.
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+    without = build_system_blocks(TOOLS, SKILLS, ENV, DATE)
+    assert usage not in without[0]
+    assert setup in without[0]
+    assert "NO browser tool" in without[1]
+
+    # A missing flag must never be how a section disappears: whichever way the
+    # host is configured, exactly one of the two sections is present.
+    for blocks in (with_browser, without):
+        assert (usage in blocks[0]) != (setup in blocks[0])
+
+
+def test_rendering_system_md_without_flags_still_ships_a_browser_section() -> None:
+    """`{{#if}}` has no else, so the pair of flags is easy to half-supply — and
+    a missing key drops its body with no marker in the output.
+
+    `render_template("system.md", {})` therefore used to produce a prompt with
+    NEITHER browser section, ~1.5k chars lighter than anything a session
+    ships. Product code always passes both, but a dozen probe and test call
+    sites render with `{}` and would silently measure a prompt that does not
+    exist. Defaulting makes the half-satisfied state unreachable rather than
+    merely unused.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    bare = render_template("system.md", {})
+    assert (usage in bare) != (setup in bare), "neither section shipped"
+    # Defaults must not override an explicit caller.
+    explicit = render_template("system.md", {"has_browser": True, "no_browser": False})
+    assert usage in explicit and setup not in explicit
+
+
+def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> None:
+    """`reviewer`, `scout`, `manager` and `architect` seeds omit `browser`.
+
+    Their tool list therefore has no browser on a host that has one. Telling
+    such a child "the host has neither backend connected... do that setup with
+    the user" is factually wrong and actionably wrong — it invites a read-only
+    subagent to walk the operator through an install it cannot use. It is also
+    the exact inversion of the principle stated for the no-browser note:
+    claiming a capability is absent while one would answer is worse than
+    saying nothing.
+
+    The no-install rule still has to reach it (the playwright dead end is just
+    as available to a restricted child), so what changes is the diagnosis, not
+    the prohibition.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+
+    instructions, inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[:2]
+
+    # The false claims must be absent.
+    assert "the host has neither backend" not in instructions
+    assert "NO browser tool" not in inventory
+    assert "no cmux CLI is reachable" not in inventory
+    # The prohibition must still be present, with the true diagnosis.
+    assert "was not given the browser tool" in inventory
+    assert "A browser IS available on this host" in inventory
+    assert "never install or script a browser engine" in inventory.lower()
+    # And it must not advertise a tool it does not have.
+    assert not any(line.startswith("- browser") for line in inventory.splitlines())
 
 
 def test_inventory_note_follows_membership_not_visibility() -> None:

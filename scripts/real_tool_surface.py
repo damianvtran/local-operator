@@ -41,6 +41,8 @@ schemas a real provider request would carry.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from local_operator.harness import types as _types
@@ -100,9 +102,48 @@ def build_real_tool_context(cwd: str) -> ToolContext:
     )
 
 
+@contextmanager
+def _forced_browser_backend() -> Iterator[None]:
+    """Make ``build_browser_tool`` say yes regardless of the host.
+
+    ``browser`` is the ONLY default tool whose gate ignores the ToolContext:
+    it probes the machine (a cmux CLI on PATH, or the extension bridge's state
+    files). Every other gate is satisfied by the stub context above, so this
+    is the one capability a benchmark cannot express as data.
+
+    That matters because it is measurement, not behaviour. Left unforced, this
+    function returns 23 tools on a CI runner and 24 on a developer's cmux box
+    — and ``browser`` is the single most expensive tool at 4,124 characters.
+    A budget guard built on that reports 2,123 tokens of headroom on CI while
+    a real host has 491, so the next tool added blows the budget on every real
+    machine while CI stays green. That is precisely the green-by-fiction this
+    benchmark was rewritten to eliminate, reintroduced one layer down.
+
+    Patched on the ``builtin`` module (not the browser_bridge internals)
+    because that is where ``build_browser_tool`` resolves both names.
+    """
+    from local_operator.tools import builtin
+
+    saved = (builtin.cmux_browser_available, builtin.bridge_browser_advertisable)
+    builtin.cmux_browser_available = lambda: True  # type: ignore[assignment]
+    builtin.bridge_browser_advertisable = lambda: True  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        builtin.cmux_browser_available, builtin.bridge_browser_advertisable = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
-    """The default tool set as a fully-capable session would advertise it."""
-    return registry.create_tools(build_real_tool_context(cwd))
+    """The default tool set as a fully-capable session would advertise it.
+
+    DETERMINISTIC across hosts: the count must not depend on whether the
+    machine running the benchmark happens to have cmux. See
+    :func:`_forced_browser_backend`. Callers that report a measurement should
+    also report ``len()`` of this, so a drop below the full surface is visible
+    rather than silent.
+    """
+    with _forced_browser_backend():
+        return registry.create_tools(build_real_tool_context(cwd))
 
 
 if __name__ == "__main__":  # pragma: no cover - developer convenience

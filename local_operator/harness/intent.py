@@ -93,15 +93,48 @@ INTENT_SCAN_LIMIT = 512
 _LEADING_INTENT_RE = re.compile(r'\s*\{\s*"i"\s*:\s*"((?:[^"\\\x00-\x1f]|\\.)*)"')
 
 
+#: JSON-Schema keywords whose value is a MAP of name -> subschema. Their keys
+#: are author-chosen names (a property called ``title`` is a real argument),
+#: never schema keywords, so the strip must recurse into the values without
+#: ever filtering the keys at that level. Getting this wrong deletes a real
+#: property: see :func:`_strip_titles`.
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}
+)
+
+#: Keywords whose value is INSTANCE DATA, not a schema. A ``default`` of
+#: ``{"title": "untitled"}`` is a value the model is told to send, not an
+#: annotation to strip, so these are copied through untouched rather than
+#: walked.
+_INSTANCE_DATA_KEYWORDS = frozenset({"default", "const", "enum", "examples"})
+
+
 def _strip_titles(value: Any) -> Any:
-    """Recursively drop pydantic's generated ``title`` keys from a schema.
+    """Recursively drop pydantic's generated ``title`` ANNOTATIONS from a schema.
 
     ``BaseModel.model_json_schema()`` emits ``"title": "Path"`` beside every
     property and ``"title": "ReadParams"`` on every model — a restatement of a
     name the schema already carries as its key. No provider requires it (this
     tree's wire clients never read the field) and no model needs it, but it is
-    serialized into the tools array on every request: measured at 2,289
-    characters (~820 billed tokens) across the 24-tool default surface.
+    serialized into the tools array on every request: 148 keys costing 2,953
+    characters (~1,060 billed tokens) across the 24-tool default surface,
+    counting with ``json.dumps`` DEFAULT separators — 2,657 with compact
+    separators. The serializer is named because the same saving has two
+    legitimate numbers, and a figure without one becomes the next agent's
+    evidence for whichever they assume.
+
+    SCHEMA-AWARE, not key-name-blind, and that distinction is load-bearing.
+    ``title`` is both a JSON-Schema keyword AND an extremely common property
+    NAME on real MCP servers — Linear ``create_issue``, Notion ``create_page``,
+    GitHub ``create_issue``, Jira. A blind ``k != "title"`` filter at every
+    dict level deleted the property, left it dangling in ``required`` (an
+    invalid schema that strict-mode providers reject), and — because these
+    schemas carry ``additionalProperties: false`` — made
+    ``prepare_outbound_args`` silently drop the model's ``title`` argument, so
+    the server received a create-issue call with no title. A wrong result with
+    no error. Hence the two keyword sets above: recurse into
+    :data:`_SCHEMA_MAP_KEYWORDS` values WITHOUT filtering their keys, and do
+    not walk :data:`_INSTANCE_DATA_KEYWORDS` at all.
 
     Only ``title`` goes. ``description`` on a property is the adherence
     surface — it is what makes the model pass the right thing — and stripping
@@ -110,13 +143,26 @@ def _strip_titles(value: Any) -> Any:
     Applied here, at the one choke point every AgentTool's schema passes
     through, so MCP tools (``mcp/tool_bridge.py``) are covered by the same
     pass rather than needing their own. Recursion covers nested objects,
-    ``$defs`` and array ``items``, where pydantic puts titles too.
+    ``$defs``, array ``items`` and ``anyOf`` branches, where pydantic puts
+    titles too.
 
     Non-destructive: builds new containers, so a caller's schema dict (and a
     params model's cached ``model_json_schema()``) is never mutated.
     """
     if isinstance(value, dict):
-        return {k: _strip_titles(v) for k, v in value.items() if k != "title"}
+        stripped: dict[str, Any] = {}
+        for key, child in value.items():
+            if key == "title":
+                # The annotation. Property NAMES never reach this branch: a
+                # schema map's keys are handled below without key filtering.
+                continue
+            if key in _INSTANCE_DATA_KEYWORDS:
+                stripped[key] = child
+            elif key in _SCHEMA_MAP_KEYWORDS and isinstance(child, dict):
+                stripped[key] = {name: _strip_titles(sub) for name, sub in child.items()}
+            else:
+                stripped[key] = _strip_titles(child)
+        return stripped
     if isinstance(value, list):
         return [_strip_titles(item) for item in value]
     return value

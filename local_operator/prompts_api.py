@@ -181,12 +181,36 @@ def _load_template(name: str) -> list[Node]:
     return nodes
 
 
+#: Defaults applied to ``system.md`` when a caller does not state them.
+#:
+#: ``{{#if}}`` has no ``else`` and no negation, so the browser sections are
+#: gated by a PAIR of flags — and a pair is easy to half-supply. A missing key
+#: renders as falsy, which drops the body with no marker in the output, so
+#: ``render_template("system.md", {})`` silently produced a prompt with NEITHER
+#: browser section (~1.5k chars lighter than any real session's). Product code
+#: always passes both (``build_system_blocks`` computes them together), but a
+#: dozen probe and test call sites render with ``{}`` and would have been
+#: measuring a prompt no session ships.
+#:
+#: Defaulting to the BROWSERLESS arm rather than to nothing: it is the
+#: conservative choice — the setup playbook is what ``main`` shipped
+#: unconditionally — and it makes "forgot to pass the flags" render something
+#: real instead of something that exists only in a test.
+_SYSTEM_MD_DEFAULTS: dict[str, Any] = {"has_browser": False, "no_browser": True}
+
+
 def render_template(name: str, data: dict[str, Any]) -> str:
     """Render the named template file from ``local_operator/prompts_md/``.
 
     Loading goes through ``importlib.resources`` so the templates work from
     installed wheels too, not only source checkouts.
+
+    ``system.md``'s conditional flags are defaulted (see
+    :data:`_SYSTEM_MD_DEFAULTS`) so a caller that omits them renders a prompt a
+    real session could have, rather than one silently missing a section.
     """
+    if name == "system.md":
+        data = {**_SYSTEM_MD_DEFAULTS, **data}
     out: list[str] = []
     _render_nodes(_load_template(name), data, out)
     return "".join(out)
@@ -233,15 +257,23 @@ def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     text the model had already been given.
 
     The names are kept rather than dropping the block outright. Deleting it
-    saves only a further ~200 characters and forfeits the one thing the tools
-    array does not present as prose: a single flat "these tools exist" anchor
-    the model can scan when deciding whether a capability is available at all.
+    saves only a further 206 characters (the measured body over 24 tools) and
+    forfeits the one thing the tools array does not present as prose: a single
+    flat "these tools exist" anchor the model can scan when deciding whether a
+    capability is available at all.
 
     Note the descriptions are NOT one-line and never were — ``browser`` and
     ``ask`` run to several hundred tokens each — which is why duplicating them
     was expensive rather than merely redundant.
+
+    Filtered on ``hidden`` ALONE. While a line was ``- {name}: {description}``
+    a description-less tool was rightly skipped, since its line would have
+    trailed a bare colon; now that the line is just the name there is nothing
+    wrong with it, and dropping it hides a real, callable tool from the only
+    list that says what exists. MCP servers may legitimately omit a
+    description, so this is reachable rather than theoretical.
     """
-    return "\n".join(f"- {tool.name}" for tool in tools if not tool.hidden and tool.description)
+    return "\n".join(f"- {tool.name}" for tool in tools if not tool.hidden)
 
 
 #: Appended to the tool inventory when the session has no browser tool. The
@@ -263,6 +295,52 @@ _NO_BROWSER_NOTE = (
     "For page text use `bash` with curl; when a task genuinely needs a rendered "
     "screenshot, say it is unavailable and why."
 )
+
+#: The same prohibition for a session whose ROLE was not given the browser
+#: tool on a host that HAS one — a ``reviewer``/``scout``/``manager``/
+#: ``architect`` subagent, whose seed allowlist omits it.
+#:
+#: A separate string because :data:`_NO_BROWSER_NOTE` asserts a fact about the
+#: HOST ("no cmux CLI is reachable on this host") that is simply false here,
+#: and the setup playbook it pairs with would invite a read-only child to walk
+#: the operator through an install it does not need and could not use. The
+#: no-install rule still applies — the playwright dead end is just as
+#: available to a restricted child — so the prohibition is kept and only the
+#: false diagnosis is dropped. Says who to ask instead, because unlike a
+#: browserless host this capability genuinely exists and is one delegation
+#: away.
+_ROLE_HAS_NO_BROWSER_NOTE = (
+    "\n\nThis session was not given the browser tool. A browser IS available on "
+    "this host — it is simply not part of this role's tool set — so never "
+    "install or script a browser engine (playwright, puppeteer, a downloaded "
+    "Chromium) to load a page or capture a screenshot. For page text use "
+    "`bash` with curl; when a task genuinely needs a rendered page or "
+    "screenshot, say so and let the delegating session take it."
+)
+
+
+def _host_browser_backend_available() -> bool:
+    """Whether THIS HOST could drive a browser at all, ignoring tool lists.
+
+    Distinct from "the browser tool is in my list": a restricted-role subagent
+    on a fully browser-capable host has no ``browser`` tool but must not be
+    told the host lacks a backend. Reads the same two probes the createIf
+    builder uses, so the answer cannot disagree with why the tool was withheld.
+
+    Imported lazily and defensively: this is prompt rendering, which must never
+    fail because a capability probe raised. A probe failure degrades to "no
+    backend", which is the conservative answer — it ships the setup playbook,
+    the same text ``main`` shipped unconditionally.
+    """
+    try:
+        from local_operator.tools.builtin import (
+            bridge_browser_advertisable,
+            cmux_browser_available,
+        )
+
+        return bool(cmux_browser_available() or bridge_browser_advertisable())
+    except Exception:  # noqa: BLE001 — prompt rendering must never break
+        return False
 
 
 def build_system_blocks(
@@ -300,11 +378,25 @@ def build_system_blocks(
     it out of the tail also stops a long instructions file from being re-sent
     ahead of every volatile change.
     """
+    # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
     # the model a browser does not exist while one answers would be worse than
-    # saying nothing. Computed BEFORE the template renders because the packaged
-    # prompt's browser sections are gated on it (see below).
+    # saying nothing.
+    #
+    #   1. tool present                      -> usage prose, no note
+    #   2. tool absent because the HOST has   -> setup playbook + the note that
+    #      no backend                            names the playwright dead end
+    #   3. tool absent because this ROLE's    -> no playbook (the host is fine,
+    #      allowlist omits it                    an install would be pointless),
+    #                                            but still the no-install rule
+    #
+    # State 3 is the one an earlier revision got wrong: `reviewer`, `scout`,
+    # `manager` and `architect` seeds all omit `browser`, so every such child
+    # on a browser-capable host was told "the host has neither backend
+    # connected... do that setup with the user". False, and actionably false.
+    # The host probe is what separates 2 from 3.
     has_browser = any(tool.name == "browser" for tool in tools)
+    host_has_browser = has_browser or _host_browser_backend_available()
     # The browser prose is conditional rather than unconditional because it is
     # ~1,500 characters of instruction for a tool that is createIf-gated: a
     # host with no cmux and no extension paid for three paragraphs about a
@@ -312,13 +404,16 @@ def build_system_blocks(
     # separately (rather than one negated in the template) because the engine
     # is deliberately tiny — `{{#if}}` has no `else` and no negation.
     #
-    # NOTE the asymmetry, and keep it: when the browser is ABSENT the prose is
-    # gated out but `_NO_BROWSER_NOTE` still ships on the inventory block. They
-    # are not two copies of one thing. The gated-out prose explains how to USE
-    # the tool; the note records a measured failure (a session spent 23s on
-    # `playwright install`) and is the only text that names the wrong turn.
+    # NOTE the asymmetry, and keep it: when the browser is absent the usage
+    # prose is gated out but a no-install note still ships on the inventory
+    # block. They are not two copies of one thing. The gated-out prose explains
+    # how to USE the tool; the note records a measured failure (a session spent
+    # 23s on `playwright install`) and is the only text that names the wrong
+    # turn — which stays worth saying however the tool came to be absent.
     instructions = render_template(
-        "system.md", {"has_browser": has_browser, "no_browser": not has_browser}
+        "system.md",
+        # The setup playbook is gated on the HOST, never on this role's list.
+        {"has_browser": has_browser, "no_browser": not host_has_browser},
     )
     instructions += (
         "\n\n## Session state updates\n\n"
@@ -355,7 +450,9 @@ def build_system_blocks(
         )
     inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
     if not has_browser:
-        inventory = f"{inventory}{_NO_BROWSER_NOTE}"
+        # Same prohibition either way; only the DIAGNOSIS differs. See the
+        # three-state comment above and _ROLE_HAS_NO_BROWSER_NOTE.
+        inventory += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE
     env_block = f"Today is {date_str}."
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
