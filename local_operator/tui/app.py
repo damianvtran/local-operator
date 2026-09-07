@@ -4823,11 +4823,23 @@ class OperatorApp(App[None]):
         async with self._turn_provider_lock:
             pass
         self._session = None
-        # The watched id dies WITH the binding. It exists so an unbound viewer
-        # can still stop what it is looking at; a session being deliberately
-        # replaced is not that, and a stale id here made an ordinary /reload
-        # take the unbound branch (review round 1, BLOCKER-2).
-        self._adopted_session_id = ""
+        # THE WATCHED ID DELIBERATELY SURVIVES THIS WINDOW. It is the only
+        # lever a stranded viewer has, and clearing it here disarmed the kill
+        # switch on the exact path this feature exists to serve: if anything
+        # between the null above and `_adopt_session` below raises, the viewer
+        # is left unbound while the session it was watching keeps running — for
+        # a remote, in another process, still billing. Measured with the swap
+        # raising mid-window: cleared, `/stop` dispatched nothing and told the
+        # user to WAIT; left alone, it dispatched the stop (review round 2,
+        # BLOCKER-3).
+        #
+        # An ordinary transition stays honest WITHOUT clearing it, because
+        # `_session_transition_pending` already gates both the unbound dispatch
+        # and the notice for the whole window — including the gap before the
+        # replacement is adopted (see `_cmd_stop`). A real /reload sampled
+        # across the transition never observes an unbound viewer holding this
+        # id. `_adopt_session` re-stamps it on success, so the value is only
+        # ever stale on the failure path, which is precisely where it is needed.
         # The pending approval belonged to the session that just died. Left
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
@@ -5848,10 +5860,10 @@ class OperatorApp(App[None]):
             except Exception:
                 pass
         self._session = None
-        # Same reason as `_reload_session`: the id is a lever for a viewer that
-        # LOST its session, never for one deliberately swapping to another.
-        # `_adopt_session` re-stamps it for the incoming session below.
-        self._adopted_session_id = ""
+        # Same reason as `_reload_session`: the watched id must OUTLIVE this
+        # window. This is the strand path itself — the remote runs in another
+        # process, so a raise before the adopt below leaves it billing with the
+        # viewer unable to name it. `_adopt_session` re-stamps on success.
         self._swapping_session = True
         try:
             self._reset_ledger_for_swap()

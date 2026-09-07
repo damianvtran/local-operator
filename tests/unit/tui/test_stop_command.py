@@ -1157,23 +1157,78 @@ async def test_an_ordinary_reload_does_not_take_the_unbound_branch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_watched_id_is_dropped_when_a_reload_unbinds_the_session() -> None:
-    """The other half of BLOCKER-2: clear the id where the binding is nulled.
+async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """BLOCKER-3: the watched id must SURVIVE a failed swap.
 
-    The transition guard covers the window while a replacement is arriving; the
-    id itself must not outlive the session either, or a path that unbinds
-    without setting the transition flag leaves the same stale lever behind.
+    `_attach_or_refuse` (and `_reload_session`) null the binding and then adopt
+    a replacement. If anything in between raises, the viewer is stranded while
+    the session it was watching keeps running — for a remote, in another
+    process, still billing. That is the exact state this whole feature exists
+    to serve, and the round-2 remediation broke it by clearing the id inside
+    that window: `/stop` then dispatched nothing and told the user to WAIT,
+    which is the pre-PR failure mode with the pre-PR wording.
+
+    An ordinary transition is kept honest by `_session_transition_pending`
+    alone (pinned by the reload test above), so the id-clear bought nothing
+    there and cost the lever here.
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
+    dispatched: list[str] = []
+
+    async def spy(session_id: str) -> None:
+        dispatched.append(session_id)
+
     async with app.run_test(size=(100, 30)) as pilot:
         await _booted(app, pilot, session)
         assert app._adopted_session_id == "sess"
-        await app._reload_session()
+        app._stop_unbound_worker = spy  # type: ignore[assignment]
+
+        # Drive the REAL `_attach_or_refuse` rather than hand-rolling its
+        # sequence: the defect was one statement inside that window, so a test
+        # that reproduces the shape by hand would step straight over it. Its
+        # imports are function-local, so the record lookup and the connect are
+        # patched at their source modules and everything else is the real path.
+        remote_record = _record(90909, "the remote")
+        remote_record.protocol = 4
+
+        async def fake_find(_root: Any, _concrete: str):
+            return remote_record, 90909
+
+        async def fake_connect(*args: Any, **kwargs: Any):
+            return FakeSession()
+
+        # The failure lands in `_reset_ledger_for_swap`, which the source runs
+        # BETWEEN nulling the binding and adopting the replacement. That is the
+        # actual strand window: a raise later, inside `_adopt_session`, is
+        # harmless because it has already re-stamped the id by then.
+        def explode() -> Any:
+            raise RuntimeError("swap failed before the replacement was adopted")
+
+        monkeypatch.setattr(app, "_reset_ledger_for_swap", explode)
+
+        monkeypatch.setattr(
+            "local_operator.mobile.attach_client.find_owner_record",
+            lambda root, concrete: (remote_record, 90909),
+        )
+        monkeypatch.setattr("local_operator.session.remote.RemoteSession.connect", fake_connect)
+        app._resume_factory = fake_find  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError):
+            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+
+        assert app._session is None, "the viewer really is unbound"
+        assert app._adopted_session_id == "sess", "the only lever the user has must survive"
+
+        app._run_slash_command("/stop")
         for _ in range(20):
             await pilot.pause()
-            if app._session is not None:
+            if dispatched:
                 break
-        # Either cleared, or re-stamped by the session that replaced it —
-        # never left naming a session this viewer no longer watches.
-        assert app._adopted_session_id in ("", getattr(app._session, "session_id", ""))
+
+        assert dispatched == ["sess"], "a stranded viewer must still be able to stop what it sees"
+        assert "session is still starting…" not in _notices(
+            app
+        ), "telling a user to wait while a remote bills is the failure this PR removes"
