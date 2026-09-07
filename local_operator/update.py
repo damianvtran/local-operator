@@ -36,11 +36,18 @@ import tempfile
 import time
 from dataclasses import dataclass
 from enum import Enum
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import (
+    PackageNotFoundError,
+    distribution,
+    distributions,
+    version,
+)
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlparse
 from urllib.request import url2pathname
+
+from local_operator.interpreter import python_argv
 
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
@@ -413,18 +420,43 @@ def check_latest(
 
 
 def _direct_url_payload() -> dict[str, Any] | None:
-    try:
-        dist = distribution("local-operator")
-    except PackageNotFoundError:
-        return None
-    text = dist.read_text("direct_url.json")
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    """PEP 610 ``direct_url.json`` from the distribution that actually has one.
+
+    NOT ``distribution("local-operator")``. That returns the FIRST name match in
+    ``sys.path`` order, and a leftover ``local_operator.egg-info/`` in a checkout
+    -- a gitignored build artifact any ``pip install -e``/``setup.py`` run leaves
+    behind, present in real checkouts -- sits earlier than site-packages whenever
+    the cwd is on the path. Egg-info metadata predates PEP 610 and carries no
+    ``direct_url.json``, so the shadow made a genuine editable install look like
+    no install at all: ``_editable_install_root()`` returned ``None``, the
+    identity check in :func:`_editable_source_version` failed against its own
+    tree, and ``installed_version()`` fell through to the stale ``PKG-INFO``
+    number the egg-info advertised. Measured on a real ``uv pip install -e`` with
+    ``pyproject.toml`` at 0.51.7 and a leftover ``PKG-INFO`` at 0.46.23, that
+    reported 0.46.23 -- the very Settings > Updates staleness (QA Q3 / UX U13)
+    this module exists to prevent, reintroduced by the shadow rather than by any
+    version comparison.
+
+    So scan every installed distribution of this name and take the first that
+    publishes the marker. The marker is the evidence; a distribution without one
+    cannot answer the question and must not be allowed to answer it negatively.
+
+    Deliberately NOT "accept an egg-info found inside the candidate root": that
+    reasoning is adjacency again -- a STRAY checkout's egg-info also lives inside
+    that stray checkout, so it would vouch for exactly the unrelated tree this
+    function's caller was rewritten to reject.
+    """
+    for dist in distributions(name="local-operator"):
+        text = dist.read_text("direct_url.json")
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def _is_editable_direct_url() -> bool:
@@ -792,9 +824,19 @@ def _mobile_restart_argv() -> list[str] | None:
     the one just upgraded, and restarting that would serve the wrong
     build while reporting success. If this interpreter is gone after the
     upgrade, the refresh fails honestly and the copy names the recovery.
+
+    ``python_argv`` (not a bare ``-m``), because the sentence above is only
+    true with it. :func:`refresh_mobile_after_upgrade` runs this argv with no
+    ``cwd=``, so the child inherits the directory the update was started from —
+    ``update.py``'s own ``lop update`` and the in-TUI ``/update`` worker both
+    run with a user or session cwd. When that directory is a checkout of this
+    project, ``-m`` puts it on ``sys.path`` ahead of site-packages and the
+    bounce restarts the daemon through the CHECKOUT: pre-upgrade code, running
+    under the post-upgrade interpreter, reporting success. See
+    :mod:`local_operator.interpreter`.
     """
     if sys.executable and Path(sys.executable).exists():
-        return [sys.executable, "-m", "local_operator.cli", "mobile", "restart"]
+        return python_argv("-m", "local_operator.cli", "mobile", "restart")
     return None
 
 

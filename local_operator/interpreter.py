@@ -2,8 +2,9 @@
 
 WHY THIS EXISTS
 ---------------
-Every ``[sys.executable, "-m", "local_operator...."]`` spawn in this codebase
-shared one latent defect: ``-m`` puts the child's WORKING DIRECTORY on
+Every spawn in this codebase that RE-ENTERS THIS PACKAGE
+(``[sys.executable, "-m", "local_operator...."]``, and the ``-c`` snippets that
+import it) shared one latent defect: ``-m`` puts the child's WORKING DIRECTORY on
 ``sys.path[0]``, *ahead of* site-packages. None of those spawns pass ``cwd=``,
 so the child inherits the parent's directory — and when that directory is a
 checkout of this project (the normal case for anyone developing it, and the
