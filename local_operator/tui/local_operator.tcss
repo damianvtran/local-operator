@@ -1036,11 +1036,12 @@ Screen.boot.boot-card #input-shell {
  * width and its offset onto the card's column are computed by the app
  * (OperatorApp._sync_boot_column_width) because both are cell counts the sheet
  * cannot ask for, and because `align-horizontal` aligns a container's CHILDREN,
- * never the node carrying it — a rule here would centre nothing. The notice's
- * TEXT is centred by the block itself (NoticeBlock._build), not by `text-align`:
- * the block pins its own height and a stylesheet re-wrap would reflow the
- * hanging indent it cannot see. The `.boot-column` class is only the marker the
- * block reads to decide between the spine and the centred axis. */
+ * never the node carrying it — a rule here would centre nothing. Only the BLOCK
+ * is moved: the notice's text keeps one left edge, landing on the composer's
+ * text column below it. `text-align` must not be added here either — the block
+ * pins its own height and a stylesheet re-wrap would reflow the hanging indent
+ * it cannot see. The `.boot-column` class is the marker the block reads to
+ * re-wrap at the card's width. */
 
 /* ── slash-command picker ────────────────────────────────────────────────
  *

@@ -245,10 +245,13 @@ GAP_CLASS = "gap-above"
 
 #: Class the app puts on a transcript block that joins the centred boot
 #: composition (a system notice under the splash). The app writes the card's
-#: width onto the block (``OperatorApp._sync_boot_column_width``); the block
-#: centres its own content on that axis (``NoticeBlock._build``). Defined here,
-#: with the block that reads it, because app.py already imports this module and
-#: the reverse would be a cycle.
+#: width AND its offset onto the block (``OperatorApp._sync_boot_column_width``),
+#: which is the whole of the centring: the block is moved onto the card's column,
+#: while its TEXT keeps the same left edge it has on the spine. The class remains
+#: a content signal rather than only a style one, because the width it carries
+#: changes where the text folds and so needs a re-wrap (``NoticeBlock.set_class``).
+#: Defined here, with the block that reads it, because app.py already imports
+#: this module and the reverse would be a cycle.
 BOOT_COLUMN_CLASS = "boot-column"
 
 
@@ -1253,13 +1256,15 @@ class NoticeBlock(TranscriptBlock):
             parent.refresh_gap_around(self)
 
     def set_class(self, add: bool, *class_names: str, update: bool = True) -> "NoticeBlock":
-        """Add/remove a class, re-centring when the boot column comes or goes.
+        """Add/remove a class, re-wrapping when the boot column comes or goes.
 
-        ``_build`` reads ``BOOT_COLUMN_CLASS`` to decide between the spine and
-        the centred card axis, so a class flip is a content change, not only a
-        style one. Rebuilding here keeps the drawn text in step with the class
-        whatever the caller (the app's reconciliation pass, a test, a resize
-        crossing the card threshold), instead of trusting each to re-render.
+        The class carries the card's WIDTH, so a flip changes the column the text
+        folds at even though it no longer changes the text's alignment: a notice
+        wrapped for the full-width spine has the wrong row count the moment it is
+        narrowed to the card. Rebuilding here keeps the drawn text in step with
+        the class whatever the caller (the app's reconciliation pass, a test, a
+        resize crossing the card threshold), instead of trusting each to
+        re-render.
         """
         had = self.has_class(BOOT_COLUMN_CLASS)
         super().set_class(add, *class_names, update=update)
@@ -1272,8 +1277,8 @@ class NoticeBlock(TranscriptBlock):
 
         The same three steps ``on_resize`` takes for a re-wrap — unfreeze,
         rebuild, refreeze — factored out so a class change (``set_class``) can
-        share them. The gap is re-asked afterwards because a re-centre can move
-        the row count exactly as a re-wrap can.
+        share them. The gap is re-asked afterwards because the width the class
+        carries can move the row count exactly as a resize can.
         """
         was_finalized = self._finalized
         self._finalized = False
@@ -1406,24 +1411,27 @@ class NoticeBlock(TranscriptBlock):
         one statement instead of as several.
 
         A ``boot-column`` notice (one under the boot splash, an MCP server that
-        failed to connect) is CENTRED instead: it belongs to the same composition
-        as the centred card below it, whose width the app writes onto the block,
-        and the wordmark and the card's caret are centred masses, not left edges —
-        so the row is centred on that axis the same way the splash centres its own
-        lines. Left at the spine it drew flush against the terminal's left edge
-        beside a centred card. The centre is computed HERE, in the build, rather
-        than left to ``text-align``: this block pins its own height and a
-        stylesheet re-wrap would also reflow the hanging indent it cannot see.
-        Every wrapped row is centred on its own width, so a notice that folds to
-        two or three lines still reads as one centred block rather than a centred
-        first line with ragged continuations — and a row is a row whether the
-        break was the wrap's or the author's, so :meth:`_rows` feeds this loop
-        the same list either way.
+        failed to connect) wraps exactly the same way. It joins the centred boot
+        composition as a BLOCK — the app gives it the card's width and offsets it
+        onto the card's column (``OperatorApp._sync_boot_column_width``) — but its
+        text keeps this one left edge, so the sentence starts on the composer's
+        text column directly below it.
+
+        It used to centre each row on its own width, and that is the one thing
+        this method must not do again. The left edge of the ink then became a
+        function of the sentence's LENGTH: a stack of three notices at 100 columns
+        drew four different left edges (``[16, 17, 24, 31]``), a visible zigzag,
+        and a wrapped continuation at 160 columns floated 34 cells right of its
+        own first row as a centred orphan. ``welcome.py::_center_blocks`` rejected
+        precisely this for the splash above it — "centring each line on its own
+        width produced a diamond of four ragged edges" — and block-centres on ONE
+        shared left edge instead. A notice is prose, not a centred mass like the
+        wordmark or the card's caret, so it gets the same treatment: one column,
+        found by the block's offset rather than by each row's own width.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
-        width = max((self.size.width or 80) - 2, 12)
         body = self.body_budget(self.size.width or 80)
         rows = self._rows(body)
         # PINNED to the authored row count, for the reason ``UserBlock._build``
@@ -1446,20 +1454,16 @@ class NoticeBlock(TranscriptBlock):
         # ``test_a_timer_delivered_notice_keeps_the_wordmark_in_frame`` pins
         # the timer path so a future un-pin is caught there too.
         self._set_authored_height(len(rows))
-        centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
-            # First row reserves the glyph column; continuations the hanging one.
-            # Centring takes the pad out of the SLACK beside the text, so each
-            # row lands on the block's axis give or take the odd cell.
-            prefix = SPINE_INDENT + 2 if index == 0 else cell_len(hanging)
-            pad = max(0, (width - prefix - cell_len(row)) // 2) if centred else 0
+            # First row reserves the glyph column; continuations the hanging one,
+            # which is the same width blank — that is what puts every row of one
+            # notice on a single text column.
             if index:
                 line.append("\n")
-                line.append((" " * (prefix + pad)) if centred else hanging, style=style)
+                line.append(hanging, style=style)
             else:
-                lead = indent if not centred else " " * (prefix - 2 + pad)
-                line.append(lead, style=style)
+                line.append(indent, style=style)
                 line.append(f"{self._glyph} ", style=style)
             line.append(row, style=style)
         return line

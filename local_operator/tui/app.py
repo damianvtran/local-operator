@@ -11217,18 +11217,26 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        # The card sits inside the transcript's content box with equal ground on
-        # both sides, so a notice given the card's width and offset by the same
-        # half-difference lands on the card's exact column. The transcript's own
-        # one-cell left gutter is inside that box, so the centre of the CONTENT
-        # is what the offset aims at. The block cannot be centred BY the
-        # stylesheet: `align-horizontal` aligns a container's children, never the
-        # node carrying it, so the offset is computed here alongside the width
-        # the same clamp resolves. When the card is gone the width is RESET to
-        # `1fr` — left at the boot value it narrowed the notice for the rest of
-        # the session, dead space to its right at any width.
-        content_box = box - transcript.styles.gutter.width
-        offset = max(0, (content_box - card) // 2)
+        # The card is centred by the stylesheet in `box` — the screen's own
+        # content box — so the offset that lands a notice on the card's column
+        # has to be computed against THAT box, then rebased into the transcript's
+        # coordinate space. The block cannot be centred BY the stylesheet:
+        # `align-horizontal` aligns a container's children, never the node
+        # carrying it, so the offset is computed here alongside the width the
+        # same clamp resolves. When the card is gone the width is RESET to `1fr`
+        # — left at the boot value it narrowed the notice for the rest of the
+        # session, dead space to its right at any width.
+        #
+        # The gutter is SUBTRACTED rather than excluded from the centring, and
+        # the distinction is the whole bug. An offset is relative to the block's
+        # own parent, so the transcript's one-cell left gutter is already spent
+        # before the offset applies; centring inside `box - gutter` instead
+        # centred the notice in a box the card is not centred in, and the two
+        # agreed only where `box - card` happened to be odd. Measured on the
+        # unfixed code: one cell of drift at 70, 80, 90, 100 and 110 columns,
+        # zero at 120, 140, 160 and 190 — a defect that hides at exactly the
+        # width its own regression test ran at.
+        offset = max(0, (box - card) // 2 - transcript.styles.gutter.left)
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
             if card_up:

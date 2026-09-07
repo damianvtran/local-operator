@@ -81,6 +81,7 @@ from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
+    SPINE_INDENT,
     NoticeBlock,
     RichBlock,
     TranscriptBlock,
@@ -571,14 +572,15 @@ async def test_a_long_single_line_notice_still_hangs_under_its_first_word() -> N
 
 
 @pytest.mark.asyncio
-async def test_a_centred_boot_notice_centres_every_authored_line() -> None:
-    """The boot column keeps working, per row, once rows can be authored.
+async def test_a_boot_notice_keeps_one_text_column_for_every_authored_line() -> None:
+    """The boot column moves the BLOCK, never the text inside it.
 
-    A boot notice (the splash's MCP connect failure) is centred on the card's
-    axis rather than hung on the spine, and each row is centred on its OWN
-    width. The split adds rows the centring never saw, so it is asserted on the
-    slack either side of each one — including the indented line, whose authored
-    indent is part of the row it centres.
+    A boot notice used to centre each row on its own width, which made the left
+    edge of the ink a function of the sentence's length: an authored two-line
+    notice drew two different left edges from one statement. The block is still
+    offset onto the card's column by the app, but its text keeps the same
+    hanging indent it has on the spine, so every row of one notice — authored
+    split or wrap, indented continuation or not — starts in one column.
     """
     rows = await _notice_rows(
         app_size=(70, 30),
@@ -587,16 +589,16 @@ async def test_a_centred_boot_notice_centres_every_authored_line() -> None:
         centred=True,
     )
     assert len(rows) == 2
-    for row in rows:
-        assert row.startswith(" "), f"a centred row sits at the spine: {row!r}"
+    # Row 0 carries the glyph field; every continuation carries the same width
+    # blank. That, and not a per-row centre, is what puts them on one column.
+    assert rows[0].startswith(f"{' ' * SPINE_INDENT}\u2717 "), rows[0]
+    for row in rows[1:]:
+        assert row.startswith(" " * NoticeBlock.GLYPH_COLS), row
         assert "\n" not in row
-    # Centred on the axis, not left-aligned in a wide block: the ink is roughly
-    # equidistant from both edges of the notice's own span. Compared against the
-    # widest row's own slack rather than a pinned column, so the assertion
-    # survives a copy change.
-    inks = [(len(row) - len(row.lstrip(" ")), cell_len(row)) for row in rows]
-    for left, painted in inks:
-        assert left > 0 and painted > left
+    # The authored indent survives INSIDE that column rather than being folded
+    # into a centre: the second line is the authored "  run: …", still indented
+    # relative to the first, not re-centred against it.
+    assert rows[1][NoticeBlock.GLYPH_COLS :] == "  run: lop mcp login cloudflare"
 
 
 @pytest.mark.asyncio
