@@ -6,8 +6,9 @@ Run from the worktree root:
 
 Seeds ONE fixed catalog covering every state the list can draw — a live turn,
 an idle runtime, an attached viewer, an armed wake, a dormant wake, a parked
-gate, a wedged runtime and cold rows — so a single frame answers both questions
-this change is about:
+gate, a wedged runtime, cold rows, and (see ``UNSEEN_ROWS``) rows carrying an
+unacknowledged completion of each kind including one that has since been
+resumed — so a single frame answers both questions this change is about:
 
 * **Which glyph each state draws**, across every mark the list can produce.
 * **How much of a title survives.** The names here are real-length generated
@@ -93,9 +94,31 @@ ROWS = [
     ("aaaaaaaaaab3", "Address Local Operator packaging review", 35, "", None, 0, False),
 ]
 
+#: Rows carrying an UNACKNOWLEDGED completion, as
+#: ``(id, title, age_minutes, live_state, completion_kind)``.
+#:
+#: Kept as a separate table because `unseen` is a dimension the fixture above
+#: does not model at all — it is layered on by the attention store, not by the
+#: runtime record — and widening every tuple in ROWS to carry two more fields
+#: would touch fourteen rows to describe four.
+#:
+#: These are the states this change is about, and none of them could be framed
+#: before: the fixture had no unseen row whatsoever, so neither the shared
+#: `✗` nor the stale-mark bug was visible in any capture. The last entry is
+#: the operator's reported defect exactly — a session that finished a turn
+#: unread and has since been RESUMED and is working again. Before the fix it
+#: painted `✗` over its own spinner; after, the spinner wins and the mark
+#: returns when the turn ends.
+UNSEEN_ROWS = [
+    ("aaaaaaaaaac1", "Backfill customer cube contacts", 9, "idle", "complete"),
+    ("aaaaaaaaaac2", "Sanctions feed reconciliation run", 16, "idle", "error"),
+    ("aaaaaaaaaac3", "Nightly PEP screening sweep", 22, "idle", "interrupted"),
+    ("aaaaaaaaaac4", "Resumed adverse-media enrichment", 2, "busy", "interrupted"),
+]
+
 
 def _entries() -> list[CatalogEntry]:
-    return [
+    entries = [
         CatalogEntry(
             SessionRow(
                 id=session_id,
@@ -109,6 +132,15 @@ def _entries() -> list[CatalogEntry]:
         )
         for session_id, name, age, state, pending, wakes, dormant in ROWS
     ]
+    entries += [
+        CatalogEntry(
+            SessionRow(id=session_id, mtime=NOW - age * 60, name=name, live_state=state),
+            unseen=True,
+            completion_kind=kind,
+        )
+        for session_id, name, age, state, kind in UNSEEN_ROWS
+    ]
+    return entries
 
 
 async def main() -> None:
