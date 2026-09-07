@@ -36,6 +36,14 @@ billed tokens derived from characters at the measured rate.
 Run:
     .venv/bin/python scripts/bench_context_budget.py
     .venv/bin/python scripts/bench_context_budget.py --verbose
+
+DO NOT PIPE IT. This script's entire value is its EXIT CODE — 0 pass, 1 budget
+or surface violation, 2 provenance mismatch — and a pipeline reports the LAST
+command's status, so ``bench_context_budget.py | tail`` prints a failure while
+exiting 0. That is not hypothetical: a reviewer's piped run reported ``EXIT=0``
+while the real code was 1, and only checking ``$?`` outside a pipeline caught
+it. AGENTS.md documents the same rc-swallowing for the lint gates. Read the
+status directly, or use ``${PIPESTATUS[0]}`` if you must page the output.
 """
 
 from __future__ import annotations

@@ -181,22 +181,68 @@ def _load_template(name: str) -> list[Node]:
     return nodes
 
 
-#: Defaults applied to ``system.md`` when a caller does not state them.
-#:
-#: ``{{#if}}`` has no ``else`` and no negation, so the browser sections are
-#: gated by a PAIR of flags — and a pair is easy to half-supply. A missing key
-#: renders as falsy, which drops the body with no marker in the output, so
-#: ``render_template("system.md", {})`` silently produced a prompt with NEITHER
-#: browser section (~1.5k chars lighter than any real session's). Product code
-#: always passes both (``build_system_blocks`` computes them together), but a
-#: dozen probe and test call sites render with ``{}`` and would have been
-#: measuring a prompt no session ships.
-#:
-#: Defaulting to the BROWSERLESS arm rather than to nothing: it is the
-#: conservative choice — the setup playbook is what ``main`` shipped
-#: unconditionally — and it makes "forgot to pass the flags" render something
-#: real instead of something that exists only in a test.
-_SYSTEM_MD_DEFAULTS: dict[str, Any] = {"has_browser": False, "no_browser": True}
+def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
+    """Complete ``system.md``'s browser flag pair, or refuse an impossible one.
+
+    ``{{#if}}`` has no ``else`` and no negation, so the browser sections are
+    gated by a PAIR of flags — and a pair is easy to half-supply. A missing key
+    renders as falsy and drops its body with no marker in the output, so the
+    mistake is silent in both directions:
+
+    - ``{}`` rendered a prompt with NEITHER browser section, ~1.5k characters
+      lighter than any real session's;
+    - supplying only ``has_browser=True`` and DEFAULTING the other flag shipped
+      BOTH — the usage prose plus the browserless setup playbook, 686
+      characters asserting the negation of what the same prompt just said.
+
+    The second is why this derives rather than merging defaults: a default is a
+    claim about the world, and the conservative claim for an absent pair is not
+    the conservative claim for a half-supplied one. Deriving the missing member
+    from the one the caller actually stated cannot contradict them.
+
+    THREE states are legitimate, so the pair is NOT a plain negation and must
+    not be collapsed into one flag (see ``build_system_blocks``):
+
+    ==================  ==========  ===========  ===========================
+    state               has_browser no_browser   meaning
+    ==================  ==========  ===========  ===========================
+    tool present        True        False        usage prose
+    host has no backend False       True         setup playbook
+    role restricted     False       False        neither; host is fine
+    ==================  ==========  ===========  ===========================
+
+    ``(True, True)`` is the one combination with no meaning — a session cannot
+    hold the browser tool on a host with no browser backend — so it raises
+    instead of rendering. Loud, for the same reason a malformed template raises
+    in :func:`_parse`: these callers are all in this repo, so an impossible
+    prompt is a build bug, not input to tolerate.
+    """
+    has = data.get("has_browser")
+    no_browser = data.get("no_browser")
+
+    if has and no_browser:
+        raise ValueError(
+            "system.md: has_browser and no_browser cannot both be true — that "
+            "ships the browser usage prose and the browserless setup playbook "
+            "together. Pass the pair from build_system_blocks, or pass just "
+            "one and let it derive."
+        )
+    if has is None and no_browser is None:
+        # Neither stated: the browserless arm, which is what `main` shipped
+        # unconditionally and so is the safe thing for a probe or a test that
+        # never had an opinion.
+        return {**data, "has_browser": False, "no_browser": True}
+    if no_browser is None:
+        # Only tool presence stated. A session that HAS the tool is on a host
+        # with a backend, so the playbook is wrong; one that lacks it has said
+        # nothing about the host, and the playbook is the conservative arm.
+        return {**data, "no_browser": not has}
+    if has is None:
+        # Only host capability stated. Never infer that a tool is present from
+        # a working host — that is the M2 error in reverse, and it would put
+        # usage prose in front of a session with no browser tool to use.
+        return {**data, "has_browser": False}
+    return data
 
 
 def render_template(name: str, data: dict[str, Any]) -> str:
@@ -205,12 +251,13 @@ def render_template(name: str, data: dict[str, Any]) -> str:
     Loading goes through ``importlib.resources`` so the templates work from
     installed wheels too, not only source checkouts.
 
-    ``system.md``'s conditional flags are defaulted (see
-    :data:`_SYSTEM_MD_DEFAULTS`) so a caller that omits them renders a prompt a
-    real session could have, rather than one silently missing a section.
+    ``system.md``'s browser flags are completed by
+    :func:`_resolve_system_md_flags`, so a half-supplied pair can never render
+    two contradictory sections and an absent one renders a prompt a real
+    session could have.
     """
     if name == "system.md":
-        data = {**_SYSTEM_MD_DEFAULTS, **data}
+        data = _resolve_system_md_flags(data)
     out: list[str] = []
     _render_nodes(_load_template(name), data, out)
     return "".join(out)

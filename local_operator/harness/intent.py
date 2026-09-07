@@ -99,7 +99,21 @@ _LEADING_INTENT_RE = re.compile(r'\s*\{\s*"i"\s*:\s*"((?:[^"\\\x00-\x1f]|\\.)*)"
 #: ever filtering the keys at that level. Getting this wrong deletes a real
 #: property: see :func:`_strip_titles`.
 _SCHEMA_MAP_KEYWORDS = frozenset(
-    {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}
+    {
+        "properties",
+        "$defs",
+        "definitions",
+        "patternProperties",
+        "dependentSchemas",
+        # draft-07 `dependencies` and 2019-09 `dependentRequired` are keyed by
+        # property name too. Their blast radius is smaller than `properties`'
+        # — they constrain what must accompany a field rather than what may be
+        # sent, so nothing is dropped from a call — but a property named
+        # `title` still loses its conditional requirement, which is the same
+        # class of silent corruption for no benefit.
+        "dependencies",
+        "dependentRequired",
+    }
 )
 
 #: Keywords whose value is INSTANCE DATA, not a schema. A ``default`` of
@@ -127,12 +141,26 @@ def _strip_titles(value: Any) -> Any:
     ``title`` is both a JSON-Schema keyword AND an extremely common property
     NAME on real MCP servers — Linear ``create_issue``, Notion ``create_page``,
     GitHub ``create_issue``, Jira. A blind ``k != "title"`` filter at every
-    dict level deleted the property, left it dangling in ``required`` (an
-    invalid schema that strict-mode providers reject), and — because these
-    schemas carry ``additionalProperties: false`` — made
-    ``prepare_outbound_args`` silently drop the model's ``title`` argument, so
-    the server received a create-issue call with no title. A wrong result with
-    no error. Hence the two keyword sets above: recurse into
+    dict level deleted the property from the MODEL-FACING schema while leaving
+    it in ``required`` — a schema whose ``required`` names an undeclared
+    property, which is invalid, and which under the ``additionalProperties:
+    false`` these servers ship makes the model's own correct payload
+    unrepresentable. Measured against the broken schema with
+    ``Draft202012Validator``:
+    ``Additional properties are not allowed ('title' was unexpected)``. A
+    strict-mode provider therefore rejects the very call the model was right
+    to make, and the tool is uncallable.
+
+    Stated precisely because an earlier version of this comment claimed the
+    argument was silently DROPPED on the wire. It is not: the manager feeds
+    ``prepare_outbound_args`` the SERVER's schema
+    (``McpManager._schema_parts`` reads ``tool.input_schema``), never this
+    stripped copy, so outbound hygiene is unaffected. The harm sits upstream
+    of that — the model is never told the argument exists and cannot legally
+    send it — which is worse rather than better, since it breaks the tool for
+    every call rather than mangling one.
+
+    Hence the two keyword sets above: recurse into
     :data:`_SCHEMA_MAP_KEYWORDS` values WITHOUT filtering their keys, and do
     not walk :data:`_INSTANCE_DATA_KEYWORDS` at all.
 

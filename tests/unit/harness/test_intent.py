@@ -164,11 +164,17 @@ def test_a_property_named_title_survives_the_strip() -> None:
     1. the property vanished from ``properties``, so the model was never told
        the argument existed;
     2. it remained in ``required``, making the schema internally invalid —
-       strict-mode providers reject a ``required`` naming an undeclared
-       property, so the tool becomes uncallable;
-    3. with ``additionalProperties: false``, ``prepare_outbound_args`` then
-       silently DROPPED a title the model supplied anyway, so the server got a
-       create-issue call with no title. A wrong result with no error.
+       a ``required`` naming an undeclared property;
+    3. under the ``additionalProperties: false`` these servers ship, the
+       model's own correct payload then became unrepresentable. Validated
+       against the broken schema: ``Additional properties are not allowed
+       ('title' was unexpected)`` — a strict provider rejects the right call
+       and the tool is uncallable.
+
+    NOT an outbound-argument drop: the manager feeds ``prepare_outbound_args``
+    the SERVER's schema (``McpManager._schema_parts``), never this stripped
+    copy. The harm is that the model is never told the argument exists, which
+    breaks every call rather than mangling one.
 
     The schema below is deliberately the real Linear shape.
     """
@@ -204,6 +210,39 @@ def test_a_property_named_title_survives_the_strip() -> None:
     # The keyword is still stripped everywhere it IS an annotation.
     assert "title" not in schema
     assert "title" not in props["meta"]
+
+
+def test_property_name_maps_other_than_properties_are_also_protected() -> None:
+    """`dependencies`/`dependentRequired` are keyed by property name too.
+
+    Same class as the `properties` defect: the un-filtered branch deleted a
+    key literally named `title`. Narrower blast radius — these constrain what
+    must ACCOMPANY a field rather than what may be sent, so no argument is
+    dropped from a call — but a property named `title` still silently loses
+    its conditional requirement.
+
+    Note the two shapes: `dependencies` values are schemas (so a keyword
+    `title` inside one must still be stripped), while `dependentRequired`
+    values are plain arrays of names.
+    """
+    schema = apply_intent_schema(
+        {
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "teamId": {"type": "string"}},
+            "dependencies": {
+                "title": {"required": ["teamId"], "title": "DepAnnotation"},
+                "teamId": {"required": ["title"]},
+            },
+            "dependentRequired": {"title": ["teamId"]},
+        }
+    )
+
+    assert "title" in schema["dependencies"], "the `title` dependency was deleted"
+    assert schema["dependencies"]["title"] == {"required": ["teamId"]}
+    assert schema["dependencies"]["teamId"] == {"required": ["title"]}
+    assert schema["dependentRequired"] == {"title": ["teamId"]}
+    # Stripping less is not the fix: the ANNOTATION inside a schema value goes.
+    assert "title" not in schema["dependencies"]["title"]
 
 
 def test_instance_data_is_never_rewritten_by_the_strip() -> None:

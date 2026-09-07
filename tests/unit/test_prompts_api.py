@@ -676,17 +676,62 @@ def test_rendering_system_md_without_flags_still_ships_a_browser_section() -> No
     NEITHER browser section, ~1.5k chars lighter than anything a session
     ships. Product code always passes both, but a dozen probe and test call
     sites render with `{}` and would silently measure a prompt that does not
-    exist. Defaulting makes the half-satisfied state unreachable rather than
-    merely unused.
+    exist. Deriving the missing member makes the half-satisfied state
+    unreachable rather than merely unused.
     """
     usage = "Browser work goes through the `browser` tool"
     setup = "the host has neither backend"
 
     bare = render_template("system.md", {})
     assert (usage in bare) != (setup in bare), "neither section shipped"
-    # Defaults must not override an explicit caller.
+    # Derivation must not override an explicit caller.
     explicit = render_template("system.md", {"has_browser": True, "no_browser": False})
     assert usage in explicit and setup not in explicit
+
+
+def test_system_md_never_ships_both_browser_sections_for_any_flag_input() -> None:
+    """The two sections are mutually exclusive claims; NO input may ship both.
+
+    Regression guard for a defect a defaulting fix introduced: merging
+    `{"has_browser": False, "no_browser": True}` under the caller's dict fixed
+    the empty case but made a caller who supplied only `has_browser=True`
+    inherit `no_browser=True`, so the prompt asserted "Browser work goes
+    through the `browser` tool" AND "the host has neither backend connected...
+    set it up with the user" — 686 characters contradicting the paragraph
+    above them.
+
+    It defeated an existing test WITHOUT touching it: the caller at
+    `test_system_md_requires_owned_browser_cleanup_before_final_response`
+    renders exactly `{"has_browser": True}`, passed before on a coherent
+    prompt, and passed after on an incoherent one. So this asserts the
+    invariant over every combination, including the half-supplied ones a
+    single-case test cannot see.
+    """
+    usage = "Browser work goes through the `browser` tool"
+    setup = "the host has neither backend"
+
+    # Every representable input: absent, half-supplied either way, and both.
+    values: list[dict[str, Any]] = [{}]
+    for key in ("has_browser", "no_browser"):
+        values += [{key: True}, {key: False}]
+    for a in (True, False):
+        for b in (True, False):
+            if not (a and b):  # (True, True) is refused; asserted below
+                values.append({"has_browser": a, "no_browser": b})
+
+    for data in values:
+        text = render_template("system.md", data)
+        assert not (usage in text and setup in text), f"both sections shipped for {data}"
+
+    # Half-supplying tool presence must not flip the host claim: this is the
+    # exact case the defaulting fix regressed.
+    only_has = render_template("system.md", {"has_browser": True})
+    assert usage in only_has and setup not in only_has
+
+    # And the one pair with no meaning is refused rather than rendered — a
+    # session cannot hold the browser tool on a host with no backend.
+    with pytest.raises(ValueError, match="cannot both be true"):
+        render_template("system.md", {"has_browser": True, "no_browser": True})
 
 
 def test_a_restricted_role_is_not_told_the_host_lacks_a_browser(monkeypatch) -> None:
