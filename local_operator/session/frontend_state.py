@@ -258,7 +258,24 @@ LIVE_EVENT_TEXT_FLOOR_CHARS = 200
 #:
 #: The full payload is never lost: it is in the durable transcript, and a
 #: viewer that stayed connected received it untouched over the live relay.
+#:
+#: ``ToolResult.text`` joins content blocks with ``""``
+#: (``harness/types.py``), so a marker following a caption renders as
+#: ``screenshot of the page[dropped from the reconnect snapshot…]`` — the two
+#: run together and the marker reads as part of what the tool said. The
+#: separator is therefore carried by the marker itself, prepended only when an
+#: earlier block already contributed text (see
+#: :data:`LIVE_EVENT_BLOCK_ELIDED_SEPARATOR`); as the first block it would
+#: otherwise open the card with a blank line.
+#:
+#: Fixed here rather than at the join because ``ToolResult.text`` is a shared
+#: API with other consumers, and widening its separator to suit this one
+#: caller would change how every existing multi-block result renders. A marker
+#: this module injects is this module's to make well-formed.
 LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER = "[dropped from the reconnect snapshot — see the transcript]"
+
+#: Separates the elided-block marker from a preceding block's text.
+LIVE_EVENT_BLOCK_ELIDED_SEPARATOR = "\n"
 
 #: Cap on retained ``tool_execution_end`` rows in the seed, newest kept.
 #:
@@ -1992,10 +2009,17 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
     # reason SIZE is — a producer emitting many blocks is a change in data,
     # not a change in this file.
     floor_spent = False
+    # Whether any block so far put text on the card, which is what a marker
+    # needs to know to separate itself from it.
+    emitted_text = False
     for block in blocks:
         cost = _live_row_cost(block)
         if cost <= remaining:
             remaining -= cost
+            # Tracked on the UNCLIPPED path too: the common shape is a small
+            # caption that fits, followed by an image that does not, and it is
+            # exactly that caption a marker must separate itself from.
+            emitted_text = emitted_text or bool(block.get("text"))
             continue
         text = block.get("text")
         if isinstance(text, str):
@@ -2014,9 +2038,21 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
             # No text to clip — an image's base64, or any future block whose
             # payload lives under a key this function has never heard of. It is
             # replaced rather than emptied so the row still reads as a block.
+            #
+            # The marker separates itself from whatever precedes it, because
+            # ``ToolResult.text`` concatenates blocks with no delimiter and a
+            # caption would otherwise run straight into it (round-4 Q4-2). Led
+            # by the text ALREADY EMITTED rather than by block position: a
+            # marker after an image-only block has nothing to separate from,
+            # and would open the card with a blank line.
             block.clear()
             block["type"] = "text"
-            block["text"] = LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+            block["text"] = (
+                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+                if emitted_text
+                else LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+            )
+        emitted_text = emitted_text or bool(block.get("text"))
         remaining = max(0, remaining - _live_row_cost(block))
 
 

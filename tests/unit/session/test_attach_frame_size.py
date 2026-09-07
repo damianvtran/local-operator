@@ -24,7 +24,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import ModelSpec, Usage
+from local_operator.harness.types import ModelSpec, ToolResult, Usage
 from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -1879,3 +1879,39 @@ def test_the_row_cost_of_many_blocks_does_not_grow_with_their_number() -> None:
     # Under the per-block floor this grew without limit, which is why the
     # COMPARISON is the assertion and neither number alone would serve.
     assert many < ten * 3, f"row cost scaled with block count: {ten} -> {many}"
+
+
+def test_the_elided_marker_separates_itself_from_a_caption() -> None:
+    """The marker must not run into the text of the block before it.
+
+    ``ToolResult.text`` joins content blocks with ``""``, so a caption
+    followed by a shed image rendered as
+    ``screenshot of the page[dropped from the reconnect snapshot…]`` — the
+    marker read as part of what the tool said (round-4 Q4-2, caught in a
+    rendered frame). Asserted through the real ``ToolResult.text`` rather
+    than on the block dict, because the join is where the defect lived.
+    """
+    row = _live_end("shot", text="screenshot of the page")
+    row["result"]["content"].append(
+        {"type": "image", "data": "A" * 1_400_000, "mime_type": "image/png"}
+    )
+
+    end = _bounded_live_events([row])[0]
+    rendered = ToolResult.model_validate(end["result"]).text
+
+    assert "page\n[dropped" in rendered
+    assert "page[dropped" not in rendered
+
+
+def test_a_lone_elided_marker_does_not_open_with_a_blank_line() -> None:
+    """The separator is conditional: nothing before it means nothing to separate.
+
+    An unconditional leading newline would open the card with an empty row
+    for the common single-image result, trading one cosmetic defect for
+    another.
+    """
+    end = _bounded_live_events([_live_image_end("img", b64="A" * 1_400_000)])[0]
+    rendered = ToolResult.model_validate(end["result"]).text
+
+    assert rendered == LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+    assert not rendered.startswith("\n")
