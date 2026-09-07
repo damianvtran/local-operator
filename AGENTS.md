@@ -648,25 +648,26 @@ Warnings that still hold, each of which has already cost a release:
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
   `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
-  re-shards every file after it in sort order**. Derive it against the ref CI
-  actually runs, not a stale local checkout:
+  re-shards every file after it in sort order**. Derive the index against the
+  ref CI actually runs rather than a stale local checkout — figures written
+  into prose go out of date within days, so run it, do not read it:
 
   ```sh
   git ls-tree -r --name-only origin/main \
     | grep -E '^tests/unit/.*test_.*\.py$' | sort | nl \
-    | grep tests/unit/tui/test_app_pilot.py     # 331st of 451 -> index 330
+    | grep <the-test-file-that-failed>   # line N -> index N-1, shard (N-1) % 5
   ```
 
-  At index 330 that file is in shard 0; add one test file earlier in the
-  ordering and it becomes 331, shard 1. This is not hypothetical — PR #730 did
-  exactly that (451 → 452 files) and its CI failure was `test_app_pilot.py`
-  failing in shard 1, on a branch that touched no TUI file. A test in the file
-  that moved fails on your branch and nowhere else, reading exactly like "your
-  diff broke the TUI". Before concluding you caused a suspect shard failure,
-  check whether your branch changed that file's shard index, and reproduce on
-  clean `origin/main` under the same conditions CI uses (the shard job runs
-  `pytest --cov`, and some of these failures do not reproduce bare).
-  Diagnosing this as a real regression has already cost a review round.
+  Run it once against `origin/main` and once against your branch: if the shard
+  differs, the failing test ran in a different group than it does on `main`,
+  and a failure that appears only on your branch may be nothing to do with your
+  diff. **The shift is a reason to check attribution, not by itself a cause of
+  failure** — a re-sharded file usually still passes, so treat a differing
+  index as "verify before blaming yourself", not as an explanation. Confirm by
+  reproducing on clean `origin/main` under the conditions CI uses (the shard
+  job runs `pytest --cov`, and some failures do not reproduce bare). Attributing
+  one of these to a diff that touched no related file has already cost a review
+  round.
 - **Several PRs going red at once is a shared cause, not several bugs.**
   `cli-sanity` and `server-sanity` call a live model (both are marked
   "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
