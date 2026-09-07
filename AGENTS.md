@@ -1102,34 +1102,38 @@ that makes that test type-check landed 3m24s later in the peer's own commit
 `06ee21d9e`. The PR's head was red for a defect its own intended change did
 not contain.
 
-**Reaching for one of these as an *undo* evades everything above.** The rules
-so far are written against a deliberate act — clearing the tree to get a
-before-frame — so they do not intercept the reflex thirty seconds after you
-notice you edited the wrong thing, when the goal is just to put it back and
-`git checkout HEAD -- <path>` is the first command to hand. Same hazard,
-different mental context, and an agent who had read the rule above walked into
-it today. What makes an operation unsafe here is that **its unit is the whole
-file rather than your hunk**; the list is examples and deliberately not
-exhaustive, since enumerating commands is how `git add -A` stayed unnamed until
-someone hit it. `git checkout`/`restore`/`reset`/`clean` on a path, a `>`
-redirect, a `cp` over the file, an editor "revert", and a `write` tool call
-that re-emits a whole file all qualify. Undo your own change the way you made
-it: a targeted reverse edit of exactly the lines you touched, leaving every
-other line as you found it. Better, avoid needing the undo — check
-`git rev-parse --show-toplevel` before a write and confirm it is the tree you
-mean, because the mistake that provokes the panic is usually aiming the edit at
+**The undo for a mistaken edit is a reverse edit of your own hunk, never a
+whole-file operation.** Everything above is written against a deliberate act —
+clearing the tree to get a before-frame — so none of it intercepts the reflex
+thirty seconds after you notice you edited the wrong thing, when the goal is
+just to put it back and `git checkout HEAD -- <path>` is the first command to
+hand. Same hazard, different mental context, and an agent who had read the rule
+above walked into it today. What makes an operation unsafe is that **its unit
+is the whole file rather than your hunk** — every command listed above, plus a
+`write` that re-emits a whole file. Treat the list as examples and not as the
+rule, since enumerating is how `git add -A` stayed unnamed until someone hit
+it. The ban lifts where the others do: in your own worktree, or a throwaway
+nobody else touches, all of these are ordinary. Where you are not alone, undo
+your own change the way you made it — a targeted reverse edit of exactly the
+lines you touched, leaving every other line as you found it — and better still,
+avoid needing the undo by checking `git rev-parse --show-toplevel` before a
+write, since the mistake that provokes the panic is usually aiming the edit at
 the wrong checkout. The undo rule limits the blast radius; the path check
-prevents the event. Measured today: a subagent editing
-`.github/workflows/ci.yml` in the shared checkout rather than its own worktree
-ran `git checkout HEAD -- .github/workflows/ci.yml` to take it back. That path
-was +23/-37 against HEAD beforehand and the subagent's own edit accounted for
-+19/-10 of it, so roughly 27 lines of another session's unstaged work went with
-it — unrecoverably, because unstaged content is never hashed into the object
-store: `git diff --cached` on the path was empty, the 283 dangling blobs under
-`.git/lost-found` yielded no candidate, and no commit after `f1cd77900` touches
-the path. That checkout currently holds 1,611 uncommitted paths from concurrent
-sessions, which is why a whole-file operation there has a blast radius you
-cannot see before you run it.
+prevents the event. Today a subagent editing `.github/workflows/ci.yml` in the
+shared checkout instead of its own worktree ran
+`git checkout HEAD -- .github/workflows/ci.yml` to take it back, and destroyed
+a peer's unstaged work with its own: on the order of 27 lines, from a diffstat
+of roughly +23/−37 against HEAD of which its own edit was about +19/−10 —
+figures reconstructed from the session log, not re-derived, because the content
+is gone. Unstaged content is never hashed into the object store, so nothing
+recovers it: `git diff --cached` on the path was empty, the 28 dangling blobs
+among the 283 entries under `.git/lost-found/other` held no candidate, and no
+commit after the incident touches the path. Reach for `git fsck --lost-found`
+there and note that it **writes** those entries rather than reporting them,
+which makes it a poor first probe in the tree whose accident you are
+investigating. That checkout held 1,611 uncommitted paths from concurrent
+sessions when this was written, which is why a whole-file operation there has a
+blast radius you cannot see before you run it.
 
 Two stills side by side catch what a single "looks fine" never does. The
 usage-card round found a **pre-existing** bug this way: the after-frame had a
