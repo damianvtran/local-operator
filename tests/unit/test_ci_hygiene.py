@@ -17,6 +17,7 @@ against the defect it claims to catch.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -367,3 +368,65 @@ def test_ci_partitions_the_suite_by_measured_duration() -> None:
     assert (
         "i % total" not in run and "i % 5" not in run
     ), "the inline positional split is back in ci.yml"
+
+
+def _partition_step_run() -> str:
+    """The `run:` body of the shard job's partition step."""
+    steps = [s for s in _steps("test") if s.get("name") == "Partition test suite"]
+    assert len(steps) == 1, "expected exactly one partition step"
+    return steps[0]["run"]
+
+
+def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
+    tmp_path: Path,
+) -> None:
+    """The matrix must run every shard `--total` splits the suite into, and
+    `main()` must emit all of them.
+
+    This asserts the coverage invariant on the REAL entry point. The other
+    guards call `partition()` directly, which leaves the layer CI actually
+    invokes -- argument parsing, `shards[args.shard]` selection, the `--out`
+    write -- untested. Review round 1 (MAJOR-2) demonstrated three mutations
+    that silently stop test files from running while all guards stayed green:
+
+      - `selected = shards[args.shard][:1]` in `main()`  -> 91 of 92 files skipped
+      - matrix `[0, 1, 2, 3]` while `--total` stays 5    -> ~92 files never run
+      - `--total 6` while the matrix stays 5             -> shard 5 orphaned
+
+    None of those is caught by asserting the step merely *calls* the script,
+    because nothing coupled the matrix length to `--total`. Both numbers are
+    read from ci.yml here rather than from constants, so changing one without
+    the other fails; and the union of what `main()` actually WRITES is
+    compared against the collected suite, so a truncated or misselected
+    write fails too.
+    """
+    run = _partition_step_run()
+
+    total_match = re.search(r"--total\s+(\d+)", run)
+    assert total_match, f"no --total in the partition step: {run!r}"
+    total = int(total_match.group(1))
+
+    matrix = _ci_jobs()["test"]["strategy"]["matrix"]["shard"]
+    assert isinstance(matrix, list)
+    assert sorted(matrix) == list(range(total)), (
+        f"the shard matrix {sorted(matrix)} does not cover every shard of "
+        f"--total {total}; files in the uncovered shards would never run"
+    )
+
+    # The step passes `--shard ${{ matrix.shard }}`, so the matrix value is
+    # the argument. Drive main() the same way CI does, once per shard.
+    assert "--shard" in run, "the partition step no longer passes --shard"
+
+    written: list[str] = []
+    for shard in matrix:
+        out = tmp_path / f"shard_{shard}.txt"
+        rc = shard_tests.main(["--shard", str(shard), "--total", str(total), "--out", str(out)])
+        assert rc == 0, f"main() failed for shard {shard}"
+        written.extend(out.read_text().split())
+
+    expected = shard_tests.collect_test_files(REPO)
+    assert len(written) == len(set(written)), "a test file was written to two shards"
+    assert set(written) == set(expected), (
+        "the files main() writes do not cover the collected suite; "
+        f"missing={sorted(set(expected) - set(written))[:5]}"
+    )
