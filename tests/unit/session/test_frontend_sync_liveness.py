@@ -422,7 +422,7 @@ async def test_a_bind_that_fails_once_then_succeeds_leaves_one_connection(
         real_bind = viewer._bind_to
         attempts = 0
 
-        async def flaky_bind(record, *, sync_timeout):
+        async def flaky_bind(record, *, sync_timeout, preempt=None):
             nonlocal attempts
             attempts += 1
             if attempts == 1:
@@ -482,7 +482,7 @@ async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monk
 
         attempts = 0
 
-        async def dispose_on_first(record, *, sync_timeout):
+        async def dispose_on_first(record, *, sync_timeout, preempt=None):
             nonlocal attempts
             attempts += 1
             viewer._disposed = True
@@ -494,6 +494,59 @@ async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monk
 
         assert attempts == 1, "a disposed facade must not attempt another bind"
         assert not server._clients, "no socket may be left attached to a dead facade"
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_vanished_record_does_not_discard_an_earlier_attempts_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ``record is None`` arm must re-raise ``last_error``, like both others.
+
+    Attempt 1 failing with the pump's own words and attempt 2 then finding no
+    record used to hand the caller the generic "could not start a runtime for
+    this session", losing the diagnosis (review round 1, MINOR-2). The two
+    disposal arms already re-raise; this makes the third consistent.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        record = await _record(tmp_path)
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        monkeypatch.setattr(
+            "local_operator.session.runtime.launch.engage_runtime",
+            _no_engage,
+        )
+
+        lookups = 0
+
+        def vanishing_find(config_dir, session_id):
+            # Found on the first attempt, gone by the second — the runtime
+            # retired between them.
+            nonlocal lookups
+            lookups += 1
+            return (record, None) if lookups == 1 else (None, None)
+
+        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", vanishing_find)
+
+        async def fail_with_reason(record, *, sync_timeout, preempt=None):
+            raise ConnectionError("the pump's own words")
+
+        monkeypatch.setattr(viewer, "_bind_to", fail_with_reason)
+        with pytest.raises(ConnectionError) as caught:
+            await viewer._ensure_bound()
+
+        assert "the pump's own words" in str(caught.value), (
+            f"got {caught.value!r}: a record vanishing on a later attempt must "
+            "not overwrite the reason an earlier attempt already produced"
+        )
+        await viewer.dispose()
     finally:
         server.close()
 
@@ -530,7 +583,7 @@ async def test_the_retry_rediscovers_the_record_each_attempt(tmp_path: Path, mon
 
         monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", counting_find)
 
-        async def always_fail(record, *, sync_timeout):
+        async def always_fail(record, *, sync_timeout, preempt=None):
             raise ConnectionError(remote_module._SYNC_UNRESPONSIVE_REASON)
 
         monkeypatch.setattr(viewer, "_bind_to", always_fail)
@@ -552,16 +605,17 @@ async def test_the_retry_rediscovers_the_record_each_attempt(tmp_path: Path, mon
 # --------------------------------------------------------------------------
 
 
-def test_a_foreground_bind_never_inherits_the_background_backstop() -> None:
-    """A user waiting on a command must not sit through the catastrophe budget.
+def test_the_envelope_constants_keep_their_ordering() -> None:
+    """The foreground envelope stays the short one, and the backstop is finite.
 
-    The budgets COMPOSE: today's worst foreground path is a 30 s engage plus a
-    15 s welcome ack AHEAD of this wait. Handing the generous backstop to a
-    foreground caller would make the wait this change exists to shorten longer
-    instead — the architect's strongest caveat, and the one thing here that a
-    reader cannot check by eye once the constants drift apart.
-
-    Structural: an ordering fact between named constants, with no clock.
+    An ordering fact between named constants, and NOTHING MORE. It was once
+    named for the behaviour in the test below, which is a guard that cannot go
+    red: two constants can be ordered correctly while a foreground caller waits
+    out the background budget on the lock, and that is exactly what shipped
+    (review round 1 / QA Q1 — 134.5 s against a 29.5 s pre-fix baseline, both
+    found independently). The behavioural claim is asserted by
+    ``test_a_foreground_bind_does_not_wait_out_an_in_flight_background_bind``;
+    this one only pins the constants that test's mechanism is built on.
     """
     assert (
         remote_module.FRONTEND_SYNC_FOREGROUND_S < remote_module.FRONTEND_SYNC_BACKSTOP_S
@@ -574,6 +628,228 @@ def test_a_foreground_bind_never_inherits_the_background_backstop() -> None:
     ), "retries must fit INSIDE the pre-fix envelope, never extend it"
     # And the backstop stays FINITE: a wedged owner must fail, not hang (#401).
     assert 0 < remote_module.FRONTEND_SYNC_BACKSTOP_S < float("inf")
+    assert (
+        0 < remote_module._BACKGROUND_YIELD_BUDGET_S < remote_module._FOREGROUND_BIND_BUDGET_S
+    ), "the yielded remainder must be a fraction of a foreground envelope, not another one"
+
+
+@pytest.mark.asyncio
+async def test_a_foreground_bind_does_not_wait_out_an_in_flight_background_bind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A foreground caller must not inherit the background bind's budget.
+
+    THE DEFECT THIS REPLACES A CONSTANT-COMPARISON FOR. Splitting the two
+    envelopes is only half the guarantee: every ``_ensure_bound`` queues on
+    ``_bind_lock``, and ``is_cold`` stays True for the whole background bind,
+    so a foreground prompt sailed past the pre-lock guard and then blocked on
+    acquisition for the *background* budget before starting its own. Measured
+    on the branch before the fix: the user's wait went from 29.5 s pre-fix to
+    134.5 s, linearly in the background envelope. Design §5.3 names that
+    composition (165 s worst case) and forbids it.
+
+    This is the ordinary TUI boot, not a corner: ``app.py``'s mount engage runs
+    ``foreground=False`` and the first prompt arrives while it is in flight.
+
+    HOW THIS IS ASSERTED WITHOUT A TIMING CEILING, per ``AGENTS.md``. No
+    wall-clock bound is calibrated here. The background bind is given an
+    ``asyncio.Event`` it will never get a sync from, so under the defect the
+    foreground caller CANNOT complete until that bind spends its whole budget —
+    the test therefore asserts *completion*, and the budgets are set far apart
+    (``background`` deliberately enormous) so a regression HANGS against the
+    deadlock guard rather than passing on a fast box. The recorded ordering
+    (the background bind returns having been cut short, the foreground caller
+    then binds) is a structural fact, not a duration.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        await _record(tmp_path)
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        monkeypatch.setattr(
+            "local_operator.session.runtime.launch.engage_runtime",
+            _no_engage,
+        )
+        # An absurd background budget: if the foreground caller inherits it,
+        # this test hangs instead of reporting a number tuned on this box.
+        monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BACKSTOP_S", 3600.0)
+        monkeypatch.setattr(remote_module, "_BACKGROUND_BIND_BUDGET_S", 3600.0)
+        # Long enough that nothing here can pass by the yield budget elapsing.
+        monkeypatch.setattr(remote_module, "_BACKGROUND_YIELD_BUDGET_S", 30.0)
+
+        order: list[str] = []
+        background_running = asyncio.Event()
+
+        async def bind(record, *, sync_timeout, preempt=None):
+            if preempt is not None:
+                # The BACKGROUND bind: an owner that accepts and never syncs.
+                # It waits on the preemption it was handed rather than on a
+                # clock, so nothing here depends on how fast this box is.
+                order.append("background-start")
+                background_running.set()
+                await preempt.wait()
+                order.append("background-yielded")
+                raise ConnectionError(remote_module._SYNC_UNRESPONSIVE_REASON)
+            # The FOREGROUND bind, once it actually holds the lock.
+            order.append("foreground-bound")
+            viewer._ready_for_events = True
+            viewer._client = _live_client()
+
+        monkeypatch.setattr(viewer, "_bind_to", bind)
+
+        background = asyncio.ensure_future(viewer._ensure_bound(foreground=False))
+        await asyncio.wait_for(background_running.wait(), timeout=10.0)
+        assert viewer._bind_lock.locked(), "the background bind must hold the lock"
+
+        # THE ASSERTION: this completes. Under the defect it cannot, because
+        # the background bind is parked on an event nothing else will set.
+        await asyncio.wait_for(viewer._ensure_bound(), timeout=30.0)
+        # The yielded background bind still REPORTS what it hit, rather than
+        # returning as though it had bound — its caller (the app's speculative
+        # engage) is the one that chooses to stay silent. Swallowing it here
+        # would be the swallowed-last_error defect in a new place.
+        with pytest.raises(ConnectionError):
+            await asyncio.wait_for(background, timeout=10.0)
+
+        assert order == ["background-start", "background-yielded", "foreground-bound"], (
+            f"observed {order}: the foreground arrival must cut the background "
+            "bind short and then bind itself"
+        )
+        assert not viewer.is_cold, "the foreground caller must end up bound"
+        assert viewer._foreground_waiting == 0, "the waiter count must not leak"
+        assert not viewer._foreground_arrived.is_set(), "the preemption edge must reset"
+        viewer._client = None
+        await viewer.dispose()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_background_bind_alone_keeps_its_generous_envelope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Preemption must be an ARRIVAL, not a permanent downgrade.
+
+    The complement of the test above, and the reason the mechanism is a counter
+    rather than "background binds are short now": with nobody waiting, the
+    background bind must still outlast an owner whose authoritative loop is
+    busy — which is the improvement this whole change exists to deliver.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        await _record(tmp_path)
+        viewer = await RemoteSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        monkeypatch.setattr(
+            "local_operator.session.runtime.launch.engage_runtime",
+            _no_engage,
+        )
+        seen: list[float] = []
+
+        async def record_timeout(record, *, sync_timeout, preempt=None):
+            seen.append(sync_timeout)
+            # The preemption is not set, so the wait is the full envelope.
+            assert preempt is not None and not preempt.is_set()
+            raise ConnectionError("stop here")
+
+        monkeypatch.setattr(viewer, "_bind_to", record_timeout)
+        with pytest.raises(ConnectionError):
+            await viewer._ensure_bound(foreground=False)
+        assert seen, "the bind must have been attempted"
+        assert (
+            max(seen) > remote_module.FRONTEND_SYNC_FOREGROUND_S
+        ), f"an unwatched background bind keeps the generous envelope; got {seen}"
+        await viewer.dispose()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_preemption_deadline_can_only_shorten_the_wait(tmp_path: Path) -> None:
+    """A late preemption must not EXTEND a wait that was nearly over.
+
+    ``min`` on the two ABSOLUTE deadlines rather than on the budgets. Taking
+    ``min`` of the budgets instead would hand a bind with 0.05 s left a fresh
+    ``_BACKGROUND_YIELD_BUDGET_S``, so the arrival of a foreground caller would
+    make the foreground caller wait LONGER — the inverse of the guarantee.
+
+    Structural: the wait already had less than the yield budget remaining, so a
+    correct implementation expires on its own deadline. No ceiling is asserted.
+    """
+    viewer = _viewer(tmp_path)
+    viewer._client = _live_client()
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[FrontendSync] = loop.create_future()
+    preempt = asyncio.Event()
+    # Fires while the (short) original deadline is still running.
+    loop.call_later(0.02, preempt.set)
+    started = time.monotonic()
+    with pytest.raises(ConnectionError):
+        await viewer._await_frontend(future, timeout=0.1, preempt=preempt)
+    elapsed = time.monotonic() - started
+    # Not a calibrated ceiling: the yield budget is 1.0 s and the original
+    # deadline 0.1 s, so anything under half the yield budget proves the
+    # deadline was not restarted. Two orders of magnitude of headroom.
+    assert elapsed < remote_module._BACKGROUND_YIELD_BUDGET_S / 2, (
+        f"waited {elapsed:.3f}s: a preemption arriving with less than the yield "
+        "budget remaining must not extend the deadline"
+    )
+    assert not future.cancelled(), "the dial's future must survive the expiry"
+
+
+@pytest.mark.asyncio
+async def test_a_preempted_wait_still_adopts_a_sync_that_lands(tmp_path: Path) -> None:
+    """Preemption shortens the deadline; it must not discard the dial.
+
+    The whole point of yielding TIME rather than the LOCK: the background
+    bind's socket is already authenticated, and a sync arriving inside the
+    shortened window is the same good sync it would have been. Cancelling the
+    future instead would reintroduce the false timeout the settle loop exists
+    to prevent.
+    """
+    viewer = _viewer(tmp_path)
+    viewer._client = _live_client()
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[FrontendSync] = loop.create_future()
+    preempt = asyncio.Event()
+    expected = _sync()
+    preempt.set()
+    loop.call_later(0.02, lambda: future.set_result(expected))
+    got = await viewer._await_frontend(future, timeout=3600.0, preempt=preempt)
+    assert got is expected, "a sync landing inside the yielded window is still adopted"
+
+
+@pytest.mark.asyncio
+async def test_a_preempted_wait_reports_the_pumps_reason_not_the_backstop(
+    tmp_path: Path,
+) -> None:
+    """A socket that dies during a preempted wait still fails with its own words.
+
+    The preemption arm must not become a second path that flattens every
+    outcome to ``_SYNC_UNRESPONSIVE_REASON`` — the property the non-preempted
+    wait is already asserted to hold.
+    """
+    viewer = _viewer(tmp_path)
+    viewer._client = _live_client()
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[FrontendSync] = loop.create_future()
+    preempt = asyncio.Event()
+    preempt.set()
+    loop.call_later(0.02, lambda: future.set_exception(ConnectionError("frame too large")))
+    with pytest.raises(ConnectionError) as caught:
+        await viewer._await_frontend(future, timeout=3600.0, preempt=preempt)
+    assert "frame too large" in str(caught.value)
+    assert remote_module._SYNC_UNRESPONSIVE_REASON not in str(caught.value)
 
 
 @pytest.mark.asyncio
@@ -600,7 +876,7 @@ async def test_the_foreground_default_is_the_short_envelope(tmp_path: Path, monk
         )
         seen: list[float] = []
 
-        async def record_timeout(record, *, sync_timeout):
+        async def record_timeout(record, *, sync_timeout, preempt=None):
             seen.append(sync_timeout)
             raise ConnectionError("stop here")
 

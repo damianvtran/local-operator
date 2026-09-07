@@ -202,6 +202,43 @@ FRONTEND_SYNC_BLOCKED_S = 15.0
 _FOREGROUND_BIND_BUDGET_S = FRONTEND_SYNC_FOREGROUND_S
 _BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
 
+#: Splitting the two envelopes is only half the guarantee. The other half is
+#: ``_bind_lock``: every ``_ensure_bound`` contends for it, so a foreground
+#: caller that arrives while a BACKGROUND bind holds it inherits that bind's
+#: budget before it ever reaches its own. ``is_cold`` stays True for the whole
+#: background bind (``_client`` is installed only after the sync), so the
+#: pre-lock guard does not stop it either.
+#:
+#: That is the ordinary TUI startup sequence, not a corner: the mount engage
+#: runs ``foreground=False`` and the user's first prompt is a foreground bind
+#: arriving while it is in flight. Measured on the branch before this constant
+#: existed: a foreground caller waited 134.5 s against 29.5 s pre-fix, linear
+#: in the background envelope (5 s backstop -> 19.7 s, 15 -> 29.7, 30 -> 44.7,
+#: 60 -> 74.7). Design §5.3 names that 165 s composition and forbids it.
+#:
+#: The mechanism is PREEMPTION, not a second timeout. A foreground arrival
+#: publishes itself on ``_foreground_waiting`` and the in-flight background
+#: bind, which polls it at every point it is about to spend more time, cuts
+#: its remaining budget to this value and finishes or fails inside it. Two
+#: reasons it is preemption rather than ``wait_for(lock.acquire())``:
+#:
+#: * Bounding acquisition alone leaves the foreground caller giving up on the
+#:   lock and then having nothing to do — it cannot dial itself without
+#:   reintroducing the two-engages-racing-for-one-lease bug the lock exists to
+#:   prevent, and a second runtime spawned for one session is far worse than a
+#:   slow bind.
+#: * The background bind's work is the SAME work the foreground caller wants.
+#:   Yielding the lock would throw away a dial that is already authenticated;
+#:   shortening it keeps it, and if it lands the foreground caller finds the
+#:   facade warm at the ``is_cold`` re-check and returns immediately.
+#:
+#: Sized as the backoff the background bind is allowed to keep spending once
+#: someone is watching: short enough that the foreground caller's total wait
+#: stays inside its own envelope's order of magnitude, long enough that a dial
+#: already mid-sync gets a real chance to land rather than being discarded a
+#: moment before it would have succeeded.
+_BACKGROUND_YIELD_BUDGET_S = 1.0
+
 #: Bounded retry of the INITIAL bind. A first attempt that loses its race with
 #: a retiring runtime, or that hits an owner whose loop is momentarily busy, is
 #: a transient — the owner is typically answering seconds later, and before
@@ -230,6 +267,31 @@ _BIND_RETRY_DELAY_CAP_S = 0.5
 #: where the most likely truth is a busy authoritative loop. This says what is
 #: actually known.
 _SYNC_UNRESPONSIVE_REASON = "the runtime is not responding"
+
+
+class RuntimeUnresponsiveError(ConnectionError):
+    """The socket was alive and the owner did not produce the canonical sync.
+
+    The TYPE is what a surface may act on, exactly as ``ActionableConnectionError``
+    is for vetted configuration text. It says one specific thing: a runtime
+    exists, this viewer reached it, and the bind ran out of its envelope while
+    the authoritative loop was busy — so "it is still running, try again" is
+    TRUE here and the retry is free.
+
+    It must not be inferred from "the error was not actionable". That test is
+    what shipped "it is running in the background" over three sentences where
+    the runtime demonstrably was not: a deliberate ``/stop``
+    (``this session was stopped``), an owner mid-reconnect, and the no-record
+    case, all of which are ordinary non-actionable ``ConnectionError``s whose
+    own text was the honest answer. A reassurance is a claim about state, so
+    it rides the one condition that establishes it.
+    """
+
+    #: Marks this as the busy-runtime outcome, for surfaces that prefer a duck
+    #: check over importing the class (the TUI reads it with ``getattr``, the
+    #: same shape it already uses for ``actionable``).
+    runtime_alive = True
+
 
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
     cls.model_fields["type"].default: cls
@@ -356,6 +418,20 @@ class RemoteSession:
         #: Serialises ``_ensure_bound`` so concurrent first-writes engage one
         #: runtime between them rather than one each.
         self._bind_lock = asyncio.Lock()
+        #: How many FOREGROUND binds are waiting on ``_bind_lock`` right now.
+        #: A counter rather than a flag so two foreground callers cannot have
+        #: the first to finish clear the signal out from under the second.
+        #: Read by an in-flight BACKGROUND bind, which shortens its remaining
+        #: envelope to ``_BACKGROUND_YIELD_BUDGET_S`` the moment this goes
+        #: positive — see that constant for why the background bind yields
+        #: TIME rather than the lock itself.
+        self._foreground_waiting = 0
+        #: The EDGE of the counter above, for a background bind already parked
+        #: inside its sync wait. The counter alone would need polling; this is
+        #: the same "wait on the event, never on the clock" discipline the sync
+        #: wait itself follows, so a foreground arrival wakes the background
+        #: wait on the turn it happens rather than up to a poll interval later.
+        self._foreground_arrived = asyncio.Event()
         #: Whether owner loss may end in an unbound viewer rather than a
         #: takeover. True for a viewer (the runtime owns the lease and this
         #: process must never take it); left False for the legacy attach path,
@@ -1270,131 +1346,207 @@ class RemoteSession:
         for why that is safe (``_bind_to`` discards its rejected client on
         every failure path, so no attach slot leaks) and why the record is
         re-read per attempt.
+
+        Picking the envelope is not enough on its own, because every caller
+        queues on the same ``_bind_lock``: a foreground caller arriving while a
+        BACKGROUND bind holds it would wait out that bind's budget before
+        starting its own. So a foreground caller announces itself on
+        ``_foreground_waiting`` BEFORE acquiring, and the background holder
+        shortens its own remaining envelope in response. See
+        ``_BACKGROUND_YIELD_BUDGET_S`` for why the background bind yields time
+        rather than the lock: handing over the lock would discard an
+        authenticated dial and risk a second engage for one session's lease.
         """
         # Recovery already owns its dial/sync and signals _owner_ready. A
         # prompt or steer must wait on that promise, not start a competing
         # initial attachment merely because its connected socket is not ready.
         if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
             return
-        async with self._bind_lock:
-            if not self.is_cold or self._disposed or self._recovering:
-                return
-            from local_operator.mobile.attach_client import find_owner_record
-            from local_operator.session.runtime.launch import (
-                ActionableConnectionError,
-                RuntimeStartupError,
-                WarmErrand,
-                engage_runtime,
+        # Published before the acquire and cleared in `finally`, so the counter
+        # covers exactly the window in which this caller can be blocked by
+        # someone else's bind. Incrementing after acquiring would signal only
+        # once there is nothing left to preempt.
+        if foreground:
+            self._foreground_waiting += 1
+            self._foreground_arrived.set()
+        try:
+            async with self._bind_lock:
+                await self._bind_under_lock(foreground=foreground)
+        finally:
+            if foreground:
+                self._foreground_waiting -= 1
+                # Cleared only by the LAST foreground caller out, so two
+                # overlapping prompts cannot have the first to finish un-signal
+                # the second. The counter is the truth; the event is its edge.
+                if not self._foreground_waiting:
+                    self._foreground_arrived.clear()
+
+    async def _bind_under_lock(self, *, foreground: bool) -> None:
+        """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
+
+        Split out so the waiter accounting around the acquire reads as one
+        statement and cannot drift from the `finally` that clears it. Not a
+        public seam: the guards below assume the lock is held.
+        """
+        if not self.is_cold or self._disposed or self._recovering:
+            return
+        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.session.runtime.launch import (
+            ActionableConnectionError,
+            RuntimeStartupError,
+            WarmErrand,
+            engage_runtime,
+        )
+
+        try:
+            await engage_runtime(
+                self._session_id,
+                self._cwd,
+                WarmErrand(),
+                config_dir=self._config_dir,
             )
+        except RuntimeStartupError as error:
+            # engage_runtime now fails FAST once no candidate can start,
+            # carrying the child's own cause. Re-raised as ConnectionError
+            # so it takes the existing owner-unavailable path, but keeping
+            # the vetted user-facing sentence when there is one, instead of
+            # a generic timeout nobody can act on (QA Q1).
+            logger.warning("engage failed for %s: %s", self._session_id, error)
+            # The vetted sentence rides a TYPE, so a relay can echo it
+            # without having to guess from the text which messages are safe
+            # to show. Anything unvetted stays a plain ConnectionError and
+            # gets the generic sentence at the surface.
+            if error.actionable:
+                raise ActionableConnectionError(error.actionable) from error
+            raise ConnectionError(self._unavailable_reason()) from error
+        # Re-checked AFTER the engage, which is the long await here (a
+        # spawn plus up to ~2 s of construction). The TUI engages at mount
+        # now, so `/resume` or `/new` typed in that first second disposes
+        # this facade while the engage is in flight; binding anyway would
+        # attach a live `attach` socket to a dead viewer — one nobody
+        # closes, which holds the old runtime resident (residency term 3)
+        # and never offers it back (review round 1, MAJOR-1). The runtime
+        # that was spawned is left to the drain: with no viewer attached
+        # and nothing written it exits in ~3 s and removes its directory.
+        if self._disposed:
+            return
+        sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
+        budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
+        deadline = time.monotonic() + budget
+        # A BACKGROUND bind holds the lock every foreground caller must queue
+        # on, so its generous budget is only defensible while nobody is
+        # waiting. This event is how it learns otherwise; a foreground bind is
+        # never preempted (it IS the thing being protected) and passes None.
+        preempt = None if foreground else self._foreground_arrived
 
-            try:
-                await engage_runtime(
-                    self._session_id,
-                    self._cwd,
-                    WarmErrand(),
-                    config_dir=self._config_dir,
-                )
-            except RuntimeStartupError as error:
-                # engage_runtime now fails FAST once no candidate can start,
-                # carrying the child's own cause. Re-raised as ConnectionError
-                # so it takes the existing owner-unavailable path, but keeping
-                # the vetted user-facing sentence when there is one, instead of
-                # a generic timeout nobody can act on (QA Q1).
-                logger.warning("engage failed for %s: %s", self._session_id, error)
-                # The vetted sentence rides a TYPE, so a relay can echo it
-                # without having to guess from the text which messages are safe
-                # to show. Anything unvetted stays a plain ConnectionError and
-                # gets the generic sentence at the surface.
-                if error.actionable:
-                    raise ActionableConnectionError(error.actionable) from error
-                raise ConnectionError(self._unavailable_reason()) from error
-            # Re-checked AFTER the engage, which is the long await here (a
-            # spawn plus up to ~2 s of construction). The TUI engages at mount
-            # now, so `/resume` or `/new` typed in that first second disposes
-            # this facade while the engage is in flight; binding anyway would
-            # attach a live `attach` socket to a dead viewer — one nobody
-            # closes, which holds the old runtime resident (residency term 3)
-            # and never offers it back (review round 1, MAJOR-1). The runtime
-            # that was spawned is left to the drain: with no viewer attached
-            # and nothing written it exits in ~3 s and removes its directory.
-            if self._disposed:
+        def _effective_deadline() -> float:
+            """``deadline``, cut to the yield budget once someone is waiting.
+
+            ``min`` of two absolute deadlines rather than of budgets, so a
+            preemption arriving near the end can only shorten the wait.
+            """
+            if preempt is not None and self._foreground_waiting:
+                return min(deadline, time.monotonic() + _BACKGROUND_YIELD_BUDGET_S)
+            return deadline
+
+        delay = _BIND_RETRY_INITIAL_S
+        last_error: BaseException | None = None
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            # Re-checked on EVERY attempt, not once on entry. The awaits
+            # below (a dial, a sync wait, a backoff sleep) are all points
+            # at which `/new` or `/resume` can dispose this facade, or at
+            # which owner loss can start a recovery that owns the dial —
+            # and binding under either leaves a live socket attached to a
+            # facade nobody owns, which pins the runtime resident and never
+            # offers it back (the failure ``_dial``'s disposed-guard and
+            # review round 1 MAJOR-1 both document).
+            if self._disposed or self._recovering or not self.is_cold:
+                # Stopping the retry must not SWALLOW a failure an attempt
+                # already produced. Disposal before any attempt is the
+                # ordinary silent return this function has always made (see
+                # the identical guards above); disposal that interrupts an
+                # attempt in flight is the caller's to hear about, and
+                # ``test_interrupted_initial_sync_closes_socket_and_retries``
+                # pins exactly that contract.
+                if last_error is not None:
+                    raise last_error
                 return
-            sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
-            budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
-            deadline = time.monotonic() + budget
-            delay = _BIND_RETRY_INITIAL_S
-            last_error: BaseException | None = None
-            for attempt in range(_BIND_RETRY_ATTEMPTS):
-                # Re-checked on EVERY attempt, not once on entry. The awaits
-                # below (a dial, a sync wait, a backoff sleep) are all points
-                # at which `/new` or `/resume` can dispose this facade, or at
-                # which owner loss can start a recovery that owns the dial —
-                # and binding under either leaves a live socket attached to a
-                # facade nobody owns, which pins the runtime resident and never
-                # offers it back (the failure ``_dial``'s disposed-guard and
-                # review round 1 MAJOR-1 both document).
-                if self._disposed or self._recovering or not self.is_cold:
-                    # Stopping the retry must not SWALLOW a failure an attempt
-                    # already produced. Disposal before any attempt is the
-                    # ordinary silent return this function has always made (see
-                    # the identical guards above); disposal that interrupts an
-                    # attempt in flight is the caller's to hear about, and
-                    # ``test_interrupted_initial_sync_closes_socket_and_retries``
-                    # pins exactly that contract.
-                    if last_error is not None:
-                        raise last_error
-                    return
-                # Re-read per attempt rather than reusing the first record: a
-                # runtime that retired between attempts publishes a NEW record
-                # under a new pid, and redialling the dead one would burn every
-                # remaining attempt on a socket that cannot answer.
-                record, _owner = await asyncio.to_thread(
-                    find_owner_record, self._config_dir, self._session_id
+            # Re-read per attempt rather than reusing the first record: a
+            # runtime that retired between attempts publishes a NEW record
+            # under a new pid, and redialling the dead one would burn every
+            # remaining attempt on a socket that cannot answer.
+            record, _owner = await asyncio.to_thread(
+                find_owner_record, self._config_dir, self._session_id
+            )
+            if self._disposed:
+                # Same rule as the guard at the top of the loop: never
+                # swallow a failure an earlier attempt already produced.
+                if last_error is not None:
+                    raise last_error
+                return
+            if record is None:
+                # No record at all is not a transient the way a refused
+                # dial is — ``engage_runtime`` returned, so one existed
+                # moments ago and has since gone. Report it rather than
+                # spending the budget rediscovering nothing.
+                #
+                # Never at the cost of a reason an earlier attempt already
+                # produced: attempt 1 failing with the pump's own words and
+                # attempt 2 then finding no record must not downgrade the
+                # diagnosis to this generic sentence. Same rule as the two
+                # disposal arms above, which is why all three read alike.
+                if last_error is not None:
+                    raise last_error
+                raise ConnectionError("could not start a runtime for this session")
+            try:
+                # Clamp the ATTEMPT to what is left of the budget, not just
+                # the backoff between attempts. Without this a second
+                # attempt starts its full envelope after the first has
+                # already spent most of the budget, so three 15 s attempts
+                # overrun a 25 s foreground budget to 45 s — the budgets
+                # would compose exactly the way this change exists to stop.
+                remaining = _effective_deadline() - time.monotonic()
+                if remaining <= 0:
+                    break
+                await self._bind_to(
+                    record, sync_timeout=min(sync_timeout, remaining), preempt=preempt
                 )
-                if self._disposed:
-                    # Same rule as the guard at the top of the loop: never
-                    # swallow a failure an earlier attempt already produced.
-                    if last_error is not None:
-                        raise last_error
-                    return
-                if record is None:
-                    # No record at all is not a transient the way a refused
-                    # dial is — ``engage_runtime`` returned, so one existed
-                    # moments ago and has since gone. Report it rather than
-                    # spending the budget rediscovering nothing.
-                    raise ConnectionError("could not start a runtime for this session")
-                try:
-                    # Clamp the ATTEMPT to what is left of the budget, not just
-                    # the backoff between attempts. Without this a second
-                    # attempt starts its full envelope after the first has
-                    # already spent most of the budget, so three 15 s attempts
-                    # overrun a 25 s foreground budget to 45 s — the budgets
-                    # would compose exactly the way this change exists to stop.
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    await self._bind_to(record, sync_timeout=min(sync_timeout, remaining))
-                    return
-                except (ConnectionError, OSError, TimeoutError) as error:
-                    # ``_bind_to`` has already discarded its client, so the
-                    # facade is clean and the runtime's attach slot is back.
-                    last_error = error
-                    remaining = deadline - time.monotonic()
-                    if attempt == _BIND_RETRY_ATTEMPTS - 1 or remaining <= 0:
-                        break
-                    logger.debug(
-                        "bind attempt %d/%d for %s failed (%s); retrying",
-                        attempt + 1,
-                        _BIND_RETRY_ATTEMPTS,
-                        self._session_id,
-                        error,
-                    )
-                    await asyncio.sleep(min(delay, remaining))
-                    delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
-            if last_error is not None:
-                raise last_error
+                return
+            except (ConnectionError, OSError, TimeoutError) as error:
+                # ``_bind_to`` has already discarded its client, so the
+                # facade is clean and the runtime's attach slot is back.
+                last_error = error
+                remaining = _effective_deadline() - time.monotonic()
+                if attempt == _BIND_RETRY_ATTEMPTS - 1 or remaining <= 0:
+                    break
+                if preempt is not None and self._foreground_waiting:
+                    # A retry is worth a foreground caller's time only when
+                    # nobody is holding a command behind it. Backing off here
+                    # would spend that caller's wait re-asking a question this
+                    # bind has already failed; the foreground caller runs its
+                    # own bind, with its own retries, the moment the lock is
+                    # free. It inherits ``last_error`` through the raise below,
+                    # so nothing is swallowed by yielding.
+                    break
+                logger.debug(
+                    "bind attempt %d/%d for %s failed (%s); retrying",
+                    attempt + 1,
+                    _BIND_RETRY_ATTEMPTS,
+                    self._session_id,
+                    error,
+                )
+                await asyncio.sleep(min(delay, remaining))
+                delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
+        if last_error is not None:
+            raise last_error
 
-    async def _bind_to(self, record: SessionRecord, *, sync_timeout: float) -> None:
+    async def _bind_to(
+        self,
+        record: SessionRecord,
+        *,
+        sync_timeout: float,
+        preempt: asyncio.Event | None = None,
+    ) -> None:
         """Attach this viewer to a live record and adopt its canonical state.
 
         The tail of :meth:`connect`, reused so a cold viewer becoming attached
@@ -1405,11 +1557,16 @@ class RemoteSession:
         ``sync_timeout`` is the caller's envelope rather than a constant: the
         same code binds for a user watching a slash command and for a silent
         speculative engage, and those are different budgets (see the envelope
-        constants at the top of this module).
+        constants at the top of this module). ``preempt`` is the background
+        caller's promise to give that envelope back if a foreground caller
+        starts waiting on the lock this bind holds; foreground callers pass
+        None because they are what it protects.
         """
         try:
             pending_sync = await self._dial(record)
-            frontend = await self._await_frontend(pending_sync, timeout=sync_timeout)
+            frontend = await self._await_frontend(
+                pending_sync, timeout=sync_timeout, preempt=preempt
+            )
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
@@ -1584,7 +1741,11 @@ class RemoteSession:
         return pending_sync
 
     async def _await_frontend(
-        self, future: asyncio.Future[FrontendSync], *, timeout: float
+        self,
+        future: asyncio.Future[FrontendSync],
+        *,
+        timeout: float,
+        preempt: asyncio.Event | None = None,
     ) -> FrontendSync:
         """Wait for the canonical sync on LIVENESS, with the clock as a backstop.
 
@@ -1614,11 +1775,30 @@ class RemoteSession:
         the engage and welcome deadlines, see ``FRONTEND_SYNC_FOREGROUND_S``),
         while a background engage or recovery has nobody waiting and should
         outlast a busy authoritative loop rather than surrender to it.
+
+        ``preempt`` is how the second half of that guarantee is kept. "Nobody
+        waiting" is true when a background wait STARTS and can stop being true
+        while it runs — the ordinary TUI boot, where the mount engage is in
+        flight when the user's first prompt arrives. Passed the event, this
+        wait stops promising the generous envelope the moment someone begins
+        waiting on it and finishes inside ``_BACKGROUND_YIELD_BUDGET_S``
+        instead. It is an EVENT rather than a polled flag for the same reason
+        the sync itself is: the wakeup lands on the turn the arrival happens.
+
+        Preemption shortens the deadline only; it never abandons the dial. The
+        socket stays open and the future stays the same object, so a sync that
+        lands inside the shortened window is still adopted normally, and one
+        that does not fails through the identical backstop arm below.
         """
-        if future is None:  # pragma: no cover - invariant, kept as a tripwire
-            raise AssertionError("_await_frontend requires the dial's own future")
+        # No `future is None` tripwire: the parameter is typed non-optional and
+        # every one of the four call sites passes `_dial`'s own return, so the
+        # check was dead code pyright already reported as unreachable (review
+        # round 1, NIT-1). The seam it guarded — a caller reaching for
+        # `self._frontend_future` instead — is closed by the signature.
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+            if preempt is None:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+            return await self._await_frontend_preemptible(future, timeout, preempt)
         except TimeoutError as exc:
             # Do NOT believe the expiry yet. ``wait_for`` checks a wall clock,
             # so a viewer loop blocked past the deadline trips it even when the
@@ -1639,7 +1819,64 @@ class RemoteSession:
                 await asyncio.sleep(0)
             if future.done():
                 return future.result()
-            raise ConnectionError(_SYNC_UNRESPONSIVE_REASON) from exc
+            raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
+
+    async def _await_frontend_preemptible(
+        self,
+        future: asyncio.Future[FrontendSync],
+        timeout: float,
+        preempt: asyncio.Event,
+    ) -> FrontendSync:
+        """Wait for ``future``, shrinking the deadline if ``preempt`` fires.
+
+        Raises ``TimeoutError`` exactly as ``asyncio.wait_for`` would, so the
+        caller's settle loop and backstop arm treat both waits identically —
+        the preemption changes WHEN the deadline lands, never what an expiry
+        means.
+
+        The deadline is recomputed rather than restarted: a preemption that
+        arrives with less than ``_BACKGROUND_YIELD_BUDGET_S`` already left must
+        not EXTEND the wait, which a naive ``min`` on the budget alone would
+        do. ``min`` of the two absolute deadlines is what makes it monotonic.
+
+        ``future`` is never cancelled here. ``asyncio.wait`` does not cancel
+        what it is handed on timeout (verified), and the pump owns this future:
+        a frame landing after the expiry still resolves it, and the caller's
+        settle loop is what looks. Cancelling it would convert this into
+        exactly the false timeout the settle loop exists to prevent.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        # The event is awaited through a task so it can be cancelled without
+        # disturbing the Event itself, which outlives this wait and may be
+        # consulted by a later bind.
+        watcher: asyncio.Task[bool] | None = None
+        if not preempt.is_set():
+            watcher = asyncio.ensure_future(preempt.wait())
+        try:
+            while True:
+                if preempt.is_set():
+                    deadline = min(deadline, loop.time() + _BACKGROUND_YIELD_BUDGET_S)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError
+                waiters: set[Any] = {future}
+                if watcher is not None and not watcher.done():
+                    waiters.add(watcher)
+                await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                if future.done():
+                    return future.result()
+                # Either the shortened deadline expired or the preemption fired
+                # and the loop re-enters to apply it. Both are decided at the
+                # top rather than here, so there is one place that owns the
+                # deadline.
+                if watcher is not None and watcher.done():
+                    watcher = None
+                if not preempt.is_set() and loop.time() >= deadline:
+                    raise TimeoutError
+        finally:
+            if watcher is not None and not watcher.done():
+                watcher.cancel()
 
     async def _load_frontend_history(self, frontend: FrontendSync) -> None:
         """Install the durable cut before live replay or command readiness."""

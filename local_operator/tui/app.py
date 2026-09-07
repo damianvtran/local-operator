@@ -11494,20 +11494,51 @@ class OperatorApp(App[None]):
                 # told the user their session was lost when it was running in
                 # the background the whole time.
                 #
-                # A VETTED sentence is different: those are real configuration
-                # faults the user has to act on (a missing credential, an
-                # unusable model), so they keep their own text and stay a
-                # warning. Everything else now says what is actually known —
-                # the runtime is alive, this attempt did not land, and the next
-                # keystroke retries for free.
+                # Gated on the SYNC condition, never on "not actionable".
+                # ``runtime_alive`` is set only by ``RuntimeUnresponsiveError``,
+                # which is raised at the one place that establishes the claim —
+                # a live socket whose owner did not sync in time. Branching on
+                # ``not actionable`` instead put "it is running" over three
+                # sentences where it was false: a deliberate `/stop`, an owner
+                # mid-reconnect, and the no-record case (review round 1,
+                # MAJOR-1). Those are plain ``ConnectionError``s and their own
+                # text is the honest answer, so they keep relaying it.
+                #
+                # A VETTED sentence is different again: those are real
+                # configuration faults the user has to act on (a missing
+                # credential, an unusable model), so they keep their own text
+                # and stay a warning.
                 if getattr(error, "actionable", False):
                     self._system_notice(str(error), "warning")
-                else:
+                elif getattr(error, "runtime_alive", False):
+                    # Past tense for the ATTEMPT, present for the RUNTIME. At
+                    # the moment this paints the retry is over — all three
+                    # attempts are spent and the `finally` below has already
+                    # cleared the band — so a present participle ("still
+                    # connecting") promises background progress the code
+                    # deliberately is not making, and a user who believes it
+                    # waits, which is the one action that cannot work (design
+                    # round 1, D1). "in the background" is dropped for the same
+                    # reason: it is the implementation's word and it is what
+                    # made the sentence sound like work in flight.
+                    #
+                    # `note`, not `info`: this row is the sole receipt for a
+                    # command that was DROPPED (the return below never reaches
+                    # the dispatch), which is NoticeBlock's definition of the
+                    # middle tier — the answer to something the user just did.
+                    # `info` rendered it in the same dim ink as the decorative
+                    # boot hint two rows above (design round 1, D2).
                     self._system_notice(
-                        "still connecting to this session's runtime — it is running "
-                        "in the background; try again in a moment",
-                        "info",
+                        "could not reach this session's runtime in time — it is "
+                        "still running; try that again in a moment",
+                        "note",
                     )
+                else:
+                    # Everything else keeps the reason it was given. The old
+                    # copy at least relayed `{error}`; dropping it for a
+                    # reassurance would regress this change's own goal of
+                    # honest failure strings.
+                    self._system_notice(str(error), "warning")
                 return
             finally:
                 self._set_starting(False)
