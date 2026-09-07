@@ -1334,6 +1334,15 @@ class RemoteSession:
                 # offers it back (the failure ``_dial``'s disposed-guard and
                 # review round 1 MAJOR-1 both document).
                 if self._disposed or self._recovering or not self.is_cold:
+                    # Stopping the retry must not SWALLOW a failure an attempt
+                    # already produced. Disposal before any attempt is the
+                    # ordinary silent return this function has always made (see
+                    # the identical guards above); disposal that interrupts an
+                    # attempt in flight is the caller's to hear about, and
+                    # ``test_interrupted_initial_sync_closes_socket_and_retries``
+                    # pins exactly that contract.
+                    if last_error is not None:
+                        raise last_error
                     return
                 # Re-read per attempt rather than reusing the first record: a
                 # runtime that retired between attempts publishes a NEW record
@@ -1343,6 +1352,10 @@ class RemoteSession:
                     find_owner_record, self._config_dir, self._session_id
                 )
                 if self._disposed:
+                    # Same rule as the guard at the top of the loop: never
+                    # swallow a failure an earlier attempt already produced.
+                    if last_error is not None:
+                        raise last_error
                     return
                 if record is None:
                     # No record at all is not a transient the way a refused

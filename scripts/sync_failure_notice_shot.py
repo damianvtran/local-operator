@@ -58,9 +58,7 @@ async def main() -> None:
 
         if legacy:
             # The pre-fix surface: a boot failure, at warning severity.
-            app._system_notice(
-                f"could not start a runtime for this session: {error}", "warning"
-            )
+            app._system_notice(f"could not start a runtime for this session: {error}", "warning")
         else:
             # The post-fix surface, copied from `_bind_then_dispatch`'s handler
             # so the frame cannot drift from the code it documents.

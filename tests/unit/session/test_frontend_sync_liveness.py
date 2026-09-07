@@ -457,6 +457,13 @@ async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monk
     runtime resident and never offers it back (review round 1, MAJOR-1). The
     guard is re-checked per attempt, not once on entry, because every await in
     the loop is a point at which disposal can land.
+
+    Stopping is NOT the same as going quiet: an attempt that already failed
+    still reports, because a caller awaiting the bind has to learn that it did
+    not happen. ``test_remote_startup``'s
+    ``test_interrupted_initial_sync_closes_socket_and_retries[dispose]`` pins
+    that contract from the other side, and an earlier draft of this retry loop
+    broke it by returning silently on the disposal check.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _claim(tmp_path)
@@ -482,7 +489,8 @@ async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monk
             raise ConnectionError(remote_module._SYNC_UNRESPONSIVE_REASON)
 
         monkeypatch.setattr(viewer, "_bind_to", dispose_on_first)
-        await viewer._ensure_bound()
+        with pytest.raises(ConnectionError):
+            await viewer._ensure_bound()
 
         assert attempts == 1, "a disposed facade must not attempt another bind"
         assert not server._clients, "no socket may be left attached to a dead facade"
