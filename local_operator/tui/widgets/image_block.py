@@ -134,10 +134,16 @@ class ImageBlock(TranscriptBlock):
     SPACING_KIND: ClassVar[str] = "image"
 
     def __init__(
-        self, data_b64: str | None, mime_type: str = "image/png", *, label: str = ""
+        self,
+        data_b64: str | None,
+        mime_type: str = "image/png",
+        *,
+        label: str = "",
+        navigation_visible: bool = True,
     ) -> None:
         super().__init__()
         self.add_class("image-block")
+        self._navigation_visible = navigation_visible
         #: Short human name for the unavailable receipt (marker text or file
         #: name). Never rendered while the image itself is on screen — the
         #: caption already lives on the tool card or in the prompt text.
@@ -228,6 +234,10 @@ class ImageBlock(TranscriptBlock):
         so they cannot interleave with a frame Textual is writing.
         """
         assert self._pil is not None
+        if not self._navigation_visible:
+            # Prepared views still need the real grid for layout, but must not
+            # transmit/place a terminal image before the source is selected.
+            return Text("\n".join(" " * (SPINE_INDENT + cols) for _ in range(rows)))
         cell = images_mod.cell_size()
         box_aspect = (cols * cell.width) / max(1, rows * cell.height)
         if self._kitty_id is not None and self._placed != (cols, rows):
@@ -439,6 +449,12 @@ class ImageBlock(TranscriptBlock):
             self.set_content(self._build())
         finally:
             self._finalized = was_finalized
+
+    def set_navigation_visible(self, visible: bool) -> None:
+        changed = visible != self._navigation_visible
+        super().set_navigation_visible(visible)
+        if changed and self.is_mounted and self._mode == "kitty":
+            self._repaint()
 
     def on_mount(self) -> None:
         """First paint at the real width (construction guessed 80 cols)."""

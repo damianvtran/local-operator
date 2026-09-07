@@ -58,6 +58,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
+    ToolResult,
     TurnEndEvent,
     TurnStartEvent,
     Usage,
@@ -75,6 +76,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -88,9 +90,14 @@ from local_operator.session.frontend_state import (
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
 )
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import (
+    Transcript,
+    read_replay_suffix,
+    replay_entries,
+)
 from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
@@ -292,6 +299,23 @@ class RemoteSession:
         self._subagent_comms = SnapshotSubagentComms()
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
+        self._live_history: dict[str, Any] = {}
+        self._display_window_requested = False
+        self._owner_record: SessionRecord | None = None
+        self._display_refresh_lock = asyncio.Lock()
+        self._display_refresh_task: asyncio.Task[None] | None = None
+        self._prompt_completion_waiters: set[asyncio.Future[AgentEndEvent]] = set()
+        self._prompt_completion_observers: set[EventHandler] = set()
+        self._display_invalidated = False
+        self._display_revision = 0
+        self._loaded_history_generation = 0
+        self._display_window_supported = False
+        self._frontend_refresh_cut: tuple[str, int] | None = None
+        self._hydrated_once = False
+        self._display_history: DisplayHistoryWindow | None = None
+        self._history_hydrated = True
+        self._durable_seed_ids: set[str] = set()
+        self._durable_seed_tool_ids: set[str] = set()
         self._history_ids: set[str] = set()
         #: The durable frontend checkpoint, handed from the threaded history
         #: read to the cold path's restore so the roster/todo/title recovery
@@ -326,6 +350,9 @@ class RemoteSession:
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
+        self._background_approval = False
+        self._keep_gate_reply = False
+        self._gate_answered_key: tuple[str, str, int] | None = None
         # Snapshot creation is not retryable: navigation must retire the UI,
         # not close the response channel after the owner has begun a copy.
         self._snapshot_clients: dict[AttachClient, int] = {}
@@ -492,6 +519,7 @@ class RemoteSession:
         *,
         config_dir: Path,
         takeover_factory: Callable[[], Any],
+        display_window: bool = False,
         surface: str = "terminal",
     ) -> "RemoteSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
@@ -504,11 +532,12 @@ class RemoteSession:
             takeover_factory=takeover_factory,
             surface=surface,
         )
+        self._display_window_requested = display_window
         await self._dial(record)
         try:
             frontend = await self._await_frontend()
             self._install_frontend(frontend.snapshot)
-            await self._load_history(frontend.live_cursor)
+            await self._load_frontend_history(frontend)
         except BaseException:
             # The caller gets the error and no facade — so nothing would ever
             # close the connection ``_dial`` just opened. See
@@ -1163,7 +1192,7 @@ class RemoteSession:
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._install_frontend(frontend.snapshot, publish=True)
-            await self._load_history(frontend.live_cursor)
+            await self._load_frontend_history(frontend)
             if self._disposed:
                 raise ConnectionError("viewer disposed while synchronizing")
             self._finish_sync()
@@ -1223,6 +1252,7 @@ class RemoteSession:
             logger.debug("closing a rejected owner connection failed", exc_info=True)
 
     async def _dial(self, record: SessionRecord) -> None:
+        self._owner_record = record
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
@@ -1273,6 +1303,7 @@ class RemoteSession:
             events=True,
             on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
             frontend_state=True,
+            display_window=self._display_window_requested,
             surface=self._surface,
             # THE full-TUI viewer is the client that renders action-carrying
             # receipts: ``_render_authoritative_slash`` submits their
@@ -1331,12 +1362,300 @@ class RemoteSession:
         except TimeoutError as exc:
             raise ConnectionError("owner did not send frontend synchronization") from exc
 
+    async def _load_frontend_history(self, frontend: FrontendSync) -> None:
+        """Install the durable cut before live replay or command readiness."""
+        window = frontend.display_history if self._display_window_requested else None
+        self._display_window_supported = window is not None
+        self._loaded_history_generation = (
+            window.history_generation
+            if window is not None
+            else frontend.snapshot.history_generation
+        )
+        self._display_revision += 1
+        previous = self._display_history
+        if window is None or window.status != "ok":
+            # Legacy owners and oversized prose keep the honest full replay.
+            self._display_history = None
+            self._history_hydrated = True
+            self._durable_seed_ids.clear()
+            self._durable_seed_tool_ids.clear()
+            await self._load_history(frontend.live_cursor, strict_cut=window is not None)
+            if previous is not None:
+                self._buffered_events.insert(
+                    0, HistoryDeltaEvent(messages=list(self._history), reset=True)
+                )
+            return
+        self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
+        rows = list(window.messages)
+        page = window
+        reset = self._hydrated_once and (
+            previous is None
+            or previous.owner_epoch != window.owner_epoch
+            or previous.history_generation != window.history_generation
+        )
+        if previous is not None and self._hydrated_once and not reset:
+            # Reconnect must include ALL rows since the last durable frontier,
+            # not just a recent tail. Appends preserve signed snapshot positions.
+            while page.start > previous.total_message_count and page.before_token:
+                page = await self._fetch_history_page(
+                    page.before_token, frontend.epoch, frontend.live_cursor
+                )
+                if page.status != "ok":
+                    raise ConnectionError("history changed during reconnect; retry attachment")
+                rows[:0] = page.messages
+        self._display_history = window.model_copy(
+            update={
+                "messages": rows,
+                "start": page.start,
+                "before_token": page.before_token,
+                "has_more": page.has_more,
+            }
+        )
+        self._history = rows
+        self._live_history.clear()
+        self._history_hydrated = page.start == 0 and len(rows) == window.total_message_count
+        self._history_ids = {m.id for m in rows}
+        self._durable_seed_ids = set(window.durable_seed_ids)
+        self._durable_seed_tool_ids = set(window.durable_seed_tool_ids)
+        if reset:
+            self._message_events.clear()
+            self._buffered_events.insert(0, HistoryDeltaEvent(messages=rows, reset=True))
+        elif self._hydrated_once and previous is not None:
+            self._replay_durable_suffix(rows[max(0, previous.total_message_count - page.start) :])
+        # Loaded rows suppress duplicate relay, but are not all painted: the
+        # TUI mounts only its viewport and pages older rows later.
+        self._live_message_phase.clear()
+        if not self._hydrated_once:
+            self._filter_known_messages()
+        self._hydrated_once = True
+
+    def _validate_display_window(
+        self, window: DisplayHistoryWindow, epoch: str, cursor: str | None
+    ) -> None:
+        if (
+            window.conversation_id != self.session_id
+            or window.owner_epoch != epoch
+            or window.through_id != cursor
+        ):
+            raise ConnectionError("display history does not match canonical sync")
+        if window.start < 0 or window.start + len(window.messages) > window.total_message_count:
+            raise ConnectionError("invalid display history range")
+
+    async def _fetch_history_page(
+        self, before: str, epoch: str, cursor: str | None, anchor: str = ""
+    ) -> DisplayHistoryWindow:
+        client = self._client
+        if client is None:
+            raise ConnectionError("history owner is disconnected")
+        page = DisplayHistoryWindow.model_validate(await client.history_page(before, anchor))
+        if page.status != "reset":
+            self._validate_display_window(page, epoch, cursor)
+        return page
+
+    async def history_page(self, before: str, *, anchor: str = "") -> DisplayHistoryWindow:
+        """Read a signed page; reset is explicit and never silently mixed in."""
+        window = self._display_history
+        if window is None:
+            raise RuntimeError("this session uses full-history replay")
+        return await self._fetch_history_page(before, window.owner_epoch, window.through_id, anchor)
+
+    def pending_display_tool_ids(self) -> set[str]:
+        """Unanswered calls in the pending gate's current serialized user turn.
+
+        A gate can precede tool_execution_start, so no invented start event is
+        needed. The latest call group after the latest user boundary is the
+        only eligible group; old interrupted turns must remain interrupted.
+        """
+        if self.pending_gate is None:
+            return set()
+        answered: set[str] = set()
+        for message in reversed(self.display_history_window()):
+            role = getattr(message, "role", "")
+            if role == "user":
+                break
+            if role == "tool":
+                answered.add(str(getattr(message, "tool_call_id", "")))
+            calls = getattr(message, "tool_calls", None)
+            if role == "assistant" and calls:
+                return {call.id for call in calls} - answered
+        return set()
+
+    @property
+    def display_history_revision(self) -> int:
+        return self._display_revision
+
+    @property
+    def display_history_current(self) -> bool:
+        return not self._display_invalidated
+
+    def _invalidate_display_history(self) -> None:
+        if not self._display_window_supported:
+            return
+        self._display_invalidated = True
+        self._display_revision += 1
+        task = self._display_refresh_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_display_history())
+            self._display_refresh_task = task
+
+            def finished(done: asyncio.Task[None]) -> None:
+                if not done.cancelled() and done.exception() is not None:
+                    # Keep the invalidation fence closed. Selection awaits this
+                    # task and reports the failure instead of painting stale rows.
+                    logger.warning("canonical display refresh failed: %s", done.exception())
+
+            task.add_done_callback(finished)
+
+    async def ensure_display_current(self) -> None:
+        task = self._display_refresh_task
+        if task is not None:
+            await asyncio.shield(task)
+        if self._display_invalidated:
+            await self._refresh_display_history()
+
+    async def _refresh_display_history(self) -> None:
+        """Capture a fresh canonical cut on the existing authenticated stream.
+
+        Redialling here abandons pending RPCs (including the compact operation
+        whose success triggered this refresh) or leaks their old connection.
+        A read-only sync uses the same atomic owner capture and buffers live
+        deltas until its exact cursor/gates/history are installed instead.
+        """
+        async with self._display_refresh_lock:
+            self._display_invalidated = True
+            while self._display_invalidated:
+                client = self._client
+                if client is None or not client.connected:
+                    raise ConnectionError("history owner is unavailable")
+                self._ready_for_events = False
+                self._owner_ready.clear()
+                self._pending_frontend_updates = []
+                try:
+                    frontend = FrontendSync.model_validate(await client.frontend_sync())
+                    if (
+                        self._client is not client
+                        or self._disposed
+                        or frontend.snapshot.session_id != self._session_id
+                        or frontend.epoch != self.frontend_state.epoch
+                    ):
+                        raise ConnectionError("history binding changed during refresh")
+                    self._frontend_refresh_cut = (frontend.epoch, frontend.sequence)
+                    self._install_frontend(frontend.snapshot, publish=True)
+                    await self._load_frontend_history(frontend)
+                    self._display_invalidated = (
+                        self.frontend_state.history_generation != self._loaded_history_generation
+                    )
+                    self._finish_sync()
+                except BaseException:
+                    # The transport remains usable even when this read fails.
+                    # Preserve its ordered updates and surface the history error
+                    # to navigation, without cancelling source work or its gates.
+                    pending, self._pending_frontend_updates = self._pending_frontend_updates, None
+                    for update in pending or ():
+                        self._on_frontend_update(update.model_dump(mode="json"))
+                    self._ready_for_events = True
+                    self._drain_buffered_events()
+                    raise
+                finally:
+                    self._owner_ready.set()
+
+    @property
+    def history_before_token(self) -> str | None:
+        window = self._display_history
+        return window.before_token if window is not None and not self._history_hydrated else None
+
+    async def load_older_display_page(self) -> list[Any]:
+        window = self._display_history
+        if window is None or not self.history_before_token:
+            return []
+        page = await self.history_page(self.history_before_token)
+        if self._display_history is not window:
+            raise RuntimeError("history changed while paging; retry")
+        if page.status == "reset":
+            await self._refresh_display_history()
+            return []
+        if page.status == "full_required":
+            old_ids = set(self._history_ids)
+            return [m for m in await self.materialize_history() if m.id not in old_ids]
+        if page.start + len(page.messages) != window.start:
+            raise ConnectionError("history page is not contiguous with the loaded window")
+        self._history[:0] = page.messages
+        self._history_ids.update(m.id for m in page.messages)
+        self._display_history = window.model_copy(
+            update={
+                "start": page.start,
+                "before_token": page.before_token,
+                "has_more": page.has_more,
+                "messages": list(self._history),
+            }
+        )
+        self._history_hydrated = page.start == 0
+        return list(page.messages)
+
+    async def ensure_display_anchor(self, anchor: str) -> bool:
+        window = self._display_history
+        if window is None or not window.snapshot_token or not anchor:
+            return True
+        page = await self.history_page(window.snapshot_token, anchor=anchor)
+        if page.status == "reset":
+            await self._refresh_display_history()
+            fresh = self._display_history
+            if fresh is None or not fresh.snapshot_token:
+                return False
+            page = await self.history_page(fresh.snapshot_token, anchor=anchor)
+            if page.status == "reset":
+                return False
+        if page.status == "full_required":
+            await self.materialize_history()
+            return True
+        # Keep a contiguous loaded interval: the existing renderer pages both
+        # ways inside it and must never mistake a disjoint anchor/tail for a
+        # complete trajectory. The signed seek determines the exact frontier.
+        while self._display_history is not None and self._display_history.start > page.start:
+            await self.load_older_display_page()
+        return True
+
+    async def materialize_history(self) -> list[Any]:
+        """Explicit full replay, off the click path, at the captured sync cut."""
+        if self._history_hydrated:
+            return self.history()
+        window = self._display_history
+        if window is None:
+            raise RuntimeError("no canonical display history is installed")
+        rows: list[Any] = []
+        token = window.snapshot_token
+        while token:
+            page = await self.history_page(token)
+            if page.status == "reset":
+                raise RuntimeError("history changed while materializing; reconnect")
+            if page.status == "full_required":
+
+                def replay() -> list[Any]:
+                    transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+                    return (
+                        transcript.build_llm_history(through_id=window.through_id)
+                        if window.through_id
+                        else []
+                    )
+
+                rows = await asyncio.to_thread(replay)
+                break
+            rows[:0] = page.messages
+            token = page.before_token
+        if self._display_history is not window:
+            raise RuntimeError("history changed while materializing; retry")
+        self._history = rows
+        self._history_ids = {m.id for m in rows}
+        self._history_hydrated = True
+        return self.display_history_window()
+
     async def _load_history(
         self,
         live_cursor: str | None = None,
         *,
         drop_history_duplicates: bool = True,
         want_checkpoint: bool = False,
+        strict_cut: bool = False,
     ) -> None:
         """Read durable history exactly up to the sync's advertised boundary.
 
@@ -1354,15 +1673,19 @@ class RemoteSession:
         file, so a long session's replay is file I/O plus JSON parsing from
         end to end, with nothing the loop needs until the result is bound.
         """
-        entries, history = await self._read_transcript(want_checkpoint=want_checkpoint)
-        self._bind_history(
-            entries, history, live_cursor, drop_history_duplicates=drop_history_duplicates
+        history = await self._read_transcript(
+            want_checkpoint=want_checkpoint, through_id=live_cursor, strict_cut=strict_cut
         )
+        self._bind_history(history, live_cursor, drop_history_duplicates=drop_history_duplicates)
 
     async def _read_transcript(
-        self, *, want_checkpoint: bool = False
-    ) -> tuple[list[Any], list[Any]]:
-        """Parse the durable transcript off-loop, once per sync.
+        self,
+        *,
+        want_checkpoint: bool = False,
+        through_id: str | None = None,
+        strict_cut: bool = False,
+    ) -> list[Any]:
+        """Replay the durable transcript off-loop, once per sync.
 
         The single threaded read shared by initial connect AND reconnect:
         review round 3 (MAJOR-2) found the reconnect path re-running this
@@ -1384,44 +1707,52 @@ class RemoteSession:
         long-lived holds a reference on any path.
         """
 
-        def _replay() -> tuple[list[Any], list[Any]]:
-            transcript = Transcript(self._config_dir / "sessions" / self._session_id)
+        def _replay() -> list[Any]:
+            directory = self._config_dir / "sessions" / self._session_id
+            # Backward suffix read instead of ``Transcript(directory)``: the
+            # constructor JSON-decodes every row (220 ms at 47 MB, 1.5 s at
+            # 204 MB on the reference owners) when the replay only ever uses
+            # rows from the latest compaction's kept window. The suffix reader
+            # stops at that boundary and replays through the SAME module
+            # function the constructor path uses, so the result is identical
+            # by construction; a journal with no compaction reads to the
+            # start, which is today's cost, not a shortcut. The checkpoint is
+            # extracted from the same pass for the cold path so nothing
+            # re-reads the file on the loop.
+            suffix = read_replay_suffix(
+                directory,
+                through_id=through_id,
+                checkpoint_type=FRONTEND_CHECKPOINT_CUSTOM_TYPE if want_checkpoint else None,
+            )
             if want_checkpoint:
-                # Read here, on the worker, while the object is alive and
-                # already parsed: a second ``Transcript(...)`` on the loop
-                # would re-read and re-parse the whole file (0.68 s on the
-                # largest observed session).
-                self._cold_checkpoint = transcript.latest_custom(FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-            return transcript.entries(), transcript.build_llm_history()
+                self._cold_checkpoint = suffix.checkpoint
+            cut = through_id
+            if cut is not None and not suffix.through_present and not strict_cut:
+                # Older owners used best-effort cursors; preserve that fallback
+                # only for legacy full replay, never the negotiated window cut.
+                # ``through_present`` is false only after the reader reached
+                # the file START without meeting the cursor, so this is the
+                # same "id is not in the journal" the whole-file parse saw.
+                cut = None
+            return replay_entries(suffix.entries, AttachmentStore(directory), through_id=cut)
 
         return await asyncio.to_thread(_replay)
 
     def _bind_history(
         self,
-        entries: list[Any],
         history: list[Any],
         live_cursor: str | None,
         *,
         drop_history_duplicates: bool,
     ) -> None:
-        """Adopt one parsed transcript as ``_history``, bounded by the cursor."""
-        if live_cursor is not None:
-            # Keep only the message entries at or before the advertised cursor.
-            # The cursor names a transcript ENTRY id (any type); walk to it and
-            # drop the durable suffix past the boundary the sync already sealed.
-            boundary_index = None
-            for index, entry in enumerate(entries):
-                if entry.id == live_cursor:
-                    boundary_index = index
-                    break
-            if boundary_index is not None:
-                kept_ids = {entry.id for entry in entries[: boundary_index + 1]}
-                history = [
-                    message
-                    for message in history
-                    if not getattr(message, "id", None) or str(message.id) in kept_ids
-                ]
+        """Adopt canonical replay already selected at the journal cut.
+
+        Filtering materialized IDs here used to lose synthetic compaction
+        markers and could apply prunes newer than the cut. The parser now
+        selects journal entries before running the shared replay semantics.
+        """
         self._history = history
+        self._live_history.clear()
         self._history_ids = {
             str(message.id) for message in self._history if getattr(message, "id", None)
         }
@@ -1460,6 +1791,10 @@ class RemoteSession:
         for data in self.frontend_state.live_events:
             event = deserialize_event(data)
             if self._is_duplicate(event):
+                # Already painted is not the same as durable. Rebuild source
+                # display storage from the canonical seed even when no event
+                # should be re-emitted into an already-painted live surface.
+                self._remember_live(event)
                 continue
             self._track(event)
             seeded.append(event)
@@ -1480,6 +1815,7 @@ class RemoteSession:
         self._ready_for_events = True
         self._owner_ready.set()
         self._drain_buffered_events()
+        self._maybe_start_gate()
 
     def _replay_durable_suffix(self, history: list[Any]) -> None:
         """Emit ONE typed history delta for durable rows nothing ever painted.
@@ -1563,7 +1899,11 @@ class RemoteSession:
         if isinstance(event, (MessageStartEvent, MessageEndEvent)):
             # Durable or already-painted-complete: a replayed row, never the
             # same live message's first/last beat.
-            if message_id in self._message_events:
+            if (
+                message_id in self._message_events
+                or message_id in self._history_ids
+                or message_id in self._durable_seed_ids
+            ):
                 return True
         phase = _MESSAGE_PHASE.get(type(event))
         if phase is None:
@@ -1580,7 +1920,29 @@ class RemoteSession:
         return False
 
     def _track(self, event: AgentEvent[Any]) -> None:
-        """Record a painted live message id so a later sync/durable row skips it."""
+        """Record painted identity separately from complete source display data."""
+        self._remember_live(event)
+        message = getattr(event, "message", None)
+        message_id = str(getattr(message, "id", "") or "")
+        if message_id and (
+            isinstance(event, MessageEndEvent)
+            or (
+                isinstance(event, MessageStartEvent)
+                and bool(getattr(message, "text", "") or getattr(message, "tool_calls", None))
+            )
+        ):
+            self._message_events.add(message_id)
+
+    def _remember_live(self, event: AgentEvent[Any]) -> None:
+        if isinstance(event, ToolExecutionEndEvent):
+            if event.tool_call_id in self._durable_seed_tool_ids:
+                return
+            # Tool results arrive as execution events rather than message_end.
+            # Keep a LIVE pairing dependency until its real durable message ID
+            # arrives at the next sync; never claim this synthetic ID as durable.
+            result = Message.tool_result(event.result)
+            result.id = f"live-tool:{event.tool_call_id}"
+            self._live_history[result.id] = result
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
@@ -1603,7 +1965,14 @@ class RemoteSession:
             isinstance(event, MessageStartEvent)
             and bool(getattr(message, "text", "") or getattr(message, "tool_calls", None))
         ):
-            self._message_events.add(message_id)
+            if message_id in self._history_ids or message_id in self._durable_seed_ids:
+                return
+            # Paint dedupe is not presentation storage. A source can leave the
+            # screen while this row is in the live seed but not in its durable
+            # attach window. Retain the complete row for the next prepared view.
+            if isinstance(message, Message) and message.role == "tool":
+                self._live_history.pop(f"live-tool:{message.tool_call_id}", None)
+            self._live_history[message_id] = message
 
     def _drain_buffered_events(self) -> None:
         """Deliver buffered sync frames once both ordering and a subscriber exist."""
@@ -1620,6 +1989,12 @@ class RemoteSession:
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
         update = FrontendUpdate.model_validate(data)
+        cut = self._frontend_refresh_cut
+        if cut is not None and update.epoch == cut[0] and update.sequence <= cut[1]:
+            # The old subscription can deliver this captured prefix after the
+            # read response. Its fields are already in the installed snapshot;
+            # the AttachClient still validates the original stream's sequence.
+            return
         if self._pending_frontend_updates is not None:
             self._pending_frontend_updates.append(update)
             return
@@ -1627,10 +2002,19 @@ class RemoteSession:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
         self._apply_frontend_facades(state)
+        if state.history_generation != self._loaded_history_generation:
+            self._invalidate_display_history()
 
     def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
         if state.session_id != self._session_id:
             raise ConnectionError("frontend state belongs to another session")
+        if self._frontend_store is None or self._frontend_store.state.epoch != state.epoch:
+            if self._gate_task is not None:
+                self._gate_task.cancel()
+                self._gate_task = None
+            self._gate_key = None
+            self._gate_answered_key = None
+            self._keep_gate_reply = False
         if self._frontend_store is None:
             self._frontend_store = FrontendStateStore(state)
         elif publish:
@@ -1640,6 +2024,11 @@ class RemoteSession:
         self._apply_frontend_facades(state)
         pending, self._pending_frontend_updates = self._pending_frontend_updates, None
         for update in pending or ():
+            # A same-connection refresh can overtake queued deltas already
+            # represented by its snapshot. Only this captured prefix is skipped;
+            # future gaps still fail the ordinary exact-sequence check.
+            if update.epoch == state.epoch and update.sequence <= state.sequence:
+                continue
             self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
@@ -1668,6 +2057,15 @@ class RemoteSession:
 
     def _on_wire_event(self, data: dict[str, Any]) -> None:
         event = deserialize_event(data)
+        # Command completion is an owner lifecycle fact, not a painting event.
+        # A canonical display refresh may buffer/dedupe UI replay, but it must
+        # never hide the requested turn's terminal outcome from its scheduler.
+        for observer in tuple(self._prompt_completion_observers):
+            observer(event)
+        if isinstance(event, CompactionEndEvent) and event.success:
+            # The success event itself closes eligibility even if its preceding
+            # canonical generation delta has not reached this reader yet.
+            self._invalidate_display_history()
         # A message-grade event whose row is already durable (history was read
         # after the socket began buffering) or already painted live is dropped
         # by stable message id — the single dedup rule for both seams. The
@@ -1750,29 +2148,60 @@ class RemoteSession:
             self._gate_task.cancel()
             self._gate_task = None
         self._gate_key = key
+        self._keep_gate_reply = False
         if pending is not None:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
-        if self._gates_detached:
+        if self._disposed or not self._ready_for_events:
             return
         if pending is None:
-            pending = _pending_request(self.frontend_state.pending_gate)
+            pending = _pending_request(self.pending_gate)
         if pending is None or self._gate_task is not None:
             return
-        if pending.kind == "approval" and self._approval_handler is not None:
+        if self._gate_identity(pending) == self._gate_answered_key:
+            return
+        background = (
+            self._gates_detached and self._background_approval and pending.kind == "approval"
+        )
+        if self._gates_detached and not background:
+            return
+        if pending.kind == "approval" and (self._approval_handler is not None or background):
             self._gate_task = asyncio.create_task(self._run_approval(pending))
         elif pending.kind == "ask" and self._ask_handler is not None:
             self._gate_task = asyncio.create_task(self._run_ask(pending))
+
+    def _gate_reply_is_current(self, pending: PendingRequest, client: Any) -> bool:
+        # Cancelling a bridge requests cooperation; even a handler that swallows
+        # cancellation must not answer after another view/gate replaced it.
+        return (
+            (
+                not self._gates_detached
+                or self._keep_gate_reply
+                or (self._background_approval and pending.kind == "approval")
+            )
+            and not self._disposed
+            and self._gate_task is asyncio.current_task()
+            and self._client is client
+            and self._gate_key == self._gate_identity(pending)
+        )
 
     async def _run_approval(self, pending: PendingRequest) -> None:
         try:
             handler = self._approval_handler
             client = self._client
-            if handler is None or client is None:
+            if client is None:
                 return
-            approved = await call_approval_gate(handler, pending.title, pending.detail)
+            if self._gates_detached and self._background_approval:
+                approved = True
+            elif handler is not None:
+                approved = await call_approval_gate(handler, pending.title, pending.detail)
+            else:
+                return
+            if not self._gate_reply_is_current(pending, client):
+                return
             await client.approval_answer(pending.request_id, approved)
+            self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
@@ -1787,7 +2216,10 @@ class RemoteSession:
             # (round-6 NIT-3).
             pass
         finally:
-            if self._gate_key == self._gate_identity(pending):
+            if (
+                self._gate_key == self._gate_identity(pending)
+                and self._gate_task is asyncio.current_task()
+            ):
                 self._gate_task = None
 
     async def _run_ask(self, pending: PendingRequest) -> None:
@@ -1816,6 +2248,8 @@ class RemoteSession:
                 secret=pending.secret,
             )
             answer = await handler([question])
+            if not self._gate_reply_is_current(pending, client):
+                return
             if not answer:
                 return
             values = answer.get(pending.request_id) or []
@@ -1825,17 +2259,22 @@ class RemoteSession:
                     values[0],
                     question_index=pending.question_index,
                 )
+                self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Same three outcomes as the approval gate above, including the
             # stop path's dead-owner post (round-6 NIT-3).
             pass
         finally:
-            if self._gate_key == self._gate_identity(pending):
+            if (
+                self._gate_key == self._gate_identity(pending)
+                and self._gate_task is asyncio.current_task()
+            ):
                 self._gate_task = None
 
     # -- owner loss ---------------------------------------------------------
 
     def _on_disconnected(self, _reason: str) -> None:
+        self._fail_prompt_completion_waiters("owner connection lost while awaiting turn completion")
         self._runtime_pid = None
         if self._disposed or self._recovering:
             return
@@ -2225,14 +2664,20 @@ class RemoteSession:
                         # follower has not painted; the bind afterwards brings
                         # ``_history`` to the same point and the live seed
                         # dedupes against the ids the replay just claimed (M4).
-                        entries, history = await self._read_transcript()
-                        self._replay_durable_suffix(history)
-                        self._bind_history(
-                            entries,
-                            history,
-                            frontend.live_cursor,
-                            drop_history_duplicates=False,
-                        )
+                        if self._display_window_requested and frontend.display_history is not None:
+                            await self._load_frontend_history(frontend)
+                        else:
+                            history = (
+                                await self._read_transcript(through_id=frontend.live_cursor)
+                                if frontend.live_cursor is not None
+                                else await self._read_transcript()
+                            )
+                            self._replay_durable_suffix(history)
+                            self._bind_history(
+                                history,
+                                frontend.live_cursor,
+                                drop_history_duplicates=False,
+                            )
                         self._finish_sync()
                         return
                     except (ConnectionError, OSError, TimeoutError):
@@ -2426,10 +2871,42 @@ class RemoteSession:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.state
 
+    @property
+    def pending_gate(self) -> Any:
+        """The pending gate without the full-state clone ``frontend_state`` pays.
+
+        For per-frame readiness checks only; see the store's own property.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.pending_gate
+
+    @property
+    def epoch(self) -> str:
+        """The owner epoch without the full-state clone.
+
+        Paired with :attr:`pending_gate` because gate IDENTITY is epoch plus
+        gate, and reading the epoch through ``frontend_state`` would put the
+        clone back on the same per-frame path.
+        """
+        return self._read_state_field("epoch")
+
     def subscribe_frontend(self, handler):  # type: ignore[no-untyped-def]
         if self._frontend_store is None:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.subscribe(handler)
+
+    def _read_state_field(self, name: str) -> Any:
+        """One canonical field without the whole-state clone.
+
+        These accessors are called per FRAME by the band and panels, and each
+        `frontend_state` read deep-copies every job and usage row (measured:
+        ~30 ms of a 135 ms cold sidebar frame). The store enforces which fields
+        are safe to share; anything else still goes through `frontend_state`.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.read_field(name)
 
     @property
     def model_label(self) -> str:
@@ -2437,6 +2914,9 @@ class RemoteSession:
 
     @property
     def model(self) -> ModelSpec:
+        # Through the COPYING path deliberately: a spec is a non-frozen model,
+        # and handing out the store's own instance let a caller rewrite
+        # canonical state in place (review round 2, Q6/F4).
         model = self.frontend_state.selected_model
         if model is None:
             raise RuntimeError("owner has no selected model spec")
@@ -2444,7 +2924,10 @@ class RemoteSession:
 
     @property
     def effective_model(self) -> ModelSpec:
-        model = self.frontend_state.effective_model or self.frontend_state.selected_model
+        # One snapshot, not two reads: the fallback must not be able to pair a
+        # spec with a newer state's selection. Copying path, per `model`.
+        state = self.frontend_state
+        model = state.effective_model or state.selected_model
         if model is None:
             raise RuntimeError("owner has no effective model spec")
         return model
@@ -2491,8 +2974,69 @@ class RemoteSession:
 
     # -- history / host errands --------------------------------------------
 
+    async def record_shell(self, command: str, result: ToolResult) -> None:
+        from local_operator.session.shell_record import shell_record_messages
+
+        await self._ensure_bound()
+        client = self._client
+        if client is None:
+            raise ConnectionError("shell receipt owner is disconnected")
+        await client.record_shell(command, result.model_dump(mode="json"))
+        # The owner may queue persistence behind a running turn. These are
+        # accepted LIVE display rows, not a fabricated durable cursor or ACK.
+        for message in shell_record_messages(command, result):
+            self._live_history[message.id] = message
+
     def history(self) -> list[Any]:
-        return list(self._history)
+        if not self._history_hydrated:
+            raise RuntimeError(
+                "display-window history is not hydrated; await materialize_history()"
+            )
+        return self.display_history_window()
+
+    def display_history_window(self) -> list[Any]:
+        """Loaded durable rows plus canonical live rows, in display order."""
+        durable_results = {
+            m.tool_call_id for m in self._history if isinstance(m, Message) and m.role == "tool"
+        }
+        return [self._live_history.get(m.id, m) for m in self._history] + [
+            m
+            for key, m in self._live_history.items()
+            if key not in self._history_ids
+            and not (
+                isinstance(m, Message) and m.role == "tool" and m.tool_call_id in durable_results
+            )
+        ]
+
+    @property
+    def history_message_count(self) -> int:
+        durable = (
+            self._display_history.total_message_count
+            if self._display_history
+            else len(self._history)
+        )
+        return durable + len(self.display_history_window()) - len(self._history)
+
+    @property
+    def history_theme_turn_count(self) -> int:
+        if self._display_history is not None:
+            return self._display_history.theme_turn_count + sum(
+                key not in self._history_ids and getattr(m, "role", "") in ("user", "assistant")
+                for key, m in self._live_history.items()
+            )
+        return sum(
+            getattr(m, "role", "") in ("user", "assistant") for m in self.display_history_window()
+        )
+
+    @property
+    def history_opener_text(self) -> str:
+        if self._display_history is not None:
+            return self._display_history.opener_text
+        return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
+
+    def history_last_message(self) -> Any:
+        rows = self.display_history_window()
+        return rows[-1] if rows else None
 
     def context_breakdown(self) -> dict[str, int]:
         return dict(self.frontend_state.context_breakdown or {})
@@ -2567,11 +3111,44 @@ class RemoteSession:
         """
         # A sibling frontend may settle Q1 while detach awaits cancellation.
         # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
+        self._background_approval = False
+        self._keep_gate_reply = False
+        task = self.suspend_viewer_gates()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    @property
+    def has_pending_gate_reply(self) -> bool:
+        return bool(
+            self._keep_gate_reply and self._gate_task is not None and not self._gate_task.done()
+        )
+
+    def suspend_viewer_gates(
+        self, *, auto_approve: bool = False, keep_answer: bool = False
+    ) -> asyncio.Task[Any] | None:
+        """Suspend presentation, never invent an answer during navigation.
+
+        An answer the user already committed must finish reaching its owner.
+        A visited source's explicit allow-all grant can keep approving that
+        source in the background; speculative viewers always pass False.
+        """
         self._gates_detached = True
-        task, self._gate_task = self._gate_task, None
+        self._background_approval = auto_approve
+        task = self._gate_task
+        if task is not None and (keep_answer or self._keep_gate_reply):
+            self._keep_gate_reply = True
+            return task
+        self._keep_gate_reply = False
+        self._gate_task = None
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        self._maybe_start_gate()
+        return task
+
+    def resume_viewer_gates(self) -> None:
+        """Recreate bridges only after the source is the visible input target."""
+        self._gates_detached = False
+        self._maybe_start_gate()
 
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.
@@ -2658,6 +3235,85 @@ class RemoteSession:
 
     # -- driving turns ------------------------------------------------------
 
+    def _fail_prompt_completion_waiters(self, reason: str) -> None:
+        for waiter in tuple(self._prompt_completion_waiters):
+            if not waiter.done():
+                waiter.set_exception(ConnectionError(reason))
+
+    async def prompt_and_wait(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        """Submit one FIFO prompt and await its owner's actual terminal outcome.
+
+        ``prompt`` intentionally returns on durable admission for interactive
+        callers. A loop cannot treat that ACK as completion. Correlate the
+        producer's user-row ID, then the owner's generation(s), on the same
+        serialized event stream. Auto-continuations remain inside the owner's
+        pipeline; its held final agent_end is the completion, not a busy flag.
+        This also works with older owners that implement the existing ID/epoch/
+        generation contract, without a new scheduler or longer RPC timeout.
+        """
+        await self._ensure_bound()
+        await self._owner_ready.wait()
+        if self._takeover_target is not None:
+            await self.prompt(text, images=images, message_id=message_id)
+            return
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("owner connection lost")
+        images_wire = [_image_to_wire(image) for image in (images or [])]
+        command = (
+            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            if message_id
+            else ContinuationCommand.create(self._session_id, text, images_wire)
+        )
+        epoch = self.frontend_state.epoch
+        admitted = False
+        generation: int | None = None
+        completed: asyncio.Future[AgentEndEvent] = asyncio.get_running_loop().create_future()
+        self._prompt_completion_waiters.add(completed)
+
+        def observe(event: AgentEvent[Any]) -> None:
+            nonlocal admitted, generation
+            if completed.done():
+                return
+            if self.frontend_state.epoch != epoch:
+                completed.set_exception(ConnectionError("owner changed during loop iteration"))
+                return
+            message = getattr(event, "message", None)
+            if (
+                isinstance(event, MessageStartEvent)
+                and getattr(message, "id", None) == command.command_id
+            ):
+                admitted = True
+            elif isinstance(event, AgentStartEvent) and admitted:
+                generation = event.generation
+            elif isinstance(event, AgentEndEvent) and admitted:
+                if generation is None or event.generation == generation:
+                    completed.set_result(event)
+
+        self._prompt_completion_observers.add(observe)
+        try:
+            # Loop iterations are queued prompt turns, never steering inferred
+            # from a transient current-busy observation.
+            await client.send_command(command, streaming=False)
+            outcome = await completed
+            if outcome.error:
+                raise RuntimeError(outcome.error)
+            if outcome.aborted:
+                raise RuntimeError("owner interrupted the loop iteration")
+        finally:
+            self._prompt_completion_observers.discard(observe)
+            self._prompt_completion_waiters.discard(completed)
+            if not completed.done():
+                completed.cancel()
+            elif not completed.cancelled():
+                completed.exception()
+
     async def prompt(
         self,
         text: str,
@@ -2714,7 +3370,7 @@ class RemoteSession:
         await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
-        if self._history:
+        if self.history_message_count:
             return
         self._history = list(messages)
 
@@ -2857,6 +3513,8 @@ class RemoteSession:
         return self.frontend_state.active_team
 
     def restored_usage(self) -> Usage | None:
+        # Copying path: `Usage` is accumulated in place elsewhere in the
+        # harness, so a shared instance is one `+=` from corrupting state.
         return self.frontend_state.last_usage
 
     def running_subagents(self) -> int:
@@ -2933,6 +3591,11 @@ class RemoteSession:
 
     async def dispose(self) -> None:
         self._disposed = True
+        self._fail_prompt_completion_waiters("viewer disposed while awaiting turn completion")
+        refresh = self._display_refresh_task
+        if refresh is not None and refresh is not asyncio.current_task() and not refresh.done():
+            refresh.cancel()
+            await asyncio.gather(refresh, return_exceptions=True)
         if self._gate_task is not None:
             self._gate_task.cancel()
         if self._recovery_task is not None and self._recovery_task is not asyncio.current_task():

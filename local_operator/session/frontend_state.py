@@ -53,6 +53,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -130,8 +131,76 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: is bounded by roster COUNT alone at roughly 1,400 children. That is stated
 #: rather than engineered away: the deepest roster observed across every session
 #: on the reference machine is 19.
-JOB_TEXT_FRAME_BUDGET_CHARS = 120_000
+#:
+#: Reduced from 120,000 by the 128 bytes that `history_generation` and its
+#: sibling window fields add to every frame. The socket line limit is fixed at
+#: 1 MiB, so a new session-level field has to be PAID FOR out of an elastic
+#: budget rather than shrinking the guard's margin: at the worst case the size
+#: guard asserts, the frame had 13 bytes of headroom and the new field costs
+#: 25. Per-row text is the right place to take it from — it is already shared,
+#: already floored at a legible preview, and 128 chars spread across a roster
+#: is invisible, whereas an over-limit frame cannot be sent at all.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
 JOB_TEXT_FLOOR_CHARS = 200
+
+#: Fields :meth:`FrontendStateStore.read_field` may serve without the
+#: whole-state deep copy — see that method for the measurement that motivates
+#: it.
+#:
+#: The membership test is the SAFETY ARGUMENT, not a convenience list, and the
+#: bar is DEEP IMMUTABILITY OF THE HANDED-OUT VALUE — not "the reducer replaces
+#: it".
+#:
+#: An earlier version of this set admitted `selected_model`, `effective_model`
+#: and `last_usage` on the reducer-replacement argument. That argument is
+#: wrong, and review round 2 (Q6/F4) demonstrated it: `ModelSpec` and `Usage`
+#: are ordinary NON-FROZEN pydantic models, so `read_field` handed out the
+#: store's own instance and a caller writing `spec.model_id = ...` or
+#: `usage.input_tokens += n` rewrote canonical session state in place. Nothing
+#: shipped did that — but this codebase accumulates `Usage` with `+=` in
+#: `harness/jobs.py` and `harness/subagent.py`, so it was one ordinary edit
+#: from silent corruption, and `state` DOES protect those fields by returning a
+#: fresh object per read. Admitting them removed an existing invariant.
+#:
+#: They are therefore back on the copying path. Freezing the two models was the
+#: alternative and was rejected here: 13 in-place mutation sites across the
+#: harness rely on them being writable, which is a refactor well outside the
+#: change that introduced this accessor. The measured saving is nearly all in
+#: the scalars regardless (a per-read `model_copy` costs ~0.0075 ms against
+#: ~0.0001 ms shared, versus ~0.15 ms for the whole-state clone at a 19-job
+#: roster), so the fast path keeps the reads that are genuinely free.
+#:
+#: What remains admitted satisfies both requirements:
+#:
+#: 1. DEEPLY IMMUTABLE. Every entry is a `str`, `bool`, `int`, `float` or
+#:    `None`. A caller cannot mutate any of them, so sharing the value cannot
+#:    reach the store at all.
+#: 2. NOT A MUTABLE CONTAINER. `jobs`, `usage_components`, `child_costs`,
+#:    `attention`, `context_breakdown` and `todos` are excluded even though
+#:    single-field readers exist for some: a `dict`/`list` handed out unguarded
+#:    can be mutated by its caller, which is exactly what `state`'s deep copy
+#:    exists to prevent. Those reads keep paying for it.
+#:
+#: `test_shareable_state_fields_are_real_and_immutable` asserts both properties
+#: against `model_fields`, so neither a renamed field nor a newly mutable type
+#: can silently re-enter this set.
+_SHAREABLE_STATE_FIELDS = frozenset(
+    {
+        "streaming",
+        "session_id",
+        "epoch",
+        "sequence",
+        "history_generation",
+        "conversation_title",
+        "goal",
+        "active_agent",
+        "active_team",
+        "context_tokens",
+        "context_window",
+        "context_is_estimate",
+        "cumulative_parent_cost",
+    }
+)
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
 #:
@@ -478,6 +547,10 @@ _FRONTEND_LOCAL_SLASHES = {
     "help",
     "exit",
     "clear",
+    # The terminal schedules source-bound iterations and owns sidebar focus;
+    # each iteration still submits through that conversation's real owner.
+    "loop",
+    "sidebar",
     # The clipboard is the machine the USER IS SITTING AT, and every part of
     # this command is already here: the transcript it reads is painted by this
     # frontend, the picker it opens is painted by this frontend, and the OSC 52
@@ -1398,6 +1471,7 @@ class FrontendSessionState(BaseModel):
     #: omitting hundreds of them.
     model_catalogue_truncated: bool = False
     history_cursor: str | None = None
+    history_generation: int = 0
     attachment_root: str | None = None
     # Durable receipts are independent of owner epoch and pending action gates.
     attention: dict[str, Any] = Field(default_factory=dict)
@@ -1492,6 +1566,7 @@ class FrontendSync(BaseModel):
     sequence: int
     snapshot: FrontendSessionState
     live_cursor: str | None = None
+    display_history: DisplayHistoryWindow | None = None
 
 
 class FrontendUpdate(BaseModel):
@@ -2203,6 +2278,47 @@ class FrontendStateStore:
             update={"jobs": _FrozenSequence(_public_job(job) for job in self._state.jobs)}
         )
 
+    def read_field(self, name: str) -> Any:
+        """One field of the state, WITHOUT cloning the whole state.
+
+        The general sibling of :attr:`pending_gate`, and it exists for the same
+        measured reason: `state` deep-copies every job, usage component and
+        trajectory row so no caller can mutate the store's instance, and the
+        per-frame accessors that read a SINGLE field were paying that clone
+        each time. Profiling one cold sidebar navigation measured 37 `state`
+        reads and ~25,000 `deepcopy` calls, ~30 ms of a 135 ms frame, almost
+        all of it from single-field reads like `model_label` and
+        `effective_model`.
+
+        RESTRICTED TO DEEPLY IMMUTABLE FIELDS, and the restriction is enforced
+        rather than documented. The value is the store's OWN object, so the bar
+        is that a caller cannot mutate it at all — every admitted field is a
+        `str`/`bool`/`int`/`float`/`None`. Model-valued fields and mutable
+        collections are deliberately absent: reading those still goes through
+        `state` and still pays for the deep copy that protects them. See
+        :data:`_SHAREABLE_STATE_FIELDS` for why "the reducer replaces it" was
+        NOT a sufficient bar.
+        """
+        if name not in _SHAREABLE_STATE_FIELDS:
+            raise KeyError(
+                f"{name!r} is not a copy-free state field; read it through `state` "
+                "so the caller cannot mutate the store's own instance"
+            )
+        return getattr(self._state, name)
+
+    @property
+    def pending_gate(self) -> "PendingGateState | None":
+        """The pending gate alone, WITHOUT cloning the whole state.
+
+        ``state`` deep-copies every job, usage and trajectory row so no caller
+        can mutate the store's instance. A per-frame readiness check only needs
+        this one immutable field, and paying that clone on every display cost
+        ~23 ms of the cold sidebar frame — the single largest item in its
+        profile. ``PendingGateState`` is never mutated in place by the reducer
+        (it is replaced), so sharing the instance is safe here.
+        """
+        return self._state.pending_gate
+
     @property
     def has_subscribers(self) -> bool:
         return bool(self._subscribers)
@@ -2629,6 +2745,7 @@ class FrontendStateStore:
             mcp_servers=mcp_servers,
             mcp_startup=mcp_startup,
             history_cursor=history_cursor,
+            history_generation=int(getattr(transcript, "_history_generation", 0)),
             attachment_root=str(getattr(transcript, "directory", "") or "") or None,
             slash_capabilities=_slash_capabilities(),
         )

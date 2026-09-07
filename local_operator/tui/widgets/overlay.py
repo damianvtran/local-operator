@@ -78,7 +78,11 @@ def rows_above_dock(widget: Widget) -> int:
         return screen_size(widget)[1]
     content = screen.content_region
     ceiling = content.bottom
-    for sibling in screen.children:
+    # The session workspace nests the conversation and its dock together.
+    # Only that layout owns this ceiling; walking every descendant would also
+    # mistake a picker footer for a screen-level bottom dock.
+    conversation = next(iter(screen.query("#session-conversation")), screen)
+    for sibling in conversation.children:
         if sibling.display and sibling.styles.dock == "bottom":
             ceiling = min(ceiling, sibling.region.y)
     return max(1, ceiling - content.y)

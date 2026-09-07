@@ -204,10 +204,34 @@ class AsideTurn:
     #: never be forked into the chat as if the model had said it.
     error: str = ""
 
+    def append_delta(self, delta: str) -> None:
+        self.answer += delta
+
+    def settle(self, answer: str) -> None:
+        if answer.strip():
+            self.answer = answer
+        self.state = "done" if self.answer.strip() else "error"
+        if self.state == "error":
+            self.error = "the model returned nothing"
+
+    def fail(self, message: str) -> None:
+        self.state = "error"
+        self.error = message
+
     @property
     def forkable(self) -> bool:
         """Whether this turn is a real exchange, worth promoting to the chat."""
         return self.state == "done" and bool(self.answer.strip())
+
+
+@dataclass
+class AsideSnapshot:
+    turns: list[AsideTurn]
+    generation: int
+    notice: str = ""
+    following_tail: bool = True
+    anchor_turn: int = 0
+    anchor_offset: int = 0
 
 
 @dataclass
@@ -348,6 +372,35 @@ class AsidePanel(Static):
         self._notice = text
         self._repaint()
 
+    def snapshot(self) -> AsideSnapshot:
+        snapshot = AsideSnapshot(list(self._turns), self._generation, self._notice)
+        if self._scroll_back_rows:
+            flat = self._flat_body()
+            end = max(1, len(flat.lines) - self._scroll_back_rows)
+            if flat.owners:
+                turn = flat.owners[min(end - 1, len(flat.owners) - 1)]
+                snapshot.following_tail = False
+                snapshot.anchor_turn = turn
+                snapshot.anchor_offset = end - flat.heads[turn][0]
+        return snapshot
+
+    def restore(self, snapshot: AsideSnapshot) -> None:
+        """Restore another source's data without retaining its rendered cache."""
+        self._turns = list(snapshot.turns)
+        self._generation = snapshot.generation
+        self._notice = snapshot.notice
+        self._scroll_back_rows = 0
+        self._answer_cache.clear()
+        self._used_answers.clear()
+        self._invalidate_flat()
+        self.display = True
+        if not snapshot.following_tail:
+            flat = self._flat_body()
+            if snapshot.anchor_turn < len(flat.heads):
+                end = flat.heads[snapshot.anchor_turn][0] + snapshot.anchor_offset
+                self._scroll_back_rows = max(0, len(flat.lines) - end)
+        self._repaint()
+
     def open(self) -> None:
         """Show an EMPTY aside. Reopening never restores a dismissed exchange."""
         self._turns = []
@@ -413,7 +466,7 @@ class AsidePanel(Static):
         # while the offset itself never changed. Holding the NUMBER still is
         # not the rule — holding the ROWS still is.
         anchored = len(self._flat_body().lines) if self._scroll_back_rows else 0
-        self._turns[-1].answer += delta
+        self._turns[-1].append_delta(delta)
         # BETWEEN the two measurements, and that placement is the whole point:
         # `anchored` is the pre-delta height and the count below is the
         # post-delta one, so the memo has to be dropped here or the second
@@ -448,11 +501,7 @@ class AsidePanel(Static):
         if not self.accepts(generation):
             return
         turn = self._turns[-1]
-        if answer.strip():
-            turn.answer = answer
-        turn.state = "done" if turn.answer.strip() else "error"
-        if turn.state == "error":
-            turn.error = "the model returned nothing"
+        turn.settle(answer)
         # The settled text routinely differs from what streamed (and is often
         # shorter), and the state row under it changes with `turn.state`, so
         # both the row COUNT and the rows themselves can move here.
@@ -464,8 +513,7 @@ class AsidePanel(Static):
         if not self.accepts(generation):
             return
         turn = self._turns[-1]
-        turn.state = "error"
-        turn.error = message
+        turn.fail(message)
         # The error rows are part of the answer block, so this changes height.
         self._invalidate_flat()
         self._repaint()

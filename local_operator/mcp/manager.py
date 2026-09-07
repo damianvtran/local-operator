@@ -69,7 +69,7 @@ from local_operator.mcp.tool_bridge import (
     is_retriable_connection_error,
     prepare_outbound_args,
 )
-from local_operator.mcp.tool_cache import McpToolCache
+from local_operator.mcp.tool_cache import McpToolCache, config_digest
 from local_operator.optional import missing_extra_error
 
 if TYPE_CHECKING:
@@ -1402,7 +1402,11 @@ class McpManager:
             # re-report the combined outcome instead of the gate snapshot.
             self._startup_deferred.add(name)
             # Still pending at the gate: defer from cache, or contribute nothing.
-            cached = self.tool_cache.get(name) if self.tool_cache is not None else None
+            cached = (
+                self.tool_cache.get(name, config_digest(self._configs.get(name)))
+                if self.tool_cache is not None
+                else None
+            )
             if cached:
                 self._unregister_origins(name)
                 self._tools_by_server[name] = [
@@ -1455,7 +1459,11 @@ class McpManager:
         conn.tools = tools
         self._register_tools(name, tools)
         if self.tool_cache is not None:
-            self.tool_cache.put(name, [_tool_to_cache_entry(tool) for tool in tools])
+            self.tool_cache.put(
+                name,
+                [_tool_to_cache_entry(tool) for tool in tools],
+                config_digest(self._configs.get(name)),
+            )
         self._fire_tools_changed()
 
     async def reconnect_server(self, name: str) -> ServerConnection | None:
@@ -1688,7 +1696,11 @@ class McpManager:
 
         conn.tools = tools
         if self.tool_cache is not None:
-            self.tool_cache.put(name, [_tool_to_cache_entry(tool) for tool in tools])
+            self.tool_cache.put(
+                name,
+                [_tool_to_cache_entry(tool) for tool in tools],
+                config_digest(self._configs.get(name)),
+            )
         return conn
 
     async def _open_transport_and_session(
