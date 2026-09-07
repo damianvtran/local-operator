@@ -280,6 +280,18 @@ listing out of a catalogue cache that the same session's own earlier live calls
 had written into the real home. Any cell whose point is a cold cache needs a
 **fresh** `HOME` per cell, not merely a fresh config dir.
 
+**And a redirected config dir is not automatically a redirected write path:
+check the store's WRITE site, not just its read site.** A function can honour
+an injected `config_dir` everywhere it reads and still default its writes to
+the global path, so the isolation looks correct in every observable way while
+the side effects land in the operator's real home. That is not hypothetical —
+the analytics session-name backfill did exactly this and wrote 612 rows into
+the live `~/.local-operator/analytics.db` from a sandboxed run. Production was
+unaffected, because the only production caller passes the real config dir and
+the two therefore agreed, which is precisely why nothing caught it. Two
+instances of this class have now landed in one session; when you isolate a run,
+verify where its writes actually go.
+
 ### Read the committed ref, not the working tree
 
 "Never `git stash` to get a before-frame" (in the visual-validation section
@@ -637,6 +649,24 @@ Warnings that still hold, each of which has already cost a release:
   the real description and the first-parent walk does not. A release note that
   omits a merged PR is a defect in the release, not a cosmetic miss — it is
   the only record of what changed under a user who is about to update.
+- **Re-derive the window immediately before `gh release create`, not once when
+  you claim it.** The bump commit is not a barrier: anything merged after it
+  and before the tag still rides the release, because the tag names a SHA and
+  everything reachable from it ships. This happened in v0.51.4 — #731 merged
+  *above* the bump commit `d1ce356ac`, shipped in the tag, and was absent from
+  the notes, even though the owner had polled every peer and derived the window
+  correctly when they started. Deriving it right once does not help if the
+  derivation is stale by the time you tag. The check is one command:
+
+  ```sh
+  git log --oneline <last-tag>..origin/main   # immediately before tagging
+  ```
+
+  The other half is the merger's, not the owner's: **if you merge while a
+  window is open, send the owner your PR number and merge SHA at merge time**,
+  not when you next happen to talk to them. The owner cannot poll continuously,
+  and a peer who confirms a window list and then silently merges into it has
+  broken the protocol even though every individual step looked correct.
 - **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
   tagging.** A non-empty diff means a merged PR carried its own version bump
   and has silently consumed the number you are about to use. That is exactly
