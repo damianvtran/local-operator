@@ -693,6 +693,14 @@ _FRONTEND_LOCAL_SLASHES = {
     # Like analytics, reads the shared local ledger for the mirrored current
     # session ID. No owner RPC or new transport payload is needed.
     "session",
+    # Everything /info reports is a fact about the process DRAWING the screen:
+    # its install prefix and resolved import path, its pid and control port, the
+    # session registry on this host, this frontend's terminal and theme. Routed
+    # to the owner it would describe the owner's machine while the header names
+    # this one — the wrong-machine answer on the one screen whose entire job is
+    # "which code am I actually running". Same argument as `/theme`, `/settings`
+    # and the `desktop_destination` this command deliberately omits.
+    "info",
     "skills",
     "login",
     "logout",

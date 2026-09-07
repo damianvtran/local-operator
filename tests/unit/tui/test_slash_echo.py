@@ -94,6 +94,9 @@ ECHO_POLICY = {
     # names a view, never words the model is told.
     "analytics": False,
     "session": False,
+    # The screen it opens IS the receipt, and it takes no argument to restate.
+    # Nothing here reaches the model: every value is a fact about this install.
+    "info": False,
     "goal": True,
     "loop": False,
     # The aside's whole promise is that the exchange leaves no trace in the
@@ -168,6 +171,9 @@ PROMPT_POLICY = {
     # open, so it splices-and-runs inline like `/usage` rather than reassembling.
     "analytics": False,
     "session": False,
+    # Takes no argument at all: there is one answer, so there is nothing typed
+    # for an inline engage to consume.
+    "info": False,
     # Free text the model is given (the objective / a loop instruction / a side
     # question), so an inline engage reassembles to the front.
     "goal": True,

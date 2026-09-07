@@ -378,6 +378,43 @@ def check_latest(
     return VersionCheck(installed=installed, latest=latest, behind=is_behind(installed, latest))
 
 
+def cached_latest(cache_dir: Path | None = None) -> tuple[str | None, float | None]:
+    """The last PyPI answer we already have, and how old it is. NEVER fetches.
+
+    :func:`check_latest` is the *upgrade* path and is not a cached read despite
+    looking like one: only its ``cached is not None and age < TTL_S and not
+    force`` branch is served from disk, and every other path — cold cache,
+    corrupt document, an age past :data:`TTL_S` — falls through to
+    :func:`_fetch_pypi_version`, a live HTTP call bounded at
+    :data:`_FETCH_TIMEOUT_S`, and then *writes* the cache.
+
+    ``/info`` is the *diagnostic* path. It is opened precisely when something is
+    already broken, and frequently because the network is the thing that is
+    broken, so a 5 s stall on a captive portal or a DNS blackhole is the worst
+    available behaviour for the one screen that exists to explain a failure.
+    Measured on this host with an injected client that raises immediately:
+    ``check_latest()`` on a cold cache cost **156.86 ms** (all of it DNS/connect
+    setup before the raise) against **0.0002 ms** for the read below. A
+    diagnostic must also not MUTATE state, and ``check_latest`` rewrites the
+    cache on success.
+
+    Returns ``(None, None)`` when there is nothing usable cached. The caller
+    must render that as "unknown (never checked)" and never as "up to date":
+    those are different facts, and collapsing them tells a user on a broken
+    network that they are on the newest release.
+    """
+    payload, age = _read_cache(_cache_path(cache_dir))
+    if payload is None:
+        return None, None
+    raw = payload.get("version")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, None
+    # ``_read_cache`` returns ``inf`` for a future-dated document (a clock
+    # skew), which is not an age any caller can render. The version is still
+    # good, so the value survives and only its staleness is unknown.
+    return raw.strip(), (age if age != float("inf") else None)
+
+
 def _direct_url_payload() -> dict[str, Any] | None:
     try:
         dist = distribution("local-operator")

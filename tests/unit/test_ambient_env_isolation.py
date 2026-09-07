@@ -56,12 +56,20 @@ _HARMLESS: dict[str, str] = {
     "ANONYMIZED_TELEMETRY": "set to 0 for chromadb; never read back",
     # -- terminal capability probes (read-only, cosmetic) --------------------
     "TERM": "colour/capability probe; tests pin it themselves",
+    "COLORTERM": "colour-capability probe; reported by /info, names no machine resource",
     "TERM_PROGRAM": "terminal identity for tab-title / notification routing",
     "NO_COLOR": "colour probe; tests pin it themselves",
     "TMUX": "presence probe for terminal-title routing; never used to address a pane",
     "KITTY_WINDOW_ID": "presence probe for terminal-title routing",
     "ITERM_SESSION_ID": "presence probe for terminal detection; never used to address",
     "WEZTERM_PANE": "presence probe for terminal detection; never used to address",
+    # /info reports WHICH multiplexer is in use for a bug report. Presence
+    # only: `info.collect._multiplexer` reads the NAME of the marker and
+    # never its value, because a value carries a socket path or a workspace
+    # id -- identifying, and this screen is pasted into public issues.
+    "STY": "presence probe for multiplexer detection; value never read",
+    "ZELLIJ": "presence probe for multiplexer detection; value never read",
+    "CMUX_SOCKET_PATH": "presence probe for multiplexer detection; value never read",
     "WEZTERM_EXECUTABLE": "binary path probe for terminal detection",
     "GHOSTTY_BIN": "binary path probe for terminal detection",
     "GHOSTTY_RESOURCES_DIR": "presence probe for terminal detection",
