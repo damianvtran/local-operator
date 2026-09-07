@@ -128,11 +128,15 @@ VIEWER_ACK_GRACE_S = 5.0
 #: session switched. Measured on the derived bounds: clean at 9.8 s, both
 #: outcomes at 10.2 s and every value above it.
 #:
-#: So the timeout now cancels the navigation and reads what is on screen once
-#: it has stopped, and this is the budget for that. It is spent INSIDE the
-#: client's grace — the server has to answer before the client stops
-#: listening — which is why it is a fraction of the grace rather than a third
-#: literal: the ordering ``RESUME + ABANDON < RESUME + GRACE`` is arithmetic
+#: So the timeout now stops the navigation and reads what is on screen once it
+#: has stopped, and this is the budget for that. The budget covers the hop for a
+#: navigation that EXISTS; one that has not been created yet is refused instead,
+#: by a flag the endpoint publishes before hopping and ``apply`` reads on
+#: Textual's thread — no budget can cover that case, because there is nothing
+#: yet to spend it on. It is spent INSIDE the client's grace — the server has to
+#: answer before the client stops listening — which is why it is a fraction of
+#: the grace rather than a third literal: the ordering
+#: ``RESUME + ABANDON < RESUME + GRACE`` is arithmetic
 #: that cannot be edited into an inversion on one side, and the remaining half
 #: stays with the socket round trip the grace was sized for.
 VIEWER_ABANDON_SETTLE_S = VIEWER_ACK_GRACE_S / 2

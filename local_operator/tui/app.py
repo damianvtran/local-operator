@@ -15530,22 +15530,62 @@ class OperatorApp(App[None]):
         acceptable: it is a pooled thread rather than this endpoint's loop, so
         the endpoint keeps answering and the click falls back on time.
 
-        NEVER BOTH — A SWITCH OR A SPAWN, AT ANY DELAY. That is the property
-        this endpoint owes its caller, and the bound alone never delivered it:
+        ONE CLICK YIELDS A SWITCH OR A SPAWN, NEVER BOTH, AT ANY DELAY. That is
+        the property this endpoint owes its caller, and it is stated with its
+        scope — one click — because that is the scope the code delivers; the
+        residue for a PAIR of clicks is written out at the end of this
+        docstring rather than papered over. This file exists because a
+        docstring asserted an invariant its code did not have, so an
+        unconditional claim here would be the same defect in a new place.
+
+        The bound alone never delivered even the single-click property:
         ``wait_for`` cancels the waiter, not the navigation, so a switch slower
         than the bound still committed *after* this had answered failure, and
         the caller spawned a window for a session that then switched underneath
         it. Raising the bound only moved the delay at which that happened —
         measured clean at 9.8 s and doubled at 10.2 s.
 
-        So an overrun is now stopped rather than merely stopped waiting for.
-        The timeout hops back and calls ``SessionNavigation.abandon``, whose
-        generation bump fences the navigation out of committing, and then reads
-        what is on screen: a switch that beat the fence is reported as the
-        success it is, and one that did not can no longer land. Two outcomes,
-        never both — by construction rather than by the bound being large
-        enough. ``abandon`` is scoped to the task this call started, so a switch
-        the USER began while this one overran is not cancelled with it.
+        So an overrun is now stopped rather than merely stopped waiting for,
+        and the give-up binds TWO orderings because the app can be slow in two
+        different places:
+
+        * **A navigation that already exists** is fenced. The timeout hops back
+          and calls ``SessionNavigation.abandon``, whose generation bump fences
+          it out of committing, and then reads what is on screen: a switch that
+          beat the fence is reported as the success it is, and one that did not
+          can no longer land.
+        * **A navigation that does not exist yet** is refused. The bound can
+          expire while the enqueue is still queued, so an app that services the
+          hop LATE would otherwise start a switch behind an endpoint that had
+          already answered failure — the same double action reached through the
+          sibling branch, and reproducible with nothing patched at all, merely a
+          loop busy past the bound. The endpoint therefore publishes that it has
+          given up BEFORE it hops, and ``apply`` reads that on Textual's thread
+          before it can create anything. A check would race the creation it is
+          trying to catch, because the two run on different threads; a refusal
+          is ordered by the thread that would do the work.
+
+        Both are needed: which one carries a given run depends on whether
+        Textual services ``apply`` before or after the abandon callback, and
+        each has a test that goes red when only that mechanism is removed.
+
+        ``abandon`` is scoped to the task this call started, so a switch the
+        USER began while this one overran is not cancelled with it.
+
+        A CLICK SUPERSEDED BY ANOTHER CLICK FOR THE SAME SESSION follows its
+        successor instead of reporting failure. ``select`` retires the current
+        navigation, so two clicks on one session inside the preparation window
+        used to give the first a truthful "not displayed" — its successor had
+        not committed yet — and that click spawned a window the successor then
+        switched underneath. Neither click overran anything, so this is not the
+        fence's path; the resolution above is where it is fixed.
+
+        WHAT REMAINS, stated rather than implied: two clicks on DIFFERENT
+        sessions in that window still produce a spawn and a switch. That is one
+        outcome each for two distinct requests rather than two for one, and it
+        is arguably correct — the superseded click really is about a session
+        that is not on screen. It is called out here because the guarantee
+        above is per click, and a reader is owed the boundary of it.
 
         A cancelled navigation cannot half-swap the app: ``SessionNavigation``
         commits with no await between its final generation check and
@@ -15581,17 +15621,40 @@ class OperatorApp(App[None]):
         future: asyncio.Future[str] = loop.create_future()
 
         # Written on Textual's thread by `apply`, read on Textual's thread by
-        # `abandon`; the hop between them is what makes that safe.
-        started: list["asyncio.Task[None]"] = []
+        # `abandon`; the hop between them is what makes that safe. ONE slot, and
+        # spelled as one: it holds the single navigation this call started, and
+        # a list made "no navigation yet" and "navigation, then abandoned" look
+        # like the same emptiness at a glance.
+        started: "asyncio.Task[None] | None" = None
+
+        #: Set by the endpoint thread the instant it gives up, read on Textual's
+        #: thread by `apply` before it starts anything. A REFUSAL, not a check:
+        #: the endpoint cannot poll for a navigation that has not been created
+        #: yet, so the only race-free way to stop one is to leave a decision
+        #: where the thread that would create it must read it first.
+        abandoned = False
 
         def apply() -> None:
             """On Textual's thread: start the switch and report where it landed."""
+            nonlocal started
+            if abandoned:
+                # The caller already answered failure and its spawn is running.
+                # Starting the switch now would deliver BOTH outcomes, which is
+                # the whole defect; refusing is what makes the endpoint's answer
+                # true after the fact rather than merely true when it was given.
+                loop.call_soon_threadsafe(
+                    _set_unless_done,
+                    future,
+                    None,
+                    TimeoutError(f"gave up on {session_id} before this hop was serviced"),
+                )
+                return
             try:
                 task = self._select_sidebar_session(session_id)
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
                 return
-            started.append(task)
+            started = task
 
             def settled(_task: "asyncio.Task[None]") -> None:
                 # Still on Textual's thread, so reading the binding is safe.
@@ -15603,14 +15666,34 @@ class OperatorApp(App[None]):
                     loop.call_soon_threadsafe(
                         _set_unless_done, future, f"displayed {session_id}", None
                     )
-                else:
-                    error = _task.exception() if not _task.cancelled() else None
-                    loop.call_soon_threadsafe(
-                        _set_unless_done,
-                        future,
-                        None,
-                        error or RuntimeError(f"could not display {session_id}"),
-                    )
+                    return
+                # SUPERSEDED BY A SWITCH TO THE SAME PLACE IS NOT A FAILURE.
+                # `SessionNavigation.select` cancels the current navigation, so
+                # a second click on the same session inside the preparation
+                # window retires this one — and answering "could not display"
+                # for it made that click spawn a window while its successor
+                # switched the app to the very session it spawned for (Q4). The
+                # question is only ever "is the user going to end up here", so
+                # follow the navigation that replaced this one rather than
+                # reporting on a task that was retired for heading the right
+                # way. Bounded by the endpoint's own `wait_for`, and only ever
+                # re-armed onto a DIFFERENT task, so it cannot spin.
+                successor = self._sidebar_navigation._task
+                if (
+                    successor is not None
+                    and successor is not _task
+                    and not successor.done()
+                    and self._sidebar_navigation.requested_id == session_id
+                ):
+                    successor.add_done_callback(settled)
+                    return
+                error = _task.exception() if not _task.cancelled() else None
+                loop.call_soon_threadsafe(
+                    _set_unless_done,
+                    future,
+                    None,
+                    error or RuntimeError(f"could not display {session_id}"),
+                )
 
             task.add_done_callback(settled)
 
@@ -15628,23 +15711,35 @@ class OperatorApp(App[None]):
             for a switch that is on screen is exactly the lie that spawns the
             duplicate window.
             """
-            task = started[0]
-            self._sidebar_navigation.abandon(task)
+            task = started
+            if task is not None:
+                self._sidebar_navigation.abandon(task)
             current = getattr(self._session, "session_id", "") if self._session else ""
             return f"displayed {session_id}" if current == session_id else ""
 
         try:
             return await asyncio.wait_for(hop_and_wait(), timeout=VIEWER_RESUME_TIMEOUT_S)
         except (asyncio.TimeoutError, TimeoutError):
-            if not started:
-                # The bound expired inside the hop itself — a wedged app that
-                # never serviced the enqueue, so no navigation exists to stop
-                # and nothing can commit behind us.
-                raise
+            # REFUSE BEFORE HOPPING, and the order is the correctness argument.
+            # The bound can expire while the enqueue is still queued, so there
+            # may be no navigation to abandon *yet* — an app that services the
+            # hop late runs `apply` after this branch, starting a switch behind
+            # an endpoint that has already answered failure. Reading `started`
+            # here and raising when it is empty was that hole: a check races the
+            # creation it is trying to catch, because the two run on different
+            # threads. Setting the refusal first closes it without a race — it
+            # is published before this thread does anything else, and `apply`
+            # reads it on Textual's thread before it can create anything, so
+            # every ordering ends in one outcome. The hop below then handles the
+            # other case, a navigation that already exists.
+            abandoned = True
             # Bounded again, and inside the client's remaining grace: this hop
             # is enqueued behind whatever made the switch slow, so an app wedged
             # badly enough to swallow it must not convert a duplicate window
-            # into an endpoint that never answers at all.
+            # into an endpoint that never answers at all. It runs even when no
+            # navigation was recorded — Textual serialises it against `apply`,
+            # so arriving first means the refusal above is what `apply` sees,
+            # and arriving second means there is a real task to fence.
             landed = await asyncio.wait_for(
                 asyncio.to_thread(self.call_from_thread, abandon),
                 timeout=VIEWER_ABANDON_SETTLE_S,
