@@ -410,33 +410,46 @@ def _overlay(monkeypatch: pytest.MonkeyPatch, session_id: str, **fields: Any) ->
     monkeypatch.setattr(session_catalog, "load_catalog", overlaid)
 
 
+# The round-1 `…attached_in_another_window…` test is subsumed here rather than
+# kept beside this one: it asserted exactly this, for exactly one of the three
+# states, and two tests spelling the same rule differently is how one of them
+# later gets updated alone. Its rationale is preserved in the docstring below.
+@pytest.mark.parametrize("live_state", ["attached", "busy", "wedged"])
 @pytest.mark.asyncio
-async def test_a_session_attached_in_another_window_is_not_announced(
-    store_root: Path, spawned: list[list[str]], monkeypatch: pytest.MonkeyPatch
+async def test_a_session_resident_in_another_window_is_not_announced(
+    store_root: Path,
+    spawned: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    live_state: str,
 ) -> None:
-    """``attached`` means ANOTHER TUI owns that session's toast (review B2).
+    """EVERY state meaning "another window owns this row" suppresses (M3).
 
-    The self-skip beside this one covers this process's own session. A row
-    whose ``live_state`` is ``attached`` belongs to a different window, whose
-    in-app ``Notifier`` already fires on ``TurnEnded`` — so announcing it here
-    is the double notification the routing design forbids (X8/X9). The
-    operator runs ~11 concurrent sessions, so this is the normal state of their
-    catalog rather than an edge case.
+    B2 shipped as ``live_state == "attached"``, but ``live_state`` is a single
+    slot whose branches are mutually exclusive and ordered ``wedged`` > ``busy``
+    > ``attached`` > ``idle``: an attached window RUNNING A TURN reports
+    ``busy``, and one whose heartbeat went stale reports ``wedged``. Both still
+    have that session open, and both still fire their own ``Notifier`` — so the
+    ``attached``-only filter matched the narrowest of the three and let the
+    other two double-notify. Reproduced at 1 banner each before the fix.
 
-    Fails without the filter: reintroducing it produced exactly one banner
-    titled with the attached session's name.
+    ``busy`` is the reachable one post-#720: that PR re-pointed ``busy`` at
+    conversational activity, so a session whose last turn finished unread enters
+    it the moment the user sends a new prompt in another window.
+
+    Parametrised rather than written three times so a state added to the
+    suppressed set is one line here, and so the failure names which state broke.
     """
     _make_session(store_root, "current", "Current conversation")
-    background = _make_session(store_root, "bg0000000001", "Attached elsewhere")
+    background = _make_session(store_root, "bg0000000001", "Owned by another window")
     store = AttentionStore(store_root / "attention.db")
     store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
-    _overlay(monkeypatch, "bg0000000001", live_state="attached")
+    _overlay(monkeypatch, "bg0000000001", live_state=live_state)
 
     app = OperatorApp(lambda: _factory(AttachedSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _booted(app, pilot)
         await _settle(app, pilot, rounds=8)
-        assert spawned == [], spawned
+        assert spawned == [], f"{live_state} is resident elsewhere; its own window toasts it"
 
 
 @pytest.mark.asyncio
@@ -501,8 +514,18 @@ async def test_a_backlog_is_capped_and_the_remainder_is_summarised(
         await _booted(app, pilot)
         await _settle(app, pilot, rounds=8)
 
-    named = [call for call in spawned if "more session" not in " ".join(call)]
-    digests = [call for call in spawned if "more session" in " ".join(call)]
+    # Partitioned on the STRUCTURAL fact, not on the banner's prose: the digest
+    # is the only delivery that carries no `session_id`, by design and because
+    # it covers several sessions (there is no single transcript to reopen). A
+    # substring test on "more session" would sort a session literally named
+    # "…3 more sessions…" into the wrong bucket, and it breaks the moment a
+    # design round rewords the copy — which one already has (review round 2,
+    # nit). The `spawned` fixture records `[title, body, session_id, subtitle]`
+    # for every delivery, so slot 2 is the discriminator; a 4-slot shape on
+    # every call is also what proves no cmux argv leaked in to be mis-sorted.
+    assert all(len(call) == 4 for call in spawned), spawned
+    named = [call for call in spawned if call[2]]
+    digests = [call for call in spawned if not call[2]]
     assert len(named) == _BACKGROUND_NOTIFY_MAX_PER_TICK, spawned
     # The count is reported rather than lost: 12 backlogged, 3 named, 9 summarised.
     assert len(digests) == 1, spawned
@@ -523,6 +546,103 @@ async def test_a_backlog_is_capped_and_the_remainder_is_summarised(
         )
         for index in range(backlog)
     )
+
+
+@pytest.mark.parametrize("mode", ["returns_false", "raises"])
+@pytest.mark.asyncio
+async def test_a_failed_digest_does_not_consume_the_claims_it_stood_for(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A digest that fails hands back every claim it spoke for (review round 2, M1).
+
+    The cap CLAIMS the rows it holds back — it must, or the backlog re-floods —
+    and the digest is then the only thing that will ever speak for them. So a
+    digest that silently fails takes N completions with it permanently, where a
+    single failed row loses one: measured at 9 of 12 the user is never told
+    about. That is strictly worse than the flood B1 replaced, because a flood is
+    noisy and self-correcting while this is silent and the claim asserts the
+    banner went out.
+
+    Neither failure mode is exotic. ``detached_notify`` returns False by
+    contract on any host with no notifier on PATH — a Linux box without
+    ``notify-send`` — and on macOS before the signed bundle finishes building,
+    which is precisely the cold-start moment a backlog exists. The ``raises``
+    mode is what the helper's own ``except Exception`` swallows.
+
+    Asserts that NO COMPLETION IS PERMANENTLY LOST — every backlogged session is
+    eventually named to the user — rather than asserting the release call. That
+    is the property the user has, it is what the reviewer measured (9 of 12
+    never announced), and it cannot be satisfied by a release that rolled the
+    watermark somewhere useless. It is also why the released rows are followed
+    all the way to a banner: the digest fails on every tick here, so the only
+    way to reach 12 is for the released claims to keep coming back under the cap
+    until each has had a real one.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    _make_session(store_root, "current", "Current conversation")
+    store = AttentionStore(store_root / "attention.db")
+    seed = _make_session(store_root, "bg0000000000", "Seed")
+    seed_token = str(uuid.uuid4())
+    store.publish(conversation_identity(seed), seed_token, "old", "complete")
+    store.acknowledge(conversation_identity(seed), seed_token)
+
+    backlog = 12
+    for index in range(backlog):
+        directory = _make_session(store_root, f"bg00000001{index:02d}", f"Overnight {index}")
+        store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", "complete")
+
+    named: list[list[str]] = []
+
+    def deliver(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+        # ONLY the digest fails. A digest is the delivery with no `session_id`
+        # (it covers several sessions, so there is no transcript to reopen), so
+        # this splits on the same structural fact the cap test partitions on.
+        if not session_id:
+            if mode == "raises":
+                raise RuntimeError("notifier backend exploded")
+            return False
+        named.append([title, body, session_id, subtitle])
+        return True
+
+    monkeypatch.setattr("local_operator.tui.notify.detached_notify", deliver)
+    monkeypatch.setattr(
+        "local_operator.proc.spawn_detached", lambda argv, **kwargs: named.append(list(argv)) or 1
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.notify.spawn_detached",
+        lambda argv, **kwargs: named.append(list(argv)) or 1,
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        # The cap lets `_BACKGROUND_NOTIFY_MAX_PER_TICK` through per scan, so
+        # draining 12 takes several scans however fast the machine is. Bounded
+        # by SCANS, not by a clock: `_settle` drives the poll directly.
+        await _settle(app, pilot, rounds=4 * backlog)
+
+    announced = {call[2] for call in named}
+    missing = {f"bg00000001{index:02d}" for index in range(backlog)} - announced
+    assert not missing, (
+        f"{len(missing)} completions were claimed by a digest that never reached the user and "
+        f"were never re-announced: {sorted(missing)}"
+    )
+    # And nothing is left holding a claim with nothing delivered.
+    fresh = AttentionStore(store_root / "attention.db")
+    stranded = [
+        index
+        for index in range(backlog)
+        if fresh.claim_delivery(
+            conversation_identity(store_root / "sessions" / f"bg00000001{index:02d}"),
+            str(
+                fresh.state(
+                    conversation_identity(store_root / "sessions" / f"bg00000001{index:02d}")
+                )["completion_token"]
+            ),
+            "test",
+        )
+    ]
+    assert not stranded, f"rows still unclaimed after every one was announced: {stranded}"
 
 
 @pytest.mark.asyncio
@@ -614,6 +734,136 @@ async def test_a_released_claim_is_retried_without_an_unrelated_completion(
         await _settle(app, pilot, rounds=6)
         assert len(calls) == 1, calls
         assert "Background work" in " ".join(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_can_never_deliver_stops_rescanning(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry is BOUNDED: a dead backend must not rescan forever (round 2, M2).
+
+    The M1/Q1 fix forgets the revision gate whenever a claim was released, so
+    the released row is re-examined without waiting for an unrelated completion.
+    Unbounded, that degenerates on a host where delivery ALWAYS fails — no
+    ``notify-send`` on Linux, no ``osascript``, the macOS bundle not yet built —
+    into a permanent 1 Hz loop: scan, claim, fail, release, forget, rescan.
+    Measured at 23 catalog scans and 138 SQLite writes over 20 ticks against a
+    store where nothing changed, on the same ``attention.db`` all of the
+    operator's sessions contend for.
+
+    STRUCTURAL, NOT TIMED. The assertion is that work per tick DECAYS — a later,
+    equally long run of idle ticks costs strictly fewer scans and writes than an
+    earlier one — rather than a bound on how long anything took. A per-tick
+    retry fails it by construction on any machine (every window costs the same),
+    and there is no clock reference anywhere in it. Ticks are counted by driving
+    `_poll_completion_attention` directly, so machine speed cannot enter.
+
+    Zero is deliberately NOT asserted: the retry must never stop entirely, which
+    is the invariant the third assertion below pins. A cap that stopped retrying
+    would make a backend outage longer than the cap a permanent silence — the
+    round-1 M1/Q1 hole, re-created. That is not hypothetical: capping was
+    implemented first here and `…a_released_claim_is_retried_without_an_
+    unrelated_completion` went red, which is why this is backoff.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    _make_session(store_root, "current", "Current conversation")
+    for index in range(3):
+        directory = _make_session(store_root, f"bg00000003{index:02d}", f"Background {index}")
+        store = AttentionStore(store_root / "attention.db")
+        store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", "complete")
+
+    from local_operator.session import attention as attention_module
+    from local_operator.tui import session_catalog
+
+    scans = 0
+    real_load = session_catalog.load_catalog
+
+    def counting_load(directory: Path) -> Any:
+        nonlocal scans
+        scans += 1
+        return real_load(directory)
+
+    writes = 0
+    real_claim = attention_module.AttentionStore.claim_delivery
+    real_release = attention_module.AttentionStore.release_delivery
+
+    def counting_claim(self: Any, conversation: str, token: str, backend: str) -> bool:
+        nonlocal writes
+        writes += 1
+        return real_claim(self, conversation, token, backend)
+
+    def counting_release(self: Any, conversation: str, token: str) -> bool:
+        nonlocal writes
+        writes += 1
+        return real_release(self, conversation, token)
+
+    monkeypatch.setattr(session_catalog, "load_catalog", counting_load)
+    monkeypatch.setattr(attention_module.AttentionStore, "claim_delivery", counting_claim)
+    monkeypatch.setattr(attention_module.AttentionStore, "release_delivery", counting_release)
+
+    delivered: list[str] = []
+    healthy = False
+
+    def deliver(title: str, body: str, *, session_id: str = "", subtitle: str = "") -> bool:
+        # The host with no notifier backend: `detached_notify`'s documented
+        # False, on every call, for as long as the backend is absent.
+        if not healthy:
+            return False
+        delivered.append(title)
+        return True
+
+    monkeypatch.setattr("local_operator.tui.notify.detached_notify", deliver)
+    monkeypatch.setattr(
+        "local_operator.proc.spawn_detached", lambda argv, **kwargs: delivered.append(argv[0]) or 1
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.notify.spawn_detached",
+        lambda argv, **kwargs: delivered.append(argv[0]) or 1,
+    )
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        # Three EQUAL windows of idle ticks. Nothing is published in any of
+        # them, so every scan and every write is pure waste; with the retry
+        # rate-limited the later windows must cost strictly less than the first.
+        window = 12
+        await _settle(app, pilot, rounds=window)
+        assert delivered == [], "the backend is down; nothing should have gone out"
+        first_scans, first_writes = scans, writes
+
+        await _settle(app, pilot, rounds=window)
+        second_scans, second_writes = scans - first_scans, writes - first_writes
+
+        await _settle(app, pilot, rounds=window)
+        third_scans, third_writes = (
+            scans - first_scans - second_scans,
+            writes - first_writes - second_writes,
+        )
+
+        assert third_scans < first_scans, (
+            f"idle scans per {window}-tick window went {first_scans} -> {second_scans} -> "
+            f"{third_scans}: the retry is not backing off and this host rescans forever"
+        )
+        assert third_writes < first_writes, (
+            f"idle SQLite writes per {window}-tick window went {first_writes} -> "
+            f"{second_writes} -> {third_writes} against a store where nothing changed"
+        )
+        # A per-tick retry would scan on every one of them; the gate must hold
+        # for the large majority of an idle window.
+        assert (
+            third_scans * 2 < window
+        ), f"{third_scans} scans in {window} idle ticks — the revision gate is barely holding"
+
+        # ...and the budget is per STORE CHANGE, not per process: a real
+        # completion re-arms it, so the M1/Q1 retry it bounds still works.
+        healthy = True
+        latecomer = _make_session(store_root, "bg0000000999", "Latecomer")
+        AttentionStore(store_root / "attention.db").publish(
+            conversation_identity(latecomer), str(uuid.uuid4()), "fresh", "complete"
+        )
+        await _settle(app, pilot, rounds=8)
+        assert "Latecomer" in " ".join(delivered), delivered
 
 
 @pytest.mark.asyncio
