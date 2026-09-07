@@ -283,6 +283,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
     WakeBlock,
     WorkingBlock,
+    conversation_started,
 )
 from local_operator.tui.widgets.usage_panel import (
     UsageDismissed,
@@ -2080,8 +2081,12 @@ class OperatorApp(App[None]):
         #: not started — a quota fallback, a provider that is missing. The
         #: splash is the empty state, and treating one of these as a
         #: transcript block retired it for an empty message view. Latest
-        #: one only: the splash is one row. Cleared on a session swap
-        #: because it describes the session that just died.
+        #: one only: the splash is one row. Cleared on a swap that RETIRES
+        #: the conversation (`/new`, `/resume`, `/reload`) because it
+        #: describes the session that just died — but NOT on a sidebar
+        #: switch, which parks that conversation and can return to it with
+        #: the warning still the only account of why it cannot answer
+        #: (see :meth:`_reset_band_for_swap`).
         self._splash_notice: str | None = None
         #: PyPI version strictly newer than this install, filled by the
         #: one-shot mount worker. ``None`` until then AND when current —
@@ -3517,7 +3522,11 @@ class OperatorApp(App[None]):
             conversation = self.query_one("#session-conversation")
             conversation.styles.layers = "session-cache default"
             await conversation.mount(replay.view)
-            if not replay.blocks:
+            # The same predicate the commit path applies on the return leg. Two
+            # tests of "is this conversation empty" on the two halves of one
+            # switch would eventually disagree, and the visible failure is a
+            # target that arrives with no empty state and no way to grow one.
+            if not conversation_started(replay.blocks):
                 welcome = WelcomeView(
                     lambda: session_welcome_info(
                         session,
@@ -4141,7 +4150,41 @@ class OperatorApp(App[None]):
             factory = self._resume_factory
             if factory is not None:
                 self._session_factory = lambda: factory(session_id)
+            # A sidebar switch IS a conversation swap, so the band's
+            # session-scoped segments are blanked here rather than being left to
+            # the incoming snapshot to overwrite. That repaint is leave-alone on
+            # absent values, and a conversation that has never had a turn
+            # legitimately supplies none: `cumulative_cost` is None until spend
+            # exists and `context_tokens` defaults to None. So switching away
+            # from a `/new` conversation to a busy one and back left the BUSY
+            # session's cost and context window painted over the fresh one, with
+            # nothing arriving to correct them until its first turn ended.
+            #
+            # Immediately BEFORE the adopt, never after: the incoming snapshot
+            # is what puts a real figure back, so a session with genuine spend
+            # still lands on its own number rather than on zero.
+            #
+            # `retire=False`: the outgoing conversation is PARKED, not destroyed.
+            # The splash notice, the dock density and the band's fork indicator
+            # are the three pieces of state in there that nothing on this path
+            # restores, and all belong to the conversation the user can click
+            # straight back to.
+            self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            # Re-derive the fork indicator from the session now in front of the
+            # user. `fork_pending` is app-scoped with no `FrontendSessionState`
+            # field, so no snapshot repaints it and the park leg deliberately
+            # leaves it alone (nothing else restores a live fork on the return).
+            # Both halves of that are correct and neither resolves the flag for
+            # the INCOMING conversation, so an adoption that changes conversation
+            # has to ask the new session itself — otherwise the outgoing
+            # conversation's `forking` stays painted here, advertising an `esc`
+            # that `action_stop` routes to `self._session` and so can never
+            # reach the fork it names. That is the lie `_schedule_fork_report`
+            # forbids, one conversation over. AFTER the adopt, never before:
+            # `_sync_fork_pending` reads `self._session`, which the line above
+            # has just swapped.
+            self._sync_fork_pending()
             self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
             history = session.display_history_window()
             total = session.history_message_count
@@ -4205,7 +4248,12 @@ class OperatorApp(App[None]):
                 editor.focus()
         finally:
             self._swapping_session = False
-        self._set_welcome_visible(not bool(incoming.replay.view.blocks()))
+        # `conversation_started`, not `bool(blocks())`: the infrastructure
+        # notices `_adopt_session` re-emits on EVERY swap (build skew, a failed
+        # MCP server) are blocks that deliberately do not end the empty state,
+        # and counting them retired the splash on the return leg — a `/new`
+        # conversation lost its empty state just by being glanced away from.
+        self._set_welcome_visible(not incoming.replay.view.conversation_started())
         if outgoing_presentation is not None:
             self.run_worker(self._release_sidebar_preparation((outgoing, outgoing_presentation)))
         if displaced is not None and displaced is not incoming:
@@ -7009,9 +7057,96 @@ class OperatorApp(App[None]):
         # dead conversation's already-billed calls from its own turn total and
         # under-report that turn by exactly that much.
         self._turn_accrued_cost = 0.0
-        # The splash notice describes the session being replaced. Left
-        # standing, a `/new` would open on the dead session's quota warning.
-        self._splash_notice = None
+        self._reset_band_for_swap()
+        return (*carried_spend, was_floor)
+
+    def _reset_band_for_swap(self, *, retire: bool = True) -> None:
+        """Blank the session-scoped BAND segments, without touching the transcript.
+
+        The band half of :meth:`_reset_ledger_for_swap`, split out because the
+        sidebar's switch path is a conversation swap that must NOT tear the
+        transcript down: it substitutes a prepared presentation rather than
+        rebuilding one, so the steer notices, tool cards, fork receipts and
+        resume state its sibling clears are all state the sidebar deliberately
+        preserves. Calling the whole of `_reset_ledger_for_swap` from there
+        would destroy the presentation the switch just spent a frame preparing.
+
+        RETIRE vs PARK is the distinction that decides what may be blanked, and
+        it is the concept to carry away from this method. ``/new``, ``/resume``
+        and ``/reload`` RETIRE the conversation they leave: it is gone, and
+        state describing it is correctly discarded with it. The sidebar PARKS
+        one and returns to it, so ``retire=False`` — state that no path puts
+        back must survive.
+
+        Most of what is cleared here does not care, because ``_adopt_session``
+        unconditionally repaints it from the incoming snapshot: the cost, the
+        context reading, the MCP segment and the model label are all overwritten
+        a few lines later whichever path called this, so blanking them costs a
+        park nothing and is what stops a never-used conversation inheriting the
+        previous one's figures. THREE things here have nobody to restore them on
+        the sidebar path — the splash notice, the dock density and the band's
+        fork indicator — and all three are therefore gated on ``retire``. They
+        were not, and a park-and-return silently discarded a standing setup
+        warning, a user's ``ctrl+g``, and the ``forking`` segment of a request
+        that was still live and still cancellable.
+
+        Every other field the ungated ``status.update`` below writes was audited
+        against both restore paths (``_adopt_session``'s explicit repaint and
+        ``_apply_frontend_state``'s snapshot repaint) and all ten come back.
+        ``fork_pending`` is the sole structural exception, which is why it needs
+        the gate rather than a restore: ``FrontendSessionState`` carries no
+        fork-pending field, so no snapshot can repaint it. A clear on the park
+        leg is therefore permanent for the lifetime of the pending request,
+        which is what ``retire=False`` prevents.
+
+        That gate answers the RETURN leg only. Leaving the flag alone also
+        leaves the OUTGOING conversation's value standing over the session
+        switched TO, so ``_commit_sidebar_session`` pairs this call with a
+        :meth:`_sync_fork_pending` after its adopt to re-derive the flag from
+        the incoming session. The two are a pair: neither alone gets both legs
+        right, and this method must not try to do the incoming half itself
+        because it runs BEFORE ``_adopt_session`` swaps ``self._session``.
+
+        The ledger figures themselves (`_total_cost`, `_spend_is_floor`, the
+        naming bookkeeping) are properties of ``self._interaction`` and are
+        therefore already per-conversation: on the sidebar path
+        ``_adopt_session`` swaps the interaction, so those come back correct on
+        their own, and zeroing them HERE would blank the outgoing conversation's
+        real spend — which, unlike a reload's, is parked and returned to rather
+        than retired.
+
+        ORDERING: call this BEFORE ``_adopt_session``, never after. The incoming
+        snapshot's repaint is leave-alone on absent values (`cumulative_cost` is
+        None until a session has had a turn, `context_tokens` defaults to None),
+        so a reset afterwards would erase a real figure, and no reset at all
+        left the previous conversation's cost and context painted over a fresh
+        `/new` — the reported bug. Resetting first means a session with genuine
+        spend still lands on its own number, because its snapshot carries it.
+        """
+        assert self._status is not None
+        if retire:
+            # The splash notice describes the session being replaced. Left
+            # standing, a `/new` would open on the dead session's quota warning.
+            #
+            # Retire-only: it describes ONE conversation's empty state (the
+            # `/login`, unknown-provider and no-model-set warnings
+            # `_announce_on_splash` raises), and nothing on the sidebar path puts
+            # it back. Clearing it on a park lost it in the worst way — silently
+            # and LATE, because `WelcomeView` reads the notice through a closure,
+            # so the row survived the switch frame and vanished at the next
+            # `refresh_info()`. A user parking an unconfigured session and
+            # returning watched the only explanation of why it cannot answer
+            # disappear on its own.
+            self._splash_notice = None
+        # The TOAST goes on both legs, unlike the notice it was raised for. They
+        # are different objects with different lifetimes, as `_announce_on_splash`
+        # says: "The toast is the interruption; the splash row is what is still
+        # there after the toast dismisses." The row is the parked conversation's
+        # own empty-state content and must survive the round trip; the toast is a
+        # transient overlay ABOUT the conversation being left, and gating it with
+        # the notice made a park carry it onto the session switched TO — "No
+        # provider configured" sitting over a working session with real spend
+        # (design round 2, D2).
         for toast in self.query(Toast):
             toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
@@ -7036,7 +7171,15 @@ class OperatorApp(App[None]):
             # Cleared with the name it qualifies: the dead session's fork tag
             # must not describe the conversation replacing it.
             forked=False,
-            fork_pending=False,
+            # Retire-only, and `None` here means leave-alone rather than clear.
+            # Unlike its ten siblings in this call, nothing repaints this one:
+            # see the docstring's audit. A `/fork` deferred to a turn boundary
+            # stays live and cancellable across a park, so blanking the segment
+            # on that leg is the inverse of the lie `_schedule_fork_report`
+            # forbids — the band stops saying `forking` while the request the
+            # user could still Ctrl+C is pending, and the fork lands later with
+            # no cue that it was coming.
+            fork_pending=False if retire else None,
             mcp=McpStatus(),
             context_tokens=0,
             context_is_estimate=False,
@@ -7049,9 +7192,12 @@ class OperatorApp(App[None]):
         # replacement session re-reads `display.dock` on its first roster and
         # a `ctrl+g` pressed against the old children does not pin the new
         # ones (#525 design §2).
-        if self._subagent_panel is not None:
+        #
+        # Retire-only for the mirror-image reason: on the sidebar path the "old
+        # children" ARE the ones the user is coming back to, so their explicit
+        # `ctrl+g` still applies and nothing would re-seed it.
+        if retire and self._subagent_panel is not None:
             self._subagent_panel.reset_density()
-        return (*carried_spend, was_floor)
 
     def _conversation_id(self) -> str:
         """Which conversation is open, or "" when none is."""
@@ -8010,10 +8156,11 @@ class OperatorApp(App[None]):
 
         Read from the session rather than tracked here, so the band can never
         disagree with the fact that actually governs the drain. Called at the
-        three moments the answer can change — the request, the receipt, and a
-        cancel — rather than polled, because the band repaints at 12.5 Hz during
-        a turn and a poll would be doing this work eighty times a second to
-        observe a flag that changes twice a session.
+        moments the answer can change — the request, the receipt, a cancel, and
+        a sidebar switch, which changes the session the flag is read FROM rather
+        than the fork itself — rather than polled, because the band repaints at
+        12.5 Hz during a turn and a poll would be doing this work eighty times a
+        second to observe a flag that changes twice a session.
 
         Defensive on both sides: a host whose session has no ``has_pending_fork``
         (the lightweight facades, ``RemoteSession``) simply never lights the
@@ -13202,6 +13349,17 @@ class OperatorApp(App[None]):
         if visible == self._welcome_visible:
             return
         self._welcome_visible = visible
+        if visible:
+            # The splash is composed ONCE into the boot transcript, but sidebar
+            # navigation mounts a whole new `TranscriptView` per target and only
+            # gives it an empty state when the target had no history — so after a
+            # switch onto a conversation with messages, `self._welcome` is None
+            # (or points at a view parked off screen) and this call had nothing
+            # to show. The boot layout still applied, so `/new` landed on a
+            # centred, EMPTY card: the reported bug. Materialise the empty state
+            # on the view that is on screen now instead of adding a second
+            # "should the splash show" rule beside this one.
+            self._welcome = self._ensure_welcome_view()
         if self._welcome is not None:
             self._welcome.set_visible(visible)
         self._sync_boot_layout_class()
@@ -13213,6 +13371,54 @@ class OperatorApp(App[None]):
             self.screen.remove_class(BOOT_CARD_CLASS)
             self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
         self._sync_boot_layout()
+
+    def _ensure_welcome_view(self) -> WelcomeView | None:
+        """The CURRENT transcript's empty state, mounting one if it has none.
+
+        Identity, not construction, is the point: the splash lives inside the
+        transcript (see :meth:`compose`), so "the splash" is whichever view the
+        transcript on screen owns. A handle to a view parked in another
+        conversation's viewport is worse than no handle at all — it is a widget
+        that reports `display=True` from one viewport to the right of the screen
+        — so a stale `self._welcome` is REPLACED here rather than reused.
+
+        At most one is ever mounted per transcript: the existing child is
+        adopted when there is one, which is what stops a splash accumulating per
+        sidebar switch. The mount is deliberately not awaited — every caller is
+        synchronous, and the swap path's whole ordering argument (see
+        :meth:`_adopt_session`) is that nothing between the clear and the replay
+        may yield to the event loop.
+
+        Returns None only before the transcript is composed, which is the one
+        state where there is no empty state to own.
+        """
+        try:
+            view = self._transcript_view()
+        except Exception:  # pragma: no cover - only before compose
+            logger.debug("transcript is not mounted yet", exc_info=True)
+            return None
+        existing = next((child for child in view.children if isinstance(child, WelcomeView)), None)
+        if existing is not None:
+            return existing
+        # Same closure as `compose` and as the sidebar's prepare path, so the
+        # splash renders the same info rows wherever it is materialised. It is a
+        # closure rather than a snapshot because the notice, the setup state and
+        # the update banner all resolve AFTER the view is built.
+        welcome = WelcomeView(
+            lambda: session_welcome_info(
+                self._session,
+                self._providers,
+                notice=self._splash_notice,
+                setup=self._setup_state,
+                update_available=self._update_available,
+            )
+        )
+        # The splash is the empty state, so it goes ABOVE the blocks — the same
+        # position `compose` gives it. `mount(before=0)` rather than a plain
+        # mount because a transcript that already holds rows (a `/clear` receipt,
+        # a boot notice) would otherwise get its empty state underneath them.
+        view.mount(welcome, before=0)
+        return welcome
 
     def _sync_row_density_class(self) -> None:
         """Put ``Screen.comfortable-rows`` on iff the setting says so.
@@ -17258,6 +17464,12 @@ class OperatorApp(App[None]):
                 block.navigation_anchor_id = self._projection_message_id
                 block.navigation_anchor_part = self._projection_part
             self._projection_part += 1
+        # Recorded on the BLOCK, not merely acted on here, because the sidebar
+        # parks a transcript and comes back to it: the return leg has to ask the
+        # same "has this conversation started" question this call is answering,
+        # long after the append that answered it. See
+        # `transcript.conversation_started`.
+        block.ends_empty_state = ends_empty_state
         if self._block_sink is not None:
             self._block_sink.append(block)
             return
