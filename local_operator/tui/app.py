@@ -1772,6 +1772,9 @@ class OperatorApp(App[None]):
         #: than tell them to wait for a session that is never arriving.
         #: Cleared the moment another session transition starts.
         self._stopped_session_id = ""
+        #: See `_adopt_session`: the session this viewer is looking at, which
+        #: outlives the `_session` binding so `/stop` can still address it.
+        self._adopted_session_id = ""
         self._watched_stop_notice_shown = False
         #: Whether THIS app issued the stop it is about to be told about, so
         #: the notice can attribute it correctly (see _paint_watched_stop_notice).
@@ -4716,6 +4719,14 @@ class OperatorApp(App[None]):
         if getattr(session, "session_id", ""):
             self._sidebar_sources[session.session_id] = source
         self._session = session
+        # The id of the session this VIEWER is looking at, kept beside the
+        # binding rather than derived from it. `self._session` is dropped by
+        # every swap/reload/reconnect path while the underlying session keeps
+        # running, and the kill switch must still be able to name a target in
+        # that window — a `/stop` that refuses because the viewer is unbound is
+        # a runaway nobody can halt (see `_cmd_stop`, QA Q-2). Recorded on
+        # adoption because that is the one edge where the identity is known.
+        self._adopted_session_id = getattr(session, "session_id", "") or ""
         # The latch belongs to the BINDING, not to the app: a swapped-in
         # session is cold again and owes its own engage. Its declaration has
         # always said a swap resets it, but nothing did — harmless while the
@@ -6616,6 +6627,23 @@ class OperatorApp(App[None]):
         async with self._turn_provider_lock:
             pass
         self._session = None
+        # THE WATCHED ID DELIBERATELY SURVIVES THIS WINDOW. It is the only
+        # lever a stranded viewer has, and clearing it here disarmed the kill
+        # switch on the exact path this feature exists to serve: if anything
+        # between the null above and `_adopt_session` below raises, the viewer
+        # is left unbound while the session it was watching keeps running — for
+        # a remote, in another process, still billing. Measured with the swap
+        # raising mid-window: cleared, `/stop` dispatched nothing and told the
+        # user to WAIT; left alone, it dispatched the stop (review round 2,
+        # BLOCKER-3).
+        #
+        # An ordinary transition stays honest WITHOUT clearing it, because
+        # `_session_transition_pending` already gates both the unbound dispatch
+        # and the notice for the whole window — including the gap before the
+        # replacement is adopted (see `_cmd_stop`). A real /reload sampled
+        # across the transition never observes an unbound viewer holding this
+        # id. `_adopt_session` re-stamps it on success, so the value is only
+        # ever stale on the failure path, which is precisely where it is needed.
         # The pending approval belonged to the session that just died. Left
         # set, the NEW session's first write/exec approval queued behind a
         # question that is no longer on screen and nothing could answer it.
@@ -7600,6 +7628,10 @@ class OperatorApp(App[None]):
             except Exception:
                 pass
         self._session = None
+        # Same reason as `_reload_session`: the watched id must OUTLIVE this
+        # window. This is the strand path itself — the remote runs in another
+        # process, so a raise before the adopt below leaves it billing with the
+        # viewer unable to name it. `_adopt_session` re-stamps on success.
         self._swapping_session = True
         try:
             self._reset_ledger_for_swap()
@@ -8223,6 +8255,27 @@ class OperatorApp(App[None]):
             )
         if self._boot_failed:
             return ("session failed to start — /login to reconfigure or restart lop", failed)
+        if self._adopted_session_id and not self._session_transition_pending:
+            # ADOPTED, then unbound. "Still starting" is false here and its
+            # advice — wait — is the most expensive thing a user can do when
+            # the session they cannot reach is spending money (QA Q-2). This is
+            # the residual state after `_cmd_stop`'s fallback could not address
+            # the session, so the copy names what is actually true and points
+            # at the lever that works from outside this viewer.
+            #
+            # EXCLUDED DURING A TRANSITION, and this helper is shared by ~15
+            # call sites (`/team`, `/agent`, the prompt path), so the exclusion
+            # is not a `/stop` detail. A /reload nulls the binding deliberately
+            # and boots a replacement; telling the user their viewer "lost its
+            # link" and that a session "may still be running" — in the error
+            # weight — during a transition they themselves started is false and
+            # alarming (review round 1, BLOCKER-2). "Still starting" is the true
+            # answer there: a session really is on its way.
+            return (
+                f"this viewer lost its link to session {self._adopted_session_id}; "
+                f"it may still be running — lop stop {self._adopted_session_id} ends it",
+                failed,
+            )
         return ("session is still starting…", starting)
 
     def _retire_name_list_reserve(self) -> None:
@@ -17927,6 +17980,41 @@ class OperatorApp(App[None]):
             return
         if not target:
             if session is None:
+                # GATED ON WHETHER A SESSION EXISTS TO STOP, not on whether
+                # THIS VIEWER happens to hold one. The two are different, and
+                # conflating them broke the kill switch in exactly the state it
+                # is needed: with the session adopted, alive and undisposed but
+                # the viewer's reference dropped (a swap, a reload, a reconnect
+                # race), `/stop` answered "session is still starting…" for a
+                # session that was visibly burning money — and told the user to
+                # WAIT, the single most expensive thing they can do (QA Q-2).
+                #
+                # An unbound viewer can still stop the session it is LOOKING
+                # at: `_adopted_session_id` carries that id (stamped in
+                # `_adopt_session`, and NOT the same thing as the
+                # `_resumable_session_id()` method, which answers a different
+                # question about transcripts on disk), and the runtime stop
+                # ladder addresses a session by id rather than by object. So
+                # the refusal is now the genuinely unstoppable case only.
+                #
+                # NOT DURING A TRANSITION. A /reload, /new, /resume or attach
+                # nulls the binding on purpose and boots a replacement, so the
+                # viewer is legitimately sessionless for that window and the
+                # id it holds names a session that is being REPLACED, not one
+                # that ran away. Clearing the id at each unbind closes most of
+                # the window; this guard closes the rest of it, including the
+                # gap before the new session is adopted (review round 1,
+                # BLOCKER-2).
+                watched = self._adopted_session_id
+                if (
+                    watched
+                    and not self._stopped_session_id
+                    and not self._session_transition_pending
+                ):
+                    self.run_worker(
+                        self._stop_unbound_worker(watched), thread=False, group="session"
+                    )
+                    return
                 # ``_system_notice``: nothing ran, so the boot composition
                 # must survive it — the rule every rejecting branch follows.
                 # Through the shared no-session helper so a second /stop
@@ -17972,6 +18060,10 @@ class OperatorApp(App[None]):
         # and no stopped id and answers "session is still starting…" — the
         # boot wording — for a session the user just stopped on purpose.
         self._stopped_session_id = resumable_id
+        # This viewer is no longer looking at a live session, so the unbound
+        # `/stop` fallback must not offer to stop it again through the socket
+        # ladder — it is already ending here.
+        self._adopted_session_id = ""
         name = getattr(session, "conversation_name", "") or resumable_id
         wakes = self._mark_own_wakes_dormant(session)
         # Retire any paint the dying session already queued: its
@@ -18150,6 +18242,61 @@ class OperatorApp(App[None]):
         # from the runtime's own ladder, and that is what the user needs.
         self._system_notice(detail or "stop requested from another terminal")
 
+    async def _stop_unbound_worker(self, session_id: str) -> None:
+        """Bare ``/stop`` when the viewer lost its binding but the session lives.
+
+        Deliberately NOT ``_stop_target_worker``. That worker's self-pid branch
+        routes back into :meth:`_cmd_stop`, which — with no bound session —
+        would take the unbound fallback again and dispatch another worker,
+        forever. Measured while building this path: the recursion spawned
+        workers until teardown and painted nothing at all, which is a quieter
+        version of the very defect being fixed.
+
+        The two outcomes are genuinely different and must read differently:
+
+        * the session is in ANOTHER process — the socket ladder owns it, and
+          the shared worker's receipt is the right one, so this delegates;
+        * the session is in THIS process — nothing here can reach it, because
+          the object that would be asked is exactly the reference this viewer
+          lost. Saying so, and naming the out-of-process lever, is the honest
+          answer; "still starting" was not.
+        """
+        from local_operator.mobile.peer_send import resolve_peer_target
+
+        # THE EXACT SELECTOR, NEVER THE SUBSTRING VOCABULARY. `target=` matches
+        # case-insensitively against conversation_name, session_id AND the cwd
+        # basename of every live record, and the state this fallback exists for
+        # is precisely the one where the watched session is NOT resolvable — so
+        # the needle falls through to whatever else happens to contain it.
+        # Measured with the watched session absent and one decoy whose name
+        # contained its id: `target=` resolved to that unrelated live session
+        # with no error and no ambiguity candidates, and the kill switch would
+        # then have stopped it (review round 1, BLOCKER-1). `resolve_peer_target`
+        # names this class a wrong-recipient hazard in its own docstring, and a
+        # kill switch is the worst place to take it: the user asks to stop a
+        # runaway, a healthy peer dies, and the runaway keeps billing.
+        #
+        # `session=` is an exact `record.session_id ==` match, so a miss returns
+        # None and falls through to the honest notice below rather than to a
+        # neighbour.
+        record, _candidates, _error = resolve_peer_target(
+            target=None,
+            pid=None,
+            session=session_id,
+            pid_hint="a pid",
+            session_hint="a session id",
+            include_wedged=True,  # a wedged agent is the one a user most needs to stop
+        )
+        if record is not None and record.pid != os.getpid():
+            # The RESOLVED RECORD is handed straight to the ladder. Re-entering
+            # `_stop_target_worker` with the id would resolve a second time
+            # through the substring vocabulary and hand back the very hazard
+            # the exact selector above just excluded.
+            await self._stop_resolved_record(record)
+            return
+        body, kind = self._no_session_notice()
+        self._system_notice(body, kind)
+
     async def _stop_target_worker(self, target: str) -> None:
         """``/stop <target>``: resolve with the `send` vocabulary, stop it.
 
@@ -18160,8 +18307,6 @@ class OperatorApp(App[None]):
         worker only surfaces them.
         """
         from local_operator.mobile.peer_send import resolve_peer_target
-        from local_operator.paths import config_dir
-        from local_operator.session.runtime import control
 
         record, candidates, error = resolve_peer_target(
             target=target,
@@ -18189,6 +18334,21 @@ class OperatorApp(App[None]):
         if record.pid == os.getpid():
             self._cmd_stop("", lambda body, kind="info": self._system_notice(body, kind))
             return
+        await self._stop_resolved_record(record)
+
+    async def _stop_resolved_record(self, record: Any) -> None:
+        """Run the stop ladder against a record that is ALREADY resolved.
+
+        Split from :meth:`_stop_target_worker` so a caller holding a record can
+        reach the ladder without resolving a second time. That matters for the
+        unbound `/stop`, which resolves by the EXACT session selector on
+        purpose: routing it back through the target worker would re-resolve the
+        id through the substring vocabulary and could land on a different live
+        session (review round 1, BLOCKER-1).
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime import control
+
         # An acknowledgement the receipt then REPLACES: the ladder can take
         # seconds (a wedged runtime pays the graceful timeout, identity and
         # the SIGTERM grace), and a composer that accepts input while
