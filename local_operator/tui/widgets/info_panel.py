@@ -148,31 +148,19 @@ def _fit_pair(label: str, metas: Sequence[str], width: int, lead: int) -> str | 
     is the caller's signal to try a shorter label rung (or drop the row). The
     empty string means the label fits but no meta does — a warning without its
     qualifier still carries the fact, which is the whole point of shedding.
+
+    NO FALLBACK CROP, inherited deliberately from the `_first_that_fits` ladder
+    this replaced: returning a cropped shortest rung made the old helper always
+    "succeed", so a caller could not tell whether anything actually fit — it got
+    a fragment whose width equalled the budget by construction. Distinguishing
+    "nothing fits" from "this fits" is what lets `marked` drop a row rather than
+    paint `! not the…`, which is a way of saying nothing (UX round 1, U5).
     """
     if lead + cell_len(label) > width:
         return None
     for meta in metas:
         if lead + cell_len(label) + 2 + cell_len(meta) <= width:
             return meta
-    return ""
-
-
-def _first_that_fits(rungs: Sequence[str], width: int) -> str:
-    """The first rung that fits, or the shortest one cropped.
-
-    The shed ladder used by ``kv``'s notes and ``marked``'s metas, extracted so
-    a FIXED label can use it too. Shedding a whole rung keeps a phrase readable
-    where ``truncate_cells`` would leave a fragment that says nothing.
-    """
-    for rung in rungs:
-        if cell_len(rung) <= width:
-            return rung
-    # NO fallback crop. Returning `truncate_cells(shortest)` here made the
-    # function always "succeed", so a caller checking whether anything fit could
-    # not tell — it received a cropped fragment whose width equalled the budget
-    # by construction. The empty string is the honest answer to "which of these
-    # fits?", and it lets the caller drop the row instead of painting
-    # `! not the…` (UX round 1, U5).
     return ""
 
 

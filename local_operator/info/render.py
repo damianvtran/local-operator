@@ -71,6 +71,15 @@ def _home() -> str:
     callers then return their input unchanged. That is the honest outcome
     rather than a redaction failure: what would be stripped is *this user's
     home prefix*, and on this host that concept is exactly what is unavailable.
+
+    DELIBERATELY NOT CACHED, and the round-2 commit message describing it as
+    "memoised" was wrong about the code (review round 3, M1). Recomputing per
+    call is the safer behaviour and the one that was verified: a cache would
+    pin a TRANSIENT failure for the life of the process, so a home that became
+    resolvable again would still export unrelativised paths. Both relativisers
+    read this same function, so they cannot disagree within one document even
+    though each call is independent. The cost is a `Path.home()` per row, which
+    is an environment lookup on a screen the user opened by hand.
     """
     try:
         return str(Path.home())

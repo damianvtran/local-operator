@@ -10,6 +10,7 @@ and could not show a stylesheet problem at all.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -902,3 +903,56 @@ def test_the_unavailable_sessions_advice_names_the_key_that_helps() -> None:
     body = _text(_snapshot(sessions=SessionsInfo(available=False)), width=100)
     assert "Press r to try again" in body
     assert "Close and reopen" not in body
+
+
+def test_the_credentials_note_never_crops_a_key_name_mid_token() -> None:
+    """D6/D3: the middle rung COUNTS the overflow; it never truncates a name.
+
+    The rung used to be `truncate_cells(keys, 30)`, which rendered
+    `ANTHROPIC_API_KEY, OPENAI_API…` at the reference width — a crop wearing a
+    ladder's clothing, and the `8.8k thin` mid-token defect the spec forbids
+    inheriting. A half-printed key cannot be told from `OPENAI_API_KEY_2` or a
+    typo, which is exactly the ambiguity this row exists to resolve.
+
+    Pinned because the designer mutation-tested the fix and found it UNDEFENDED:
+    restoring `truncate_cells` brought `OPENAI_API…` back with 115 tests green.
+    A fix nobody can break loudly is one the next ladder edit breaks silently,
+    and this file is where that edit will happen.
+    """
+    keys = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "RADIENT_API_KEY")
+    lines = _lines(_snapshot(env=EnvInfo(credential_keys=keys)), width=83)
+    rows = [line for line in lines if "Credentials" in line]
+    assert rows, "the Credentials row is missing entirely"
+    row = rows[0]
+
+    # The positive form: the middle rung is the name plus a COUNT.
+    assert "ANTHROPIC_API_KEY +2 more" in row, row
+    # And the negative form, which is what actually catches a re-crop: no key
+    # name is ever followed by the ellipsis.
+    assert not re.search(r"[A-Z0-9_]{3,}…", row), f"key name cropped mid-token: {row!r}"
+
+
+def test_the_depth_fold_row_is_a_section_summary_not_a_child_row() -> None:
+    """D6/D2: `+N deeper` hangs off nothing, so it carries no connector.
+
+    It counts nodes below the cap ANYWHERE in the tree. Rendered at the cap's
+    child indent with a `└`, it sat under whatever row happened to be last — a
+    depth-0 node in the reported frame — and claimed hidden children that node
+    does not have. A connector to nothing is worse than no connector.
+
+    Pinned for the same reason as the credentials rung: the designer restored
+    the misparented form and the whole suite stayed green.
+    """
+    tree = (
+        SubagentLine(job_id="a", label="reviewer", status="running", depth=0),
+        SubagentLine(job_id="b", label="scout", status="running", depth=1),
+    )
+    lines = _lines(_snapshot(agents=AgentsInfo(tree=tree, running=2, deeper=2)), width=150)
+    rows = [line for line in lines if "deeper" in line]
+    assert rows, "the fold row is missing entirely"
+    row = rows[0]
+
+    assert "└" not in row, f"the fold must not claim a parent: {row!r}"
+    # Base indent — the same two cells every top-level row in the section uses,
+    # not the cap's child indent.
+    assert len(row) - len(row.lstrip()) == 2, f"fold is not at base indent: {row!r}"
