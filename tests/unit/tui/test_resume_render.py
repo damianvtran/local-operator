@@ -1330,6 +1330,138 @@ async def test_the_head_notice_stops_being_a_control_once_it_is_inert() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exhausting_the_focused_notice_lands_focus_on_the_visible_transcript() -> None:
+    """Say WHERE focus goes when the control retires, not merely that it left.
+
+    The sibling guard above asserts the NEGATIVE — the exhausted row is no
+    longer focusable — and that shape passed while the row handed focus to the
+    topmost ``ToolCard``, roughly 770 rows above a reader sitting at the tail.
+    Their next ``enter`` expanded a card off screen: D7 removed a focus stop
+    that answered ``enter`` with silence and replaced it with one that answered
+    with an invisible side effect, which is strictly harder to attribute
+    (review round 3, R9).
+
+    So this asserts the positive landing, and the two properties that make it
+    the right one: the widget focus moved to is ON SCREEN, and ``enter`` on it
+    changes nothing the reader would have to explain. Both are read from the
+    live app rather than from ``set_interactive``'s intent, because the defect
+    lived entirely in Textual's fallback branch — ``blur()`` after ``can_focus``
+    was cleared cannot find the row in the focus chain and falls back to the
+    first focusable visible SIBLING instead of an ordered neighbour.
+
+    Drained through the control WITH FOCUS ON IT, which is the mouse route
+    (focus-then-activate) and the only state in which the blur runs at all.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(120):
+            await pilot.pause()
+        notice = app._resume_head_notice
+        assert isinstance(notice, OlderHistoryNotice)
+        view = app._transcript_view()
+
+        for _ in range(14):
+            if not app._resume_pending_head:
+                break
+            notice.focus()
+            for _ in range(10):
+                await pilot.pause()
+            assert notice.has_focus, "the live notice refused focus"
+            notice.action_older()
+            for _ in range(80):
+                await pilot.pause()
+        assert not app._resume_pending_head, "the head never drained"
+        assert notice.text() == RESUME_START_NOTICE
+        for _ in range(40):
+            await pilot.pause()
+
+        focused = app.focused
+        assert focused is not None, "focus was dropped entirely"
+        assert focused is view, (
+            "focus left the exhausted notice for "
+            f"{type(focused).__name__}, not the transcript the reader is "
+            "looking at; a widget reached through Textual's visible-sibling "
+            "fallback can sit far outside the viewport"
+        )
+
+        # On screen, not merely non-None: the fallback branch produced a
+        # perfectly valid focus target whose region was ~210 rows above the
+        # screen at 120x600.
+        region = focused.region
+        assert region.height > 0
+        assert 0 <= region.y < app.screen.size.height, (
+            f"focus landed off screen at y={region.y} for a " f"{app.screen.size.height}-row screen"
+        )
+
+        # And the stray keypress a reader makes next must do nothing visible.
+        before = (view.virtual_size.height, view.scroll_offset.y)
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause()
+        after = (view.virtual_size.height, view.scroll_offset.y)
+        assert after == before, (
+            f"enter after exhausting the notice changed the transcript: "
+            f"extent/offset {before} -> {after}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_raising_fill_does_not_leave_the_pessimistic_copy_suppressed() -> None:
+    """A crashed fill must not silence the correction it was suppressing (R10).
+
+    ``_resume_fill_active`` exists to hold back the "not reachable by
+    scrolling" copy while the geometry is still provisional, so a flag left
+    ``True`` is not inert bookkeeping: it permanently suppresses the very
+    correction this feature adds, and the notice goes on promising a gesture
+    the frame cannot perform. Its eight clear sites are statement sites, so a
+    raise between arming the flag and reaching one of them skipped all eight.
+
+    ``_resume_paging``, the sibling flag, is protected by a ``finally`` in
+    ``_fetch_older_display_page``; this pins the same guarantee here so the two
+    cannot drift apart.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 300)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(120):
+            await pilot.pause()
+
+        def explode(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("synthetic mount failure")
+
+        app._mount_older_resume_page = explode  # type: ignore[assignment]
+        # The attempt body reads only these four geometry terms before it
+        # reaches the mount, and by now the real transcript is scrollable and
+        # would take an earlier exit. Pinning them keeps the test on the branch
+        # under examination instead of on whatever the fill happened to settle
+        # to — the flag's LIFETIME is what is being pinned, not the conditions
+        # that normally arm it.
+        unscrollable = SimpleNamespace(
+            parent=app,
+            container_size=SimpleNamespace(height=40),
+            size=SimpleNamespace(height=40),
+            virtual_size=SimpleNamespace(height=10),
+        )
+        app._transcript_view = lambda: unscrollable  # type: ignore[assignment]
+        app._resume_paging = False
+        app._resume_pending_head = list(_history(4))
+        app._resume_fill_active = True
+
+        with pytest.raises(RuntimeError):
+            app._fill_resume_until_scrollable()
+
+        assert app._resume_fill_active is False, (
+            "a raising fill left itself flagged active, which suppresses the "
+            "unreachable-head copy for the rest of the session"
+        )
+
+
+@pytest.mark.asyncio
 async def test_the_insert_restore_is_applied_inside_the_programmatic_guard() -> None:
     """Pin the ``immediate=True`` half of the landing fix ON ITS OWN (QA Q6).
 

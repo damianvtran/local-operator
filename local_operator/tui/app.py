@@ -5934,6 +5934,35 @@ class OperatorApp(App[None]):
         self._transcript_view().call_after_refresh(self._fill_resume_until_scrollable)
 
     def _fill_resume_until_scrollable(self, _attempt: int = 0) -> None:
+        """Run one fill attempt, and never leave the fill flagged active if it raises.
+
+        ``_resume_fill_active`` SUPPRESSES the pessimistic "not reachable by
+        scrolling" copy while the geometry is still provisional (R6), so a flag
+        stuck ``True`` is not inert — it permanently silences the correction
+        and leaves the notice promising a gesture the frame cannot perform,
+        which is the defect this whole feature exists to remove. The attempt
+        body clears the flag at each of its terminal exits, but those are
+        statement sites: a raise between the ``True`` in ``_render_resume`` and
+        any of them skips every one (measured: ``fill_active`` stayed ``True``
+        across a subsequent resize, with the copy frozen).
+
+        Only the ABNORMAL path is cleared here. A `finally` would be wrong:
+        the two continuation branches return with the flag deliberately still
+        ``True`` because the fill is genuinely still running, and clearing it
+        there would hand the reader the pessimistic copy mid-fill.
+
+        ``_resume_paging``, the flag this one is contrasted with in the body's
+        own commentary, is protected the same way by the ``finally`` in
+        :meth:`_fetch_older_display_page`; the two siblings must not disagree
+        about who guarantees their invariant (review round 3, R10).
+        """
+        try:
+            self._fill_resume_attempt(_attempt)
+        except BaseException:
+            self._resume_fill_active = False
+            raise
+
+    def _fill_resume_attempt(self, _attempt: int) -> None:
         """Mount older pages until the first resume frame is actually scrollable.
 
         The render bound is counted in MESSAGES, but "can the reader scroll up
@@ -6208,6 +6237,14 @@ class OperatorApp(App[None]):
         # Typed as the base `NoticeBlock` because that is what the app holds:
         # a reduced presentation can seat a plain notice here. Only the control
         # has interactivity to correct, and only it needs this.
+        #
+        # This `isinstance` is the ONLY thing keeping the correction attached
+        # to the rows that need it, so a future interactive head notice that is
+        # not an `OlderHistoryNotice` would silently skip it and re-introduce
+        # the stale-affordance bug with no test failing (review round 3, R11).
+        # A new head-notice class must therefore either subclass
+        # `OlderHistoryNotice` or grow a shared `set_interactive` protocol that
+        # this branch tests for instead of a concrete type.
         if isinstance(notice, OlderHistoryNotice):
             # Set unconditionally: `restate` may have been skipped as a no-op
             # while the interactivity still needs correcting (a reader who
@@ -24652,7 +24689,7 @@ class OperatorApp(App[None]):
         # nothing visible (ux review round 2, U6). 71 composed cells.
         lines.append(_key_more("loads older history when there is no more to scroll"))
         lines.append(_key_row("ctrl+t", "expand or collapse the todo panel"))
-        # 46 cells (66 composed) against the 74-cell ceiling: names the three
+        # 67 composed cells against the 74-cell ceiling: names the three
         # stops so a user who only ever saw "expand/collapse" learns the panel
         # can now shrink to a row or go away (#525).
         lines.append(_key_row("ctrl+g", "cycle the subagent panel: full, summary, hidden"))

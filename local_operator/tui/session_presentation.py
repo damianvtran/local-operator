@@ -100,12 +100,24 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
         if interactive == self._interactive:
             return
         self._interactive = interactive
-        self.can_focus = interactive
-        self.set_class(interactive, "interactive-notice")
         if not interactive and self.has_focus:
             # Focus cannot rest on a row that just left the focus chain: it
             # would keep the band painted and keep swallowing Enter.
+            #
+            # ORDER IS LOAD-BEARING: blur BEFORE `can_focus` is cleared.
+            # `blur()` -> `Screen._reset_focus(self)` locates this widget in
+            # the focus chain to hand focus to an ordered NEIGHBOUR. Clearing
+            # `can_focus` first removes the row from that chain, so the lookup
+            # raises and Textual takes its "widget was made invisible" fallback
+            # instead: the first focusable VISIBLE SIBLING, which in a
+            # transcript is the topmost `ToolCard` — measured ~770 rows above a
+            # reader sitting at the tail, with the reader's next `enter`
+            # silently expanding a card they cannot see (review round 3, R9).
+            # Blurring while still in the chain lands focus on `TranscriptView`,
+            # which is on screen and answers `enter` with nothing.
             self.blur()
+        self.can_focus = interactive
+        self.set_class(interactive, "interactive-notice")
 
     def action_older(self) -> None:
         self.post_message(self.Requested(self))
