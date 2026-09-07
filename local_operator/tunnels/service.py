@@ -48,6 +48,69 @@ def tunnel_path(value: dict[str, Any]) -> str:
     return "/" + quote(identifier, safe="")
 
 
+def pinned_harness_ports(value: dict[str, Any]) -> dict[str, int] | None:
+    """The harness ports the operator last approved from this device.
+
+    `lop tunnel create/connect/configure` persist the whole cloud record
+    locally, so `record.harnesses` is the device's own copy of the port map an
+    operator ran a local command to accept. Returns None — meaning "no usable
+    pin" — for a record written before the field existed or hand-edited into a
+    shape we cannot trust, so callers can fall back rather than strand a device
+    whose config predates this check.
+    """
+    record = value.get("record")
+    harnesses = record.get("harnesses") if isinstance(record, dict) else None
+    if not isinstance(harnesses, list) or not harnesses:
+        return None
+    pinned: dict[str, int] = {}
+    for harness in harnesses:
+        if not isinstance(harness, dict) or not isinstance(harness.get("id"), str):
+            return None
+        try:
+            pinned[harness["id"]] = config.port(harness.get("port"))
+        except ValueError:
+            return None
+    return pinned
+
+
+def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> None:
+    """Refuse a /connect that repoints a harness at an unapproved local port.
+
+    The cloud validates a harness port only as 1024-65535 and != gateway_port,
+    and replaces the harness list wholesale on PATCH, so anyone holding the
+    owner's console session can aim a harness at any other loopback service.
+    The gateway then attaches this device's mobile-relay cookie or OpenCode
+    Basic credential to whatever answers there (gateway.headers), handing a
+    live relay credential to an unrelated local service. Pinning against the
+    locally stored record makes changing a harness port require an act on this
+    machine, exactly as the cloud already treats gateway_port.
+
+    Fail-closed but recoverable: the console PATCH that legitimately changes a
+    port bumps the tunnel version, the poller restarts, and this refusal then
+    names the local command that re-approves it. Refreshing the pin is left to
+    those commands (they are what write `record`); re-pinning from the polled
+    record here would restore exactly the silent repointing this prevents.
+    """
+    pinned = pinned_harness_ports(value)
+    if pinned is None:
+        print(
+            "Warning: this tunnel configuration predates harness port pinning, so console "
+            "port changes are not verified locally. Run lop tunnel connect to pin them.",
+            flush=True,
+        )
+        return
+    for harness in connection["tunnel"]["harnesses"]:
+        # A disabled harness is never dialed (Gateway.harness filters on it),
+        # so its port cannot carry a credential and is not worth an outage.
+        if not harness["enabled"]:
+            continue
+        if pinned.get(harness["id"]) != harness["port"]:
+            raise ValueError(
+                f"Harness port for {harness['id']} changed in the console. "
+                "Run lop tunnel connect again."
+            )
+
+
 def active(record: Any) -> bool:
     return (
         isinstance(record, dict)
@@ -106,6 +169,7 @@ async def run() -> int:
                 raise ValueError(
                     "Gateway port changed in the console. Run lop tunnel connect again."
                 )
+            enforce_harness_ports(connection, value)
             needs_mobile = any(
                 h["enabled"] and h["id"] == "local-operator"
                 for h in connection["tunnel"]["harnesses"]
