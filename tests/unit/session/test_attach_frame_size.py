@@ -1814,3 +1814,68 @@ def test_the_headline_of_a_clipped_result_survives_beside_an_image() -> None:
     assert LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER in image_block["text"]
     assert end["result"]["details"] is None
     assert len(json.dumps(end)) < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1_000
+
+
+def test_block_count_is_bounded_the_way_block_size_is() -> None:
+    """Many blocks in one result must not multiply the row's share.
+
+    The floor is a promise that the CARD stays legible, so it is spent once
+    per row. Granted per block it becomes an entitlement instead of a ceiling:
+    N blocks cost N x floor and the row has no bound at all. That regression
+    was introduced once by moving the floor one loop level inward during a
+    rewrite, and it measured 1,102,743 B at the 100-row cap against a
+    1,048,576-byte limit while the per-row form stayed flat.
+
+    Pinned here because ``content`` is typed ``list[dict[str, Any]]`` and this
+    module deliberately does not enumerate what rides in it — a producer that
+    starts emitting many blocks is a change in DATA, which no test of block
+    SIZE would catch.
+    """
+    row = _live_end("many", text="a" * 5_000)
+    row["result"]["content"] = [{"type": "text", "text": "a" * 5_000} for _ in range(200)]
+
+    end = _bounded_live_events([row])[0]
+    cost = len(json.dumps(end))
+
+    # The whole row lands within one share plus its own envelope — NOT within
+    # 200 shares. The exact ceiling is not the assertion; not scaling with
+    # block count is.
+    assert cost < LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS * 2
+    # The TEXT the row carries is one share's worth in total, spent in order
+    # until it runs out. Asserting the sum rather than any per-block length is
+    # the point: the defect was that each block could re-claim the floor, so
+    # the total is what distinguishes a shared ceiling from N entitlements.
+    total_text = sum(len(block.get("text") or "") for block in end["result"]["content"])
+    assert total_text <= LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS
+    # Blocks past the budget are clipped to nothing rather than each keeping a
+    # floor's worth. Under the per-block floor all 200 sat at or above it.
+    starved = [
+        block
+        for block in end["result"]["content"]
+        if len(block.get("text") or "") < LIVE_EVENT_TEXT_FLOOR_CHARS
+    ]
+    assert len(starved) > 150, "the floor was granted per block, not per row"
+    # ...and the row still settles its card.
+    assert end["tool_call_id"] == "many" and end["is_error"] is False
+
+
+def test_the_row_cost_of_many_blocks_does_not_grow_with_their_number() -> None:
+    """The structural invariant behind the test above, stated as a comparison.
+
+    A ceiling that holds at 10 blocks and quietly scales at 2,000 is the
+    defect this pins; comparing the two is what distinguishes a real bound
+    from a number that merely happened to fit.
+    """
+    costs = []
+    for count in (10, 2_000):
+        row = _live_end(f"n{count}", text="a" * 5_000)
+        row["result"]["content"] = [{"type": "text", "text": "a" * 5_000} for _ in range(count)]
+        costs.append(len(json.dumps(_bounded_live_events([row])[0])))
+
+    ten, many = costs
+    # 200x the blocks must not mean anything like 200x the bytes. Only the
+    # extra blocks' fixed envelopes may grow; their TEXT comes out of the one
+    # shared budget, so the ratio stays near 1 rather than tracking the count.
+    # Under the per-block floor this grew without limit, which is why the
+    # COMPARISON is the assertion and neither number alone would serve.
+    assert many < ten * 3, f"row cost scaled with block count: {ten} -> {many}"
