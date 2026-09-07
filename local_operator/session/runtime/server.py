@@ -995,9 +995,20 @@ class RuntimeServer:
                 # missed publish can get to one heartbeat. A 15 s-stale bit is
                 # still wrong for the picker; it is right for a `lop sessions`
                 # run hours later, which is the case the hook's absence cost.
-                is_busy = getattr(self._handle, "is_busy", None)
-                if callable(is_busy):
-                    self.set_busy(bool(is_busy()))
+                #
+                # Reads the same predicate the handle publishes
+                # (``is_conversationally_active``) rather than ``is_busy``:
+                # this loop runs every 15 s forever, so a floor that disagreed
+                # with the turn-boundary publisher would not merely be stale,
+                # it would OVERWRITE the correct value within one heartbeat and
+                # re-pin the spinner on every idle session holding a background
+                # job. Falls back to ``is_busy`` only for a handle predating the
+                # split, where the older answer is the only one available.
+                probe = getattr(self._handle, "is_conversationally_active", None)
+                if not callable(probe):
+                    probe = getattr(self._handle, "is_busy", None)
+                if callable(probe):
+                    self.set_busy(bool(probe()))
                 # A dead renderer can leave its main-process socket alive.
                 # Expiring the lease must reroute a parked gate even when no
                 # TCP disconnect arrives to trigger the ordinary detach path.

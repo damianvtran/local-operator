@@ -238,6 +238,7 @@ from local_operator.tui.widgets.session_sidebar import (
     SIDEBAR_MIN_CONTENT_WIDTH,
     SIDEBAR_WIDTH,
     SessionSidebar,
+    sidebar_content_width,
 )
 from local_operator.tui.widgets.settings_view import (
     SettingsChanged,
@@ -4301,8 +4302,18 @@ class OperatorApp(App[None]):
         # right edge when docked left, left edge when docked right. Applied as
         # padding on the widget rather than a margin on the main lane so the
         # overlay case (where nothing is displaced) gets the same separation.
-        total_width = SIDEBAR_WIDTH + SIDEBAR_GUTTER
-        narrow = size.width < total_width + SIDEBAR_MAIN_MIN_WIDTH + 2
+        #
+        # The list grows on a roomy terminal and stays at its base width
+        # otherwise; `sidebar_content_width` owns that rule so the docked width
+        # and anything predicting it cannot drift apart.
+        content_width = sidebar_content_width(size.width)
+        total_width = content_width + SIDEBAR_GUTTER
+        # The OVERLAY threshold is deliberately measured against the BASE width,
+        # not the grown one. Growth only happens well above this threshold (it
+        # needs a comfortable main lane before it takes a single column), so
+        # feeding the grown width in here could only move the dock/overlay
+        # switch — a behaviour change at small sizes this has no business making.
+        narrow = size.width < SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_MIN_WIDTH + 2
         workspace = self.query_one("#session-workspace")
         workspace.set_class(narrow, "sidebar-overlay")
         sidebar.styles.dock = position

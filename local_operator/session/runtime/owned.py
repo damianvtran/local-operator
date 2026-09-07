@@ -692,6 +692,73 @@ class OwnedSessionHandle(SessionHandle):
             return True
         return False
 
+    def is_conversationally_active(self) -> bool:
+        """True while the CONVERSATION itself is moving — the spinner's signal.
+
+        Deliberately narrower than :meth:`is_busy`, and the difference is the
+        whole point. The two answer different questions:
+
+        * :meth:`is_busy` asks *may this runtime exit?* and must be maximally
+          inclusive, because exiting under live work destroys it. A detached
+          background job, a running subagent, a retained background task all
+          forbid an exit and are all counted there.
+        * This asks *is this conversation working right now?*, which is what an
+          animated indicator claims to a user. Somebody reading a spinner
+          expects tokens to be moving and a reply to be coming.
+
+        Publishing the residency answer as the activity bit made every session
+        that had ever backgrounded a job look permanently busy. Measured on the
+        reporter's host: 8 of 8 live sessions published ``busy=True``, one of
+        them idle for 25.6 minutes with a completed final turn — the runtime
+        was correctly resident (a `bash` job was still running) and the sidebar
+        was incorrectly claiming it was working. A spinner that is always on is
+        not a status; the user's report ("still shows that it's active … even
+        though the task is done") is exactly that indicator having become
+        meaningless.
+
+        The terms kept here are the ones a user would call "it is working on my
+        conversation": a live provider stream, a compaction, a held turn lock,
+        a queued or draining prompt, a running goal loop, and a parked gate.
+        The gate is included because a parked approval IS a running turn — the
+        tool slot is held mid-flight — and the surfaces then draw it with the
+        needs-you marker, which outranks the spinner in ``row_state_mark``.
+
+        The terms dropped are the work-RETENTION ones: background jobs,
+        subagents, MCP grant/reload tasks and retained background tasks. Each
+        is real work the runtime must stay alive for, and none of it means the
+        conversation is mid-reply — a `background=true` job exists precisely to
+        outlive its turn, so animating a row for it contradicts the flag's
+        purpose. Those sessions still render as live (the idle glyph), and
+        `lop sessions` still reports them resident.
+
+        Fails CLOSED (True) on an unreadable probe, matching :meth:`is_busy`:
+        a spurious spinner is a cosmetic fault, while a missed one would hide a
+        session that genuinely is working.
+        """
+        if self._disposing:
+            return False
+        session = self._session
+        if self._goal_loop is not None and self._goal_loop.running:
+            return True
+        try:
+            if getattr(session, "is_streaming", False):
+                return True
+            if getattr(session, "_compacting", False):
+                return True
+            lock = getattr(session, "_turn_lock", None)
+            if lock is not None and lock.locked():
+                return True
+        except Exception:  # noqa: BLE001 — an unreadable session is assumed active
+            return True
+        if self._prompt_queue or (
+            self._prompt_drain_task is not None and not self._prompt_drain_task.done()
+        ):
+            return True
+        if self._pending_futures:
+            # A gate parked on a person belongs to a turn that has not ended.
+            return True
+        return False
+
     def is_pristine(self) -> bool:
         """True when nothing has ever happened in this session.
 
@@ -3265,16 +3332,26 @@ class OwnedSessionHandle(SessionHandle):
         de-duplicates, so the republish costs one comparison per event and a
         staged write only on an actual transition.
 
-        `is_busy()` is the authority rather than a second flag: it is the same
-        predicate the reaper uses to decide whether this runtime may exit, so
-        the marker and the residency decision can never disagree.
+        The authority is :meth:`is_conversationally_active`, NOT ``is_busy()``.
+        The record's ``busy`` field is read by exactly one kind of consumer —
+        surfaces that render "this session is working" (the sidebar's spinner,
+        the picker's marker, `lop sessions`) — and residency is a different
+        question that no surface asks. Publishing ``is_busy()`` here meant a
+        session holding a background job wore a spinner forever; see
+        :meth:`is_conversationally_active` for the measurement.
+
+        This deliberately DOES let the marker and the residency decision
+        disagree, which the previous note here forbade. That coupling was the
+        defect: a runtime may quite correctly be un-exitable while its
+        conversation is finished, and the record has a separate field for each
+        fact a reader needs.
         """
         server = self._registrant
         setter = getattr(server, "set_busy", None)
         if not callable(setter):
             return
         try:
-            setter(self.is_busy())
+            setter(self.is_conversationally_active())
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
 

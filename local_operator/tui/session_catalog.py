@@ -64,11 +64,21 @@ class CatalogEntry:
             return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
             )
+        if self.row.live_state == "wedged":
+            return "Not responding"
+        if self.row.live_state == "busy":
+            return "Working"
+        # Follows ``row_state_mark``'s precedence exactly, so the tooltip can
+        # never name a different state from the glyph beside it: an armed wake
+        # outranks mere presence, a dormant one does not. The glyph is a single
+        # character and the description is where a user finds out what it meant,
+        # so the two disagreeing is worse than either being terse.
+        if self.row.wakes and not self.row.wakes_dormant:
+            count = self.row.wakes
+            return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
         return {
-            "busy": "Working",
             "idle": "Ready",
             "attached": "Open",
-            "wedged": "Not responding",
         }.get(self.row.live_state, "Recent")
 
 

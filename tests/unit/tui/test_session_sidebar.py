@@ -22,8 +22,12 @@ from local_operator.tui.session_catalog import (
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import (
     SIDEBAR_GUTTER,
+    SIDEBAR_MAIN_COMFORT_WIDTH,
     SIDEBAR_MAIN_MIN_WIDTH,
+    SIDEBAR_MAX_WIDTH,
     SIDEBAR_SPINNER_INTERVAL_S,
+    SIDEBAR_WIDTH,
+    sidebar_content_width,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -1025,3 +1029,168 @@ async def test_the_outer_title_yields_to_section_headers_but_survives_quiet_stat
     ):
         quiet = await first_lines(setup)
         assert quiet[0] == "Sessions", quiet[:2]
+
+
+# ---------------------------------------------------------------------------
+# Responsive width
+#
+# The list is the one surface whose whole job is "recognise your own
+# conversation", and at the fixed base width it could not do it: the reported
+# frame ellipsized eleven of twelve titles, several of them before the word
+# that told them apart from the row above. These pin the growth rule and, more
+# importantly, the two ways widening a docked panel usually goes wrong — eating
+# the conversation, and regressing narrow terminals.
+# ---------------------------------------------------------------------------
+
+
+def test_a_narrow_terminal_is_left_exactly_as_it_was():
+    """Growth must be unable to regress the sizes that already worked.
+
+    Everything at or below the comfort threshold resolves to the base width, so
+    the layout, the overlay switch and every existing geometry test describe the
+    same app they did before.
+    """
+    threshold = SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    for width in (60, 80, 100, threshold - 1, threshold):
+        assert sidebar_content_width(width) == SIDEBAR_WIDTH, width
+
+
+def test_growth_spends_only_surplus_and_stops_at_the_cap():
+    """One column of terminal buys at most one column of list, up to the cap."""
+    threshold = SIDEBAR_WIDTH + SIDEBAR_GUTTER + SIDEBAR_MAIN_COMFORT_WIDTH
+    assert sidebar_content_width(threshold + 1) == SIDEBAR_WIDTH + 1
+    assert sidebar_content_width(threshold + 5) == SIDEBAR_WIDTH + 5
+    assert sidebar_content_width(threshold + 500) == SIDEBAR_MAX_WIDTH
+    # Monotonic: dragging a window wider never narrows the list.
+    widths = [sidebar_content_width(w) for w in range(40, 400)]
+    assert widths == sorted(widths)
+
+
+def test_the_conversation_never_pays_for_the_list_getting_wider():
+    """The structural invariant, asserted as arithmetic rather than as a frame.
+
+    At every terminal width, whatever the sidebar and its gutter take must
+    leave the main lane at least its comfort width. This is the property that
+    makes the feature safe, so it is checked across the whole range rather than
+    at the two sizes a screenshot happens to use.
+    """
+    for width in range(40, 400):
+        content = sidebar_content_width(width)
+        if content == SIDEBAR_WIDTH:
+            continue  # not growing: the pre-existing floors govern
+        assert width - (content + SIDEBAR_GUTTER) >= SIDEBAR_MAIN_COMFORT_WIDTH, width
+
+
+@pytest.mark.asyncio
+async def test_a_wide_terminal_actually_shows_more_of_the_title():
+    """The user-visible payoff, measured on the RENDERED rows.
+
+    The arithmetic above proves the budget; this proves the budget reaches the
+    text. A long title is rendered at a base-width terminal and a wide one, and
+    the wide frame must carry strictly more of it — otherwise the extra cells
+    went to padding somewhere and the report would be unfixed.
+    """
+    name = "Article-search-svc schema review and rollout plan"
+    entries = [
+        CatalogEntry(SessionRow(id="aaaaaaaaaaa1", mtime=time.time(), name=name, live_state="idle"))
+    ]
+
+    async def rendered(size) -> str:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            sidebar = app._session_sidebar
+            sidebar.set_entries(entries)
+            if sidebar._timer is not None:
+                sidebar._timer.pause()
+            await pilot.pause()
+            from textual.geometry import Region
+
+            lines = [
+                "".join(segment.text for segment in line)
+                for line in sidebar.render_lines(
+                    Region(0, 0, sidebar.size.width, sidebar.size.height)
+                )
+            ]
+            return next(line for line in lines if "Article" in line)
+
+    narrow = await rendered((100, 30))
+    wide = await rendered((160, 40))
+
+    def visible_title(line: str) -> str:
+        # Everything up to the ellipsis is what the user can actually read,
+        # minus the leading chrome (cursor cells and the state glyph) which is
+        # fixed-width and not part of the title budget under test.
+        text = line.split("…")[0]
+        return text[text.index("Article") :].strip() if "Article" in text else text.strip()
+
+    narrow_title, wide_title = visible_title(narrow), visible_title(wide)
+    assert len(wide_title) > len(narrow_title), (narrow, wide)
+    # Numbers, not just "more": the base width shows about 20 cells of title
+    # and the cap about 38, so the gain is worth the change rather than
+    # cosmetic. Asserted as a floor so a future tweak to the chrome does not
+    # fail the test for being one cell off.
+    assert len(narrow_title) < 25, narrow_title
+    assert len(wide_title) >= 35, wide_title
+    # A title that FITS the grown budget is shown outright, with no ellipsis:
+    # the previous frame ellipsized even short names.
+    short = "Article-search-svc schema review"
+    assert len(short) <= len(wide_title)
+    assert wide_title.startswith(short), wide_title
+
+
+@pytest.mark.asyncio
+async def test_the_grown_list_still_leaves_the_conversation_its_lane():
+    """The same invariant, through the real layout rather than the helper."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(200, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        assert sidebar.content_region.width > SIDEBAR_WIDTH - SIDEBAR_GUTTER
+        assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_COMFORT_WIDTH
+        # A wider list must not introduce a scrollbar or a reflow.
+        assert app.screen.virtual_size == app.screen.size
+        assert not app.screen.show_vertical_scrollbar
+
+
+def test_the_tooltip_never_names_a_different_state_from_the_glyph():
+    """Description and marker are two renderings of one precedence.
+
+    The glyph is a single character, so the description is where a user finds
+    out what it meant; the two disagreeing is worse than either being terse.
+    When wakes were promoted above presence in ``row_state_mark``, a status map
+    keyed only on ``live_state`` would have gone on saying "Ready" beside a
+    wake glyph.
+    """
+    from local_operator.tui.widgets.session_picker import (
+        IDLE_MARKER,
+        WAKE_MARKER,
+        row_state_mark,
+    )
+
+    now = time.time()
+    armed = CatalogEntry(SessionRow("wake00000001", now, "armed", live_state="idle", wakes=2))
+    assert row_state_mark(armed.row, 0)[0] == WAKE_MARKER
+    assert armed.status == "Scheduled (2 wakes)"
+
+    single = CatalogEntry(SessionRow("wake00000002", now, "one", live_state="idle", wakes=1))
+    assert single.status == "Scheduled (1 wake)", "the count must not be pluralised at 1"
+
+    # A dormant wake does not win the glyph, so it must not win the words.
+    dormant = CatalogEntry(
+        SessionRow("dorm00000001", now, "stopped", live_state="idle", wakes=1, wakes_dormant=True)
+    )
+    assert row_state_mark(dormant.row, 0)[0] == IDLE_MARKER
+    assert dormant.status == "Ready"
+
+    # And the states above wakes are unchanged.
+    busy = CatalogEntry(SessionRow("busy00000001", now, "working", live_state="busy", wakes=4))
+    assert busy.status == "Working"
+    gate = CatalogEntry(
+        SessionRow("gate00000001", now, "waiting", live_state="idle", pending="approval", wakes=4)
+    )
+    assert gate.status == "Approval needed"
