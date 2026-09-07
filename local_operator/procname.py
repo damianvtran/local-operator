@@ -87,7 +87,9 @@ replaces the interpreter, the planted link keeps pointing at the OLD inode —
 uv preserves unknown files in ``bin/`` but does not refresh them — and the
 process would silently run a stale interpreter with a fresh site-packages.
 :func:`ensure_branded_interpreter` therefore re-checks three facts at every
-startup (three ``stat`` calls, microseconds) and re-plants when any fails. The
+startup (a handful of stats plus one symlink resolution, tens of microseconds
+— measured ~180 µs here against a startup already north of a second) and
+re-plants when any fails. The
 inode is ground truth; there is deliberately **no version-stamp file**, because
 a stamp is a second source of truth that can itself go stale.
 
@@ -296,7 +298,15 @@ def branded_link_path() -> Path | None:
 
 
 def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
-    """Whether the planted shape is missing or stale. Three ``stat`` calls.
+    """Whether the planted shape is missing or stale. Stats plus one resolve.
+
+    Cost, measured rather than asserted: two ``stat`` calls on the link and the
+    interpreter, one ``exists`` on the symlink, and one ``resolve()`` pair for
+    the dylib-identity check below. ``resolve()`` ``lstat``s every path
+    component, so the exact syscall count scales with how deep the venv sits
+    and is not worth pinning to a number here — the total is tens of
+    microseconds either way (~180 µs for the whole steady-state
+    ``ensure_branded_interpreter``, against a >1 s startup).
 
     Refresh when ANY of:
 
@@ -333,7 +343,16 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
         return True  # (b)
     if libpython is not None:
         # `exists` follows the symlink, so a dangling one is already False.
-        if not libpython.exists():
+        # Inside the try because it is NOT total: an unreadable parent
+        # directory makes it raise `PermissionError` (reproduced), and this
+        # function's contract is that it never raises. Treated as "replant",
+        # which is the safe direction — a libpython we cannot even stat is not
+        # one we should assume is correct.
+        try:
+            live = libpython.exists()
+        except OSError:
+            return True
+        if not live:
             return True  # (c) missing or dangling
         # A LIVE symlink is not automatically a CORRECT one. After an
         # interpreter upgrade the old link still resolves — to the previous
@@ -456,8 +475,9 @@ def _plant_libpython(link: Path, real: Path, name: str) -> bool:
 def ensure_branded_interpreter() -> Path | None:
     """Plant/refresh the branded interpreter image; return its path or None.
 
-    Cheap enough for every startup: the common case is three ``stat`` calls and
-    no writes. Only a first run in a fresh venv, or a genuine staleness trigger,
+    Cheap enough for every startup: the common case is the staleness probe
+    above (~180 µs measured, against a startup already over a second) and no
+    writes. Only a first run in a fresh venv, or a genuine staleness trigger,
     does any filesystem work — and a hardlink plus a symlink cost zero bytes of
     data, which is what makes this safe for the many concurrent worktrees on a
     development machine (each plants into its OWN venv; they never contend for
@@ -487,7 +507,7 @@ def ensure_branded_interpreter() -> Path | None:
         # BOTH plant directories. A killed plant can leak a temp in `bin/`
         # (named for the brand) or in `lib/` (named for the dylib), and
         # sweeping only the first left lib temps accumulating forever. Only on
-        # the replant path, so the common startup stays three stats and no
+        # the replant path, so the common startup stays a stat probe with no
         # directory scan.
         _sweep_orphan_temps(link.parent, BRAND)
         _sweep_orphan_temps(link.parent.parent / "lib", name)

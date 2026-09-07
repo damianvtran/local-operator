@@ -194,6 +194,28 @@ class TestStaleness:
         assert not bin_orphan.exists(), "bin/ orphan must be swept"
         assert not lib_orphan.exists(), "lib/ orphan must be swept too"
 
+    def test_unreadable_libpython_parent_does_not_raise(self, branded, tmp_path):
+        """QA round 2, Q3: `_needs_replant` is contractually no-raise.
+
+        `Path.exists()` is not total — an unreadable parent directory makes it
+        raise `PermissionError` (reproduced), which escaped a function this
+        module documents as never raising. "Replant" is the safe answer: a
+        libpython we cannot stat is not one to assume correct.
+        """
+        walled = tmp_path / "lib" / "sub"
+        walled.mkdir(parents=True)
+        dylib = walled / "libpython3.12.dylib"
+        dylib.touch()
+        walled.chmod(0o000)
+        try:
+            assert (
+                procname._needs_replant(branded, Path(os.path.realpath(sys.executable)), dylib)
+                is True
+            )
+        finally:
+            # Restore so tmp_path teardown can remove the tree.
+            walled.chmod(0o755)
+
     def test_healthy_shape_is_not_rewritten(self, branded):
         """The common path does no filesystem writes.
 
@@ -299,19 +321,37 @@ class TestFallbackLadder:
         monkeypatch.setattr(sys, "orig_argv", orig_argv)
         assert procname.is_own_launch() is expected
 
-    def test_reexec_is_suppressed_once_branded(self, monkeypatch, tmp_path):
+    def test_reexec_is_suppressed_once_branded(self, monkeypatch, branded):
         """Already running through the link => no second exec. No loop.
 
         The loop guard is the process's OWN identity (`sys.executable` is the
         branded link), not an environment marker — see
         `test_reexec_leaves_the_environment_untouched` for why a marker was
         removed.
+
+        THIS TEST MUST FAIL IF THE GUARD IS DELETED, and an earlier version did
+        not (review round 2, R2-1): it patched `sys.executable` but left
+        pytest's own `sys.orig_argv`, so `is_own_launch()` returned False and
+        `should_reexec()` returned None at the NEXT early return — one line
+        below the line under test. The assertion passed on a path that never
+        reached the guard, and deleting the guard left 352 tests green.
+
+        So every other reason to return None is neutralised first, and the
+        preconditions are asserted rather than assumed: a REAL planted link
+        (a `tmp_path` fake makes `ensure_branded_interpreter()` fail on a fake
+        prefix, which is a second independent way to pass vacuously) and an
+        `orig_argv` that `is_own_launch()` accepts. The guard is then the only
+        thing left that can produce None.
         """
-        fake_link = tmp_path / "bin" / procname.BRAND
-        fake_link.parent.mkdir(parents=True)
-        fake_link.touch()
-        monkeypatch.setattr(sys, "executable", str(fake_link))
-        assert procname.should_reexec() is None
+        link = branded  # the real planted link, not a fake
+        monkeypatch.setattr(sys, "executable", str(link))
+        monkeypatch.setattr(sys, "orig_argv", [str(link), "/x/.venv/bin/lop", "serve"])
+
+        # Preconditions: without these the assertion below is vacuous.
+        assert procname.is_own_launch() is True
+        assert procname.ensure_branded_interpreter() is not None
+
+        assert procname.should_reexec() is None, "a branded process must not re-exec again"
 
     def test_reexec_leaves_the_environment_untouched(self, monkeypatch):
         """REGRESSION (review round 1, B1+B2): no marker may enter os.environ.
