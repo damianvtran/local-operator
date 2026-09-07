@@ -13603,7 +13603,7 @@ class OperatorApp(App[None]):
 
         return conversation_identity(config_dir() / "sessions" / session_id)
 
-    def _announce_background_digest(self, kinds: Sequence[str], announced: int) -> bool:
+    def _announce_background_digest(self, kinds: Sequence[str]) -> bool:
         """One line standing in for the completions the per-tick cap held back.
 
         The cap exists to stop a backlog flooding the notification centre; on
@@ -13616,15 +13616,31 @@ class OperatorApp(App[None]):
         D8. The remainder is whatever the cap did not reach and the catalog
         ranks by `(tier, -mtime, id)` rather than by kind, so this line was
         asserting `Complete` over sets that were entirely errors. The caller
-        already holds each held-back row's `completion_kind` at no extra cost,
-        so the honest subtitle is a derivation rather than new mechanism — see
-        `digest_subtitle`, which says a state only when every session held back
+        already holds each row's `completion_kind` at no extra cost, so the
+        honest subtitle is a derivation rather than new mechanism — see
+        `digest_subtitle`, which says a state only when every session in the set
         is in it.
 
-        `announced` is the number of banners that DID go out this tick, so the
-        title can carry the absolute total. "N more" is relative to a cap the
-        user may never have seen — a lock screen or a coalesce loses the three
-        banners it counts from (D11) — while "27 sessions finished" stands on
+        ONE SEQUENCE, COVERING THE WHOLE TICK — every completion this tick
+        handled, ANNOUNCED AND HELD BACK ALIKE — and the single parameter is
+        the fix, not an incidental shape. It arrived here as `(kinds,
+        announced)`, and the title counted `announced + len(kinds)` while the
+        subtitle read `kinds` alone: two scopes, moved apart by two independent
+        remediations, so `5 complete + 3 interrupted` rendered
+        `8 sessions finished` over `Complete` — D8's exact sentence one line up
+        (design round 3, D12). Ordinary data, not an edge: the cap is 3 and the
+        catalog ranks by `(tier, -mtime, id)` rather than by kind, so any tick
+        with a non-uniform backlog produced it.
+
+        THE SCOPE IS THE WHOLE TICK, and collapsing the two arguments into one
+        is what makes the title and the subtitle structurally incapable of
+        disagreeing about it — there is no second set for either line to drift
+        onto. The alternative, deriving both from the remainder, would reopen
+        D11.
+
+        That absolute count is the other half of D11: "N more" is relative to a
+        cap the user may never have seen — a lock screen or a coalesce loses the
+        three banners it counts from — while "27 sessions finished" stands on
         its own.
 
         REPORTS WHETHER THE BANNER WENT OUT, exactly like
@@ -13662,9 +13678,11 @@ class OperatorApp(App[None]):
             digest_subtitle,
         )
 
-        # The TOTAL, not the remainder: the title is the line that survives
-        # macOS's clip, and an absolute count needs no knowledge of the cap.
-        title = background_digest_title(announced + len(kinds))
+        # ONE SET, READ TWICE. The title is the line that survives macOS's clip
+        # and an absolute count needs no knowledge of the cap; the subtitle is
+        # the line that carries the state claim. Both describe `kinds`, so the
+        # count and the claim have the same denominator by construction (D12).
+        title = background_digest_title(len(kinds))
         subtitle = digest_subtitle(kinds)
         try:
             surface = cmux_surface_id()
@@ -13928,6 +13946,15 @@ class OperatorApp(App[None]):
             self._background_notify_revision = revision
             current = str(getattr(self._session, "session_id", "") or "")
             announced = 0
+            # The kinds of the rows that DID get a banner this tick. Collected
+            # for one reason: the digest's title counts the whole tick, so its
+            # subtitle must describe the whole tick too, or the frame states an
+            # outcome about sessions it counted but did not look at — `5
+            # complete + 3 interrupted` read `8 sessions finished` over
+            # `Complete` (design round 3, D12). `entry.completion_kind` is
+            # already in hand here, where `announced` is incremented, so this is
+            # a second read of a value already loaded rather than new plumbing.
+            announced_kinds: list[str] = []
             # The rows the cap held back, kept as `(identity, token, kind)`
             # rather than counted: their claims are already taken, so if the
             # digest standing in for them fails to send they have to be handed
@@ -13988,6 +14015,11 @@ class OperatorApp(App[None]):
                         entry, self._background_completion_identity(entry.id)
                     ):
                         announced += 1
+                        # Only a DELIVERED banner counts, exactly as `announced`
+                        # does: a released row is not part of the tick the
+                        # digest speaks for, so it must not reach the title's
+                        # count or the subtitle's claim.
+                        announced_kinds.append(entry.completion_kind)
                     else:
                         released = True
                 except Exception:  # noqa: BLE001 — one bad row must not mute the rest
@@ -14001,7 +14033,7 @@ class OperatorApp(App[None]):
                     logger.debug("background completion row skipped", exc_info=True)
                     released = True
             if claimed_silently and not self._announce_background_digest(
-                [kind for _, _, kind in claimed_silently], announced
+                announced_kinds + [kind for _, _, kind in claimed_silently]
             ):
                 # THE DIGEST IS THE ONLY THING THAT WAS EVER GOING TO SPEAK FOR
                 # THESE ROWS. Each was claimed above with backend `"digest"`, so

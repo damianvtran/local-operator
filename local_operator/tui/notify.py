@@ -241,7 +241,16 @@ def background_digest_title(total: int) -> str:
 
     It is also ABSOLUTE, not relative: "3 more" is only meaningful to a user who
     noticed the three banners it counts from, which a lock screen or a coalesce
-    does not guarantee (design round 2, D11). The caller passes the TOTAL.
+    does not guarantee (design round 2, D11). The caller passes the TOTAL — the
+    whole tick, announced and held back alike, which is the same set the
+    subtitle beside it describes (round 3, D12).
+
+    THE SINGULAR IS DEFENSIVE, NOT REACHABLE. The digest fires only when the cap
+    held something back, which needs `_BACKGROUND_NOTIFY_MAX_PER_TICK` (3)
+    delivered banners first, so the smallest total production can reach is 4;
+    1-3 are test-only. Kept because a total is a count and a count that reads
+    "1 sessions" is wrong wherever it surfaces — but do not optimise the string
+    for a frame the user cannot receive (round 3, D13).
 
     NAME-FREE BY CONSTRUCTION, like the body beside it — a digest is about
     several sessions, so naming one would be wrong on its own terms, and nothing
@@ -261,7 +270,17 @@ def background_digest_title(total: int) -> str:
 #: pointed at the surface that CAN take them there — the docstring on
 #: ``_announce_background_digest`` already said the sidebar is where the user
 #: goes next; this is that sentence finally reaching the user.
-BODY_BACKGROUND_DIGEST = "Open the session sidebar to see them"
+#:
+#: IT NAMES THE KEY because ``tui.sidebar_visible`` defaults to ``False``, so
+#: for a default-configured user the sentence otherwise pointed at a surface
+#: that is not on screen and did not say how to summon it (round 3, D14).
+#: ``Ctrl+B`` and not ``Cmd+B``: the latter is bound only on darwin and only
+#: when the terminal delivers Super, while ``ctrl+b`` is unconditional on every
+#: platform — a banner cannot know which terminal is reading it, so it names the
+#: route that always exists. 45 characters, inside the ~43-char title clip that
+#: matters for the TITLE; bodies wrap rather than clip in Notification Centre,
+#: and the rendered captures confirm it lands whole.
+BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
 
 #: The observer path's body line, keyed by ROUTE rather than by state — which
 #: is why it is a single constant and not another entry in :data:`BODIES`.

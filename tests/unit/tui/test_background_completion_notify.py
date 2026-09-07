@@ -1157,3 +1157,133 @@ async def test_the_digest_never_asserts_an_outcome_the_remainder_did_not_have(
     assert all(title != call[0] for call in named), spawned
     # The one inert banner in the stack says where to go instead (D10).
     assert "sidebar" in body.lower(), digests
+
+
+@pytest.mark.parametrize(
+    ("announced_kind", "held_kind"),
+    [
+        # THE EXACT REPRODUCTION from design round 3: 5 complete held back
+        # behind 3 interrupted, which rendered `8 sessions finished` over
+        # `Complete` while three of those eight were interrupted.
+        ("interrupted", "complete"),
+        # The same seam in the other direction, where the held-back set is the
+        # alarming one: announcing 3 complete over 5 errors read
+        # `8 sessions finished` / `Needs attention` under the old subtitle
+        # scope and `Complete` under the old title's. Either way the two lines
+        # described different sets.
+        ("complete", "error"),
+    ],
+    ids=["interrupted-announced-complete-held", "complete-announced-error-held"],
+)
+@pytest.mark.asyncio
+async def test_the_digest_title_and_subtitle_describe_the_same_sessions(
+    store_root: Path,
+    spawned: list[list[str]],
+    announced_kind: str,
+    held_kind: str,
+) -> None:
+    """Title and subtitle must count the SAME set (design round 3, D12).
+
+    D8 moved the subtitle onto the remainder's real kinds; D11 moved the title
+    onto the tick's absolute total. Independently each was right, and together
+    they left the frame's two lines with different denominators — the title
+    naming the whole tick, the subtitle speaking only for the rows the cap held
+    back. So `5 complete + 3 interrupted` rendered `8 sessions finished` over
+    `Complete`: D8's exact sentence, one line up, reachable with ordinary data
+    because the cap is 3 and the catalog ranks by `(tier, -mtime, id)` rather
+    than by kind.
+
+    Asserted as a RELATION between the two lines rather than as an expected
+    string: the guard is that whatever set the title counts is the set the
+    subtitle describes, so it fails for a title scoped to the remainder just as
+    it fails for a subtitle scoped to it. A test pinning only `Mixed outcomes`
+    would pass a build that fixed the subtitle by shrinking the title, which
+    would silently reopen D11.
+
+    THE PRECONDITION IS ASSERTED, NOT ASSUMED. This PR has now shipped three
+    guards that passed against the defect they named because the catalog put
+    the interesting rows where the test did not expect (QA round 1's Q2; the
+    round-3 mixed case, where the cap announced all three errors and left an
+    all-complete remainder that `Complete` described correctly). A D12 case
+    whose announced and held-back sets happen to share a kind proves nothing at
+    all — the two scopes agree by accident and the old code passes. So the two
+    sets are derived from what actually went out and are required to differ in
+    kind before any assertion about the digest is trusted.
+    """
+    import os
+
+    from local_operator.tui.app import _BACKGROUND_NOTIFY_MAX_PER_TICK
+    from local_operator.tui.notify import (
+        CONTEXT_MIXED,
+        CONTEXTS,
+        background_digest_title,
+        digest_subtitle,
+    )
+
+    _make_session(store_root, "current", "Current conversation")
+    store = AttentionStore(store_root / "attention.db")
+    # An ESTABLISHED store, so this is the steady state rather than the tick
+    # that creates the deliveries table.
+    seed = _make_session(store_root, "bg0000000000", "Seed")
+    seed_token = str(uuid.uuid4())
+    store.publish(conversation_identity(seed), seed_token, "old", "complete")
+    store.acknowledge(conversation_identity(seed), seed_token)
+
+    # Held back first, announced last, with mtimes PINNED rather than left to
+    # creation order: the catalog ranks unseen rows by `-mtime`, so the newest
+    # rows are the ones that fit under the cap. Pinning is what makes "which
+    # kind gets announced" a property of the test rather than of how fast the
+    # filesystem clock ticks — and the precondition below still checks it.
+    held = [held_kind] * 5
+    announced = [announced_kind] * _BACKGROUND_NOTIFY_MAX_PER_TICK
+    for index, kind in enumerate(held + announced):
+        directory = _make_session(store_root, f"bg00000002{index:02d}", f"Overnight {index}")
+        os.utime(directory / "transcript.jsonl", (1_700_000_000 + index, 1_700_000_000 + index))
+        store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", kind)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot, rounds=8)
+
+    # Structural discriminator, not prose: the digest is the only delivery with
+    # no `session_id`, because it covers several sessions.
+    assert all(len(call) == 4 for call in spawned), spawned
+    digests = [call for call in spawned if not call[2]]
+    named = [call for call in spawned if call[2]]
+    assert len(digests) == 1, spawned
+    title, _, _, subtitle = digests[0]
+
+    # WHAT WAS ACTUALLY ANNOUNCED, read back off the banners rather than
+    # assumed from the parametrisation: each named banner's subtitle is its own
+    # kind's category, so inverting `CONTEXTS` recovers the announced set, and
+    # the rest of the published set is what the digest stood for.
+    by_context = {context: kind for kind, context in CONTEXTS.items()}
+    shown_kinds = [by_context[call[3]] for call in named]
+    remainder = list(held + announced)
+    for kind in shown_kinds:
+        remainder.remove(kind)
+
+    # THE PRECONDITION. If these two sets share a kind the case is vacuous: the
+    # title's scope and the subtitle's scope agree by accident and the defect
+    # passes. Everything below is only evidence because this holds.
+    assert len(shown_kinds) == _BACKGROUND_NOTIFY_MAX_PER_TICK, spawned
+    assert set(shown_kinds) == {announced_kind}, shown_kinds
+    assert set(remainder) == {held_kind}, remainder
+    assert set(shown_kinds).isdisjoint(remainder), (shown_kinds, remainder)
+
+    # THE DEFECT, as a relation between the two lines. The title counts the
+    # whole tick, so the subtitle must speak for the whole tick — a set holding
+    # two kinds, which is mixed. Under the defect this read `Complete` (or the
+    # held kind's own category) over a count that included sessions in neither.
+    whole_tick = shown_kinds + remainder
+    assert title == background_digest_title(len(whole_tick)), (title, whole_tick)
+    assert subtitle == digest_subtitle(whole_tick), (title, subtitle, whole_tick)
+    assert subtitle == CONTEXT_MIXED, (title, subtitle, whole_tick)
+    # Neither side's category may be asserted over a set only partly in it.
+    assert subtitle != CONTEXTS[announced_kind], (title, subtitle)
+    assert subtitle != CONTEXTS[held_kind], (title, subtitle)
+    # …and the title still carries the ABSOLUTE total, so a subtitle fixed by
+    # shrinking the title's scope fails here rather than silently reopening D11.
+    assert str(len(whole_tick)) in title, (title, whole_tick)
+    assert str(len(remainder)) not in title.split()[0], (title, remainder)
