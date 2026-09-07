@@ -703,8 +703,9 @@ Warnings that still hold, each of which has already cost a release:
   point. Shell `sort` does not — it honours `LC_COLLATE`, so on an
   `en_*.UTF-8` locale it produces a different order from the one CI computed.
   Since no displacement happens to be a multiple of 5, **every divergent file
-  then lands in a different shard** — 51 of 452 when measured, versus 0 under
-  `LC_ALL=C`. So the flag does not make CI deterministic; it makes your
+  then lands in a different shard** — measured at the time of writing, an
+  `en_*.UTF-8` shell sort misplaced 51 files where `LC_ALL=C` misplaced none.
+  So the flag does not make CI deterministic; it makes your
   reproduction agree with a partitioner that was already deterministic.
   Without it you are told a file moved shards when it did not, which is the
   same misattribution this warning exists to prevent.
