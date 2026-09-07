@@ -916,11 +916,12 @@ class EpisodeRunner:
                 ),
                 input_tokens=decision.usage.input_tokens,
                 message_count=message_count,
-                # ``decision`` here is not always a ``ModelDecision``: a
-                # rejected reply or an aborted stream arrives as an error
-                # carrier that never saw a request object, so it cannot know
-                # what was offered. Those attempts record 0 rather than
-                # guessing, exactly as they did before the channel existed.
+                # ``decision`` here is not always a ``ModelDecision``. A
+                # rejected reply carries the count honestly, because the
+                # request was built and sent before the reply was judged. An
+                # ABORTED stream is the case this default exists for: it fails
+                # before there is a request object to read, so it cannot know
+                # what was offered and records 0 rather than guessing.
                 tool_count=getattr(decision, "offered_tool_count", 0),
                 prompt_cache_key=decision.prompt_cache_key,
                 context_tokens=decision.context_tokens,
