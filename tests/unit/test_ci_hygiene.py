@@ -17,6 +17,7 @@ against the defect it claims to catch.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -26,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from scripts import shard_tests
 
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
@@ -281,4 +284,149 @@ def test_tui_e2e_still_runs_on_macos() -> None:
     assert "macos-latest" in matrix, (
         "tui-e2e lost its macOS leg; the freeze this stage exists to "
         f"catch cannot go red on Linux (os={matrix!r})"
+    )
+
+
+def test_every_test_file_lands_in_exactly_one_shard() -> None:
+    """The shard partition must never drop or duplicate a test file.
+
+    This is the load-bearing invariant of the duration-balanced split. The
+    positional `i % 5` scheme could not lose a file by construction; a
+    weighted partition reading a committed manifest can, if it ever grows a
+    "skip what I have no weight for" path. A silently dropped test file is a
+    test that stops running while CI stays green -- strictly worse than the
+    imbalance the manifest exists to fix.
+
+    Mutation-tested: filtering the file list through the manifest
+    (`[f for f in files if f in weights]`) fails this test.
+    """
+    files = shard_tests.collect_test_files(REPO)
+    weights, fallback = shard_tests.load_weights()
+    assert files, "no unit test files collected; the glob is wrong"
+
+    shards = shard_tests.partition(files, weights, fallback, 5)
+    assigned = [f for shard in shards for f in shard]
+
+    assert len(assigned) == len(set(assigned)), "a test file was assigned twice"
+    assert set(assigned) == set(files), (
+        "the partition does not cover every collected test file; "
+        f"missing={sorted(set(files) - set(assigned))[:5]}"
+    )
+
+
+def test_unmeasured_test_files_are_still_scheduled() -> None:
+    """A file absent from the manifest must still run.
+
+    The manifest is committed, so it is stale the moment anyone adds a test.
+    Staleness is allowed to cost BALANCE and must never cost COVERAGE: an
+    unknown file is weighted at `fallback_seconds` and scheduled like any
+    other. Without this, adding a test file would silently exempt it from CI.
+    """
+    files = shard_tests.collect_test_files(REPO)
+    weights, fallback = shard_tests.load_weights()
+    unknown = "tests/unit/test_not_in_the_manifest_at_all.py"
+    assert unknown not in weights
+
+    shards = shard_tests.partition(files + [unknown], weights, fallback, 5)
+    holders = [i for i, shard in enumerate(shards) if unknown in shard]
+    assert (
+        len(holders) == 1
+    ), f"an unmeasured test file must land in exactly one shard, got {holders}"
+    assert fallback > 0, "the fallback weight must be positive"
+
+
+def test_shard_partition_is_deterministic() -> None:
+    """The same commit must always produce the same split.
+
+    If the partition varied between the five shard jobs of one run, a file
+    could be run twice or not at all; if it varied between runs, a shard
+    failure would be unreproducible. Determinism comes from sorting on
+    (-weight, path) and breaking load ties on the lowest shard index.
+    """
+    files = shard_tests.collect_test_files(REPO)
+    weights, fallback = shard_tests.load_weights()
+    first = shard_tests.partition(files, weights, fallback, 5)
+    for _ in range(5):
+        assert shard_tests.partition(files, weights, fallback, 5) == first
+
+
+def test_ci_partitions_the_suite_by_measured_duration() -> None:
+    """CI must invoke the balanced partitioner, not an inline positional split.
+
+    The `i % 5` split left the heaviest shard ~47 seconds under a 20-minute
+    cap and migrated that load between shards as files were added, so a PR
+    was failed by a cap while its log read `3693 passed`. Reverting to an
+    inline split silently restores that.
+    """
+    steps = _steps("test")
+    partition_steps = [s for s in steps if s.get("name") == "Partition test suite"]
+    assert len(partition_steps) == 1, "expected exactly one partition step"
+    run = partition_steps[0]["run"]
+    assert (
+        "scripts/shard_tests.py" in run
+    ), "the test job no longer calls the duration-balanced partitioner"
+    assert (
+        "i % total" not in run and "i % 5" not in run
+    ), "the inline positional split is back in ci.yml"
+
+
+def _partition_step_run() -> str:
+    """The `run:` body of the shard job's partition step."""
+    steps = [s for s in _steps("test") if s.get("name") == "Partition test suite"]
+    assert len(steps) == 1, "expected exactly one partition step"
+    return steps[0]["run"]
+
+
+def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
+    tmp_path: Path,
+) -> None:
+    """The matrix must run every shard `--total` splits the suite into, and
+    `main()` must emit all of them.
+
+    This asserts the coverage invariant on the REAL entry point. The other
+    guards call `partition()` directly, which leaves the layer CI actually
+    invokes -- argument parsing, `shards[args.shard]` selection, the `--out`
+    write -- untested. Review round 1 (MAJOR-2) demonstrated three mutations
+    that silently stop test files from running while all guards stayed green:
+
+      - `selected = shards[args.shard][:1]` in `main()`  -> 91 of 92 files skipped
+      - matrix `[0, 1, 2, 3]` while `--total` stays 5    -> ~92 files never run
+      - `--total 6` while the matrix stays 5             -> shard 5 orphaned
+
+    None of those is caught by asserting the step merely *calls* the script,
+    because nothing coupled the matrix length to `--total`. Both numbers are
+    read from ci.yml here rather than from constants, so changing one without
+    the other fails; and the union of what `main()` actually WRITES is
+    compared against the collected suite, so a truncated or misselected
+    write fails too.
+    """
+    run = _partition_step_run()
+
+    total_match = re.search(r"--total\s+(\d+)", run)
+    assert total_match, f"no --total in the partition step: {run!r}"
+    total = int(total_match.group(1))
+
+    matrix = _ci_jobs()["test"]["strategy"]["matrix"]["shard"]
+    assert isinstance(matrix, list)
+    assert sorted(matrix) == list(range(total)), (
+        f"the shard matrix {sorted(matrix)} does not cover every shard of "
+        f"--total {total}; files in the uncovered shards would never run"
+    )
+
+    # The step passes `--shard ${{ matrix.shard }}`, so the matrix value is
+    # the argument. Drive main() the same way CI does, once per shard.
+    assert "--shard" in run, "the partition step no longer passes --shard"
+
+    written: list[str] = []
+    for shard in matrix:
+        out = tmp_path / f"shard_{shard}.txt"
+        rc = shard_tests.main(["--shard", str(shard), "--total", str(total), "--out", str(out)])
+        assert rc == 0, f"main() failed for shard {shard}"
+        written.extend(out.read_text().split())
+
+    expected = shard_tests.collect_test_files(REPO)
+    assert len(written) == len(set(written)), "a test file was written to two shards"
+    assert set(written) == set(expected), (
+        "the files main() writes do not cover the collected suite; "
+        f"missing={sorted(set(expected) - set(written))[:5]}"
     )
