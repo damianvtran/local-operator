@@ -7,6 +7,7 @@ cleanup without importing or installing GUI libraries on the host.
 
 from __future__ import annotations
 
+import base64
 import os
 import signal
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator import computer_input
 from local_operator.computer_input import paste_text_source, python_source_argv
 
 
@@ -152,9 +154,19 @@ def test_source_arguments_are_literals_not_caller_injection(
     assert json.loads((tmp_path / "keys").read_text()) == [key]
 
 
-def test_small_python_commands_keep_legacy_bytes() -> None:
+def test_even_a_small_command_is_encoded_rather_than_quoted_literally() -> None:
+    """No size fast path: a short statement is exactly the dangerous case.
+
+    This test previously asserted the opposite (``["python", "-c", source]``).
+    That literal shape is the argv exposure itself, and the payload that killed
+    ep-0ce67ac2d3a1 was a few dozen characters — well under any threshold a
+    "small commands stay legible" carve-out would have used.
+    """
     source = "pyautogui.typewrite('abc')"
-    assert python_source_argv(source) == ["python", "-c", source]
+    argv = python_source_argv(source)
+    assert source not in " ".join(argv)
+    assert argv[:3] == ["python", "-c", computer_input._SOURCE_BOOTSTRAP]
+    assert base64.b64decode("".join(argv[3:])).decode("utf-8") == source
 
 
 def test_large_argv_reconstruction_executes_once(tmp_path: Path) -> None:
