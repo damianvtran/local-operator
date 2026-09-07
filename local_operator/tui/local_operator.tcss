@@ -1819,6 +1819,20 @@ CopyPickerScreen .copy-picker {
     overflow: hidden;
 }
 
+/* Shown in place of the card on a terminal too small to draw one, where the
+ * alternative is a dimmed screen that says nothing at all. A SIBLING of the
+ * card rather than a row inside it, so the card's pinned "either the footer
+ * is on screen or nothing drew" contract is untouched: one row, no ground of
+ * its own, and `dim` because it is an explanation of a degraded frame rather
+ * than anything to act on. */
+#copy-picker-too-small {
+    width: 100%;
+    height: 1;
+    content-align: center middle;
+    text-align: center;
+    color: $lo-dim;
+}
+
 
 /* ── /resume session picker ────────────────────────────────────────────── *
  *
