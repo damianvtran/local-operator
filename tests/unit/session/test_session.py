@@ -8,6 +8,7 @@ import base64
 import io
 import sys
 import types
+import warnings
 from collections.abc import Awaitable, Callable, Sequence
 
 import pytest
@@ -4665,3 +4666,94 @@ async def test_a_held_message_is_still_persisted_only_once(tmp_path):
     ]
     assert len(replayed) == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_is_not_persisted(tmp_path):
+    """The recovery reaches the LIVE context and never the transcript.
+
+    Mirror of the incident test above, inverted. An MCP connection is
+    process-scoped — ``McpManager._connections`` is instance state and
+    ``disconnect_all`` runs on dispose — so a resumed session re-runs discovery
+    from scratch. Replaying "its 3 tools are available to you now" into a
+    session that did NOT reconnect (an expired grant, a moved binary, an
+    offline machine — the likely cases for exactly the servers this feature is
+    about) would assert tools that are not in the inventory. Same class as the
+    credential record, which is why the type is absent from
+    ``_PERSISTABLE_CUSTOM_TYPES``.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.journal_mcp_recovery("files", 3)
+
+    live = [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_mcp_recovery"
+    ]
+    assert live, "the recovery must reach the live context"
+    assert "[mcp recovery]" in live[-1].details["text"]
+    assert live[-1].details["server"] == "files"
+    assert live[-1].details["tool_count"] == 3
+
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert "session_mcp_recovery" not in dumped, (
+        "the recovery was persisted; a resumed session would replay a claim "
+        "about a connection it cannot re-verify"
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_renders_as_a_user_message(tmp_path):
+    """It must arrive on the same surface the INCIDENT arrived on.
+
+    The failure reaches the model as a ``user`` turn; a recovery that rendered
+    to nothing (or to a system aside) could not supersede it. This exercises
+    the render whitelist branch in ``_default_convert_to_llm``.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="one"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="two"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    await session.journal_mcp_recovery("minerva-qa", 41)
+    await session.prompt("continue")
+
+    rendered = [m for m in stream.requests[1].messages if getattr(m, "role", "") == "user"]
+    texts = "\n".join(getattr(m, "text", "") for m in rendered)
+    assert "[mcp recovery] MCP server 'minerva-qa'" in texts
+    assert "41 tools are available again" in texts
+    assert "supersedes the earlier session incident" in texts
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_dispose_is_a_no_op(tmp_path):
+    """A reconnect racing teardown must be silent, not noisy.
+
+    ``_on_mcp_recovery`` is fired from the manager's connect path, which can
+    land while the session is disposing (dispose calls ``disconnect_all``, and
+    an in-flight reconnect may still complete). ``_spawn_background`` closes
+    the coroutine after dispose, so this must neither raise nor leave an
+    un-awaited coroutine warning.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    await session.dispose()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        session._on_mcp_recovery("files", 3)
+        await asyncio.sleep(0)
+
+    assert not [
+        m
+        for m in session._context.messages
+        if isinstance(m, CustomMessage) and m.custom_type == "session_mcp_recovery"
+    ]

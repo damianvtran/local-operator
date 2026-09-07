@@ -129,6 +129,7 @@ from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
 )
 from local_operator.session.goal import GoalState
@@ -653,6 +654,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             SESSION_INCIDENT_MESSAGE_TYPE,
             SESSION_MODEL_SWITCH_MESSAGE_TYPE,
             SESSION_CREDENTIAL_MESSAGE_TYPE,
+            SESSION_MCP_RECOVERY_MESSAGE_TYPE,
             "session_state",
         ):
             # An incident rides the sender's preformatted text (the classifier
@@ -666,6 +668,10 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ``/credential`` is ANNOUNCED to the model rather than only
             # changing the prompt tail, which the model has no reason to
             # re-read (the failure behind session 835fbcafdc27).
+            # An MCP-recovery record rides it for the symmetric reason: the
+            # FAILURE reaches the model as a ``session_incident`` user turn, so
+            # the recovery that supersedes it has to arrive on the same surface
+            # or the model keeps believing the older, more emphatic claim.
             out.append(
                 Message(
                     role="user",
@@ -800,6 +806,19 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # discovery is served by the ``<session-credentials>`` prompt-tail
         # block, which is rebuilt from the live store every turn and so
         # correctly shows nothing after a restart.
+        #
+        # SESSION_MCP_RECOVERY_MESSAGE_TYPE is deliberately absent for the same
+        # reason — it is the second member of that class, not a second
+        # exception. "MCP server 'X' is connected again and N tools are
+        # available" asserts a PROCESS-SCOPED capability: ``_connections`` is
+        # manager instance state and ``disconnect_all`` runs on dispose, so a
+        # resumed session re-runs discovery from scratch. If it reconnects the
+        # replay is redundant (the tools are simply in the inventory, which is
+        # how every healthy server is communicated); if it does NOT — an
+        # expired grant, a moved binary, an offline machine, all likely for the
+        # servers this feature is about — the replay asserts tools that are not
+        # there. The live tool inventory and ``mcp://`` status tell the truth at
+        # resume time; the harness must not replay a claim it cannot re-verify.
     }
 )
 
@@ -7083,10 +7102,67 @@ class Session:
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
 
+    async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
+        """Tell the MODEL an MCP server it was told was broken is usable again.
+
+        The symmetric counterpart to :meth:`journal_incident`'s ``mcp``
+        category. Without it, an operator who fixed a server mid-session —
+        ``/mcp login minerva-qa``, or simply waiting for the backoff reconnect
+        the incident text itself promises — left the model holding a death
+        notice, and its hint "its tools are gone ... Do not call its tools",
+        for the rest of the session. The tools were genuinely back
+        (``refresh_tools`` swaps the inventory mid-turn) but the model had been
+        told not to use them and had no reason to re-check.
+
+        LIVE CONTEXT ONLY, deliberately: there is no
+        ``_transcript.append_message`` here and the type is absent from
+        ``_PERSISTABLE_CUSTOM_TYPES``. The record asserts a process-scoped
+        capability, so replaying it into a resumed session that did not
+        reconnect would claim tools that are not in the inventory — the same
+        failure mode as a replayed credential announcement, and the likely one
+        for servers whose grants expire. The comment at
+        ``_PERSISTABLE_CUSTOM_TYPES`` carries the full argument.
+
+        Known and accepted consequence: the un-superseded INCIDENT does still
+        persist, so a resumed session replays "authorization failed" with no
+        recovery after it. That is today's behaviour, not a regression, and the
+        live tool inventory is the honest correction. Deleting the persisted
+        incident was rejected — the transcript is append-only by design.
+
+        Parked, never spliced: ``_append_or_park_journal`` is what keeps a
+        notice arriving mid-tool-batch from producing
+        ``assistant(tool_use) -> user -> tool_result`` and bricking the
+        session. Delivery is therefore at the next tool boundary of the running
+        turn — before the next model call, not the next user turn.
+        """
+        from local_operator.incidents import format_mcp_recovery_message
+
+        if self._disposed or not server:
+            return
+        text = format_mcp_recovery_message(server, tool_count)
+        message = CustomMessage(
+            custom_type=SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "server": server, "tool_count": tool_count},
+        )
+        self._append_or_park_journal(message)
+
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips): journal without blocking the
         manager's reconnect loop."""
         self._spawn_background(self.journal_incident(f"MCP server '{server}': {reason}"))
+
+    def _on_mcp_recovery(self, server: str, tool_count: int) -> None:
+        """MCP manager hook (a previously-announced server reconnected).
+
+        Mirrors :meth:`_on_mcp_incident` exactly: fire-and-forget on the
+        session's background machinery, because the manager calls this from
+        inside ``_register_connection`` on its own connect path and must not be
+        blocked or made to fail by the session. ``_spawn_background`` is a
+        no-op that closes the coroutine after dispose, so a reconnect racing
+        teardown neither raises nor warns about an un-awaited coroutine.
+        """
+        self._spawn_background(self.journal_mcp_recovery(server, tool_count))
 
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.

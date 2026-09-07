@@ -6,9 +6,11 @@ import pytest
 
 from local_operator.incidents import (
     SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     classify_incident,
     format_incident_message,
+    format_mcp_recovery_message,
     format_model_switch_message,
 )
 
@@ -140,3 +142,55 @@ def test_a_throttle_that_mentions_tokens_is_not_an_overflow(raw: str) -> None:
     does.
     """
     assert classify_incident(raw).category != "context-length"
+
+
+def test_recovery_text_names_server_count_and_supersedes() -> None:
+    """The recovery must name the server, the count, and CANCEL the incident.
+
+    All three are load-bearing. The server name is what ties it to the specific
+    incident it supersedes. The count is concrete evidence the connection is
+    real (and is the REGISTERED count, so it agrees with what the model can
+    actually call). The supersede clause is the reason the message exists: the
+    model is simultaneously holding an ``mcp`` incident whose hint says "its
+    tools are gone ... Do not call its tools", and a bare "reconnected" leaves
+    both claims live for it to choose between.
+    """
+    text = format_mcp_recovery_message("minerva-qa", 41)
+    assert "minerva-qa" in text
+    assert "41 tools are available again" in text
+    assert "supersedes the earlier session incident" in text
+    assert text.startswith("[mcp recovery]")
+    # Tag is server-scoped, not session-scoped: [session incident] already owns
+    # the session register, and the subject here is one server.
+    assert "[session recovery]" not in text
+
+
+def test_recovery_text_agrees_in_number() -> None:
+    """Singular and the zero fallback, because the model reads this text.
+
+    Zero registered tools is a real state — a server can be connected with
+    every tool filtered out by ``disabledTools`` — so it must not claim
+    "0 tools are available again"; the count-free phrasing stays honest about
+    the connection without promising callable tools.
+    """
+    assert "1 tool is available again" in format_mcp_recovery_message("files", 1)
+    assert "2 tools are available again" in format_mcp_recovery_message("files", 2)
+    zero = format_mcp_recovery_message("files", 0)
+    assert "its tools are available again" in zero
+    assert "0 tool" not in zero
+
+
+def test_recovery_is_not_an_incident_type() -> None:
+    """The distinct type is what keeps the classifier off this message.
+
+    ``journal_incident`` classifies its input, and ``classify_incident``
+    matches the substring "mcp" — so routing a recovery through the incident
+    type would append "its tools are gone until it reconnects" and "This is why
+    the previous turn ended" to a message announcing the opposite. This asserts
+    both halves: the type is separate, and the classifier really would do that.
+    """
+    assert SESSION_MCP_RECOVERY_MESSAGE_TYPE != SESSION_INCIDENT_MESSAGE_TYPE
+    assert SESSION_MCP_RECOVERY_MESSAGE_TYPE != SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    contradiction = classify_incident(format_mcp_recovery_message("files", 3))
+    assert contradiction.category == "mcp"
+    assert "tools are gone" in contradiction.render()

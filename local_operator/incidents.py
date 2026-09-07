@@ -15,6 +15,13 @@ session replays it). Classification is deliberately conservative: plain
 substring rules over the error text, ordered most-specific first, because
 the texts come from every provider's error envelope and no taxonomy covers
 them all. Unknown is a valid answer — the raw text always rides along.
+
+It also carries the formatters for the other model-visible session records
+that are NOT classified failures — a credential change, a model switch, and
+an MCP recovery. Each has its own custom type and its own formatter for the
+same reason: running them through :func:`classify_incident` would attach a
+failure category and a "this is why the previous turn ended" tail to a
+message that is not about a failure at all.
 """
 
 from __future__ import annotations
@@ -50,6 +57,28 @@ SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
 #: static "Model:" line in the system prompt. Persisted, so a resumed session
 #: replays the switch history too.
 SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
+
+#: Custom-message type journaled by the session when an MCP server that was
+#: ANNOUNCED BROKEN to the model connects again. The failure half of that pair
+#: has always been model-visible (``McpManager.on_incident`` ->
+#: ``Session._on_mcp_incident`` -> a ``session_incident`` message); the recovery
+#: half was not, so an operator who ran ``/mcp login <server>`` mid-session left
+#: the model holding a death notice — and its ``mcp`` hint, "its tools are gone
+#: ... Do not call its tools" — for a server that had been usable for the rest
+#: of the session. Observed live against ``minerva-qa``.
+#:
+#: It is a DEDICATED type rather than another ``session_incident`` because
+#: ``journal_incident`` runs :func:`classify_incident`, whose ``mcp`` rule
+#: matches the substring "mcp" and would append ``_HINTS["mcp"]`` — precisely
+#: the "its tools are gone" sentence — to a message saying the opposite.
+#:
+#: LIVE CONTEXT ONLY, deliberately not persisted: an MCP connection is
+#: process-scoped (``McpManager._connections`` is instance state and
+#: ``disconnect_all`` runs on dispose), so a replayed "its N tools are
+#: available to you now" would assert a live capability a restarted session may
+#: not have — the same class as the credential record above, and the more
+#: likely case for exactly the servers this serves, whose grants expire.
+SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
 
 #: Provider wordings that mean "this request does not fit", in every phrasing
 #: the vendors actually use (anthropic's "prompt is too long", google's token
@@ -283,6 +312,51 @@ def format_credential_message(
         f"variable ${key} into every bash command — use it there (a child "
         "process reads it), never echo, print, or write it. It is not "
         "readable through read_variable."
+    )
+
+
+def format_mcp_recovery_message(server: str, tool_count: int) -> str:
+    """Render the MCP-recovery text injected into the model's context.
+
+    The counterpart to the ``mcp`` incident category, and the reason it is a
+    dedicated formatter rather than another :func:`classify_incident` category:
+    the classifier matches the substring "mcp" and would append
+    ``_HINTS["mcp"]`` — "its tools are gone until it reconnects. Do not call
+    its tools in a tight loop" — plus ``Incident.render``'s "This is why the
+    previous turn ended", to a message announcing the exact opposite.
+
+    Present-tense STATE, like :func:`format_model_switch_message`, so the model
+    treats it as context for the turns that follow rather than an instruction
+    to acknowledge.
+
+    The SUPERSEDE sentence is load-bearing and must not be trimmed to a bare
+    "reconnected": the model is holding an earlier ``session_incident`` for
+    this server whose hint explicitly says "do not call its tools", and two
+    live claims leave it free to defer to the older, more emphatic one. It must
+    be told the earlier notice no longer applies.
+
+    ``tool_count`` is the REGISTERED tool count
+    (``len(McpManager.get_server_tools(server))``), not ``len(conn.tools)``:
+    ``_register_tools`` filters by ``enabledTools``/``disabledTools``, so the
+    raw list overstates what the model can actually call.
+    """
+    # Verb agreement is spelled out rather than templated: the design's draft
+    # formatter read "1 tool are available again", which is text the model
+    # actually reads. Zero registered tools still recovers honestly — the
+    # server may be connected with every tool filtered out by
+    # ``disabledTools`` — so it falls back to the count-free phrasing rather
+    # than claiming "0 tools".
+    if not tool_count:
+        tools = "its tools are available again"
+    elif tool_count == 1:
+        tools = "1 tool is available again"
+    else:
+        tools = f"{tool_count} tools are available again"
+    return (
+        f"[mcp recovery] MCP server '{server}' is connected again and {tools}. "
+        "This supersedes the earlier session incident about this server: its "
+        "tools are usable now, so call them normally and stop reporting it as "
+        "unavailable."
     )
 
 

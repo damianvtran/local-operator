@@ -2454,3 +2454,420 @@ class TestTheManagerDerivesTheAuthRemedy:
         assert manager.auth_recovery_hint(error) is None
         hint = mcp_auth_recovery_hint(error, None)
         assert hint is not None and "`/mcp`" in hint
+
+
+class TestMcpRecoveryNotice:
+    """The RECOVERY half of the model-visible MCP incident pair.
+
+    The failure half has always reached the model (``on_incident`` ->
+    ``Session._on_mcp_incident`` -> a ``session_incident`` message). The
+    recovery half did not, so an operator who ran ``/mcp login <server>``
+    mid-session left the model holding a death notice — and its "do not call
+    its tools" hint — for a server that had been usable for the rest of the
+    session. Observed live against ``minerva-qa``.
+
+    Two properties are load-bearing and each has its own tests below:
+
+    * a recovery fires ONLY for a server whose failure the MODEL was told
+      about, which is why the gate is armed inside the ``if sink is not None``
+      branches at the three ``on_incident`` sites and not derived from
+      ``_auth_toasted`` / ``_reconnect_suspended`` / ``_startup_failures``; and
+    * ``reload()`` re-registers EVERY connection, so an ungated notice would
+      be a storm of "is connected again" about servers that never broke.
+    """
+
+    @staticmethod
+    def _sinks(manager: McpManager) -> tuple[list[tuple[str, str]], list[tuple[str, int]]]:
+        """Install both sinks and return their recording lists."""
+        incidents: list[tuple[str, str]] = []
+        recoveries: list[tuple[str, int]] = []
+        manager.on_incident = lambda server, reason: incidents.append((server, reason))
+        manager.on_recovery = lambda server, count: recoveries.append((server, count))
+        return incidents, recoveries
+
+    @staticmethod
+    async def _trip_breaker(
+        manager: McpManager, name: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Drive ``name``'s reconnect chain until the breaker trips.
+
+        Mirrors ``TestCircuitBreaker``: backoff sleeps are made instant so the
+        five attempts inside the 30 s window happen in a few loop turns.
+        """
+        real_sleep = asyncio.sleep
+
+        async def instant_sleep(delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", instant_sleep)
+
+        async def failing_connect(server: str, cfg: Any) -> ServerConnection:
+            raise RuntimeError("still down")
+
+        monkeypatch.setattr(manager, "_connect_server", failing_connect)
+        manager._schedule_reconnect(name)
+        for _ in range(60):
+            await real_sleep(0)
+            if manager.reconnect_suspended(name):
+                break
+        assert manager.reconnect_suspended(name) is True
+
+    @pytest.mark.asyncio
+    async def test_breaker_incident_then_reconnect_fires_recovery(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Route 4: the reconnect the incident text itself promises.
+
+        The breaker incident says the tools are "unavailable until a reconnect
+        succeeds"; when one does, the model must be told so.
+        """
+        manager = McpManager(str(project))
+        incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        assert recoveries == []  # a healthy boot announces nothing
+
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        assert [server for server, _ in incidents] == ["fast"]
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        conn = await manager.reconnect_server("fast")
+        assert conn is not None
+        assert recoveries == [("fast", len(manager.get_server_tools("fast")))]
+        assert recoveries[0][1] == 1
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_after_gate_auth_failure_then_login_fires_recovery(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The operator's exact scenario, end to end.
+
+        An HTTP server's grant expires, its connect misses the 250 ms startup
+        gate and fails with ``McpAuthRequiredError`` (the after-gate
+        continuation fires the incident), then ``/mcp login`` reconnects it via
+        ``connect_configured_server``. Exactly one recovery, naming the server.
+        """
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        manager = McpManager(str(project))
+        incidents, recoveries = self._sinks(manager)
+        gate_passed = asyncio.Event()
+
+        # ``interactive`` is accepted because ``connect_configured_server``
+        # (the /mcp login path) passes it; the other routes do not.
+        async def slow_auth_failure(name: str, cfg: Any, **_kw: Any) -> ServerConnection:
+            if name == "fast":
+                return _make_conn(name, cfg)
+            # Miss the gate, then fail with the auth error, so the failure runs
+            # through _finish_pending's continuation rather than the gate arm.
+            await gate_passed.wait()
+            raise McpAuthRequiredError("https://srv.example/mcp")
+
+        monkeypatch.setattr(manager, "_connect_server", slow_auth_failure)
+        result = await manager.discover_and_connect()
+        assert "slow" not in result.errors  # still in flight at the gate
+        gate_passed.set()
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if incidents:
+                break
+        assert [server for server, _ in incidents] == ["slow"]
+        assert "authorization failed" in incidents[0][1]
+        assert recoveries == []
+
+        async def good_connect(name: str, cfg: Any, **_kw: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        conn = await manager.connect_configured_server("slow")
+        assert conn is not None
+        assert recoveries == [("slow", 1)]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_recovery_reports_registered_not_raw_tool_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The count must survive ``enabledTools``/``disabledTools`` filtering.
+
+        ``_register_tools`` drops filtered tools, so ``len(conn.tools)`` — what
+        the TUI's own login receipt prints — overstates what the model can
+        actually call. The notice must not promise tools that are not in the
+        inventory.
+        """
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"fast": {"type": "stdio", "command": "fast-cmd",'
+            ' "disabledTools": ["hidden"]}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            conn = _make_conn(name, cfg)
+            conn.tools = [_tool("search"), _tool("hidden")]
+            return conn
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        conn = manager.get_connection("fast")
+        assert conn is not None and len(conn.tools) == 2
+        assert len(manager.get_server_tools("fast")) == 1
+
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        assert await manager.reconnect_server("fast") is not None
+        # 1 (registered), NOT 2 (raw): the filtered tool is not callable.
+        assert recoveries == [("fast", 1)]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_recovery_sink_raising_does_not_break_connect(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising sink is contained AND disarms the server.
+
+        The disarm happens before the call precisely so a broken session sink
+        cannot leave a server re-announcing on every later reconnect.
+        """
+        manager = McpManager(str(project))
+        calls: list[str] = []
+
+        def exploding(server: str, count: int) -> None:
+            calls.append(server)
+            raise RuntimeError("sink exploded")
+
+        manager.on_incident = lambda server, reason: None
+        manager.on_recovery = exploding
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+
+        conn = await manager.reconnect_server("fast")
+        assert conn is not None  # the connection still registered
+        assert manager.get_connection("fast") is not None
+        assert calls == ["fast"]
+
+        # Disarmed: a second clean reconnect says nothing more.
+        assert await manager.reconnect_server("fast") is not None
+        assert calls == ["fast"]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_no_recovery_for_a_server_that_never_failed(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The core negative: healthy servers are never announced."""
+        manager = McpManager(str(project))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        assert recoveries == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_reload_emits_no_recovery_storm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE storm test. ``reload()`` re-registers every connection.
+
+        Every server passes through ``_register_connection`` on a reload, so an
+        ungated notice would tell the model that three servers which never
+        broke are "connected again". This is the case the gate exists for.
+        """
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"a": {"type": "stdio", "command": "a-cmd"},'
+            ' "b": {"type": "stdio", "command": "b-cmd"},'
+            ' "c": {"type": "stdio", "command": "c-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        assert len(manager.get_tools()) == 3
+
+        await manager.reload()
+        assert len(manager.get_tools()) == 3  # all three genuinely re-registered
+        assert recoveries == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_reload_with_one_armed_server_emits_exactly_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other side of the storm test: the armed server is not lost.
+
+        Gating must not be so broad that a genuine recovery is swallowed when
+        it arrives through a reload rather than a login.
+        """
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"a": {"type": "stdio", "command": "a-cmd"},'
+            ' "b": {"type": "stdio", "command": "b-cmd"},'
+            ' "c": {"type": "stdio", "command": "c-cmd"}}}',
+            encoding="utf-8",
+        )
+        manager = McpManager(str(tmp_path))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        await self._trip_breaker(manager, "b", monkeypatch)
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+
+        await manager.reload()
+        assert recoveries == [("b", 1)]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_startup_gate_failure_then_connect_emits_no_recovery(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A boot failure fires no incident, so it earns no recovery.
+
+        This pins the §2 decision to arm from the SINK rather than from
+        ``_startup_failures``: the gate arm records the failure for the boot
+        report but never tells the model, so announcing a recovery from it
+        would "supersede" an incident the model never received.
+        """
+        manager = McpManager(str(project))
+        incidents, recoveries = self._sinks(manager)
+        attempt = {"n": 0}
+
+        # ``**_kw`` absorbs ``interactive``, which the /mcp login route passes.
+        async def fail_then_succeed(name: str, cfg: Any, **_kw: Any) -> ServerConnection:
+            if name == "fast" and attempt["n"] == 0:
+                attempt["n"] += 1
+                raise RuntimeError("boot failure")
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fail_then_succeed)
+        result = await manager.discover_and_connect()
+        assert "fast" in result.errors
+        assert incidents == []  # the gate arm fires no incident — the premise
+
+        conn = await manager.connect_configured_server("fast")
+        assert conn is not None
+        assert recoveries == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_recovery_fires_once_per_failure_not_per_reconnect(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One notice per announced failure, not one per connect.
+
+        A server that keeps reconnecting cleanly (a ``/mcp reload`` habit, a
+        transport that re-establishes) must not re-announce: the model was
+        told once and corrected once.
+        """
+        manager = McpManager(str(project))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+
+        assert await manager.reconnect_server("fast") is not None
+        assert recoveries == [("fast", 1)]
+        for _ in range(3):
+            assert await manager.reconnect_server("fast") is not None
+        assert recoveries == [("fast", 1)]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_removed_server_does_not_inherit_stale_arming(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A re-added server starts clean.
+
+        ``_drop_removed_servers`` clears the arming with the rest of the
+        per-server state; otherwise a config edit that removes and re-adds a
+        server would announce a recovery for an incident about the old entry.
+        """
+        manager = McpManager(str(project))
+        _incidents, recoveries = self._sinks(manager)
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+
+        # Remove 'fast' from the config and reload: the arming goes with it.
+        (project / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        await manager.reload()
+        assert recoveries == []
+        assert manager.get_connection("fast") is None
+
+        # Re-add it and connect: a first connection, not a recovery.
+        (project / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"fast": {"type": "stdio", "command": "fast-cmd"},'
+            ' "slow": {"type": "stdio", "command": "slow-cmd"}}}',
+            encoding="utf-8",
+        )
+        await manager.reload()
+        assert manager.get_connection("fast") is not None
+        assert recoveries == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_no_recovery_sink_installed_is_a_no_op(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI shape: ``on_recovery is None`` and nothing breaks.
+
+        ``local-operator mcp login`` builds a throwaway manager with no session
+        behind it, so there is no sink to fire. The connect must still succeed,
+        and the server must still be disarmed so a later session-backed manager
+        does not inherit a phantom arming.
+        """
+        manager = McpManager(str(project))
+        manager.on_incident = lambda server, reason: None
+        assert manager.on_recovery is None
+
+        async def good_connect(name: str, cfg: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        await manager.discover_and_connect()
+        await self._trip_breaker(manager, "fast", monkeypatch)
+        assert "fast" in manager._incident_announced
+
+        monkeypatch.setattr(manager, "_connect_server", good_connect)
+        assert await manager.reconnect_server("fast") is not None
+        assert "fast" not in manager._incident_announced
+        await manager.disconnect_all()
