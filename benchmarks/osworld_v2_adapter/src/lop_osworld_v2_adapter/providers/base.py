@@ -84,13 +84,13 @@ _SQUEEZED_DEADLINE_FRACTION = 0.5
 # The strictly positive floor under EVERY derived guest deadline. A body
 # ``timeout`` of 0 -- or a negative one -- is not "no deadline", it is
 # "kill immediately", which is the exact outcome this whole module exists to
-# prevent. The squeezed branch alone does not rule it out: a caller that has
-# already exhausted its budget can reach here with ``socket_timeout_s`` at or
-# below zero (``guest_disk`` samples its remaining budget at the guard and
-# again at the call, so a value positive at the guard can be ~0 by the call),
-# and a fraction of zero is still zero. Clamping keeps the guest's deadline
-# positive so a doomed-either-way call still gets a real, if tiny, chance to
-# run rather than a guaranteed instant kill.
+# prevent. The squeezed branch alone does not rule it out, because a fraction
+# of a vanishingly small number is still vanishingly small: ``guest_disk``
+# guards on ``remaining > 0`` and passes ``min(COMMAND_TIMEOUT_S, remaining)``,
+# so a budget with nanoseconds left passes that guard and arrives here as a
+# positive value that rounds to nothing useful. Clamping keeps the guest's
+# deadline meaningfully positive, so a doomed-either-way call still gets a
+# real, if tiny, chance to run rather than a guaranteed instant kill.
 _ABSOLUTE_FLOOR_S = 0.05
 
 
@@ -110,10 +110,10 @@ def guest_deadline_for(socket_timeout_s: float) -> float:
     restores the ambiguous ordering this function exists to prevent.
 
     Below that floor the two properties genuinely conflict: a caller whose budget
-    is already spent cannot be given a deadline that is both inside its own and
-    positive. Positivity wins, because a non-positive body ``timeout`` is an
-    instant kill while a deadline marginally outside an already-exhausted socket
-    budget merely returns the pre-existing behaviour.
+    is all but spent cannot be given a deadline that is both inside its own and
+    usefully positive. Positivity wins, because a non-positive body ``timeout``
+    is an instant kill while a deadline marginally outside an already-exhausted
+    socket budget merely returns the pre-existing behaviour.
 
     Subtracting the margin is the normal case. A caller whose socket deadline is
     already at or under the margin (``guest_disk`` shrinks its own toward zero as
