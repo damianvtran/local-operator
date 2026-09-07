@@ -134,6 +134,25 @@ async def test_gutter_faces_the_conversation_at_either_position(size, position):
             assert app.query_one("#session-conversation").size.width >= SIDEBAR_MAIN_MIN_WIDTH
 
 
+async def _focus_settled(pilot, sidebar) -> None:
+    """Focus the list and WAIT until it has actually landed.
+
+    ``Widget.focus()`` defers the real work through ``App.call_later``, so a
+    single ``pilot.pause()`` after it is a coin toss. That matters here
+    because ``render`` gates the cursor mark and its ``tint-select`` ground on
+    ``has_focus``: a frame captured before focus arrives is missing a ``›``
+    and a background colour that the next frame has. Any test comparing two
+    painted frames from two app instances will then fail intermittently, and
+    it CLUSTERS, so a handful of consecutive passes proves nothing.
+    """
+    sidebar.focus()
+    for _ in range(20):
+        await pilot.pause()
+        if sidebar.has_focus:
+            return
+    raise AssertionError("sidebar never took focus")
+
+
 def _hover_entries(ids: tuple[str, ...] = ("alpha", "sess", "gamma")) -> list[CatalogEntry]:
     now = time.time()
     return [
@@ -567,8 +586,7 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
             app._sidebar_timer.pause()
             sidebar = app._session_sidebar
             sidebar.set_entries(_hover_entries(("alpha", "sess", "gamma")))
-            sidebar.focus()
-            await pilot.pause()
+            await _focus_settled(pilot, sidebar)
             sidebar.cursor_id = cursor
             sidebar.requested_id = requested
             sidebar.refresh()
@@ -766,7 +784,21 @@ async def test_disabling_auto_links_leaves_the_painted_frame_identical():
             sidebar = app._session_sidebar
             sidebar.auto_links = auto_links
             sidebar.set_entries(_mixed_entries())
-            sidebar.focus()
+            # Deliberately NOT focused. `render` gates the cursor mark and its
+            # tinted ground on `has_focus`, and `focus()` lands through
+            # `call_later`, so a focused frame here is a race that fails ~half
+            # the time on the identical diff (`'  '` vs `'› '`, `#14110c` vs
+            # `#16221a`). Focus has nothing to do with whether the list
+            # renders a LINK, which is the only question this guard asks, so
+            # the stable frame is the honest instrument rather than a weaker
+            # one. The frame IS captured under hover, which is the state a
+            # link would be highlighted in at all — that is what keeps this
+            # able to fail if a link is ever rendered here.
+            await pilot.pause()
+            first_row = next(
+                y for y in range(1, sidebar.size.height) if sidebar._entry_at(y) is not None
+            )
+            sidebar._set_hover(first_row)
             await pilot.pause()
             painted: list[tuple[str, str]] = []
             for line in sidebar.render_lines(Region(0, 0, sidebar.size.width, sidebar.size.height)):
@@ -843,8 +875,7 @@ async def test_navigation_crosses_a_section_header_without_stalling():
         app._sidebar_timer.pause()
         sidebar = app._session_sidebar
         sidebar.set_entries(_mixed_entries())
-        sidebar.focus()
-        await pilot.pause()
+        await _focus_settled(pilot, sidebar)
         # The frame really does carry both headers.
         # Two headings, each owning the blank beneath it, plus the blank that
         # separates the second heading from the group above.
