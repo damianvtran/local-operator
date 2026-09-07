@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from typing import Any
 
 import pytest
@@ -161,12 +162,29 @@ def test_the_typing_process_is_not_signalled_by_the_command_it_typed() -> None:
     decoy still dies. The agent's cleanup must keep working; only the false
     match on ourselves may disappear.
     """
+    # The pattern is made unique per run. `pkill -f` matches EVERY process on
+    # the host, and this repo is worked through many concurrent worktrees under
+    # `-n auto`: with the episode's literal constant, two overlapping runs of
+    # this file would have each one's pkill killing the other's decoy, and the
+    # assertion below would read the wrong process. The self-match property
+    # under test is unaffected by the pattern being unique -- what matters is
+    # that OUR OWN argv does not contain it.
+    unique_pattern = f"{FATAL_PATTERN} run-{uuid.uuid4().hex}"
+
+    # The decoy carries the pattern in its OWN argv rather than being renamed
+    # with `exec -a`, which is a bash builtin extension: on ubuntu-latest
+    # /bin/sh is dash, where it fails with "exec: -a: not found" and the decoy
+    # never starts. That is why this test had never once executed on Linux --
+    # the platform whose /proc/<pid>/cmdline semantics the fix is actually
+    # about. A python -c whose source embeds the pattern is visible to pgrep -f
+    # on both platforms with no shell dependency at all.
     decoy = subprocess.Popen(
-        ["/bin/sh", "-c", f'exec -a "{FATAL_PATTERN} decoy" sleep 30'],
+        [sys.executable, "-c", f"import time; time.sleep(30)  # {unique_pattern} decoy"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    argv = python_source_argv("import time; time.sleep(10); typed = %r" % FATAL_TYPED_TEXT)
+    typed_text = FATAL_TYPED_TEXT.replace(FATAL_PATTERN, unique_pattern)
+    argv = python_source_argv("import time; time.sleep(10); typed = %r" % typed_text)
     typist = subprocess.Popen(
         [sys.executable, *argv[1:]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
@@ -177,7 +195,7 @@ def test_the_typing_process_is_not_signalled_by_the_command_it_typed() -> None:
         while time.monotonic() < deadline:
             if (
                 subprocess.run(
-                    ["pgrep", "-f", f"{FATAL_PATTERN} decoy"], capture_output=True
+                    ["pgrep", "-f", f"{unique_pattern} decoy"], capture_output=True
                 ).returncode
                 == 0
             ):
@@ -186,9 +204,12 @@ def test_the_typing_process_is_not_signalled_by_the_command_it_typed() -> None:
         else:
             pytest.fail("the decoy never became visible to the matcher")
 
-        subprocess.run(["pkill", "-f", FATAL_PATTERN], capture_output=True)
-        time.sleep(0.5)
+        subprocess.run(["pkill", "-f", unique_pattern], capture_output=True)
 
+        # Wait on the EVENT, not the clock. A fixed sleep here is a bet on
+        # machine load: under CI contention SIGTERM delivery and reaping can
+        # outlast any budget short enough to be worth having.
+        decoy.wait(timeout=10)
         assert decoy.poll() is not None, "the agent's own cleanup must still work"
         assert typist.poll() != -15, "our typing process was SIGTERMed by the text it typed"
         assert typist.poll() is None, "our typing process must still be running"
