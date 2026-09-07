@@ -11,7 +11,9 @@ isolated widget calls that can pass while the wiring is dead.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -276,6 +278,12 @@ class _Job:
         self.result_text: str | None = None
         self.error_text: str | None = None
         self.settled_at: float | None = None
+        # Mirrors ``AsyncJob.restored``: rehydrated from a previous session's
+        # roster on resume. Declared (rather than set ad hoc by the one test
+        # that needs it) because retention EXEMPTS it — see
+        # ``jobs.retention_expired`` — so a fixture missing the attribute would
+        # be silently answering "not restored" through a ``getattr`` default.
+        self.restored: bool = False
         self.trajectory: list[dict[str, Any]] | None = None
         # Mirrors ``AsyncJob.agent_role``/``effort``: the child's role and
         # effort tier, recorded at launch. Defaulted to the real model's
@@ -1935,3 +1943,139 @@ async def test_the_gate_admitting_a_queued_child_updates_the_summary_caption() -
         caption = panel.summary_text()
         assert "3 running" in caption, caption
         assert "queued" not in caption, caption
+
+
+class _RetentionManager:
+    """The slice of ``AsyncJobManager`` the dock roster reads, with a window.
+
+    ``_fake_jobs`` deliberately exposes no ``retention_ms``, which is the
+    "no live manager" case (a follower) where the filter is the identity. This
+    one carries the attribute so the OWNER path is exercised.
+    """
+
+    def __init__(self, jobs: list[Any], retention_ms: int) -> None:
+        self._jobs = jobs
+        self.retention_ms = retention_ms
+
+    def list(self, *, owner_id: str | None = None) -> list[Any]:
+        return list(self._jobs)
+
+    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        return next((job for job in self._jobs if str(getattr(job, "id", "")) == job_id), None)
+
+
+class _GraphComms:
+    """A comms graph that keeps resolving a row after the ledger let it go.
+
+    This is not a simplification — it is what the real registry does. Every
+    ``_ChildRecord`` holds a ``job_ref``, so ``comms.job()`` answers for a
+    child whose execution row the retention sweep already deleted (pinned by
+    ``test_a_swept_child_keeps_its_durable_identity_on_the_roster``). The dock
+    resolves its rows through exactly this path, which is why sweeping the
+    manager alone did not clear the panel in issue #524.
+    """
+
+    def __init__(self, jobs: list[Any]) -> None:
+        self._jobs = jobs
+
+    def children(self, job_id: str | None) -> list[Any]:
+        return [SimpleNamespace(job_id=str(job.id)) for job in self._jobs]
+
+    def job(self, job_id: str) -> Any:
+        return next((job for job in self._jobs if str(getattr(job, "id", "")) == job_id), None)
+
+
+@pytest.mark.asyncio
+async def test_the_dock_sheds_a_settled_row_once_retention_passes() -> None:
+    """Issue #524, at the surface the operator actually sees.
+
+    The panel is a VIEW over the roster, and the roster it reads comes from the
+    comms graph rather than ``jobs.list()`` — so this asserts the user-visible
+    end of the fix: rows inside the window are shown, rows past it are gone,
+    and the panel hides itself when nothing is left. No new job is registered
+    between the two assertions; only time passes.
+    """
+    session = FakeSession()
+    now = time.time()
+    jobs = [_Job(f"sub-{index}", f"child {index}", status="completed") for index in range(3)]
+    for job in jobs:
+        job.settled_at = now  # just settled: inside any sane window
+    session.jobs = _RetentionManager(jobs, retention_ms=300_000)
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert panel.display is True
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["sub-0", "sub-1", "sub-2"]
+
+        # Retention elapses. NOTHING is registered, cancelled or settled — the
+        # rows are simply older than the window now.
+        for job in jobs:
+            job.settled_at = now - 600.0
+        app._refresh_band()
+        for _ in range(4):
+            await pilot.pause()
+
+        assert app._subagent_roster()[0] == []
+        assert panel.display is False
+
+
+@pytest.mark.asyncio
+async def test_the_dock_keeps_a_running_child_whatever_its_stamps_say() -> None:
+    """The filter must never reach a live child. A running row is exempt in
+    :func:`retention_expired` regardless of ``settled_at``, and this pins that
+    at the dock rather than only at the manager."""
+    session = FakeSession()
+    running = _Job("live", "still working", status="running")
+    running.settled_at = time.time() - 600.0  # nonsense stamp; status wins
+    settled = _Job("done", "finished long ago", status="completed")
+    settled.settled_at = time.time() - 600.0
+    jobs = [running, settled]
+    session.jobs = _RetentionManager(jobs, retention_ms=1)
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["live"]
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_the_dock_keeps_restored_rows_after_a_resume() -> None:
+    """A rehydrated child carries the PREVIOUS session's settle stamp, which is
+    always past the window. Filtering it would empty the dock of exactly the
+    rows resume exists to show."""
+    session = FakeSession()
+    restored = _Job("old", "from last session", status="completed")
+    restored.settled_at = time.time() - 86_400.0
+    restored.restored = True
+    jobs = [restored]
+    session.jobs = _RetentionManager(jobs, retention_ms=1)
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["old"]
+        assert panel.display is True
+
+
+@pytest.mark.asyncio
+async def test_a_roster_with_no_live_manager_is_left_alone() -> None:
+    """A follower has no local manager to read a window from; its rows arrive
+    already filtered by the owner. The filter is the identity there rather than
+    a second, uninformed opinion about what to hide."""
+    session = FakeSession()
+    settled = _Job("remote", "owner-side child", status="completed")
+    settled.settled_at = time.time() - 86_400.0
+    jobs = [settled]
+    session.jobs = _fake_jobs(*jobs)  # no ``retention_ms`` attribute
+    session._subagent_comms = _GraphComms(jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        assert [str(job.id) for job in app._subagent_roster()[0]] == ["remote"]
+        assert panel.display is True

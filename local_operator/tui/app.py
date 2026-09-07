@@ -81,6 +81,12 @@ from local_operator.harness.intent import (
     tool_activity,
 )
 
+# The retention predicate the job ledger sweeps with. Imported here so the dock
+# roster applies the SAME rule to rows the comms graph resolves (which the
+# manager's own sweep cannot reach — see `_subagent_roster`), rather than
+# re-deriving a window that could drift from the ledger's.
+from local_operator.harness.jobs import retention_expired
+
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
 # discipline protects. The aside builds the request-scoped turns it hands to
@@ -15375,12 +15381,55 @@ class OperatorApp(App[None]):
             job = next((row for row in getattr(frontend, "jobs", ()) if row.id == job_id), None)
         return job
 
+    @staticmethod
+    def _within_retention(jobs: list[Any], manager: Any) -> list[Any]:
+        """Drop rows the ledger's retention window has already released.
+
+        Split out of :meth:`_subagent_roster` so the rule is testable on its
+        own and so the resolver's happy path stays one expression. Total and
+        silent by design — this feeds a status surface, so an unreadable
+        manager or a row of an unexpected shape returns the input unchanged
+        rather than blanking the dock: showing a stale row is a much smaller
+        failure than showing none.
+
+        The window comes from the LIVE manager (``retention_ms``); a follower
+        has no local manager, and its rows arrive already filtered by the
+        owner's own snapshot, so with no manager this is the identity.
+        """
+        retention_ms = getattr(manager, "retention_ms", None)
+        if not isinstance(retention_ms, int):
+            return jobs
+        now = time.time()
+        try:
+            return [job for job in jobs if not retention_expired(job, retention_ms, now=now)]
+        except Exception:  # noqa: BLE001 — the dock must not fail on a filter
+            return jobs
+
     def _subagent_roster(self) -> tuple[list[Any], Any]:
         """Resolve one direct-child scope for open, retarget, tick and close.
 
         The execution ledger is local on an owner and flattened on a follower.
         The comms graph is the common ownership contract, never the current row
         selection or a best-effort label match.
+
+        RETENTION IS APPLIED HERE, and it has to be. This resolver does not
+        read ``jobs.list()`` on the comms path — it walks the comms graph and
+        asks ``comms.job()`` for each node, and that lookup falls back to
+        ``_ChildRecord.job_ref``, a live reference the manager's ``del`` cannot
+        free (kept on purpose: a swept child must keep its durable identity so
+        its transcript page still resolves — see
+        ``test_a_swept_child_keeps_its_durable_identity_on_the_roster``). So
+        the manager sweeping a settled row does NOT by itself take it off the
+        dock: the graph hands the same row straight back, which is why issue
+        #524's panel kept showing settled children after the ledger had let
+        them go. Identity outliving retention is correct; PRESENTING it as a
+        current roster row is not, so the presentation layer filters.
+
+        Filtered with the manager's own :func:`retention_expired` against the
+        manager's own window, never a local re-derivation, so the panel and the
+        ledger cannot drift. A running row and a ``restored`` row are exempt by
+        that predicate, so a live child and a resumed session's rehydrated
+        children are untouched.
         """
         session = self._session
         comms = getattr(session, "_subagent_comms", None)
@@ -15392,6 +15441,7 @@ class OperatorApp(App[None]):
             if comms is not None and callable(getattr(comms, "children", None)):
                 nodes = comms.children(view.job_id if view is not None else None)
                 jobs = [job for node in nodes if (job := job_for(node.job_id)) is not None]
+                jobs = self._within_retention(jobs, manager)
                 return jobs, job_for(view.job_id) if view is not None else None
             # Old/local hosts without lineage can still show their root ledger,
             # but a child must never inherit its parent's roster by default.

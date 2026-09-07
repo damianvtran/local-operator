@@ -750,6 +750,81 @@ async def test_retention_sweep_drops_old_settled_jobs():
 
 
 @pytest.mark.asyncio
+async def test_the_last_batch_is_swept_with_no_later_job_settling():
+    """Issue #524. Every ``_sweep_due`` call site used to sit inside a job's
+    own settle path, so the LAST batch of a session was never swept: its rows
+    stayed in the dock's Subagents panel until a NEW job happened to settle,
+    which for the final batch is never. ``list()`` sweeps on read, so the
+    guarantee no longer depends on unrelated future work arriving.
+
+    The assertion that matters is the one made WITHOUT registering anything:
+    the old code passes every line of this test except that one."""
+    manager = AsyncJobManager(retention_ms=20)
+    for index in range(3):
+        manager.register("task", f"L{index}", quick_runner)
+    await wait_for(lambda: all(job.status == "completed" for job in manager.list()))
+    await asyncio.sleep(0.1)  # 5x the retention window
+
+    assert manager.list() == []  # no new job registered — this is the defect
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_read_never_sweeps_a_row_inside_its_retention_window():
+    """The other half of the contract: eviction must not become eager. A row
+    that settled a moment ago is still fully observable, which is what makes
+    the panel a stable surface rather than one that blinks rows away."""
+    manager = AsyncJobManager()  # the shipped 5-minute window
+    job_id = manager.register("task", "recent", quick_runner)
+    await manager.settled_event(job_id).wait()
+    await asyncio.sleep(0.05)
+
+    assert [job.id for job in manager.list()] == [job_id]
+    assert manager.get(job_id) is not None
+
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_read_never_sweeps_a_running_row():
+    """Retention reclaims FINISHED work. A running row has no ``settled_at``,
+    so no window has started for it — pinned with ``retention_ms=0``, where any
+    arithmetic slip would evict it on the first read."""
+    manager = AsyncJobManager(retention_ms=0)
+    gate = asyncio.Event()
+
+    async def blocked(job_id, signal, report_progress):
+        await gate.wait()
+        return "done"
+
+    job_id = manager.register("task", "long-runner", blocked)
+    await wait_for(lambda: require_job(manager, job_id).started_at is not None)
+
+    for _ in range(5):  # every read sweeps; none may take the live row
+        assert [job.id for job in manager.list()] == [job_id]
+
+    gate.set()
+    await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_read_sweep_starts_no_background_task():
+    """Why ``list()`` rather than a timer: nothing to start, cancel, or leak.
+    A ``set_interval``/``create_task`` sweep would have to be torn down on
+    dispose, and this pins that no such task exists to forget."""
+    before = len(asyncio.all_tasks())
+    manager = AsyncJobManager(retention_ms=20)
+    for index in range(3):
+        manager.register("task", f"T{index}", quick_runner)
+    await wait_for(lambda: manager.list() == [])
+    await manager.dispose()
+    await asyncio.sleep(0)
+
+    assert len(asyncio.all_tasks()) == before
+
+
+@pytest.mark.asyncio
 async def test_list_scoped_by_owner():
     manager = AsyncJobManager()
     gate = asyncio.Event()
