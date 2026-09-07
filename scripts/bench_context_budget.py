@@ -44,6 +44,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -128,7 +129,7 @@ def measure_start_context(
     user_instructions: str = _SAMPLE_USER_INSTRUCTIONS,
     repo_guidance: str = _SAMPLE_REPO_GUIDANCE,
     inflate_schemas: int = 0,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Character cost of everything a fresh session puts on the wire.
 
     ``inflate_schemas`` pads the TOOL SCHEMAS specifically. The fail-proof
@@ -153,7 +154,7 @@ def measure_start_context(
         user_instructions=user_instructions,
         repo_guidance=repo_guidance,
     )
-    parts = {
+    parts: dict[str, Any] = {
         "instructions": len(blocks[0]),
         "tool_inventory": len(blocks[1]),
         "environment": len(blocks[2]),
@@ -162,6 +163,8 @@ def measure_start_context(
     }
     parts["TOTAL"] = sum(parts.values())
     parts["n_tools"] = len(tools)
+    # Names, so a short surface can say WHICH tool a host-dependent gate ate.
+    parts["names"] = [t.name for t in tools]
     return parts
 
 
@@ -222,12 +225,18 @@ def main() -> int:
     # The surface is stated ALWAYS, not only under --verbose: a silent drop
     # from the full tool set is exactly how this guard would go back to
     # measuring a machine no user has. See real_tool_surface._forced_browser_backend.
-    n_tools = parts["n_tools"]
+    n_tools = int(parts["n_tools"])
+    parts_names = list(parts["names"])
     expected_tools = len(DEFAULT_TOOL_NAMES)
     print(f"tool surface: {n_tools}/{expected_tools} tools")
     if n_tools != expected_tools:
+        # Name the tools, not just the count: the whole point of this check is
+        # that a host-dependent gate dropped something, and "which one" is the
+        # first question anyone reading a CI log will ask.
+        missing = sorted(set(DEFAULT_TOOL_NAMES) - set(parts_names))
         print(
             f"FAIL: measured {n_tools} of {expected_tools} default tools.\n"
+            f"      missing: {', '.join(missing) or '(none — duplicate names?)'}\n"
             "      The benchmark must measure the FULL surface on every host, or it "
             "reports headroom a real session does not have.\n"
             "      If a tool was deliberately removed, update DEFAULT_TOOL_NAMES; "
