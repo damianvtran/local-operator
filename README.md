@@ -693,7 +693,7 @@ Then install the extension from the
 load `extension/dist` unpacked at `chrome://extensions` with Developer mode
 on), click its toolbar icon, and enter the pairing code. Once paired, `browser`
 tool calls drive a dedicated tab in your real browser. The first time the
-agent wants a new site, the published store build (v0.1.7) asks **Allow
+agent wants a new site, the published store build asks **Allow
 once**, **Always allow**, or **Deny**; you stay in control of which sites it
 can reach, and can revoke the whole browser any time from the extension's
 Settings or with `lop browser pair --reset`.

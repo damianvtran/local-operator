@@ -1377,6 +1377,14 @@ def browser_command(args: argparse.Namespace) -> int:
             print("                     run 'lop browser status --repair' to reconcile.")
         print(f"port:                {result['port']}")
         print(f"log:                 {result['log']}")
+        # Only when this is NOT the default install: the common case should not
+        # grow a line, but an isolated run (a redirected HOME or
+        # LOCAL_OPERATOR_CONFIG_DIR) is otherwise indistinguishable from the
+        # real one in this output.
+        supervisor = result.get("supervisor")
+        if supervisor not in (browser_install.LABEL, browser_install.SYSTEMD_UNIT):
+            print(f"supervisor:          {supervisor}")
+            print(f"config root:         {result.get('config_root')}")
         return 0 if result["healthy"] else 1
     if command == "pair":
         if args.reset:
@@ -1419,17 +1427,43 @@ def browser_command(args: argparse.Namespace) -> int:
     if command == "logs":
         import subprocess
 
-        command_line = ["tail", "-n", str(args.lines)]
-        if args.follow:
-            command_line.append("-f")
-        command_line.append(str(browser_install.log_path()))
-        return subprocess.call(command_line)
+        # Through logs_command() so this matches where the daemon's output
+        # actually goes: systemd's default is the journal, and tailing the
+        # log file there reports "cannot open" on a path nothing writes.
+        command_line = browser_install.logs_command(args.lines, follow=args.follow)
+        # A log file that was never created means the daemon has not run under
+        # a supervisor here, which is a different thing from "it ran and said
+        # nothing". Say which, instead of leaving the user with `tail`'s
+        # "No such file or directory" on a path they never chose.
+        if command_line[0] == "tail" and not browser_install.log_path().exists():
+            print(
+                f"no daemon log at {browser_install.log_path()}.\n"
+                "The bridge has not run under a service supervisor on this machine. "
+                "Run `lop browser install`, or `lop browser serve` to run it in the "
+                "foreground."
+            )
+            return 1
+        try:
+            return subprocess.call(command_line)
+        except FileNotFoundError:
+            print(
+                f"\033[1;31mcannot run `{command_line[0]}`: not installed on this "
+                f"system.\033[0m\nThe daemon's output is at "
+                f"{browser_install.log_location()}."
+            )
+            return 1
     if command == "uninstall":
         result = browser_install.uninstall(purge=args.purge)
         steps = result.get("steps", [])
         assert isinstance(steps, list)
         for step in steps:
             print(f"  {step}")
+        # Print the reason too. Without this a failed uninstall exits 1 having
+        # said nothing at all — the no-supervisor case produces no steps, so
+        # the user got a bare non-zero exit with no explanation.
+        error = result.get("error")
+        if not result.get("ok") and error:
+            print(f"\033[1;31m{error}\033[0m")
         return 0 if result.get("ok") else 1
     print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
     return 1
