@@ -1770,67 +1770,77 @@ def _sanitize_sender_field(value: object) -> str:
     return text[:_SENDER_FIELD_MAX_CHARS]
 
 
-class PeerMessageBlock(TranscriptBlock):
-    """An inbound message from ANOTHER local lop session (`lop send`).
+class PeerMessageBlock(ExpandableActionBlock):
+    """An inbound message from ANOTHER local lop session (`lop send`), as a card.
 
-    This is deliberately NOT a :class:`UserBlock` and NOT a :class:`WakeBlock`.
-    It must read as *inbound cross-session* — a note the user did not type and
-    the schedule did not fire, but that another running session handed over —
-    so it carries its own affordances:
+    This is deliberately NOT a :class:`UserBlock`: it must read as *inbound
+    cross-session* — a note the user did not type and the schedule did not
+    fire, but that another running session handed over. It IS drawn as a
+    ledger card, the same shape :class:`WakeBlock` uses, and that is the fix
+    this class exists in its present form for.
 
-    - A ``↔`` glyph in the gutter rule marks the block as a two-way
-      cross-session hand-off, distinct from the user prompt's plain ``▌`` bar.
-      Using the same full-height rule discipline as :class:`UserBlock` keeps a
-      multi-paragraph peer message reading as ONE block rather than several.
-    - A muted header line names the sending session (conversation / pid /
-      model) so the reader can see WHO reached in, which is the whole point of
-      a cross-session indicator — the parent/wake paths have no slot for it.
+    **Why the card replaced the rule-and-header block.** The receipt used to
+    paint a full-height ``↔`` gutter rule, a wrapped sender header, and then
+    the WHOLE body at body weight. That is right for one message and wrong for
+    the traffic this harness actually carries: a single release-window
+    announcement from a peer measured **15 rows at 100 columns**, and two of
+    them pushed the conversation the user was reading off the top of the
+    screen. An inbound note is a RECEIPT — something arrived, from whom, about
+    what — and a receipt earns one line until the reader asks for more. So the
+    collapsed row names the sender and previews the message, and Enter / click
+    / Space reveals the full sender identity and the whole body, exactly the
+    contract every other action row in the ledger offers.
 
-    The header is app chrome (the app naming the sender), so it is excluded
-    from a copy the same way :class:`UserBlock`'s attachment receipt is; the
-    body copies verbatim.
+    It is a ledger row on purpose, for the reasons :class:`WakeBlock`'s
+    docstring gives: sharing :attr:`SPACING_KIND` with the tool card plus
+    :attr:`SPACING_AIRY` is what puts a blank row above and below it, and
+    ``LEDGER_ROW`` keeps its name column aligned with the tool rows a peer
+    message habitually lands between. A receipt sitting in a run of actions
+    with its own private layout is a second spine.
+
+    **The name leads the snippet.** ``_send_summary`` in ``tool_card.py``
+    learned this the expensive way: the row builder truncates the composed
+    summary from the right as ONE string, so whatever sits rightmost dies
+    first. WHO reached in is what the reader acts on — it is the address they
+    would answer at — and free text is the thing that can be shed without the
+    row becoming unidentifiable, so the sender leads and the snippet trails.
+
+    The summary row is app chrome (the app naming the sender), so it is
+    excluded from a copy the same way :class:`UserBlock`'s attachment receipt
+    is; :meth:`text` and the expanded body stay the peer's verbatim message.
     """
 
-    #: A cross-session message arrives unbidden — always give it air so it does
-    #: not fuse with whatever row preceded it.
-    SPACING_KIND = "peer"
-    SPACING_LEAD = True
+    EXPANDED_CLASS = "peer-expanded"
 
-    #: ``↔`` (LEFT RIGHT ARROW): a two-way link between sessions. One cell of
-    #: glyph plus a trailing space fills the same gutter width the user rule
-    #: uses, so the body lands in the shared text column and no other block
-    #: moves.
-    RULE = "↔"
-    RULE_COLS = SPINE_INDENT
-    #: The rule and header wear the accent-free ``muted`` ink: loud enough to
-    #: register as "something reached in", quiet enough not to compete with the
-    #: live-turn accent. The body is full ``fg`` so the message itself reads at
-    #: body weight.
-    RULE_TOKEN = "muted"
-    HEADER_TOKEN = "muted"
-    TEXT_TOKEN = "fg"
+    #: The name column says ``peer``. Not "receive" (which implies the agent
+    #: acted) and not "inbox" (a place, not an event): the row reports that a
+    #: peer session reached in. The icon carries the direction.
+    tool_name = "peer"
+
+    #: Kept for the expansion's identity line, which is the one place the old
+    #: header's information still belongs. The wrapping there is the card's,
+    #: so this is only the floor for the fit test in :meth:`_header`.
     MIN_BODY = 8
-    #: The model label is attached only when the WHOLE header still fits on one
-    #: row with it (see ``_header``). A fixed column threshold cannot express
-    #: that: it was calibrated against a 14-cell name, and at 22-26 cells — the
-    #: ordinary length here — crossing it re-attached a ~23-cell label that
-    #: cost more than the columns just gained, so widening a pane from 70 to 80
-    #: made the card TALLER. The rule is now about fit rather than width, which
-    #: is what makes wrapping monotonic: more columns never yields more rows.
 
     def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
         super().__init__()
         self.add_class("peer-message-block")
         self._text = body
         self._sender = sender or {}
-        #: How many rendered rows the header occupies. The header is ONE
-        #: paragraph but wraps to several rows at narrow widths and with a long
-        #: sender name, so a single index cannot describe it: set by ``_build``
-        #: at the width it actually wrapped at, so ``copy_row_is_chrome`` never
-        #: re-derives it and cannot disagree with the frame (the discipline
-        #: ``UserBlock._receipt_row`` already follows).
-        self._header_rows: int = 0
-        self.set_content(self._build())
+        self._expanded = False
+        self._hovered = False
+        self._focused = False
+        #: How many rendered rows are the card's OWN furniture — the summary
+        #: plus, when open, the sender identity and the rule beneath it. Set by
+        #: the build at the width it actually wrapped at, so
+        #: :meth:`copy_row_is_chrome` never re-derives it and cannot disagree
+        #: with the frame (the discipline the old header row count followed,
+        #: and ``UserBlock._receipt_row`` before it).
+        self._chrome_rows: int = 1
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+        self._refresh_row()
         self.finalize()
 
     def text(self) -> str:
@@ -1838,39 +1848,57 @@ class PeerMessageBlock(TranscriptBlock):
         their own row (parallel to :meth:`UserBlock.text`)."""
         return self._text
 
-    def _header(self) -> str:
-        """The sender label: 'peer message from "<name>" (pid N, <model>)'.
+    def can_expand(self) -> bool:
+        """Always: the collapsed line is a preview of a message behind it.
 
-        Every field is advisory — a leaner sender omits some — so the label is
-        assembled from whatever is present and never assumes a key exists.
+        Unconditional even for a one-word note, because the expansion also
+        carries the sender's pid and model — the fields a reader needs in
+        order to address the peer back, which no snippet can hold.
+        """
+        return True
 
-        When the conversation name is genuinely absent even after the receive
-        side's registry enrichment, the label falls back to the sender's cwd
-        basename and then to a short session id rather than showing a bare pid.
-        A row reading `peer message from (pid 1)` names nothing a reader can act
-        on — the whole point of the indicator is to say WHICH session reached
-        in, and a working directory or an id prefix answers that where a pid
-        assigned by the kernel does not."""
+    def _sender_name(self) -> tuple[str, bool]:
+        """``(name, quoted)`` for the sending session, or ``("", False)``.
+
+        The ladder — conversation name, then cwd basename, then a short session
+        id — is why a peer receipt never degrades to a bare pid: a row naming
+        `pid 1` names nothing a reader can act on, and the whole point of the
+        indicator is to say WHICH session reached in.
+
+        ``quoted`` is False for the two fallbacks. A name the peer CHOSE is
+        quoted; a directory basename and an id prefix are the app guessing, and
+        rendering them identically told the reader nothing about which they
+        were looking at — two sessions in sibling checkouts would both read as
+        "user-dashboard".
+        """
         name = _sanitize_sender_field(self._sender.get("conversation_name"))
+        if name:
+            return name, True
+        cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
+        if cwd:
+            return os.path.basename(cwd) + "/", False  # trailing slash: a directory
+        session_id = _sanitize_sender_field(self._sender.get("session_id"))
+        if session_id:
+            # A short prefix: a full ULID is 26 cells of entropy that pushes the
+            # message preview off the row without helping the eye.
+            return session_id[:8], False
+        return "", False
+
+    def _header(self, width: int | None = None) -> str:
+        """The full sender label: 'peer message from "<name>" (pid N, <model>)'.
+
+        This is the EXPANSION's identity line — the information the collapsed
+        row cannot hold and the operator asked to see on expand. Every field is
+        advisory (a leaner sender omits some), so the label is assembled from
+        whatever is present and never assumes a key exists.
+
+        ``width`` is the body width the caller will wrap this at; it defaults
+        to the block's own, which is what the pre-card call sites and the
+        degradation tests pass.
+        """
+        name, quoted = self._sender_name()
         pid = self._sender.get("pid")
         model = _sanitize_sender_field(self._sender.get("model_label"))
-        # Quoted only for a name the peer CHOSE. A directory basename and an id
-        # prefix are the app guessing, and rendering them identically to a real
-        # title told the reader nothing about which they were looking at — two
-        # sessions in sibling checkouts would both read as "user-dashboard".
-        quoted = True
-        if not name:
-            cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
-            if cwd:
-                name = os.path.basename(cwd) + "/"  # trailing slash: a directory
-                quoted = False
-        if not name:
-            session_id = _sanitize_sender_field(self._sender.get("session_id"))
-            if session_id:
-                # A short prefix: a full ULID is 26 cells of entropy that pushes
-                # the pid and model out of the header without helping the eye.
-                name = session_id[:8]
-                quoted = False
         bits: list[str] = []
         if pid is not None:
             bits.append(f"pid {pid}")
@@ -1892,49 +1920,169 @@ class PeerMessageBlock(TranscriptBlock):
         # "which session reached in, so I can go and talk to it", so it is the
         # first thing to give way (the information order name -> pid -> model is
         # also the shed order). It is attached only when the result still fits
-        # on ONE row, measured against the same body width ``_build`` wraps at.
+        # on ONE row, measured against the width it will be wrapped at.
         # Testing the terminal width instead made the behaviour non-monotonic:
         # a wider pane could re-attach a label that cost more than the extra
-        # columns and push the header onto a second row.
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        # columns and push the identity line onto a second row.
+        body = width if width is not None else (self.size.width or 80)
+        body = max(body, self.MIN_BODY)
         with_model = _compose(bits + [model])
         return with_model if cell_len(with_model) <= body else header
 
+    def _summary(self) -> tuple[str, str]:
+        """``(identity, snippet)`` for the collapsed row — identity FIRST.
+
+        The identity is the sender's name alone, not the whole
+        ``peer message from …`` sentence: the ``peer`` name column and the
+        inbound icon already say what kind of row this is, and repeating it in
+        the summary is the caption-not-card problem :class:`WakeBlock` names
+        one column along. When even the fallback ladder finds nothing, the pid
+        is the last thing that identifies the sender at all, and it is better
+        on the row than an anonymous line.
+
+        The snippet carries NO cap of its own. The row's ``truncate_cells``
+        already sheds it to the available budget, and a second arbitrary bound
+        only left the line empty at wide widths while protecting nothing — the
+        identity survives either way because it leads.
+        """
+        name, quoted = self._sender_name()
+        if name:
+            identity = f'"{name}"' if quoted else name
+        else:
+            pid = self._sender.get("pid")
+            identity = f"pid {pid}" if pid is not None else "another session"
+        # Newlines collapse to spaces: the snippet is one row by construction,
+        # and an authored break inside it would be measured into a word's width
+        # and then printed literally mid-row.
+        snippet = " ".join(self._text.split())
+        return identity, snippet
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the card at the new width (same guard as the tool card)."""
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._built_width:
+            return
+        self._refresh_row()
+
     def copy_gutter(self, index: int) -> int:
-        """The rule occupies the gutter on every row (same as UserBlock)."""
-        return self.RULE_COLS
+        """The icon field on the summary row; the expansion's indent below it."""
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+
+        return 2 if index == 0 else OUTPUT_INDENT
 
     def copy_row_is_chrome(self, index: int) -> bool:
-        """The sender header is the app talking, not the peer's message body.
+        """The summary and the sender identity are the app talking.
 
-        Every row the header wrapped to, not merely the first — the count comes
-        from the same build that produced the frame, so a resize cannot make
-        the two disagree.
+        Not the message: the peer's body copies verbatim, which is what makes a
+        drag over an expanded receipt paste the note rather than the app's own
+        label above it. The count comes from the same build that produced the
+        frame, so a resize cannot make the two disagree.
         """
-        return index < self._header_rows
+        return index < self._chrome_rows
 
-    def on_resize(self, event: object) -> None:
-        """Re-wrap at the new width and re-ask the spacing gap, matching the
-        UserBlock discipline: this block wraps itself, so a width change is a
-        content change and also a height change adaptive spacing depends on."""
+    def refresh_row(self) -> None:
+        """Repaint at the current width — the ledger's shared column moved."""
+        self._refresh_row()
+
+    def _refresh_row(self) -> None:
+        """Rebuild the card at its OWN width, matching :class:`WakeBlock`.
+
+        Finalization is bypassed deliberately: a resize, a hover, or an expand
+        must be able to re-fit a settled card, and the content it produces is a
+        pure function of the card's state, never new history.
+        """
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+
+        # Same ladder as `WakeBlock._refresh_row`, for the same reason: a row
+        # built before its first layout pass must fold at the width it is about
+        # to be given, not at the terminal's or at 80.
+        width = self.fold_width(0)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(self._build())
+            self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells.
+
+        Read from the transcript rather than fixed here, because the column is
+        a spine: a peer receipt sitting between tool rows has to agree with
+        them or the ledger stops being a column.
+        """
+        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
+
         parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_around(self)
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
+            return parent.tool_name_col
+        return NAME_COL
 
-    def retheme(self) -> None:
-        """Re-ink rule, header and body from the current ramp."""
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(self._build(), layout=False)
-        finally:
-            self._finalized = was_finalized
+    def _build_row(self, width: int) -> Text:
+        """The single summary row — the ONE-ROW guarantee lives here."""
+        from local_operator.tui.glyphs import display_name, tool_icon
+        from local_operator.tui.widgets.tool_card import (
+            _SUMMARY_FLOOR,
+            COLLAPSE_HINT,
+            EXPAND_HINT,
+            truncate_cells,
+        )
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+
+        icon = tool_icon(self.tool_name)
+        label = display_name(self.tool_name)
+        name_budget = width - 4  # icon, its space, name's trailing space, 1 cell of summary
+        identity, snippet = self._summary()
+        if name_budget < 2:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(icon + " ", style=dim)
+            return row
+
+        name_col = min(self._name_col(width), name_budget)
+        name = truncate_cells(label, name_col)
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
+
+        slot = ""
+        remaining = max(0, width - prefix_cells)
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
+                slot = offer
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        budget = max(0, remaining - slot_cells)
+        # Identity first, snippet after the dash — one string, truncated from
+        # the right, so the free text is what sheds. See the class docstring.
+        composed = f"{identity} — {snippet}" if snippet else identity
+        summary = truncate_cells(composed, budget)
+
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(icon + " ", style=dim)
+        row.append(name + " ", style=muted)
+        row.append(summary, style=dim)
+        if slot:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - cell_len(slot))
+            row.append(" " * pad, style=dim)
+            row.append(slot, style=dim)
+        return row
 
     def _body_rows(self, body: int) -> list[str]:
         """The message body wrapped to ``body`` cells, paragraphs preserved.
@@ -1954,39 +2102,54 @@ class PeerMessageBlock(TranscriptBlock):
             rows.pop()
         return rows
 
-    def _build(self) -> RenderableType:
-        """The sender header then the body, every row behind the ``↔`` gutter.
+    def _build_content(self, width: int) -> Text:
+        """The card: one summary row, plus sender identity and body when open.
 
-        Height is pinned to the row count for the same reason UserBlock pins
-        its own (an ``auto`` measurement caches the fallback-width build and
-        leaves a hole); this block authors its rows so it knows its height."""
-        rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
-        header_style = Style(color=theme_mod.semantic_color(self.HEADER_TOKEN))
-        text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
-        gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
+        The expansion answers the two questions the collapsed row cannot: WHO
+        exactly (name, pid, model — the fields the old always-on header
+        carried) and WHAT they said in full. The identity leads the body
+        because it is the shorter, fixed-shape fact; a blank row separates
+        them so a long message does not read as a continuation of the label.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
 
-        # The header is one wrapped paragraph; the body rows follow. EVERY
-        # header row is chrome, not just the first: an ordinary sender name
-        # wraps the header at 60-70 columns, and marking only row 0 meant
-        # dragging over a peer message copied app chrome above it ("…claude-
-        # opus-4)\ngates are green").
-        header_rows = wrap_cells(self._header(), body) or [""]
-        body_rows = self._body_rows(body)
-        self._header_rows = len(header_rows)
+        row = self._build_row(width)
+        if not self._expanded:
+            self._chrome_rows = 1
+            return row
 
-        rows: list[tuple[str, bool]] = [(row, True) for row in header_rows]
-        rows.extend((row, False) for row in body_rows)
-        self._set_authored_height(len(rows))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        text_style = Style(color=theme_mod.semantic_color("fg"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
 
-        line = Text(no_wrap=True, overflow="ellipsis")
-        for index, (row, is_header) in enumerate(rows):
-            if index:
-                line.append("\n")
-            line.append(gutter, style=rule_style)
-            if row:
-                line.append(row, style=header_style if is_header else text_style)
-        return line
+        # Wrapped, not truncated: the identity is one paragraph, and at narrow
+        # widths a truncated pid is worse than a second row — it is the field a
+        # reader uses to address the peer back.
+        chrome = 1
+        for wrapped in wrap_cells(self._header(line_width), line_width) or [""]:
+            row.append("\n" + indent, style=dim)
+            row.append(truncate_cells(wrapped, line_width), style=dim)
+            chrome += 1
+        row.append("\n", style=dim)
+        chrome += 1
+        #: Everything above the body is the app's own furniture; the body is
+        #: the peer's words. `copy_row_is_chrome` reads this, so a drag over an
+        #: open receipt pastes the message and nothing else.
+        self._chrome_rows = chrome
+
+        for wrapped in self._body_rows(line_width):
+            row.append("\n" + indent, style=text_style)
+            row.append(truncate_cells(wrapped, line_width), style=text_style)
+        return row
+
+    def settled_rows(self) -> int:
+        """Rows settled now: one collapsed, the whole card when expanded."""
+        return self._row_count if self._finalized else 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Exact: the card already tracks its own height, collapsed or not."""
+        return self._row_count > 1
 
 
 class RichBlock(TranscriptBlock):
