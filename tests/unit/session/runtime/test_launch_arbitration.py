@@ -26,12 +26,19 @@ from typing import Any
 
 import pytest
 
+import local_operator.session.runtime.launch as launch_module
 from local_operator.session.runtime.launch import (
+    _CONSTRUCTING_POLL_S,
+    _CONSTRUCTING_WINDOW_S,
     _MAX_SPAWNS,
+    _POLL_CAP_S,
+    _POLL_FACTOR,
+    _POLL_INITIAL_S,
     PeerMessageErrand,
     PromptErrand,
     RuntimeStartupError,
     WarmErrand,
+    _poll_delay,
     engage_runtime,
 )
 from local_operator.session.runtime.types import SessionRecord
@@ -528,3 +535,346 @@ def test_spawn_capture_is_private_and_anonymous(tmp_path, monkeypatch) -> None:
         assert capture.exists()
     finally:
         capture.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Poll shape
+#
+# WHY THESE ARE SCHEDULE-SHAPE ASSERTIONS AND NOT TIME BOUNDS
+# ===========================================================
+# The property under test is "the parent does not sleep past a runtime that is
+# already serving". The tempting way to assert that is to spawn a runtime and
+# bound the wall time, and AGENTS.md ("Timing, flakes, and how to assert that
+# something is fast") is emphatic that this repo has burned multiple PRs doing
+# exactly that: a bound calibrated on a dev box is not a bound on CI, and the
+# only honest conclusion at several sites was that no portable number exists.
+#
+# So these tests assert the SHAPE OF THE SCHEDULE the loop computes -- the
+# actual sleep durations it requests, captured from a stubbed `asyncio.sleep`.
+# That is a fact about what the code decided, not about how fast the machine
+# ran it, so it cannot flake under load: the recorded values are identical on
+# an idle laptop and a saturated 4-vCPU runner. It also fails deterministically
+# if someone restores the old single-grid constants, which is the regression
+# these guard.
+# ---------------------------------------------------------------------------
+
+
+class _sleep_recorder:
+    """A stand-in for ``launch``'s ``asyncio`` that records what it was asked to sleep.
+
+    WHY A PROXY OBJECT AND NOT ``setattr(launch_module.asyncio, "sleep", ...)``
+    ==========================================================================
+    ``launch_module.asyncio`` is not a per-module copy -- it is THE shared
+    ``asyncio`` module object, so setting an attribute on it patches
+    ``asyncio.sleep`` for every module in the process. Under ``-n auto`` the
+    recorder then captures sleeps from whatever else is running in the same
+    worker, and the assertion reports another test's timings as this one's
+    (observed: 0.2 and 1.0 leaking in from ``tests/unit/tui/test_stop_command.py``,
+    which failed a poll-shape test that passes in isolation).
+
+    Rebinding the NAME on the module under test keeps the patch where the test
+    can reason about it: only ``launch``'s own ``asyncio.sleep`` calls are
+    recorded, and nothing outside this module is affected.
+    """
+
+    def __init__(self, slept: list[float], clock: dict[str, float] | None = None) -> None:
+        self._slept = slept
+        self._clock = clock
+
+    async def sleep(self, duration: float) -> None:
+        self._slept.append(duration)
+        # When a virtual clock is in play, the loop's own deadline arithmetic
+        # advances by exactly the sleeps it asked for -- time is DATA here,
+        # never a measurement, so a 3 s window costs no real seconds.
+        if self._clock is not None:
+            self._clock["now"] += duration
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything the module reaches for other than `sleep` is the real thing.
+        return getattr(asyncio, name)
+
+
+class _virtual_clock:
+    """A stand-in for ``launch``'s ``time``, driven by the sleeps it requests.
+
+    Scoped for the same reason as :class:`_sleep_recorder`: ``time`` is a shared
+    module object, and a process-wide ``monotonic`` would be considerably worse
+    than a process-wide ``sleep``.
+    """
+
+    def __init__(self, clock: dict[str, float]) -> None:
+        self._clock = clock
+
+    def monotonic(self) -> float:
+        return self._clock["now"]
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+def test_poll_delay_is_dense_while_a_construction_is_known_to_be_in_flight() -> None:
+    """The unit fact: a known construction polls flat and dense, and the
+    open-ended backoff is preserved rather than decayed underneath it.
+
+    Carrying the backoff forward untouched is what makes the fallback correct:
+    when the dense window expires the open-ended wait must start from the top,
+    not from a value that decayed while we were watching a healthy child.
+    """
+    backoff = _POLL_INITIAL_S
+    for elapsed in (0.0, 0.5, 1.2, _CONSTRUCTING_WINDOW_S - 0.001):
+        delay, backoff = _poll_delay(backoff, elapsed)
+        assert delay == _CONSTRUCTING_POLL_S
+        assert backoff == _POLL_INITIAL_S, "the open-ended backoff decayed during a dense window"
+
+
+def test_poll_delay_falls_back_to_the_open_ended_backoff() -> None:
+    """With nothing known to be constructing, the exponential shape is intact.
+
+    The backoff is what keeps a 30-second deadline from becoming a spin when
+    the wait is genuinely open-ended (a contender's contended lease, a session
+    that will never appear), so the dense regime must not have replaced it.
+    """
+    delay, backoff = _poll_delay(_POLL_INITIAL_S, None)
+    assert delay == _POLL_INITIAL_S
+    assert backoff == pytest.approx(_POLL_INITIAL_S * _POLL_FACTOR)
+
+    # It must still climb, and still cap.
+    for _ in range(40):
+        delay, backoff = _poll_delay(backoff, None)
+    assert delay == _POLL_CAP_S, "the open-ended backoff no longer reaches its cap"
+
+    # A construction that outlives the dense window is no longer 'about to
+    # publish', so it rejoins the open-ended shape rather than spinning.
+    delay, _ = _poll_delay(_POLL_INITIAL_S, _CONSTRUCTING_WINDOW_S)
+    assert delay == _POLL_INITIAL_S
+
+
+@pytest.mark.asyncio
+async def test_engage_polls_densely_while_its_own_candidate_constructs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The integration fact, and the regression guard for the ~150 ms of dead time.
+
+    A candidate that we spawned and that is still alive is by definition still
+    constructing. Under the old single grid the loop slept 50, 135, 280, 525 ms
+    while waiting for it, so a child publishing at ~400 ms went unnoticed until
+    525 ms. Here the whole recorded schedule must be the dense interval.
+
+    The sleeps are RECORDED, not endured: `asyncio.sleep` is stubbed to a
+    no-op, so this test asserts the schedule the loop computed without waiting
+    for any of it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    class _LiveCandidate:
+        """A spawned child that is alive and has published nothing yet."""
+
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise: _LiveCandidate(),
+    )
+
+    slept: list[float] = []
+
+    # Scoped to a PRIVATE asyncio proxy for this module, never to the shared
+    # `asyncio` module object. `launch_module.asyncio` IS the global module, so
+    # `setattr(launch_module.asyncio, "sleep", ...)` patches it for the whole
+    # process and this recorder then captures unrelated sleeps from any test
+    # running beside it (observed: 0.2 and 1.0 leaking in from the TUI suite).
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept))
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=0.4
+        )
+
+    assert slept, "the loop never polled"
+    # No wake exceeds the dense interval. Stated as a ceiling rather than as
+    # equality because the loop clamps each sleep to the time left on the
+    # deadline (`min(delay, deadline - now)`), so the last few wakes of a
+    # short-deadline run are legitimately SMALLER than the interval.
+    assert max(slept) <= _CONSTRUCTING_POLL_S, f"not a dense grid: {sorted(set(slept))}"
+    # The unclamped body of the schedule is exactly the dense interval, and
+    # the old grid's signature is absent: under 0.05/x1.7 the loop would have
+    # slept 50, 85, 145, 246 ms and noticed a ~400 ms child only at 525 ms.
+    # Those values are precisely what this guards against.
+    assert _CONSTRUCTING_POLL_S in slept, "the dense interval was never requested"
+    assert not [d for d in slept if d > _CONSTRUCTING_POLL_S], "an exponential wake survived"
+
+
+@pytest.mark.asyncio
+async def test_engage_uses_the_coarse_grid_when_nothing_is_constructing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other half: an open-ended wait must NOT be polled densely.
+
+    Once every spawn we are allowed has been made and no candidate is alive,
+    there is no prior on when (or whether) a record appears. Polling that at
+    100 Hz for the rest of a 30-second deadline is the spin the backoff exists
+    to prevent, so the schedule here must climb rather than stay flat.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+    # A spawn that starts nothing: no candidate handle, no lease, no record --
+    # so the loop can observe no construction in flight.
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise: None,
+    )
+
+    slept: list[float] = []
+
+    # Scoped to a PRIVATE asyncio proxy for this module, never to the shared
+    # `asyncio` module object. `launch_module.asyncio` IS the global module, so
+    # `setattr(launch_module.asyncio, "sleep", ...)` patches it for the whole
+    # process and this recorder then captures unrelated sleeps from any test
+    # running beside it (observed: 0.2 and 1.0 leaking in from the TUI suite).
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept))
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=5.0
+        )
+
+    assert len(slept) > 2
+    assert slept[0] == _POLL_INITIAL_S
+    # Strictly increasing until the cap: the exponential shape is intact.
+    assert slept[1] == pytest.approx(_POLL_INITIAL_S * _POLL_FACTOR)
+    assert _CONSTRUCTING_POLL_S not in slept, "an open-ended wait was polled at the dense interval"
+
+
+@pytest.mark.asyncio
+async def test_a_dense_window_does_not_outlive_its_welcome(tmp_path: Path, monkeypatch) -> None:
+    """A construction that never finishes must stop being polled densely.
+
+    The dense regime is a bet on a prior ("a record is about to appear"). A
+    candidate still alive and recordless after `_CONSTRUCTING_WINDOW_S` has
+    falsified that bet -- it is wedged or pathologically slow, not imminent --
+    and continuing at 100 Hz for the remaining ~27 s of the deadline would be
+    the spin the backoff exists to prevent. The schedule must therefore leave
+    the dense interval behind, on its own, with the child still alive.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    class _WedgedCandidate:
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise: _WedgedCandidate(),
+    )
+
+    slept: list[float] = []
+    # A virtual clock: the loop's own deadline arithmetic advances by exactly
+    # the sleeps it asks for, so the dense window can expire without the test
+    # waiting out three real seconds. Time is DATA here, never a measurement.
+    clock = {"now": 0.0}
+
+    # Same scoping as above, for both the sleep and the clock: `time` is a
+    # shared module object too, and a process-wide `monotonic` is far worse.
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept, clock))
+    monkeypatch.setattr(launch_module, "time", _virtual_clock(clock))
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=10.0
+        )
+
+    dense = [d for d in slept if d == _CONSTRUCTING_POLL_S]
+    coarse = [d for d in slept if d > _CONSTRUCTING_POLL_S]
+    assert dense, "the dense regime never engaged"
+    assert coarse, "the dense window never expired; a wedged child is polled forever"
+    # The window is bounded by design, so the dense phase is ~_CONSTRUCTING_WINDOW_S
+    # of virtual time and not one poll more.
+    assert len(dense) == pytest.approx(_CONSTRUCTING_WINDOW_S / _CONSTRUCTING_POLL_S, rel=0.05)
+    # ...and the fallback restarts the backoff from the top rather than from a
+    # value that decayed while the child looked healthy.
+    assert coarse[0] == _POLL_INITIAL_S
+
+
+@pytest.mark.asyncio
+async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live runtime that will not answer must stay on the SLOW path.
+
+    The lease is held for a session's whole life -- ``session_factory``
+    registers its release as a dispose hook -- so ``_lease_holder`` names a
+    live pid for a fully constructed, happily serving runtime, not merely one
+    that is starting. A runtime that has published a record but refuses the
+    dial (wedged control socket, port exhaustion) therefore takes the loop's
+    ``ConnectionError`` retry path with its lease still held.
+
+    Reading that as "constructing" turned a slow retry into a hot spin:
+    measured at 301 dial attempts inside a 3 s window against 8 under the
+    open-ended grid (review round 1, MAJOR-1). The guard is the shape of the
+    schedule -- no dense wake may be requested while a record exists -- which
+    is a fact about what the loop decided and cannot flake under load.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id=SESSION_ID,
+        conversation_name="wedged",
+        cwd=str(tmp_path),
+        model_label="test/model",
+        control_port=1,
+        control_key="k" * 16,
+    )
+    # A record IS present and the lease IS held by a live pid: construction is
+    # over and this runtime is simply unreachable. `find_owner_record` is a
+    # function-local import in the loop, so it is patched at its source module.
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_owner_record",
+        lambda config_dir, session_id: (record, os.getpid()),
+    )
+    monkeypatch.setattr(launch_module, "_lease_holder", lambda config_dir, session_id: os.getpid())
+
+    dials = 0
+
+    async def refuses_the_dial(*args: Any, **kwargs: Any) -> tuple[str, bool]:
+        nonlocal dials
+        dials += 1
+        raise ConnectionError("control socket refuses")
+
+    monkeypatch.setattr(launch_module, "_deliver", refuses_the_dial)
+    # Nothing may be spawned: a record exists, so the loop must only be
+    # retrying the dial. A spawn here would be a separate (arbitration) bug.
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise: pytest.fail("spawned despite a live record"),
+    )
+
+    slept: list[float] = []
+    clock = {"now": 0.0}
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept, clock))
+    monkeypatch.setattr(launch_module, "time", _virtual_clock(clock))
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=3.0
+        )
+
+    assert dials > 0, "the dial was never attempted; the repro no longer exercises the retry path"
+    assert (
+        _CONSTRUCTING_POLL_S not in slept
+    ), f"a published record was polled at the dense interval: {sorted(set(slept))}"
+    # The open-ended shape is what should be running here, from the top.
+    assert slept[0] == _POLL_INITIAL_S
+    assert max(slept) > _CONSTRUCTING_POLL_S, "the schedule never backed off"
+    # Retries are bounded by the backoff, not by the poll floor: an order of
+    # magnitude fewer than the ~300 the dense regime produced over 3 s.
+    assert dials < 30, f"{dials} dial attempts in a 3 s window is a retry storm"
