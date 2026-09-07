@@ -612,6 +612,26 @@ under a checked-out `main` moves the branch without touching the index, so
 
 Warnings that still hold, each of which has already cost a release:
 
+- **Never derive the window with `git log --merges`.** A squash-merged PR has
+  no merge commit, so `--merges` silently omits it and the release notes ship
+  without it. Use a plain `git log <last-tag>..origin/main`, or walk
+  `--first-parent` from the head back to the tag — a squash lands as a
+  single-parent commit *on that chain*, which is exactly why the plain forms
+  see it and `--merges` does not. Verify it against a real window rather than
+  taking it on faith — for v0.51.0..v0.51.1, `--merges` lists three PRs while
+  `--first-parent` lists four, and the missing one is #720 (`78c20295e`),
+  squash-merged. It nearly shipped unlisted, and was caught only because its
+  author happened to be watching. A release note that omits a merged PR is a
+  defect in the release, not a cosmetic miss: it is the only record of what
+  changed under a user who is about to update.
+- **Check `git diff <last-tag>..origin/main -- pyproject.toml` is empty before
+  tagging.** A non-empty diff means a merged PR carried its own version bump
+  and has silently consumed the number you are about to use. That is exactly
+  how 0.50.1 and 0.50.2 were burned — each consumed by a PR's own bump, neither
+  ever built, tagged or published, and the next owner had to skip both. The
+  `version-bump-guard` CI job now catches this on the PR, but it does **not**
+  block an `--admin` merge, because `main`'s ruleset configures no required
+  status checks and admins hold a bypass. The pre-tag check is the backstop.
 - **Never pre-create a bare tag** (`git tag vX.Y.Z && git push --tags`) and
   then make a release from it. The publish workflow triggers on the *release*
   being published, so a bare tag publishes nothing, and `gh release create`
