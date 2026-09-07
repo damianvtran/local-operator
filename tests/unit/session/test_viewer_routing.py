@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -43,18 +44,39 @@ from local_operator.session.runtime.viewers import (
 
 
 class _Host:
-    """A viewer host that records what a click asked of it."""
+    """A viewer host that records what a click asked of it.
+
+    ``viewer_focus_window`` mirrors the production host's shape — it hops the
+    blocking OS call onto a worker thread — because the property under test is
+    "the OS call does not run on the loop that is serving this conversation".
+    A double that recorded only its own thread could not express that: see
+    ``test_focus_runs_off_the_serving_loop`` for why that shape was vacuous.
+    """
 
     def __init__(self) -> None:
         self.resumed: list[str] = []
+        #: The thread the host coroutine itself was scheduled on — i.e. the
+        #: viewer endpoint's loop thread.
+        self.handler_threads: list[int] = []
+        #: The thread the (blocking) OS call actually executed on.
         self.focus_threads: list[int] = []
+        #: Set True to drop the ``to_thread`` hop, reproducing the defect.
+        self.focus_on_the_loop = False
 
     async def viewer_resume_session(self, session_id: str) -> str:
         self.resumed.append(session_id)
         return f"displayed {session_id}"
 
     async def viewer_focus_window(self) -> str:
-        self.focus_threads.append(threading.get_ident())
+        self.handler_threads.append(threading.get_ident())
+
+        def activate() -> int:
+            return threading.get_ident()
+
+        if self.focus_on_the_loop:
+            self.focus_threads.append(activate())
+        else:
+            self.focus_threads.append(await asyncio.to_thread(activate))
         return "activated"
 
 
@@ -270,25 +292,204 @@ def test_a_viewer_that_cannot_switch_is_not_chosen():
     assert choose_viewer([fixed], "wanted") is None
 
 
-def test_focus_runs_off_the_event_loop(viewer_root):
-    """STRUCTURAL: the OS call must not execute on the caller's loop.
+def test_focus_runs_off_the_serving_loop(viewer_root):
+    """STRUCTURAL: the OS call must not execute on the loop serving the click.
 
     A thread-identity assertion rather than a timing bound, per this repo's
-    standing preference: it is a fact about WHERE the code ran and fails
-    deterministically the moment someone drops the ``to_thread`` hop, whereas a
+    standing preference: it is a fact about WHERE the code ran, whereas a
     wall-clock bound on a window-server call is unportable by construction.
+
+    **THE COMPARISON IS AGAINST THE HANDLER'S OWN THREAD, and the earlier
+    version's choice of the CALLER's thread is why it was vacuous.**
+    ``ViewerServer`` always serves on its dedicated ``lop-viewer-endpoint``
+    thread, so the handler can never run on the caller's thread whatever the
+    production code does — the assertion was satisfied by the threading model
+    alone and passed with the ``to_thread`` hop deleted (found independently by
+    the reviewer and by QA, both by mutation). The property that actually
+    matters is that a blocking OS call does not occupy the loop that has to keep
+    answering this conversation, and only handler-vs-OS-call expresses it.
+
+    ``_Host.focus_on_the_loop`` is the defect switch, exercised below, so this
+    guard's ability to go red is asserted rather than assumed.
     """
     host = _Host()
     server = _started(host, viewer_root)
     try:
         server.note_session("other")
         records = scan_viewers(viewer_root)
-        caller_thread = threading.get_ident()
 
         asyncio.run(deliver_click(records[0], "wanted"))
 
         assert host.focus_threads, "precondition: focus must actually have been invoked"
-        assert caller_thread not in host.focus_threads
+        assert host.handler_threads, "precondition: the host coroutine must have run"
+        # PRECONDITION for the assertion below to mean anything: the handler
+        # must not have run on this test's thread, or "different from the
+        # handler" would be trivially true of anything the endpoint did.
+        assert threading.get_ident() not in host.handler_threads
+        assert host.focus_threads[0] != host.handler_threads[0], (
+            "the OS call ran on the loop serving the click; a slow window "
+            "server would stall this endpoint"
+        )
+    finally:
+        server.close()
+
+
+def test_the_focus_thread_guard_goes_red_when_the_hop_is_dropped(viewer_root):
+    """The mutation the guard above is meant to catch, asserted as a behaviour.
+
+    Guard vacuity is not detectable from a passing test, so the defect is
+    reproduced here in the double rather than left to a manual mutation that
+    nobody re-runs: with the hop dropped, the OS call lands on the very loop
+    thread the handler is running on. If this test ever stops observing that
+    equality, the guard above has stopped being able to fail.
+    """
+    host = _Host()
+    host.focus_on_the_loop = True
+    server = _started(host, viewer_root)
+    try:
+        server.note_session("other")
+        records = scan_viewers(viewer_root)
+
+        asyncio.run(deliver_click(records[0], "wanted"))
+
+        assert host.focus_threads and host.handler_threads, "precondition: focus must have run"
+        assert host.focus_threads[0] == host.handler_threads[0]
+    finally:
+        server.close()
+
+
+def test_the_client_ack_bound_outlasts_the_server_resume_bound():
+    """Q1: the two bounds must never invert, and are derived so they cannot.
+
+    An 8.0 s client ack against a 10.0 s server bound gave the user BOTH
+    outcomes for a ``/resume`` measured at 8.5 s — the running TUI switched AND
+    a duplicate terminal opened, which is the precise defect this feature
+    removes. The client now derives its deadline from the server's, so an edit
+    to one carries to the other; this asserts the resulting ordering, and the
+    grace term's sign, rather than two hand-checked literals.
+    """
+    from local_operator.session.runtime import viewer_client
+    from local_operator.session.runtime.viewers import (
+        VIEWER_ACK_GRACE_S,
+        VIEWER_RESUME_TIMEOUT_S,
+    )
+
+    assert VIEWER_ACK_GRACE_S > 0, "a non-positive grace makes the two bounds equal or inverted"
+    assert viewer_client._ACK_TIMEOUT_S > VIEWER_RESUME_TIMEOUT_S, (
+        "the client must never give up on a switch the server is still going "
+        "to land: that delivers a switch AND a duplicate window"
+    )
+
+
+def test_a_viewer_speaking_an_unknown_protocol_is_not_dialed():
+    """MINOR-3: the refusal ``viewers`` documents is now performed.
+
+    Dialing a socket whose frames we cannot predict is worse than not dialing
+    it — the click spends its ack timeout on a conversation neither side
+    understands, when the spawn fallback works against any build.
+    """
+    from local_operator.session.runtime.viewers import VIEWER_PROTOCOL
+
+    future = ViewerRecord(
+        pid=1,
+        surface="tui",
+        control_port=1,
+        control_key="a",
+        protocol=VIEWER_PROTOCOL + 1,
+        focused_at=900.0,
+    )
+    known = ViewerRecord(pid=2, surface="tui", control_port=2, control_key="b", focused_at=100.0)
+
+    assert choose_viewer([future], "wanted") is None
+    # Even when it is the freshest and already displaying the target, which is
+    # rung 1 of the precedence — the protocol filter must precede both rungs.
+    future.current_session = "wanted"
+    assert choose_viewer([future, known], "wanted") is known
+
+
+def test_focus_is_not_requested_from_a_viewer_that_cannot_do_it(viewer_root):
+    """MINOR-4: the advertised capability is READ, not merely published.
+
+    A viewer without the method answers the unknown-op error; spending a round
+    trip and the focus timeout to be told what the record already said is
+    latency on the click path for nothing.
+    """
+    host = _NoFocusHost()
+    server = _started(host, viewer_root)
+    # Spy on the SERVER's dispatcher rather than adding a counter to production
+    # code: the observable question is "did a focus_window frame arrive", and
+    # the wire is where that is answerable.
+    seen_ops: list[str] = []
+    original = server._dispatch
+
+    async def spy(frame, writer):
+        seen_ops.append(str(frame.get("op") or ""))
+        return await original(frame, writer)
+
+    server._dispatch = spy  # type: ignore[method-assign]
+    try:
+        server.note_session("other")
+        records = scan_viewers(viewer_root)
+        assert FOCUS_WINDOW_CAPABILITY not in records[0].capabilities, "precondition"
+
+        outcome = asyncio.run(deliver_click(records[0], "wanted"))
+
+        assert outcome.switched is True
+        assert outcome.focused is False
+        assert "resume_session" in seen_ops, "precondition: the spy must see the switch"
+        assert "focus_window" not in seen_ops, "no focus_window frame should have been sent"
+    finally:
+        server.close()
+
+
+def test_an_oversized_frame_does_not_wedge_an_authenticated_conversation(viewer_root, caplog):
+    """MINOR-6: ``readline`` raises on an over-limit line WITHOUT consuming it.
+
+    The client half hand-rolls its framing to dodge this exact defect; the
+    server half did not, so an over-limit line raised ``LimitOverrunError``
+    (a ``ValueError``) out of ``client_connected_cb``.
+
+    **THE ASSERTION IS ON THE ESCAPING EXCEPTION, NOT ON THE CLOSED SOCKET, and
+    that is the whole point of this test's shape.** Its first version checked
+    that the conversation ended — which it does either way, since an uncaught
+    exception tears the connection down just as a deliberate return does. That
+    version passed with the defect reintroduced (mutation-proven), i.e. it was
+    vacuous. What actually distinguishes handled from unhandled here is asyncio
+    logging the traceback, so that is what is asserted.
+    """
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    server = _started(_Host(), viewer_root)
+    try:
+        record = scan_viewers(viewer_root)[0]
+
+        async def probe() -> bytes:
+            reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+            writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+            await writer.drain()
+            # One line, comfortably over the endpoint's 64 KiB frame limit.
+            writer.write(b"x" * (128 * 1024) + b"\n")
+            try:
+                await writer.drain()
+                return await asyncio.wait_for(reader.read(1024), timeout=5.0)
+            except (ConnectionResetError, BrokenPipeError):
+                # A close against unread bytes may surface as RST rather than
+                # FIN; both mean the conversation ended, as elsewhere here.
+                return b""
+            finally:
+                writer.close()
+
+        assert asyncio.run(probe()) == b"", "the conversation should end, not hang or reply"
+        # The endpoint's loop logs from its own thread; give it a moment to.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not caplog.records:
+            time.sleep(0.05)
+        escaped = [
+            record
+            for record in caplog.records
+            if "client_connected_cb" in record.getMessage()
+            or "LimitOverrunError" in (record.exc_text or "")
+        ]
+        assert not escaped, f"the over-limit line escaped the handler: {escaped}"
     finally:
         server.close()
 

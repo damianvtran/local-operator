@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -1600,3 +1602,248 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
                         checked += 1
     # 3 kinds x 5 states x 3 gates x 3 wake shapes.
     assert checked == 135, checked
+
+
+# --- notification-click routing (PR #750, round 1 remediation) ---------------
+#
+# These drive `OperatorApp.viewer_resume_session` — the method a notification
+# click reaches over the viewer endpoint — against the REAL app rather than a
+# double, because the findings they guard are both about the app-side path the
+# double cannot have: which switch route runs (D1) and what "displayed" means
+# when the target cannot open (D2).
+
+
+def _call_from_viewer_thread(app: OperatorApp, session_id: str) -> "Future[str]":
+    """Invoke the click's entry point the way the endpoint does: off the app's
+    thread, on its own PERSISTENT loop.
+
+    Calling it from Textual's thread is refused by contract
+    (``call_from_thread`` raises), so faking that would exercise a path that
+    does not exist.
+
+    THE LOOP IS NOT ``asyncio.run``, and that is load-bearing rather than
+    stylistic. ``asyncio.run`` calls ``shutdown_default_executor`` on the way
+    out, which JOINS any worker thread still blocked in ``to_thread`` — so a
+    timeout that fired correctly at 0.5 s did not return to the caller until the
+    stranded worker finished 30 s later, and the wedge test below read that as
+    an unbounded hop. Measured in isolation: ``wait_for`` fired at 0.50 s,
+    ``asyncio.run`` returned at 30.02 s. ``ViewerServer`` runs its loop with
+    ``run_until_complete`` on a long-lived thread and never tears it down per
+    call, so the harness matches production and the test measures the bound
+    rather than the teardown.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.new_event_loop()
+
+    def run() -> str:
+        try:
+            return loop.run_until_complete(app.viewer_resume_session(session_id))
+        finally:
+            # Deliberately NOT `shutdown_default_executor`; see above.
+            loop.close()
+
+    future = pool.submit(run)
+    pool.shutdown(wait=False)
+    return future
+
+
+@pytest.mark.asyncio
+async def test_a_notification_click_switches_by_the_sidebars_own_route():
+    """D1: the click must not answer a gate the user parked in the session it
+    leaves.
+
+    ``/resume`` reloads through ``_deny_queued_approvals``, so routing the click
+    that way silently answered "no" to a pending approval in the OUTGOING
+    session and rendered no receipt — a click about session B spending session
+    A's decision. ``docs/SESSION_SIDEBAR.md`` forbids it of a switch in as many
+    words, and ``viewer_resume_session``'s own docstring claimed to inherit that
+    invariant while taking the other path.
+
+    Asserted structurally, on WHICH route runs: the sidebar navigation is the
+    one that suspends gates (``_suspend_sidebar_gates``) rather than denying
+    them, so "the click starts a sidebar navigation and runs no /resume" is the
+    property, and it cannot drift the way a re-derived gate assertion could.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        selected: list[str] = []
+        commands: list[str] = []
+
+        def settle(session_id: str):
+            selected.append(session_id)
+            done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            done.set_result(None)
+            task = asyncio.ensure_future(asyncio.sleep(0))
+            # Pretend the navigation landed: the ack is resolved against what
+            # is on screen, so the identity has to move for a success.
+            app._adopted_session_id = session_id
+            return task
+
+        with (
+            patch.object(app, "_select_sidebar_session", side_effect=settle),
+            patch.object(app, "_run_slash_command", side_effect=commands.append),
+            patch.object(type(app._session), "session_id", property(lambda _s: "target-session")),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            for _ in range(200):
+                if future.done():
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            detail = future.result(timeout=5)
+
+        assert detail == "displayed target-session"
+        assert selected == ["target-session"], "the click must use the sidebar's navigation"
+        assert commands == [], (
+            "no slash command may run: /resume denies the outgoing session's "
+            "parked approval, which a switch must never do"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_a_session_that_cannot_open_does_not_claim_success():
+    """D2: the ack means DISPLAYED, not dispatched.
+
+    ``open_session`` skips its spawn fallback on this ack, so reporting success
+    for a session that failed to open cost the user both outcomes — no new
+    window AND the conversation they were reading. ``SessionNavigation`` reports
+    failure through its ``failed`` callback and completes its task NORMALLY, so
+    the task's own outcome is not the answer; what is on screen is.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+
+        def settle(session_id: str):
+            # The navigation runs and finishes; the binding never moves, which
+            # is exactly what a failed boot looks like from here.
+            return asyncio.ensure_future(asyncio.sleep(0))
+
+        with (
+            patch.object(app, "_select_sidebar_session", side_effect=settle),
+            patch.object(
+                type(app._session), "session_id", property(lambda _s: "still-the-old-one")
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "cannot-open")
+            for _ in range(200):
+                if future.done():
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            with pytest.raises(Exception) as excinfo:
+                future.result(timeout=5)
+
+        assert "cannot-open" in str(excinfo.value), (
+            "a failed switch must raise so the ack is an error frame and the "
+            "click falls through to its spawn fallback"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_app_hop_does_not_outlast_the_click_bound():
+    """MAJOR-2: the hop into Textual is bounded, and now really is.
+
+    ``App.call_from_thread`` ends in a bare ``future.result()`` — it blocks its
+    caller with no timeout of its own — so a ``wait_for`` placed AFTER it never
+    applied to the hazard the docstring named, and an app wedged in a nested
+    pump ran 30 s against a 12 s outer bound. The blocking enqueue is inside the
+    bound now, via ``to_thread``.
+
+    **THE HAZARD IS SIMULATED IN ``call_from_thread`` ITSELF, not by wedging the
+    app's loop, and that is not a shortcut.** A first version of this test
+    blocked Textual's loop with ``call_later`` — but the pilot's own coroutine
+    runs ON that loop, so the test body could not advance until the block
+    expired either. It measured its own suspension (32 s per run) rather than
+    the bound, and would have reported success for the wrong reason. Patching
+    the blocking call reproduces exactly the property under test — an enqueue
+    that never returns — while leaving the loop able to run the assertions.
+    """
+    from local_operator.session.runtime.viewers import VIEWER_RESUME_TIMEOUT_S
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entered = threading.Event()
+        released = threading.Event()
+
+        def never_returns(callback, *args, **kwargs):
+            # What a wedged app does to its caller: the callback is enqueued and
+            # nothing ever services it.
+            entered.set()
+            released.wait(timeout=30)
+
+        try:
+            with (
+                patch.object(type(app), "call_from_thread", never_returns),
+                patch("local_operator.session.runtime.viewers.VIEWER_RESUME_TIMEOUT_S", 0.5),
+            ):
+                started = time.monotonic()
+                future = _call_from_viewer_thread(app, "anything")
+                with pytest.raises(asyncio.TimeoutError):
+                    # Generous relative to the 0.5 s bound and far below the
+                    # 30 s block, so the two outcomes are unambiguous.
+                    await asyncio.to_thread(future.result, 10)
+                elapsed = time.monotonic() - started
+        finally:
+            released.set()
+
+        assert entered.is_set(), "precondition: the blocking hop must have been entered"
+        assert elapsed < 5.0, (
+            f"the bound did not apply to the blocking hop: gave up after "
+            f"{elapsed:.1f}s against a 0.5s bound (the real one is "
+            f"{VIEWER_RESUME_TIMEOUT_S}s)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_real_hosts_focus_call_runs_off_the_serving_loop():
+    """MAJOR-1/Q2: the property asserted against the METHOD THAT SHIPS.
+
+    ``tests/unit/session/test_viewer_routing.py`` guards this shape too, but
+    through a double — so it proves the contract is expressible, not that
+    ``OperatorApp.viewer_focus_window`` honours it. Deleting the ``to_thread``
+    hop in ``app.py`` leaves that test green (verified). This one is the guard
+    that goes red for it, which is what both review streams asked for: this is
+    the method whose blocking ``subprocess.run`` would freeze the TUI, and the
+    frozen-loop class is invisible to a Python-level probe once it happens.
+
+    ``activate_window`` is patched to report its thread rather than to touch the
+    window server: the question is WHERE it ran, and a real OS call would make
+    this test depend on a macOS window server that CI does not have.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        ran_on: list[int] = []
+
+        def fake_activate() -> bool:
+            ran_on.append(threading.get_ident())
+            return True
+
+        with patch("local_operator.tui.window_focus.activate_window", fake_activate):
+            handler_thread: list[int] = []
+
+            async def call() -> str:
+                handler_thread.append(threading.get_ident())
+                return await app.viewer_focus_window()
+
+            loop = asyncio.new_event_loop()
+            try:
+                detail = await asyncio.to_thread(loop.run_until_complete, call())
+            finally:
+                loop.close()
+
+        assert detail == "activated"
+        assert ran_on, "precondition: the activation must actually have been attempted"
+        assert handler_thread, "precondition: the host coroutine must have run"
+        # PRECONDITION: the coroutine ran on its own loop thread, not Textual's
+        # — otherwise "different from the handler" says nothing about the loop
+        # this endpoint has to keep serving.
+        assert handler_thread[0] != threading.get_ident()
+        assert ran_on[0] != handler_thread[0], (
+            "the OS call ran on the loop serving the click; a slow window "
+            "server would stall the endpoint and the click would fall back to "
+            "spawning the very window this feature removes"
+        )
