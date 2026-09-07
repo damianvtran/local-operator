@@ -561,3 +561,48 @@ def test_the_flattened_schema_admits_exactly_what_the_validator_admits() -> None
 
     for action in cases:
         assert admitted_by_schema(action) == admitted_by_validator(action), action
+
+    # The agreement above is about SHAPE: presence, type, and per-field range.
+    # It is deliberately not total, and saying so here matters because a green
+    # test otherwise reads as "the schema and the validator agree, full stop".
+    #
+    # A cross-field invariant cannot be expressed in the JSON Schema subset
+    # these providers accept, so the validator stays strictly stricter for
+    # those. ``ScrollAction`` requires some motion; the schema admits a scroll
+    # with both deltas zero and pydantic then rejects it. This is INHERENT, not
+    # a consequence of flattening: the pre-flattening discriminated schema
+    # admitted it too. What the flattening must not do is widen the set beyond
+    # that pre-existing boundary, which is what the loop above pins.
+    motionless_scroll = {
+        "kind": "scroll",
+        "observation_id": "o",
+        "frame_id": "f",
+        "x": 1,
+        "y": 2,
+        "delta_x": 0,
+        "delta_y": 0,
+    }
+    assert admitted_by_schema(motionless_scroll) is True
+    assert admitted_by_validator(motionless_scroll) is False
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_reply_still_records_the_tools_the_request_offered() -> None:
+    """The rejection path is where the offered count matters most.
+
+    A reply rejected WHILE the channel was on offer is the measurement that
+    says whether offering it is paying off. Recording 0 there would describe a
+    request the wire never sent, and would understate exactly the population
+    worth counting.
+    """
+
+    from local_operator.evaluation.runner.model import DecisionRejected
+    from tests.unit.evaluation.runner.test_provider_client import ScriptedStream
+
+    current = observation()
+    client = _client(ScriptedStream("not json at all"), model_spec=_spec(supports_tools=True))
+
+    with pytest.raises(DecisionRejected) as raised:
+        await client.decide(current, _turns(current))
+
+    assert raised.value.offered_tool_count == 1

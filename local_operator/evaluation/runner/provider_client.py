@@ -1145,6 +1145,12 @@ class ProviderModelClient:
                 cost_micros=cost_micros,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
+                # The rejection path is where this number matters MOST: a reply
+                # rejected while the channel was on offer is the measurement
+                # that says whether offering it is paying off. Leaving it 0
+                # here would have made every rejected attempt look like a
+                # request that offered no tools, which the wire never sent.
+                offered_tool_count=len(request.tools or ()),
                 prompt_cache_key=self._prompt_cache_key,
                 context_tokens=_estimate_context(messages),
                 compaction=compaction,
