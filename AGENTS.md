@@ -648,25 +648,36 @@ Warnings that still hold, each of which has already cost a release:
 - **A shard failure on your branch alone is not evidence your diff caused it.**
   CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
   `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
-  re-shards every file after it in sort order**. Derive it against the ref CI
-  actually runs, not a stale local checkout:
+  re-shards every file after it in sort order**. Derive the index against the
+  ref CI actually runs rather than a stale local checkout — figures written
+  into prose go out of date within days, so run it, do not read it:
 
   ```sh
   git ls-tree -r --name-only origin/main \
-    | grep -E '^tests/unit/.*test_.*\.py$' | sort | nl \
-    | grep tests/unit/tui/test_app_pilot.py     # 331st of 451 -> index 330
+    | grep -E '^tests/unit/.*test_.*\.py$' | LC_ALL=C sort | nl \
+    | grep <the-test-file-that-failed>   # line N -> index N-1, shard (N-1) % 5
   ```
 
-  At index 330 that file is in shard 0; add one test file earlier in the
-  ordering and it becomes 331, shard 1. This is not hypothetical — PR #730 did
-  exactly that (451 → 452 files) and its CI failure was `test_app_pilot.py`
-  failing in shard 1, on a branch that touched no TUI file. A test in the file
-  that moved fails on your branch and nowhere else, reading exactly like "your
-  diff broke the TUI". Before concluding you caused a suspect shard failure,
-  check whether your branch changed that file's shard index, and reproduce on
-  clean `origin/main` under the same conditions CI uses (the shard job runs
-  `pytest --cov`, and some of these failures do not reproduce bare).
-  Diagnosing this as a real regression has already cost a review round.
+  `LC_ALL=C` is load-bearing, not decoration: CI sorts in Python's byte order,
+  while shell `sort` honours `LC_COLLATE`. On an `en_*.UTF-8` locale the two
+  orderings diverge, and since no displacement happens to be a multiple of 5,
+  **every divergent file lands in a different shard** — 51 of 452 when
+  measured, versus 0 under `LC_ALL=C`. Getting this wrong says a file moved
+  shards when it did not, which is the same misattribution this warning exists
+  to prevent.
+
+  Run it once against `origin/main` and once against your branch. If the shard
+  differs, the failing test ran in a different group than it does on `main`, so
+  a failure appearing only on your branch may have nothing to do with your
+  diff. **A differing index is a reason to check attribution, not by itself an
+  explanation** — confirm either way by reproducing on clean `origin/main`
+  under the conditions CI uses (the shard job runs `pytest --cov`, and some
+  failures do not reproduce bare). The one case where the grouping genuinely
+  *is* the cause is cross-test pollution: if the test fails reproducibly in its
+  new shard and passes in its old one, the neighbours it now runs beside are
+  leaking or withholding state, and you have a test-isolation bug to fix rather
+  than a false alarm. Attributing one of these to a diff that touched no
+  related file has already cost a review round.
 - **Several PRs going red at once is a shared cause, not several bugs.**
   `cli-sanity` and `server-sanity` call a live model (both are marked
   "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
