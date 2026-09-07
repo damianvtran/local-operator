@@ -524,6 +524,87 @@ _BAND_SETTLE_PASSES = 3
 #: deliberately not half-built here.
 _BACKGROUND_NOTIFY_MAX_PER_TICK = 3
 
+#: Longest gap, in observer ticks (~1 s each), between two retries of a
+#: completion whose delivery failed. The retry interval starts at one tick and
+#: DOUBLES after every barren attempt until it reaches this.
+#:
+#: TWO INVARIANTS PULL AGAINST EACH OTHER HERE, and this is the shape that holds
+#: both. Neither may be traded for the other:
+#:
+#: 1. A RELEASED CLAIM MUST BE RE-EXAMINED, EVENTUALLY, WITHOUT AN UNRELATED
+#:    COMPLETION — for as long as the process runs. `revision()` reads
+#:    `completions` and `receipts` only, so claiming and handing back leaves it
+#:    byte-identical and the observer's own gate short-circuits forever; on a
+#:    one-session machine that is silence (review round 1 M1 / QA Q1).
+#: 2. A HOST THAT CANNOT DELIVER AT ALL MUST NOT RESCAN AT 1 Hz FOREVER. Retried
+#:    every tick, (1) degenerates on any machine with no notifier backend — no
+#:    `notify-send` on Linux, no `osascript`, or the macOS bundle not yet built
+#:    — into a permanent `load_catalog` directory scan plus two `BEGIN
+#:    IMMEDIATE` writes per unread row per tick, against a store where by
+#:    construction nothing has changed: measured at 23 scans and 138 writes over
+#:    20 ticks on 3 unread rows (review round 2, M2).
+#:
+#: BACKOFF RATHER THAN A CAP, and the difference is not cosmetic. Round 2
+#: proposed capping the consecutive retries and then waiting for a genuine
+#: revision change. That was implemented first and REGRESSED (1): with the cap
+#: at 3, a backend down for four ticks and then healthy never delivered again,
+#: which `…a_released_claim_is_retried_without_an_unrelated_completion` caught
+#: immediately. A cap converts a rare permanent hole into a common one — any
+#: outage longer than the cap — whereas doubling makes the steady-state cost
+#: O(log T) over T ticks while the retry itself never stops. Under this the same
+#: 20-tick window above costs 5 scans instead of 23, and an hour of a dead
+#: backend costs about 12 rather than 3,600.
+#:
+#: A CACHED "this host has no notifier" FLAG WAS ALSO REJECTED. `detached_notify`
+#: returns False for one durable fact (nothing on PATH) and for two transient
+#: ones (notifications disabled between the two calls, a refused spawn) without
+#: distinguishing them — and on macOS the bundle case is transient BY DESIGN:
+#: `ensure_bundle` returns None on a cold machine and starts the build in the
+#: background, so the very next attempt may succeed. Latching would latch at
+#: exactly the cold-start moment a backlog exists, and would then need an
+#: invalidation path to unlatch. Backoff is self-healing and needs none.
+#:
+#: Counted in TICKS, never in seconds: the poll's own cadence is the only clock
+#: this needs, and a tick count cannot drift with machine load the way a
+#: wall-clock deadline does (AGENTS.md §"Timing, flakes").
+#:
+#: 64 ticks ≈ a minute between attempts at the ceiling — negligible load, and
+#: still far inside the window where a user who has just installed `notify-send`
+#: or whose bundle has finished building would call it responsive.
+_BACKGROUND_NOTIFY_MAX_RETRY_TICKS = 64
+
+#: The `SessionRow.live_state` values this observer may announce a completion
+#: for. An ALLOW-LIST, deliberately, and the inversion is the finding: the skip
+#: shipped as `live_state == "attached"`, which is the narrowest of the three
+#: states that all mean the same thing (review round 2, M3).
+#:
+#: THE RULE IS RESIDENCY, NOT A LABEL: "some other TUI holds this session open
+#: and its own in-app `Notifier` already owns its completion toast, so anything
+#: this process sends is a duplicate" (X8/X9; review round 1, B2). `live_state`
+#: is a single-slot field whose branches are mutually exclusive and ordered
+#: `wedged` > `busy` > `attached` > `idle` (`session_catalog.decorate_rows`), so
+#: an attached window that is running a turn reports `busy` and never
+#: `attached` — and post-#720 `busy` means conversational activity, which a
+#: session whose previous turn completed unread reaches the moment the user
+#: sends it a new prompt in another window. `wedged` is likewise an ATTACHED
+#: window whose heartbeat went stale, not an absence of one. All three were
+#: reproduced double-notifying.
+#:
+#: An allow-list rather than a deny-list because the failure directions are not
+#: symmetric. A new `live_state` added later defaults, under a deny-list, to
+#: NOTIFYING — the duplicate this exists to prevent, and silent. Under this it
+#: defaults to staying quiet, which loses at most a transient nudge while
+#: `unseen` stays true, the sidebar keeps its `✓` and `lop sessions` still
+#: reports it. That is the same trade `claim_delivery` documents, made the same
+#: way.
+#:
+#: `""` is a COLD session — no runtime record at all — and `"idle"` is a
+#: resident runtime with nobody watching. Both are precisely the reported bug's
+#: own scenario (a background runtime finishing with no attached surface), so
+#: both must stay in this set; `test_an_idle_background_session_is_still_
+#: announced` guards that direction.
+_BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES = frozenset({"", "idle"})
+
 
 # The registry, its policy commentary and `slash_command_for` live in
 # `local_operator.slash_commands`, which the server front ends import too; both
@@ -1876,6 +1957,21 @@ class OperatorApp(App[None]):
         #: next unrelated change.
         self._background_notify_pending = False
         self._background_notify_revision: tuple[int, int] | None = None
+        #: Retry backoff for a delivery that failed: how many ticks to wait
+        #: before the next attempt, and how many of those are still owed. The
+        #: interval doubles per barren attempt so the revision-forgetting retry
+        #: (M1/Q1) cannot become a permanent 1 Hz rescan on a host with no
+        #: notifier backend (M2), while still never giving up — see
+        #: `_BACKGROUND_NOTIFY_MAX_RETRY_TICKS` for why backoff and not a cap.
+        self._background_notify_retry_ticks = 0
+        self._background_notify_retry_wait = 0
+        #: The last revision this observer actually SCANNED, kept separately
+        #: from `_background_notify_revision` because the retry sets that one to
+        #: None on purpose. Comparing against this is what tells a genuine
+        #: publish or acknowledgement apart from the observer's own retry coming
+        #: back round — without it, a real completion arriving mid-backoff would
+        #: be made to wait out the backoff it had nothing to do with.
+        self._background_notify_seen_revision: tuple[int, int] | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,
@@ -13507,7 +13603,7 @@ class OperatorApp(App[None]):
 
         return conversation_identity(config_dir() / "sessions" / session_id)
 
-    def _announce_background_digest(self, count: int) -> None:
+    def _announce_background_digest(self, count: int) -> bool:
         """One line standing in for the completions the per-tick cap held back.
 
         The cap exists to stop a backlog flooding the notification centre; on
@@ -13516,9 +13612,26 @@ class OperatorApp(App[None]):
         never lost — the sidebar still carries every row's `✓`, and the user
         now knows to go and look at it.
 
-        Titled with the neutral sentence rather than any session's name: it is
-        about several sessions, so naming one of them would be wrong, and it
-        also costs nothing to a user who has opted out of names entirely.
+        REPORTS WHETHER THE BANNER WENT OUT, exactly like
+        `_deliver_background_completion` beside it, and for the same reason: the
+        rows this line stands for were already CLAIMED with backend `"digest"`,
+        so a digest that silently fails takes every one of those claims with it
+        and nothing re-fires them. Measured at 9 of 12 completions the user is
+        never told about, on both failure modes (review round 2, M1). That is
+        strictly worse than the flood B1 replaced — a flood is noisy and
+        self-correcting; this is silent while the claim asserts delivery. The
+        caller hands the claims back when this returns False.
+
+        NAME-FREE BY CONSTRUCTION, AND IT MUST STAY SO. The title is the
+        `BACKGROUND_FALLBACK_TITLE` constant and the body is a bare count, so
+        `session_names_in_notifications()` is not consulted — not because the
+        flag does not apply, but because there is nothing here for it to
+        govern. A digest is ABOUT several sessions, so naming one of them would
+        be wrong on its own terms; the useful-looking improvement ("Overnight 3
+        and 8 others finished") is therefore also the one that would silently
+        defeat that privacy flag on this leg, since nothing on this path reads
+        it. Any change that puts session-derived text in this banner must gate
+        it on `session_names_in_notifications()` first (review round 2, minor).
 
         Same best-effort contract as every other delivery here — this runs off
         the loop inside `collect()`, and a digest that failed to send must not
@@ -13537,16 +13650,21 @@ class OperatorApp(App[None]):
         try:
             surface = cmux_surface_id()
             if surface is not None:
-                spawn_detached(
-                    cmux_command(surface, BACKGROUND_FALLBACK_TITLE, CONTEXT_COMPLETE, body)
+                return bool(
+                    spawn_detached(
+                        cmux_command(surface, BACKGROUND_FALLBACK_TITLE, CONTEXT_COMPLETE, body)
+                    )
                 )
-            else:
-                # No `session_id`: a digest covers several sessions, so there is
-                # no single transcript for a click to reopen. The banner is
-                # informational and the sidebar is where the user goes next.
-                detached_notify(BACKGROUND_FALLBACK_TITLE, body, subtitle=CONTEXT_COMPLETE)
+            # No `session_id`: a digest covers several sessions, so there is no
+            # single transcript for a click to reopen. The banner is
+            # informational and the sidebar is where the user goes next.
+            return detached_notify(BACKGROUND_FALLBACK_TITLE, body, subtitle=CONTEXT_COMPLETE)
         except Exception:  # noqa: BLE001 — a toast must never affect the poll
             logger.debug("background completion digest failed", exc_info=True)
+            # A RAISE IS A FAILED DELIVERY, not a swallowed one: this return is
+            # what makes the caller hand the digest's claims back rather than
+            # leaving them asserting a banner nobody received.
+            return False
 
     def _background_completion_title(self, entry: CatalogEntry) -> str:
         """The banner title for a background session: its STORED name, or a sentence.
@@ -13704,7 +13822,11 @@ class OperatorApp(App[None]):
         called from `_poll_completion_attention`'s 1 s tick and gated on
         `AttentionStore.revision()`, the store's documented cheap change
         detector, so the catalog scan behind it happens only when a completion
-        was actually published or acknowledged — not once a second.
+        was actually published or acknowledged — not once a second. The one
+        deliberate exception is the retry after a failed delivery, which forgets
+        that gate for at most `_BACKGROUND_NOTIFY_MAX_BARREN_RETRIES` ticks per
+        store change; that bound is what stops a host with no notifier backend
+        from rescanning and rewriting forever (M2).
 
         THE FOCUS GATE IS THE ATTACHED-SESSION CHECK, and that is the whole
         point of the fix rather than an omission. OS terminal focus is the
@@ -13721,15 +13843,19 @@ class OperatorApp(App[None]):
         in-app `Notifier` on `TurnEnded`), which is what stops one completion
         being announced twice by one process.
 
-        A row ATTACHED IN ANOTHER WINDOW is skipped by the same rule, not by a
-        different one: `live_state == "attached"` means some other TUI holds
-        that session open and its own `Notifier` already owns the toast, so the
-        only thing this process would add is a duplicate (B2).
+        A row RESIDENT IN ANOTHER WINDOW is skipped by the same rule, not by a
+        different one: a `live_state` outside
+        `_BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES` means some other TUI holds that
+        session open — attached, busy running a turn, or wedged — and its own
+        `Notifier` already owns the toast, so the only thing this process would
+        add is a duplicate (B2, widened past `attached` in M3).
 
         BOUNDED PER TICK. At most `_BACKGROUND_NOTIFY_MAX_PER_TICK` banners are
         spawned in one scan; the rest are still claimed and reported as one
         digest line, so a backlog cannot flood the notification centre and
-        cannot be silently swallowed either (B1).
+        cannot be silently swallowed either (B1). If that digest fails to send,
+        every claim it stood for is handed back, because otherwise the digest
+        loses N completions where a single failed row loses one (M1).
 
         Never raises and never blocks the loop: a notification is chrome, and
         the work below is a SQLite read plus a directory scan plus a spawn.
@@ -13757,13 +13883,38 @@ class OperatorApp(App[None]):
                 # since the last look, so no row's unseen state can have
                 # changed and the catalog scan is pure waste.
                 return
+            if revision == self._background_notify_seen_revision:
+                # THE STORE HAS NOT MOVED SINCE THE LAST SCAN, so the only
+                # reason this tick got past the gate above is that a previous
+                # one forgot the gate after a failed delivery: this is our own
+                # retry coming back round, not new activity.
+                if self._background_notify_retry_ticks > 0:
+                    # Not due yet. Spend one tick of the backoff and scan
+                    # nothing — without this the retry runs every tick and a
+                    # host that can never deliver rescans and rewrites forever
+                    # (M2). `_background_notify_revision` stays None so the next
+                    # tick reaches this same branch.
+                    self._background_notify_retry_ticks -= 1
+                    self._background_notify_revision = None
+                    return
+            else:
+                # A GENUINE publish or acknowledgement. It never waits out a
+                # backoff it had nothing to do with, and it resets the interval:
+                # whatever made delivery fail last time, there is new work now
+                # and it deserves a full-speed attempt.
+                self._background_notify_seen_revision = revision
+                self._background_notify_retry_wait = 0
             # Recorded BEFORE the scan, not after: a completion published while
             # this scan runs bumps the revision again, and recording the newer
             # value afterwards would skip the next poll and lose that event.
             self._background_notify_revision = revision
             current = str(getattr(self._session, "session_id", "") or "")
             announced = 0
-            claimed_silently = 0
+            # The rows the cap held back, kept as `(identity, token)` rather
+            # than counted: their claims are already taken, so if the digest
+            # standing in for them fails to send they have to be handed BACK,
+            # and `release_delivery` needs both halves to do it (M1).
+            claimed_silently: list[tuple[str, str]] = []
             released = False
             for entry in load_catalog(directory):
                 if (
@@ -13771,29 +13922,31 @@ class OperatorApp(App[None]):
                     or not entry.completion_token
                     or entry.row.pending
                     or entry.id == current
-                    or entry.row.live_state == "attached"
+                    or entry.row.live_state not in _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES
                 ):
                     # A pending row is a GATE, not a finished turn: the runtime
                     # already announces those itself (`_announce_pending`), and
                     # a second toast for one parked question is the duplicate
                     # that routing was built to avoid.
                     #
-                    # `live_state == "attached"` is the SAME rule as the
+                    # The `live_state` test is the SAME rule as the
                     # `entry.id == current` skip beside it, applied to a window
-                    # this process cannot see. It means another TUI has that
-                    # session open, and that TUI's own in-app `Notifier` owns
-                    # its completion toast — so announcing it here is the
-                    # double notification the routing design forbids (X8/X9;
-                    # review round 1, B2). The operator runs ~11 concurrent
-                    # sessions, so attached-elsewhere is the NORMAL state of
-                    # their catalog rather than an edge case. Delivering
-                    # THROUGH the attached surface is a later PR; suppressing
-                    # is the correct behaviour to ship here.
+                    # this process cannot see: another TUI has that session
+                    # open, and that TUI's own in-app `Notifier` owns its
+                    # completion toast, so announcing it here is the double
+                    # notification the routing design forbids (X8/X9; review
+                    # round 1, B2). The operator runs ~11 concurrent sessions,
+                    # so resident-elsewhere is the NORMAL state of their
+                    # catalog rather than an edge case. Delivering THROUGH the
+                    # attached surface is a later PR; suppressing is the
+                    # correct behaviour to ship here.
                     #
-                    # Reading `live_state` and not `busy`: #720 re-pointed
-                    # `busy` at a conversational-activity predicate but left
-                    # `attached` meaning exactly what it did — a record whose
-                    # runtime reports a watching surface.
+                    # It reads an ALLOW-LIST of the states with no other owner
+                    # rather than naming the states to skip — see
+                    # `_BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES` for why the
+                    # `attached`-only form this shipped as still double-notified
+                    # a busy or wedged window (review round 2, M3), and why a
+                    # future state must default to quiet rather than to noisy.
                     continue
                 try:
                     if announced >= _BACKGROUND_NOTIFY_MAX_PER_TICK:
@@ -13801,12 +13954,9 @@ class OperatorApp(App[None]):
                         # still be taken or the backlog re-floods on the next
                         # revision change, and the digest below tells the user
                         # the count rather than silently dropping it.
-                        if store.claim_delivery(
-                            self._background_completion_identity(entry.id),
-                            entry.completion_token,
-                            "digest",
-                        ):
-                            claimed_silently += 1
+                        identity = self._background_completion_identity(entry.id)
+                        if store.claim_delivery(identity, entry.completion_token, "digest"):
+                            claimed_silently.append((identity, entry.completion_token))
                         continue
                     if self._deliver_background_completion(
                         entry, self._background_completion_identity(entry.id)
@@ -13824,8 +13974,24 @@ class OperatorApp(App[None]):
                     # chrome; it may lose itself, never its siblings.
                     logger.debug("background completion row skipped", exc_info=True)
                     released = True
-            if claimed_silently:
-                self._announce_background_digest(claimed_silently)
+            if claimed_silently and not self._announce_background_digest(len(claimed_silently)):
+                # THE DIGEST IS THE ONLY THING THAT WAS EVER GOING TO SPEAK FOR
+                # THESE ROWS. Each was claimed above with backend `"digest"`, so
+                # a failed digest leaves N completions delivered-but-unannounced
+                # for good — the exact silent hole `release_delivery` exists to
+                # close, at N times the scale of a single row's (M1). Hand every
+                # one of them back, and let the `released` path below re-examine
+                # them: on the next tick they are unclaimed again, so whichever
+                # of them falls under the cap gets a real banner.
+                for identity, token in claimed_silently:
+                    try:
+                        store.release_delivery(identity, token)
+                    except Exception:  # noqa: BLE001 — per row, same rule as above
+                        # One unreleasable row must not strand its siblings'
+                        # claims; this loop is the recovery path, so it cannot
+                        # itself be all-or-nothing.
+                        logger.debug("background digest claim not released", exc_info=True)
+                released = True
             if released:
                 # A RELEASED CLAIM MUST BE RE-EXAMINED, and `revision()` cannot
                 # see that it was: it reads `completions` and `receipts` only,
@@ -13843,6 +14009,29 @@ class OperatorApp(App[None]):
                 # business moving a number those read as "something happened to
                 # this conversation". The retry is this observer's problem, so
                 # it is fixed in this observer's state.
+                #
+                # RATE-LIMITED, because retried every tick this is not a retry
+                # but a permanent 1 Hz rescan-and-write loop on any host that
+                # can never deliver (M2). The interval doubles per barren
+                # attempt up to `_BACKGROUND_NOTIFY_MAX_RETRY_TICKS` — see there
+                # for why backoff and not a cap, and why not a cached "this host
+                # has no notifier" flag.
+                #
+                # A tick that DELIVERED something is PROGRESS, not a barren
+                # retry, so it resets the interval: a partly-working backend
+                # (three banners out under the cap, the rest released) must keep
+                # draining a backlog at full speed rather than backing off
+                # through it. That cannot spin, because every delivered row
+                # consumes its own claim — progress is monotone and the backlog
+                # is finite.
+                if announced:
+                    self._background_notify_retry_wait = 0
+                else:
+                    self._background_notify_retry_wait = min(
+                        max(1, self._background_notify_retry_wait * 2),
+                        _BACKGROUND_NOTIFY_MAX_RETRY_TICKS,
+                    )
+                self._background_notify_retry_ticks = self._background_notify_retry_wait
                 self._background_notify_revision = None
 
         async def run() -> None:
