@@ -18,6 +18,7 @@ machine delivers and what used to crash the app.
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 from textual import events
 from textual.binding import Binding
 
@@ -25,6 +26,7 @@ from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.copy_picker import (
     HEADER_ROWS,
+    PREVIEW_HINT,
     PREVIEW_WRAP_BUDGET,
     TOO_SMALL_NOTICE,
     CopyPickerScreen,
@@ -207,6 +209,18 @@ async def test_the_wheel_over_the_preview_scrolls_it_and_leaves_the_cursor_alone
 
 @pytest.mark.asyncio
 async def test_the_preview_offset_clamps_at_both_ends() -> None:
+    """Clamped, never wrapped — and the DOWN ceiling is the offset whose pane
+    ends on the last source line, not the last source line itself.
+
+    This test previously asserted `== 39` on a 40-line document, i.e. the
+    document scrolled until only its final line remained above a pane of blank
+    rows. Review round 1 (MAJOR-2, and U5 independently) rejected that
+    ceiling: it pushed up to 33 rows of already-read text off the top of a
+    document the user was still reading, where `less` and this card's own tree
+    both stop with the last line at the bottom. The assertion is rewritten to
+    the corrected contract rather than relaxed — the last line must be ON
+    SCREEN at the ceiling, and nothing may remain below it.
+    """
     app = _real_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -216,7 +230,13 @@ async def test_the_preview_offset_clamps_at_both_ends() -> None:
         for _ in range(200):
             screen.post_message(_wheel(screen, *_preview_row(screen), down=True))
         await pilot.pause()
-        assert screen._preview_offset == 39, "stops on the last source line"
+        ceiling = screen._preview_offset
+        assert (
+            0 < ceiling < 39
+        ), f"stops with the document's end at the foot, not past it: {ceiling}"
+        lines = screen.render_lines_for_test()
+        assert any("line 39" in line for line in lines), "the last line is on screen"
+        assert not any("more lines" in line for line in lines), "and nothing is below it"
 
         for _ in range(200):
             screen.post_message(_wheel(screen, *_preview_row(screen), down=False))
@@ -479,11 +499,26 @@ async def test_the_keyboard_path_cannot_crash_by_dismissing_twice() -> None:
 async def test_the_pointer_shape_is_released_before_the_screen_leaves() -> None:
     """The modal goes without another mouse move, so OSC 22 has to be restored
     while this screen still owns the pointer. Without it a user who clicks to
-    copy is left with a hand cursor over their transcript."""
+    copy is left with a hand cursor over their transcript.
+
+    Observed AT DISMISS TIME, in the dismiss callback, rather than after the
+    screen has left the stack. Round 1 (MINOR-1) showed the after-the-fact
+    assertion was vacuous: `styles.pointer` reads `"default"` once the screen
+    is off the stack whether or not the code resets it, so deleting the line
+    under test left all 127 tests green. The callback runs while the screen is
+    still the one that owns the pointer, which is the only moment at which the
+    reset is observable — and is exactly the moment the terminal is being told.
+    """
     app = _real_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        screen = await _open(app, _targets("first", "second"), pilot)
+        at_dismiss: list[str] = []
+        screen = await _open(
+            app,
+            _targets("first", "second"),
+            pilot,
+            lambda _result: at_dismiss.append(str(screen.styles.pointer)),
+        )
         screen.post_message(_move(screen, *_tree_row(screen, 0)))
         await pilot.pause()
         assert screen.styles.pointer == "pointer"
@@ -491,7 +526,10 @@ async def test_the_pointer_shape_is_released_before_the_screen_leaves() -> None:
         screen.post_message(_click(screen, *_tree_row(screen, 0), chain=2))
         await pilot.pause()
         await pilot.pause()
-        assert screen.styles.pointer == "default"
+        assert at_dismiss == ["default"], (
+            "the hand cursor was still set as the screen left, so it would "
+            f"outlive the modal: {at_dismiss}"
+        )
 
 
 # --- preview scrolling -------------------------------------------------------
@@ -687,11 +725,17 @@ async def test_the_wrap_budget_is_a_window_and_not_a_dead_end() -> None:
         shown = sum(1 for line in lines if line.startswith("line "))
         assert int(marker.strip().split()[1]) == total - beyond - shown
 
-        # And the far end is reachable rather than floored at the budget.
+        # And the far end is reachable rather than floored at the budget. The
+        # ceiling is the offset whose pane ENDS on the last line (MAJOR-2/U5),
+        # so the property that matters is that the last line is drawn — not
+        # that the offset equals `total - 1`, which was the old ceiling that
+        # scrolled the document off its own pane.
         screen._scroll_preview_to(total)
         await pilot.pause()
-        assert screen._preview_offset == total - 1
-        assert any(f"line {total - 1}" in line for line in screen.render_lines_for_test())
+        assert screen._preview_offset > PREVIEW_WRAP_BUDGET, "far past the budget"
+        lines = screen.render_lines_for_test()
+        assert any(f"line {total - 1}" in line for line in lines)
+        assert not any("more lines" in line for line in lines), "nothing left below"
 
 
 # --- the scroll cues ---------------------------------------------------------
@@ -710,10 +754,13 @@ async def test_the_tree_cues_appear_only_in_the_direction_that_overflows() -> No
         screen = await _open(app, _targets(*[f"answer {i}" for i in range(30)]), pilot)
 
         def _cues() -> tuple[bool, bool]:
+            # Keyed on the ARROW, not on the word "more": both cues carry
+            # `more` since D12 made the up cue a remainder rather than the
+            # bare `↑ 6`, which reads as an ordinal.
             lines = screen.render_lines_for_test()
             return (
-                any("↑ " in line and "─" in line for line in lines),
-                any("more" in line and "─" in line for line in lines),
+                any("↑" in line and "─" in line for line in lines),
+                any("↓" in line and "─" in line for line in lines),
             )
 
         assert _cues() == (False, True), "at the top: only the down cue"
@@ -933,3 +980,450 @@ async def test_the_wrap_cache_serves_the_same_rows_it_would_have_computed() -> N
         fresh_rows, fresh_map = screen._wrap_preview(target, 88, 0)
         assert [row.plain for row in cached_rows] == [row.plain for row in fresh_rows]
         assert cached_map == fresh_map
+
+
+# --- review round 1 regressions ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_double_click_copies_the_row_the_first_click_selected() -> None:
+    """The BLOCKER from round 1 (U1/Q1), and the one that put wrong bytes on a
+    real clipboard: aimed at `Quote 1`, received `Answer 10 body text.`
+
+    `_window_start` centres the cursor, so click 1 recentres the tree UNDER A
+    STATIONARY POINTER and click 2 resolves the same screen coordinate against
+    a different window. It covered ~41% of the pane on any overflowing tree —
+    the lower half, which is exactly where a user clicks after scanning a list
+    top to bottom.
+
+    Driven through Textual's own `pilot.click(times=2)` rather than posted
+    messages, because the pilot is what produces a real chained click, and
+    aimed BELOW `tree_rows / 2` on an overflowing tree: a version of this test
+    that clicks row 0 passes against the broken code.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        bodies = [f"Answer {i} body text.\n\n> Quote of answer {i}." for i in range(16, 0, -1)]
+        chosen: list[CopyTarget | None] = []
+        screen = await _open(app, _targets(*bodies), pilot, chosen.append)
+
+        tree_rows, _ = screen._split_rows()
+        assert len(screen.visible_rows) > tree_rows, "the tree must overflow to recentre"
+        pane_row = tree_rows - 3
+        assert pane_row > tree_rows // 2, "aimed in the band that used to copy the wrong row"
+
+        start = screen._window_start(tree_rows)
+        aimed = screen.visible_rows[start + pane_row].target
+        x, y = _tree_row(screen, pane_row)
+
+        await pilot.click(offset=(x, y), times=2)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(chosen) == 1
+        assert chosen[0] is not None
+        assert (
+            chosen[0].id == aimed.id
+        ), f"copied {chosen[0].label!r}, user aimed at {aimed.label!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_wheel_off_the_card_does_nothing_at_all() -> None:
+    """Round 1, U3/Q2. `_pointer_row_of` returns `None` off the body and the
+    notch used to fall through to `action_move`, which reset the preview — so
+    a pointer ONE COLUMN outside the card moved the cursor and silently
+    discarded the reading position. At 100x30 that zone is three cells left of
+    the preview text being read, and trackpad drift of three cells is routine.
+
+    Off the card is now inert, exactly as it already was for the click.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        body = "\n".join(f"line {index}" for index in range(200))
+        # Seeded LAST so the long answer is row 0 (most-recent-first), which is
+        # what makes a preview offset reachable at all.
+        screen = await _open(app, _targets("second answer", body), pilot)
+
+        screen._scroll_preview_to(60)
+        await pilot.pause()
+        assert screen._preview_offset == 60
+
+        region = screen._body.region
+        row = region.y + screen._preview_top_row + 1
+        outside = [
+            (region.x - 1, row),
+            (region.x + region.width, row),
+            (region.x + 4, region.y + region.height),
+        ]
+        for x, y in outside:
+            screen.post_message(_wheel(screen, x, y, down=True))
+            await pilot.pause()
+            assert screen._preview_offset == 60, f"the page was lost at {(x, y)}"
+            assert screen._selected == 0, f"the cursor moved at {(x, y)}"
+
+
+@pytest.mark.asyncio
+async def test_a_move_that_changes_nothing_keeps_the_reading_position() -> None:
+    """Round 1, U2 — the one KEYBOARD-ONLY regression against main. The offset
+    was reset BEFORE the clamp, so `up`/`home`/`pageup` at the top row (a total
+    visual no-op) threw away the reading position with no way back: 90
+    `shift+down` to recover. On a single long answer the tree is ONE row, so
+    every arrow press was such a no-op.
+
+    A move that DOES change the selection still resets, because the preview is
+    then a different document — that contract is unchanged and is pinned by
+    `test_the_preview_offset_resets_on_every_cursor_move`.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        body = "\n".join(f"line {index}" for index in range(200))
+        screen = await _open(app, _targets(body), pilot)
+        assert len(screen.visible_rows) == 1, "the single-node case U2 bites hardest on"
+
+        screen._scroll_preview_to(60)
+        await pilot.pause()
+        assert screen._preview_offset == 60
+
+        for key in ("up", "home", "pageup", "down", "end", "pagedown"):
+            await pilot.press(key)
+            await pilot.pause()
+            assert screen._selected == 0, f"{key} moved the cursor on a one-row tree"
+            assert screen._preview_offset == 60, f"{key} moved nothing but lost the page"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_advertises_the_scroll_whenever_the_pane_overflows() -> None:
+    """Round 1, MAJOR-1: the footer's gate and the pane's marker were computed
+    in DIFFERENT UNITS — source lines against wrapped rows. On ordinary prose
+    (one long source line per paragraph, the normal shape of an answer) the
+    pane overflowed with FEWER source lines than rows, so the frame drew
+    `… N more lines` while the footer — the only place `shift+↑↓` is ever
+    named — declined to say the preview scrolled, in one screenshot.
+
+    The fixture is deliberately one whose two units DISAGREE: 11 source lines
+    wrapping to 17 rows in a 16-row pane. A fixture of short lines passes
+    against the broken predicate.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        prose = "\n\n".join(
+            "This is a long paragraph of ordinary assistant prose written as one "
+            "single source line, which therefore wraps across several rows of the "
+            f"preview pane when it is painted at the card's width. Paragraph {i}."
+            for i in range(6)
+        )
+        screen = await _open(app, _targets(prose), pilot)
+
+        assert screen._preview_source_lines() <= screen._preview_rows, (
+            "the fixture must have FEWER source lines than rows, or the old "
+            "source-line predicate would have been right by accident"
+        )
+        lines = screen.render_lines_for_test()
+        assert any("more lines" in line for line in lines), "the pane overflows"
+        assert (
+            PREVIEW_HINT in lines[-1]
+        ), f"the pane says it overflows and the footer disagrees: {lines[-1]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_preview_that_fits_does_not_scroll_at_all() -> None:
+    """Round 1, MAJOR-2/U5. The clamp ceilinged at `source_lines - 1`
+    regardless of whether the document already fitted, so a 3-line preview in a
+    16-row pane scrolled its own content off the top and left blank rows — the
+    "a scroll gesture that teleports reads as the list resetting itself"
+    failure AGENTS.md warns about. `less` stops with the last line at the
+    bottom; so does the tree's own `down`; so does this now.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets("alpha\nbeta\ngamma"), pilot)
+        assert screen._preview_source_lines() < screen._preview_rows, "it fits"
+
+        before = screen.render_lines_for_test()
+        for _ in range(6):
+            await pilot.press("shift+down")
+        await pilot.pause()
+        for _ in range(6):
+            screen.post_message(_wheel(screen, *_preview_row(screen), down=True))
+        await pilot.pause()
+
+        assert screen._preview_offset == 0, "a document that fits has nowhere to go"
+        assert screen.render_lines_for_test() == before
+        assert PREVIEW_HINT not in before[-1], "and the footer does not advertise it"
+
+
+@pytest.mark.asyncio
+async def test_a_long_preview_stops_with_its_last_line_at_the_foot() -> None:
+    """The other end of the same clamp: scrolling a document that DOES overflow
+    still reaches its last line, and stops there rather than sliding the text
+    up into blank rows (round 1, U5 measured 33 rows of read text pushed off
+    screen at 200x50)."""
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        body = "\n".join(f"line {index}" for index in range(121))
+        screen = await _open(app, _targets(body), pilot)
+
+        for _ in range(300):
+            await pilot.press("shift+down")
+        await pilot.pause()
+
+        lines = screen.render_lines_for_test()
+        assert any("line 120" in line for line in lines), "the last line is on screen"
+        assert not any("more lines" in line for line in lines), "and nothing remains below"
+
+        # The pane must still be FULL. This is the assertion the finding turns
+        # on: the old ceiling reached the same last line but with fifteen of
+        # sixteen rows blank beneath it, having pushed everything already read
+        # off the top. `less` leaves the screen full; so does this.
+        top = screen._preview_top_row
+        pane = lines[top + 1 : top + 1 + screen._preview_rows]
+        blank = sum(1 for line in pane if not line.strip())
+        assert blank <= 1, (
+            f"{blank} of {len(pane)} preview rows are empty — the document was "
+            f"scrolled off its own pane"
+        )
+        assert sum(1 for line in pane if line.strip()) >= screen._preview_rows - 1
+
+
+@pytest.mark.asyncio
+async def test_the_hover_highlight_follows_the_window_under_a_resting_pointer() -> None:
+    """Round 1, U4/Q3. `on_mouse_move` was the only thing that updated
+    `_hovered`, but the wheel and the click move rows under a stationary
+    pointer and a real terminal sends NO `MouseMove` while only the wheel
+    turns — so the highlight was left on a row the pointer was not over, and
+    enough notches scrolled it off the pane entirely while the hand remained.
+
+    Cosmetic in isolation (the click resolves by coordinate, not by the
+    highlight), but the hover highlight is the ENTIRE affordance for the mouse
+    here by design, and a stale one confirmed the wrong aim in the exact frame
+    where U1 was still catchable.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        bodies = [f"Answer {i} body text.\n\n> Quote of answer {i}." for i in range(16, 0, -1)]
+        screen = await _open(app, _targets(*bodies), pilot)
+
+        pane_row = 3
+        x, y = _tree_row(screen, pane_row)
+        screen.post_message(_move(screen, x, y))
+        await pilot.pause()
+
+        def _row_under_pointer() -> int:
+            tree_rows, _ = screen._split_rows()
+            return screen._window_start(tree_rows) + pane_row
+
+        assert screen._hovered == _row_under_pointer()
+
+        for notch in range(8):
+            screen.post_message(_wheel(screen, x, y, down=True))
+            await pilot.pause()
+            assert (
+                screen._hovered == _row_under_pointer()
+            ), f"after notch {notch + 1} the highlight is on a row the pointer is not over"
+
+        # And the same under a click that recentres the tree.
+        screen.post_message(_click(screen, x, y))
+        await pilot.pause()
+        assert screen._hovered == _row_under_pointer()
+
+
+@pytest.mark.asyncio
+async def test_the_thumb_reaches_the_bottom_exactly_when_the_cue_goes() -> None:
+    """Round 1, D11. `_thumb_span` anchored on the window's fraction of the
+    LIST and then clamped, so the clamp won one window position early: the
+    thumb sat at the bottom of the track while the rule still read `↓ 1 more`,
+    two distinct positions painted an identical gutter, and the user's final
+    arrow press moved the one CONTINUOUS signal not at all.
+
+    The invariant asserted here is the whole point of the component: thumb at
+    the bottom of the track if and only if there is nothing below.
+
+    **The row counts are chosen because they DISCRIMINATE.** The old formula
+    is accidentally correct at many shapes — at 32 rows in a 12-row pane it
+    has no violation at all — so a single convenient fixture passes against
+    the broken code. 19 is the shape D11 was reported against (it bottoms out
+    one window early, at `start=6` of 7); 15, 26 and 40 are the other
+    published failures, 40 breaking at three consecutive positions. A test
+    that pinned only one shape here would be a guard that cannot go red.
+    """
+    for total_rows in (15, 19, 26, 40):
+        app = _real_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            bodies = [f"answer {i}" for i in range(total_rows)]
+            screen = await _open(app, _targets(*bodies), pilot)
+            tree_rows = screen._tree_rows
+            total = len(screen.visible_rows)
+            max_start = total - tree_rows
+            assert max_start > 0, f"{total_rows} must overflow the pane"
+
+            for start in range(max_start + 1):
+                span = screen._thumb_span(tree_rows, start)
+                at_bottom = span.stop == tree_rows
+                nothing_below = start == max_start
+                assert at_bottom == nothing_below, (
+                    f"{total} rows in {tree_rows}: start={start}/{max_start} thumb "
+                    f"{span.start}..{span.stop}, {total - start - tree_rows} rows still below"
+                )
+            # And it actually travels rather than sitting still.
+            first = screen._thumb_span(tree_rows, 0)
+            last = screen._thumb_span(tree_rows, max_start)
+            assert first.start < last.start, f"the thumb never moved at {total} rows"
+
+
+@pytest.mark.asyncio
+async def test_a_track_too_short_to_hold_a_proportion_is_shed() -> None:
+    """Round 1, D14. At 100x14 the split gives the tree ONE row with eighteen
+    hidden, and a one-row track can only paint a thumb that FILLS it — the
+    visual language for "everything fits" — beside a `↓ 18 more` cue saying
+    the opposite. Forced by geometry rather than by D11's anchor, so fixing
+    D11 does not fix it. The cue does the work alone instead."""
+    app = _real_app()
+    async with app.run_test(size=(100, 14)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets(*[f"answer {i}" for i in range(19)]), pilot)
+        assert screen._tree_rows < 3, "the geometry D14 was reported against"
+        assert not screen._gutter_drawn(screen._card_width())
+
+        lines = screen.render_lines_for_test()
+        assert not any("█" in line or "│" in line for line in lines), "no contradictory thumb"
+        assert any("more" in line and "─" in line for line in lines), "the cue still says so"
+
+
+@pytest.mark.asyncio
+async def test_both_tree_cues_read_as_remainders_and_hold_their_column() -> None:
+    """Round 1, D12 and U9, which are one shape between them.
+
+    D12: `↑ 6` is a bare number where `↓ 7 more` is a remainder, and a bare N
+    reads as an ordinal ("row 6") — the exact hazard that ruled out an `N of M`
+    indicator on this card. `↑ N more` fits the slot already reserved.
+
+    U9: the cue moved COLUMN as its digit count changed (measured stepping at
+    9→10 on a 39-row tree), which is precisely what brief item C1 asked to
+    avoid. The count is now right-aligned in a field sized on the largest value
+    it can reach, so the digits line up and nothing twitches under a user who
+    is only scrolling.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets(*[f"answer {i}" for i in range(39)]), pilot)
+
+        columns: set[int] = set()
+        seen_up = False
+        for index in range(len(screen.visible_rows)):
+            screen._move_to(index)
+            await pilot.pause()
+            for line in screen.render_lines_for_test():
+                if "↑" in line and "─" in line:
+                    seen_up = True
+                    assert "more" in line, f"the up cue reads as an ordinal: {line.strip()[-12:]!r}"
+                    columns.add(line.index("↑"))
+                if "↓" in line and "─" in line:
+                    columns.add(line.index("↓"))
+
+        assert seen_up, "the fixture must scroll far enough to raise the up cue"
+        assert len(columns) == 1, f"the cue changed column as its digits did: {columns}"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_an_empty_block_is_audible_rather_than_silent() -> None:
+    """Round 1, U6. Marking the row shipped and does real work — the refusal is
+    PREDICTED by the frame — but the audible half did not, so a user who had
+    not read the hint column pressed Enter and got nothing at all: no notice,
+    no bell, no frame change, which is an application that appears to have
+    stopped responding to the key. That was the original complaint.
+
+    `bell` rather than a toast: a toast would demand a dismissal for a keypress
+    the user can simply repeat elsewhere, and this screen raises no notices of
+    its own.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        chosen: list[CopyTarget | None] = []
+        screen = await _open(app, _targets("Here:\n\n```py\n```\n"), pilot, chosen.append)
+
+        rings: list[int] = []
+        app.bell = lambda: rings.append(1)  # type: ignore[method-assign]
+
+        empty = next(
+            index for index, node in enumerate(screen.visible_rows) if not node.target.content
+        )
+        screen._move_to(empty)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert rings == [1], "the refusal is audible"
+        assert chosen == [], "and it is still a refusal"
+        assert screen.is_active
+
+        # A row with content copies, and does NOT ring.
+        screen._move_to(0)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert rings == [1], "a successful copy is not an error"
+        assert len(chosen) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_too_small_notice_keeps_esc_when_it_cannot_keep_the_rest() -> None:
+    """Round 1, U8 and NIT-1. The notice is pinned to ONE row in the
+    stylesheet, so below its own width it wrapped and the pin clipped it: `esc`
+    — the ACTIONABLE half — sheds first, leaving `terminal too small for /copy
+    ·`, a dangling separator that reads as a rendering fault. The footer
+    already solves this by keeping `esc quit` last; the notice now does the
+    same with two forms.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        chosen: list[CopyTarget | None] = []
+        screen = await _open(app, _targets("first", "second"), pilot, chosen.append)
+
+        for width in (40, 30, 20, 16):
+            await pilot.resize_terminal(width, 8)
+            await pilot.pause()
+            await pilot.pause()
+            assert not screen.is_drawable, f"{width} columns must be too small"
+            text = str(screen._too_small.content)
+            assert "esc" in text, f"the way out was shed at {width} columns: {text!r}"
+            assert cell_len(text) <= width, f"the notice wraps at {width}: {text!r}"
+            assert not text.rstrip().endswith("·"), f"dangling separator at {width}"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert chosen == [None], "and esc really does work throughout"
+
+
+@pytest.mark.asyncio
+async def test_a_resize_keeps_the_reading_position_instead_of_dropping_it() -> None:
+    """Round 1, U7. `on_resize` clamped the offset and then called `_move_to`,
+    which reset it to 0 regardless, so the clamp could not be observed and
+    someone widening their terminal to read a long block more comfortably was
+    thrown back to line 1. Falls out of the U2 fix; asserted so it stays out.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        body = "\n".join(f"line {index}" for index in range(201))
+        screen = await _open(app, _targets(body), pilot)
+
+        screen._scroll_preview_to(40)
+        await pilot.pause()
+        assert screen._preview_offset == 40
+
+        for size in ((80, 24), (140, 40), (100, 30)):
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            await pilot.pause()
+            assert screen._preview_offset > 0, f"the position was dropped resizing to {size}"
+            assert screen._preview_offset <= 40

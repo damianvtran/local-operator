@@ -266,9 +266,19 @@ async def test_the_footer_is_always_the_last_drawn_row() -> None:
                 # fixture's: a short answer overflows a 14-row card's preview
                 # too, and asserting otherwise would pin the fixture rather
                 # than the rule.
-                scrollable = screen._preview_source_lines() > screen._preview_rows
+                #
+                # Read off the PAINTED FRAME — whether the pane drew a `… N
+                # more lines` marker — and not from the predicate under test.
+                # Round 1 (MAJOR-1) found this test deriving `expected` from
+                # the very expression the footer used, so it asserted the
+                # implementation against itself and passed for ANY predicate,
+                # including the one that was wrong. The marker is the user's
+                # evidence that the preview overflows, so it is the right
+                # thing for the footer to be checked against.
+                lines = screen.render_lines_for_test()
+                scrollable = any("more lines" in line for line in lines)
                 expected = overflows if scrollable else fits
-                assert screen.render_lines_for_test()[-1] == expected, (height, scrollable)
+                assert lines[-1] == expected, (height, scrollable, lines[-1])
                 seen.add(scrollable)
     assert seen == {True, False}, f"both sides of the gate must be exercised: {seen}"
 

@@ -16,6 +16,8 @@ The tree itself is a SNAPSHOT taken when the screen was built. See
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from rich.cells import cell_len
 from rich.console import Console
 from rich.style import Style
@@ -93,6 +95,12 @@ GUTTER_THUMB_CELLS = 2
 #: on terminals that draw one today. It is shed instead, the discipline
 #: :meth:`CopyPickerScreen._footer_text` already applies to hints.
 GUTTER_SHED_HEADROOM = 4
+#: Shortest track that can carry a PROPORTION. On one or two rows the thumb
+#: either fills the track — the visual language for "everything fits", beside
+#: a `↓ N more` cue saying it does not — or occupies half of it regardless of
+#: where the window sits. Three rows is the first height at which a thumb has
+#: somewhere to be that is neither of those. See `_gutter_drawn`.
+MIN_GUTTER_TRACK_ROWS = 3
 #: Footer hints, widest first, paired with the order they are SHED in. The
 #: footer is the only statement of how to leave, so a narrow card drops the
 #: movement hints rather than the whole row — `esc quit` is eight cells and
@@ -136,6 +144,29 @@ MIN_CARD_INNER_ROWS = 7
 #: clipboard": that string is what the pinned tests use to assert the card is
 #: absent, and a notice that tripped it would make the guard unable to fail.
 TOO_SMALL_NOTICE = "terminal too small for /copy · esc"
+#: The same notice for a card too narrow to hold the full one. `esc` is the
+#: ACTIONABLE half and it used to shed FIRST, leaving `terminal too small for
+#: /copy ·` — a dangling separator that reads as a rendering fault — and then
+#: dropping the one word that tells the user how to leave (round 1, U8). The
+#: footer already solves this by shedding hints and keeping `esc quit` last;
+#: this is the same discipline in two forms rather than a truncation, because
+#: there is only one thing here worth keeping. 14 cells against 34.
+TOO_SMALL_NOTICE_SHORT = "too small · esc"
+
+
+class _PointerAt(NamedTuple):
+    """A bare screen coordinate with the two attributes the hit-tests read.
+
+    :meth:`CopyPickerScreen._index_at` and :meth:`_pointer_row_of` take an
+    "event" but use only ``screen_x``/``screen_y``. Re-resolving the hover
+    after the window moved has a coordinate and no event — synthesising a real
+    ``events.MouseMove`` for it would mean inventing a widget, a button state
+    and deltas that no hit-test reads, and posting it would re-enter the
+    handler. This is the coordinate, and nothing else.
+    """
+
+    screen_x: int
+    screen_y: int
 
 
 class CopyPickerScreen(ModalScreen[CopyTarget | None]):
@@ -208,6 +239,17 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # `_selected`: hover says "clickable", the cursor says "Enter takes
         # this", and painting them identically would show two selected rows.
         self._hovered: int | None = None
+        # Last pointer position seen on this screen, in SCREEN coordinates.
+        # Kept because `_hovered` is an index into `_flat` and the window
+        # moves under a resting pointer: a real terminal sends no MouseMove
+        # while only the wheel turns, so the highlight has to be recomputed
+        # from the coordinate rather than carried (round 1, U4/Q3).
+        self._pointer_at: tuple[int, int] | None = None
+        # `(index, screen coordinate)` the current click chain is bound to.
+        # A double-click copies THIS row rather than re-resolving the
+        # coordinate, because the first click recentres the tree under the
+        # pointer — see `on_click` (round 1, U1/Q1).
+        self._click_anchor: tuple[int, tuple[int, int]] | None = None
         # Wrapped preview rows, keyed `(target.id, width)`. See
         # `_wrap_preview` for why that key is total and why the cache exists.
         self._wrap_cache: dict[tuple[str, int, int], tuple[list[Text], list[int]]] = {}
@@ -302,12 +344,17 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         visible, which reads as the key being broken rather than as the
         document being short — and it spends cells a narrow card needs for the
         hints that do apply.
+
+        The gate reads :meth:`_preview_overflows`, the SAME fact the pane's
+        `… N more lines` marker is drawn from. It used to compare
+        ``_preview_source_lines() > _preview_rows``, which is source lines
+        against wrapped rows: on ordinary prose (one long source line per
+        paragraph) the pane overflowed with FEWER source lines than rows, so
+        the frame drew the marker while the footer — the only place
+        `shift+↑↓` is ever named — declined to say the preview scrolled, in
+        one screenshot (round 1, MAJOR-1). One overflow fact, two cues.
         """
-        hints = [
-            hint
-            for hint in FOOTER_HINTS
-            if hint != PREVIEW_HINT or self._preview_source_lines() > self._preview_rows
-        ]
+        hints = [hint for hint in FOOTER_HINTS if hint != PREVIEW_HINT or self._preview_overflows()]
         while len(hints) > 1 and cell_len(" · ".join(hints)) > width:
             hints.pop(0)
         return " · ".join(hints)
@@ -403,18 +450,32 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         only choice that leaves one uniform rule on the page. `home`/`end` are
         the better answer to "take me to the other end" anyway.
         """
-        # The preview is a DIFFERENT DOCUMENT once the selection changes, so
-        # the offset resets on every cursor move — including one that lands
-        # where it already was, which costs nothing and removes a state where
-        # the reset depends on whether the clamp happened to move anything.
-        # Carrying an offset across targets would open the next preview
-        # part-way down a document the user never scrolled.
-        self._preview_offset = 0
         if not self._flat:
             self._selected = 0
+            self._preview_offset = 0
             self._repaint()
             return
-        self._selected = max(0, min(len(self._flat) - 1, index))
+        clamped = max(0, min(len(self._flat) - 1, index))
+        # The preview is a DIFFERENT DOCUMENT once the selection changes, so
+        # the offset resets — but ONLY when the index actually changed.
+        # Resetting unconditionally meant a movement that is a complete visual
+        # no-op (`up`/`home`/`pageup` already at the top row, `down`/`end` at
+        # the last, or a wheel notch at either end) still threw away the
+        # user's reading position, with no history and no way back: 90
+        # `shift+down` to recover a place lost to a key that moved nothing
+        # (round 1, U2). It bites hardest on this surface's own best case, a
+        # single long answer, where the tree is ONE row so every arrow press
+        # is such a no-op. The old comment argued the unconditional form
+        # "removes a state where the reset depends on whether the clamp
+        # happened to move anything" — but that state is exactly what a user
+        # expects: nothing moved, so nothing should have changed.
+        if clamped != self._selected:
+            self._preview_offset = 0
+        self._selected = clamped
+        # The cursor move may have scrolled the window under a resting
+        # pointer, which is what left the highlight on a row the pointer was
+        # not over. Resolved before the repaint so one paint carries both.
+        self._refresh_hover()
         self._repaint()
 
     def _preview_source_lines(self) -> int:
@@ -428,20 +489,94 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             return 0
         return len(target.preview.splitlines())
 
+    def _preview_tail_offset(self) -> int:
+        """The LAST useful offset: the one whose pane ends on the last line.
+
+        This is the single definition of "the preview overflows" that the
+        whole surface derives from — the footer's `shift+↑↓ preview` hint, the
+        `… N more lines` marker's existence, and the scroll clamp all read it,
+        so the frame cannot contradict itself in the way review round 1 found
+        it doing (MAJOR-1: the pane drew `… 4 more lines` while the footer
+        declined to say the preview scrolled, because the two were computed in
+        DIFFERENT UNITS — source lines against wrapped rows — on ordinary
+        prose that wraps, which is most assistant answers).
+
+        Returning **0** when the document already fits is the other half of
+        that fix (MAJOR-2/U5). The previous ceiling was ``source_lines - 1``
+        unconditionally, so a three-line preview in a sixteen-row pane still
+        scrolled, pushing content it had room for off the top of the frame and
+        leaving blank rows behind — the `less` contract, and the tree's own
+        `down` contract, are both that scrolling stops with the last line at
+        the bottom.
+
+        The count walks ``rows_per_source`` BACKWARDS from the end, because
+        the two units only convert through that map: filling a pane of
+        ``content_rows`` wrapped rows consumes however many source lines those
+        rows came from, which varies per line. Walking from the end asks the
+        question the clamp actually has — "what is the first source line whose
+        remainder still fills the pane?" — and answers it exactly, at any
+        width, without ever subtracting a row count from a line count. That
+        subtraction is the defect `_preview_lines` documents at length and the
+        one this method exists not to re-introduce.
+        """
+        target = self.selected_target()
+        source_total = self._preview_source_lines()
+        if target is None or source_total <= 0:
+            return 0
+        # `_preview_rows` is already the pane's CONTENT height — `_card_text`
+        # stores it net of the header row — and the tail is the offset whose
+        # remainder fills exactly that, with no marker row needed because
+        # there is nothing left to announce.
+        content_rows = max(0, self._preview_rows)
+        if content_rows <= 0:
+            return max(0, source_total - 1)
+
+        # Wrapped from the LAST window, so a long document costs one wrap of
+        # the tail rather than of the whole body: only the final rows can
+        # decide where the tail begins. The cache makes a repeat free.
+        window_start = self._wrap_window_start(max(0, source_total - 1))
+        width = max(1, self._card_width() - 2)
+        _, rows_per_source = self._wrap_preview(target, width, window_start)
+        if not rows_per_source:
+            return max(0, source_total - 1)
+
+        # Lines below the mapped window are not wrapped here (the map covers
+        # at most PREVIEW_WRAP_BUDGET); they cannot be part of a tail that
+        # begins inside the window, so the ceiling stays the last line.
+        mapped_end = window_start + len(rows_per_source)
+        if mapped_end < source_total:
+            return max(0, source_total - 1)
+
+        rows = 0
+        for back, count in enumerate(reversed(rows_per_source), start=1):
+            rows += count
+            if rows >= content_rows:
+                # `back` source lines fill the pane, so the tail starts at the
+                # first of them. One earlier line would overflow it.
+                return max(0, source_total - back)
+        # The whole mapped window fits the pane. Only a window that starts at
+        # line 0 proves the DOCUMENT fits; otherwise the tail is the window.
+        return window_start
+
+    def _preview_overflows(self) -> bool:
+        """Whether the preview has anything the pane is not already showing.
+
+        The one fact both cues are gated on. See :meth:`_preview_tail_offset`.
+        """
+        return self._preview_tail_offset() > 0
+
     def _scroll_preview_to(self, offset: int) -> None:
         """Move the preview, CLAMPED at both ends — never wrapped.
 
-        Clamped for the same reason `_move_to` is, and the ceiling is the LAST
-        SOURCE LINE rather than ``total - preview_rows``: the pane's row count
-        is in wrapped rows and the offset is in source lines, so subtracting
-        one from the other would over- or under-shoot by however much the
-        document wraps. Stopping at the last line means a fully scrolled
-        preview can show a single line above blank rows, which is the honest
-        frame — the remainder marker has vanished by then, so the blank space
-        reads as "that is the end" rather than as a rendering fault.
+        Clamped for the same reason `_move_to` is. The ceiling is
+        :meth:`_preview_tail_offset` — the offset whose pane ends on the last
+        source line — rather than ``source_lines - 1``, so scrolling stops
+        with the document's end at the bottom of the pane instead of sliding
+        it up into blank rows (round 1, MAJOR-2/U5). It is deliberately NOT
+        ``total - preview_rows``: that subtracts wrapped rows from source
+        lines, the unit confusion this file documents throughout.
         """
-        ceiling = max(0, self._preview_source_lines() - 1)
-        clamped = max(0, min(ceiling, offset))
+        clamped = max(0, min(self._preview_tail_offset(), offset))
         if clamped == self._preview_offset:
             return
         self._preview_offset = clamped
@@ -509,9 +644,21 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         Refusing here rather than dropping the empty child from the tree: the
         block IS in the message, and a `Block 2` that vanishes from the list
         makes the remaining numbers disagree with what the user is reading.
+
+        The refusal RINGS. Marking the row (`py · empty` in the hint column,
+        and `Preview · py · empty` in the header) predicts the refusal, and
+        that prediction does real work — but a user who did not read the hint
+        column pressed Enter and got nothing at all: no notice, no bell, no
+        frame change, which is an application that appears to have stopped
+        responding to the key (round 1, U6). `App.bell` is the right register
+        for it — a toast would demand a dismissal for a keypress the user can
+        simply repeat elsewhere, and this screen deliberately raises no
+        notices of its own. On a terminal with the bell disabled the marking
+        is still there, which is why both halves exist.
         """
         target = self.selected_target()
         if target is None or not target.content:
+            self.app.bell()
             return
         self._dismiss_result(target)
 
@@ -560,13 +707,28 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         routing on stale state would send the first notch to the wrong pane.
         """
         row = self._pointer_row_of(event)
-        if row is not None and row >= self._preview_top_row:
+        # OFF THE CARD IS INERT, exactly as it is for the click. The notch
+        # used to fall through to `action_move`, so a pointer ONE COLUMN
+        # outside the card did something categorically different and
+        # destructive: it moved the cursor and discarded the reading position
+        # (round 1, U3/Q2). At 100x30 that zone is three cells left of the
+        # preview text the user is reading, and trackpad drift of three cells
+        # while scrolling is routine rather than adversarial; on a
+        # single-node tree it was a PURE loss, since nothing moved and the
+        # page was simply gone.
+        #
+        # The old justification — "movement is clamped, reversible and
+        # visible" — is true of the cursor and false of the offset it silently
+        # discarded. `_index_at` had already decided the backdrop is inert to
+        # clicks, and one gesture map per surface is easier to learn than two.
+        if row is None:
+            return
+        if row >= self._preview_top_row:
             self._scroll_preview_to(self._preview_offset + direction * self._wheel_step())
             return
-        # Anywhere else on the card — including the chrome and the backdrop —
-        # moves the cursor. That is the generous reading and it is safe:
-        # movement is clamped, reversible and visible, unlike the click, which
-        # is why only the click carries `_index_at`'s three guards.
+        # The tree pane and its own chrome (title and rules) move the cursor:
+        # inside the card the generous reading is right, and it is the pane
+        # the pointer is visibly over.
         self.action_move(direction * self._wheel_step())
 
     def on_mouse_scroll_down(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -603,28 +765,55 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         Button 1 only, and the button is tested BEFORE any state changes: a
         right-click asking for a context menu is measured to arrive here, and
         it must not move the cursor on its way to being ignored.
+
+        **The copy is bound to the row the FIRST click resolved, not to a
+        fresh hit-test on the second.** `_window_start` centres the cursor, so
+        click 1 recentres the tree UNDER A STATIONARY POINTER and the same
+        screen coordinate then names a different row: measured at ~41% of the
+        pane on any overflowing tree, and it copied `Answer 10` when the user
+        aimed at `Quote 1` (round 1, U1/Q1 — the clipboard bytes were
+        captured). Two clicks of one gesture must mean one row, so the chain
+        remembers which. This does not re-open the arbitration that made a
+        double-click the copy gesture; it is what makes that gesture honest.
         """
         if getattr(event, "button", 1) != 1:
             return
         index = self._index_at(event)
         if index is None:
+            # A chain broken off the tree cannot be continued onto it: the
+            # next click on a row must read as a fresh first click.
+            self._click_anchor = None
             return
         event.stop()
-        if index != self._selected:
-            self._move_to(index)
         # `Click.chain` is Textual's own double-click count (0.5 s threshold),
-        # so the contract needs no timing invented here.
-        if getattr(event, "chain", 1) >= 2:
+        # so the contract needs no timing invented here. Textual only
+        # increments the chain while the pointer stays on ONE screen offset,
+        # which is what makes the anchor safe: a chained click is by
+        # definition the same physical spot, so the row the user aimed at is
+        # the row the first click bound.
+        chain = getattr(event, "chain", 1)
+        anchor = self._click_anchor
+        coordinate = (event.screen_x, event.screen_y)
+        if chain >= 2 and anchor is not None and anchor[1] == coordinate:
+            target_index = anchor[0]
+        else:
+            target_index = index
+            self._click_anchor = (index, coordinate)
+        if target_index != self._selected:
+            self._move_to(target_index)
+        if chain >= 2:
             self.action_choose()
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._pointer_at = (event.screen_x, event.screen_y)
         index = self._index_at(event)
         if index != self._hovered:
             self._hovered = index
-            # Tree rows only: `_tree_lines` is 0.07 ms against the preview's
-            # 31 ms, and a hover changes nothing the preview draws. Repainting
-            # the whole card per row the pointer crosses is what made a mouse
-            # sweep cost 365 ms of loop CPU.
+            # Tree rows only: the tree is roughly two orders of magnitude
+            # cheaper to draw than the preview (see `_wrap_preview`), and a
+            # hover changes nothing the preview draws. Repainting the whole
+            # card per row the pointer crosses is what made a mouse sweep
+            # dominate the loop before the wrap was memoised.
             self._repaint()
         # A hand over a tree row, the default shape everywhere else INCLUDING
         # the preview: the preview is scrollable, not clickable, and a hand
@@ -633,7 +822,46 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # property's own observer and no-ops when the shape did not change.
         self.styles.pointer = "pointer" if index is not None else "default"
 
+    def _refresh_hover(self) -> bool:
+        """Re-resolve the highlight against the LAST KNOWN pointer position.
+
+        `_hovered` is an index into `_flat`, but the window moves under a
+        resting pointer — the wheel scrolls the tree and a click recentres it
+        — and a real terminal sends NO `MouseMove` while only the wheel turns.
+        So the highlight was left painted on a row the pointer was not over,
+        and six notches scrolled it off the pane entirely while the hand
+        cursor stayed (round 1, U4/Q3).
+
+        That matters more here than it looks: the hover highlight is the
+        ENTIRE affordance for the mouse on this screen, deliberately — the
+        footer does not advertise the click — so a highlight that is not under
+        the pointer undermines the one thing teaching the feature. It also hid
+        U1 in the exact frame where it was still catchable, by confirming an
+        aim the second click did not honour.
+
+        Called from every path that can move the window without a pointer
+        event. Cheap: it is one hit-test plus the repaint the caller was
+        already doing, and it no-ops when the row did not change.
+
+        `session_picker` has the identical staleness and is NOT fixed here —
+        that is its own change, deliberately out of this PR's scope.
+
+        Returns whether the highlight moved, so a caller that is about to
+        repaint anyway does not pay for a second one.
+        """
+        if self._pointer_at is None:
+            return False
+        index = self._index_at(_PointerAt(*self._pointer_at))
+        self.styles.pointer = "pointer" if index is not None else "default"
+        if index == self._hovered:
+            return False
+        self._hovered = index
+        return True
+
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._pointer_at = None
+        # A chain cannot survive the pointer leaving the card.
+        self._click_anchor = None
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
@@ -647,19 +875,30 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         relative to the whole block — title, rules, preview and footer
         included.
 
-        Three guards, all load-bearing, and all three are `session_picker`'s.
-        Its docstring records that its first cut without them resolved a click
-        on the footer to session #12 and the dimmed backdrop to row 0, and
-        BOTH of those coordinates were re-measured as still delivered here —
-        so these are mandatory rather than defensive:
+        Three guards, all three `session_picker`'s. Its docstring records that
+        its first cut without them resolved a click on the footer to session
+        #12 and the dimmed backdrop to row 0, and BOTH of those coordinates
+        were re-measured as still delivered here:
 
         - the point must be inside the body's region (the modal's backdrop
           covers the whole screen and bubbles events from well outside the
           card, including the columns to its left where ``y`` alone still
-          looks valid);
+          looks valid). **Mandatory**: without it those measured coordinates
+          resolve to real rows;
         - the row must be inside the DRAWN page, not merely inside ``_flat`` —
           a short tree caps the pane at the rows that exist, and the blank
-          remainder below them would otherwise resolve to real targets;
+          remainder below them would otherwise resolve to real targets.
+          **Defensive on this screen, not mandatory.** Review round 1
+          brute-forced the reachable state space (``_flat`` 0-39 x
+          ``available`` 1-39 x every cursor position) and found NO state where
+          it changes the outcome: ``_window_start``'s clamp to
+          ``len(_flat) - tree_rows`` and ``_split_rows``' ``min(len(_flat), …)``
+          cap already guarantee ``start + tree_rows <= len(_flat)``, so the
+          third guard subsumes it. It is kept as defence against a future
+          change to either invariant — both live in other methods — and this
+          note replaces an earlier one calling all three "mandatory rather
+          than defensive", which sent a reader hunting for a case that cannot
+          occur (MINOR-2);
         - and the resulting index must still be a row that exists.
 
         Title, rules, preview, footer, card padding and backdrop are therefore
@@ -744,11 +983,16 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         position the document no longer has would paint blank.
         """
         self._wrap_cache.clear()
-        # Before `_move_to`, which resets the offset to 0 anyway — the clamp
-        # is here so the invariant holds even if that reset is ever narrowed
-        # to "only when the index actually changed".
-        self._scroll_preview_to(self._preview_offset)
+        # `_move_to` first, so the split and the window are re-derived at the
+        # new size, and it no longer resets the offset for a resize (the index
+        # does not change, U2). Then the clamp, which now OBSERVABLY does what
+        # its docstring always claimed: the position is kept and clamped
+        # rather than dropped, so widening the terminal to read a long block
+        # more comfortably no longer throws the reader back to line 1
+        # (round 1, U7). The order matters — the clamp reads `_preview_rows`,
+        # which `_card_text` only refreshes during that repaint.
         self._move_to(self._selected)
+        self._scroll_preview_to(self._preview_offset)
 
     def _repaint(self) -> None:
         body = getattr(self, "_body", None)
@@ -769,6 +1013,19 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         notice = getattr(self, "_too_small", None)
         if notice is not None and notice.is_mounted:
             notice.display = not drawable
+            if not drawable:
+                # The notice is pinned to ONE row in the stylesheet, so a
+                # string wider than the screen wraps and the pin clips it —
+                # the notice that exists to explain a degraded frame becoming
+                # degraded itself. Choosing the form that fits keeps `esc`
+                # down to fourteen columns instead of shedding it first (U8,
+                # NIT-1).
+                columns = self._screen_size()[0]
+                notice.update(
+                    TOO_SMALL_NOTICE
+                    if cell_len(TOO_SMALL_NOTICE) <= columns
+                    else TOO_SMALL_NOTICE_SHORT
+                )
 
     def render_lines_for_test(self) -> list[str]:
         """The card as plain strings — what a user reads.
@@ -830,7 +1087,13 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # overflows costs no row to say so — which matters because the row
         # budget is exactly what the split above is fighting to recover, and
         # at 80x24 the tree is six rows, two of which would have been signage.
-        self._append_rule(out, width, rule, f"↑ {above}" if above else "")
+        # `↑ N more`, not `↑ N`: a bare number reads as an ordinal ("row 6")
+        # rather than as a remainder, which is the exact hazard that ruled out
+        # an `N of M` position indicator on this card. `↓ N more` cannot be
+        # misread that way, so the asymmetry was worth closing rather than
+        # preserving (design round 1, D12). It is free — the slot below is
+        # already sized on the wider `↓` form.
+        self._append_rule(out, width, rule, self._cue("↑", above) if above else "")
         out.append("\n")
 
         for line in self._tree_lines(width, tree_rows):
@@ -845,7 +1108,7 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # clipped at both ends at once, and a down-only cue would then be
         # actively misleading — it would say the list continues below while
         # silently hiding the rows above.
-        self._append_rule(out, width, rule, f"↓ {below} more" if below else "")
+        self._append_rule(out, width, rule, self._cue("↓", below) if below else "")
         out.append("\n")
 
         target = self.selected_target()
@@ -857,6 +1120,25 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         out.append("\n")
         out.append(self._footer_text(width), style=dim)
         return out
+
+    def _cue(self, arrow: str, count: int) -> str:
+        """A remainder cue whose COLUMNS do not move as its digits change.
+
+        The count is right-aligned in a field as wide as the largest it can
+        ever reach (``len(_flat)``), so `↑  3 more` and `↑ 14 more` occupy the
+        same cells and the digits line up under each other. Reserving the
+        rule's slot alone was not enough: the cue is right-aligned into it, so
+        a one-digit value started a column further right than a two-digit one
+        and the text visibly stepped sideways as the user crossed 9→10 while
+        merely scrolling (round 1, U9). That is precisely what item C1 asked
+        to avoid, and `todo_panel`'s U1 is the same lesson.
+
+        The field is sized from the row count rather than from the current
+        value for the same reason the rule's slot is: a width that tracks the
+        present number is a width that changes.
+        """
+        digits = len(str(max(1, len(self._flat))))
+        return f"{arrow} {count:>{digits}} more"
 
     def _append_rule(self, out: Text, width: int, rule: Style, cue: str) -> None:
         """A full-width rule, with ``cue`` right-aligned into its last cells.
@@ -874,7 +1156,7 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             return
         # Widest rendering: every row hidden in that direction, in the longer
         # of the two cue shapes.
-        slot = cell_len(f"↓ {max(1, len(self._flat))} more")
+        slot = cell_len(self._cue("↓", max(1, len(self._flat))))
         keep = max(0, width - slot - 1)
         out.append("─" * keep, style=rule)
         pad = max(0, width - keep - cell_len(cue))
@@ -891,6 +1173,17 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         cannot scroll is a scrollbar for a document that fits, and it makes
         the cue's absence stop meaning "this is everything".
 
+        A track shorter than :data:`MIN_GUTTER_TRACK_ROWS` is dropped for the
+        same reason, one step further on. At 100x14 the split gives the tree
+        ONE row with eighteen hidden, and a one-row track can only paint a
+        thumb that fills it — the visual language for "everything fits", while
+        `↓ 18 more` on the rule says the opposite (design round 1, D14). The
+        contradiction is forced by geometry rather than by the anchor, so
+        fixing D11 does not fix it: below three rows no thumb can express a
+        proportion at all. The card at that height is a degraded frame either
+        way; dropping the gutter removes the one element in it that is
+        actively wrong and leaves `↓ N more` to do the work alone.
+
         And it is a SHED, not an optional decoration. The gutter costs
         :data:`GUTTER_THUMB_CELLS` off every tree row, which raises the
         narrowest row the card can lay out — so drawing it unconditionally
@@ -902,6 +1195,8 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         if rows is None:
             rows = self._tree_rows
         if len(self._flat) <= rows:
+            return False
+        if rows < MIN_GUTTER_TRACK_ROWS:
             return False
         return width - self._min_flat_width() >= GUTTER_SHED_HEADROOM
 
@@ -1020,16 +1315,39 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         thumb is the only CONTINUOUS signal on this surface — the `↓ N more`
         cue says how much is left, the thumb says WHERE you are and moves as
         you go — which is why both exist and neither replaces the other.
+
+        The top is anchored on SCROLL PROGRESS (``start / max_start``) across
+        the track's free travel, not on the window's fraction of the list.
+        Those are two different mappings, and the earlier
+        ``min(rows - span, round(start * rows / total))`` let the clamp win one
+        window position early: the thumb bottomed out at ``start=2`` of 3 while
+        the rule still read `↓ 1 more`, so two distinct list positions painted
+        an IDENTICAL gutter and the user's final arrow press moved the
+        continuous signal not at all (design round 1, D11). This is the model
+        `ask_picker._scrollbar_thumb` and `usage_panel._scrollbar_thumb`
+        already use — span from the viewport fraction, top from the offset's
+        fraction of its own range — so the app's three bars agree.
+
+        The division FLOORS rather than rounds, and that is the part carrying
+        the invariant. ``floor(start * travel / max_start) == travel`` exactly
+        when ``start == max_start``, so **"thumb at the bottom of the track"
+        means "no `↓ N more`" at every shape**. Rounding is very nearly right
+        and fails the same way the original did on shapes where the fraction
+        crosses ``travel - 0.5`` early: at 32 rows in a 12-row pane
+        (``span=4``, ``travel=8``, ``max_start=20``) ``round(19*8/20) = 8``
+        bottoms the thumb at ``start=19``, one window before the end, exactly
+        the defect being fixed. Verified over every ``start`` for both that
+        shape and the 19-row one D11 was reported against.
         """
         total = len(self._flat)
         if total <= rows:
             return range(0)
         span = max(1, round(rows * rows / total))
-        # Anchored on the window rather than the cursor, since the window is
-        # what the track represents. Clamped so a thumb at the end of the list
-        # cannot be drawn past the bottom of the track.
-        top = min(rows - span, round(start * rows / total))
-        return range(max(0, top), max(0, top) + span)
+        travel = rows - span
+        max_start = total - rows
+        top = (start * travel) // max_start if travel > 0 and max_start > 0 else 0
+        top = max(0, min(travel, top))
+        return range(top, top + span)
 
     @staticmethod
     def _append_gutter(line: Text, on_thumb: bool, row_bg: Style) -> None:
@@ -1184,14 +1502,42 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         frozen, the tree is a snapshot taken when the screen was pushed and
         cannot change while it is open, and width and window are the only
         other inputs — so a hit is byte-identical to a recomputation by
-        construction. The cost of not caching is not theoretical either. Every
-        repaint re-wrapped the whole preview through ``rich.Syntax``: measured
-        at 31 ms against ``_tree_lines``' 0.07 ms, so one mouse sweep across
-        the tree spent 365 ms of loop CPU with the loop frozen throughout, and
-        the same sweep warm costs 2 ms. Hover made that trivial to hit without
-        meaning to press anything, which is what turned a pre-existing
-        inefficiency into a blocker for the mouse work. Cleared on resize,
-        where width changes wholesale.
+        construction.
+
+        The cost of not caching is not theoretical either. Every repaint
+        re-wrapped the preview through ``rich.Syntax``, which is two orders of
+        magnitude dearer than the tree beside it. Measured with
+        ``time.thread_time`` (CPU, not wall — AGENTS.md), median of 9, on an
+        M-series laptop at 100x30, so treat the RATIO as the durable fact and
+        the absolute numbers as this machine's:
+
+        ===============================  =========  =========  =========
+        preview shape                    wrap cold  wrap warm  _tree_lines
+        ===============================  =========  =========  =========
+        plain, 121 lines                   3.40 ms   0.00025 ms   0.015 ms
+        plain, 3002 lines                  3.58 ms   0.00025 ms   0.014 ms
+        python block, 499 lines            4.19 ms   0.00025 ms   0.024 ms
+        python block, 499 lines @200col    4.31 ms   0.00025 ms   0.023 ms
+        ===============================  =========  =========  =========
+
+        Note what the third column says: the wrap is ~200x the tree's cost,
+        and a hover changes ONLY what the tree draws — which is why
+        `on_mouse_move` repaints without touching the preview, and why the
+        memo exists at all. `_card_text` as a whole goes from ~4.06 ms cold to
+        ~0.10 ms warm on the 121-line answer, so a mouse sweep across the tree
+        costs one wrap rather than one per row.
+
+        The figures are also flat in the document's length, which is
+        :data:`PREVIEW_WRAP_BUDGET` doing its job: a 3002-line answer wraps no
+        more source than a 121-line one, so neither the cache entry nor the
+        wrap grows with the message. An earlier revision of this comment
+        quoted 31 ms / 0.07 ms / a 365 ms sweep; those do not reproduce at the
+        shapes described here (QA round 1, Q4), and 31 ms was only reachable
+        on a wide card before the budget bounded the work. An unqualified
+        number that does not reproduce is worse than no number, so the shape,
+        the clock and the machine are stated above.
+
+        Cleared on resize, where width changes wholesale.
         """
         key = (target.id, width, window_start)
         cached = self._wrap_cache.get(key)
