@@ -31,6 +31,8 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
+from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -66,9 +68,22 @@ class SidebarRemote(FakeSession):
 
     is_remote = True
 
-    def __init__(self, session_id: str, *, history=(), cost=None, context=None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        history=(),
+        cost=None,
+        context=None,
+        pending_fork: bool = False,
+    ) -> None:
         super().__init__()
         self._id = session_id
+        #: Opt-in, because `has_pending_fork` is the fact the band's `forking`
+        #: segment reads and only ONE test wants it true. A `/fork` issued on a
+        #: streaming session defers to a turn boundary (`owned.py:2208`), so the
+        #: request stays live — and cancellable — across a park.
+        self._pending_fork = pending_fork
         self._history = list(history)
         self._store = FrontendStateStore(
             FrontendSessionState(
@@ -91,6 +106,9 @@ class SidebarRemote(FakeSession):
     @property
     def session_id(self) -> str:
         return self._id
+
+    def has_pending_fork(self) -> bool:
+        return self._pending_fork
 
     @property
     def frontend_state(self):
@@ -423,3 +441,130 @@ async def test_returning_to_an_empty_conversation_shows_the_splash_under_a_notic
             assert welcome.display, "the splash is mounted but hidden"
             assert app._welcome_visible is True
             assert app.screen.has_class("boot")
+
+
+@pytest.mark.asyncio
+async def test_a_parked_conversation_keeps_its_pending_fork_indicator():
+    """A `/fork` still awaiting its boundary must survive a park-and-return.
+
+    The third RETIRE-only clear, found by the same audit that produced the other
+    two (review round 2, MAJOR-3). `fork_pending` is the one field the ungated
+    `status.update` writes that NEITHER restore path repaints: `_adopt_session`
+    does not touch it, `FrontendSessionState` carries no fork-pending field so a
+    snapshot cannot either, and the only writer of the truth
+    (`_sync_fork_pending`) is called from neither adoption path. So a clear on
+    the park leg is permanent for the lifetime of the request.
+
+    Why that matters more than a missing glyph: a deferred fork stays LIVE and
+    Ctrl+C-cancellable until the turn ends, so a band that stops saying `forking`
+    is the inverse of the lie `_schedule_fork_report` forbids — the user gets no
+    cue that a fork is coming and it lands minutes later out of nowhere.
+
+    Asserted on the RENDERED row, not on the flag: round 1's bug was state that
+    was set while the user saw nothing, so `_status._fork_pending` alone cannot
+    close this. `is_showing` confirms the drop ladder kept the segment at this
+    width, which is what makes reading the row a fair test rather than a
+    width-sensitive one.
+    """
+    home = SidebarRemote("home-session", pending_fork=True)
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            # The request, as `/fork` on a streaming session makes it: the
+            # session reports the pending fork and the band is synced from it.
+            app._sync_fork_pending()
+            for _ in range(5):
+                await pilot.pause()
+            assert app._status is not None
+            assert app._status.is_showing("fork"), "the band never showed `forking` to begin with"
+            assert FORK_PENDING_TEXT in app._status.render_text(100).plain
+
+            await _switch(app, pilot, busy)
+            await _switch(app, pilot, home)
+            for _ in range(10):
+                await pilot.pause()
+
+            # The truth is unchanged — the fork is still waiting for a boundary.
+            assert home.has_pending_fork() is True
+            assert app._status.is_showing("fork")
+            assert FORK_PENDING_TEXT in app._status.render_text(100).plain, (
+                "the band stopped saying `forking` after a sidebar round trip, "
+                "while the request is still live and still cancellable"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_park_withdraws_the_splash_toast_but_keeps_the_notice():
+    """The park drops the outgoing toast and keeps the outgoing splash row.
+
+    The notice and the toast are raised together by `_announce_on_splash` and
+    have opposite lifetimes, which is the distinction this asserts (design round
+    2, D2). The NOTICE is the parked conversation's own empty-state content and
+    must survive the round trip — that is what this PR exists to deliver. The
+    TOAST is a transient overlay ABOUT the conversation being left, so gating it
+    with the notice made a park carry it onto the session switched TO: "No
+    provider configured" sitting over a working session with real spend.
+
+    Both halves are asserted in ONE test deliberately, because they are a pair
+    that can drift apart: withdrawing the toast must not cost the notice, and
+    keeping the notice must not keep the toast. Split across two tests, a fix
+    for either could silently break the other and still show green.
+    """
+    home = SidebarRemote("home-session")
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+        cost=12.35,
+        context=98_765,
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            warning = "/login openai to get started - no provider configured."
+            app._announce_on_splash(warning, "warning")
+            for _ in range(5):
+                await pilot.pause()
+
+            live = [toast for toast in app.query(Toast) if toast.display]
+            assert live, "no toast was raised — the park has nothing to withdraw"
+
+            await _switch(app, pilot, busy)
+            for _ in range(10):
+                await pilot.pause()
+
+            # ON the session switched TO: nothing of the parked conversation's
+            # interruption is left standing over it. Counted from `display`
+            # rather than from the owner, because what the user sees is a card
+            # on screen; a hidden toast still holding a tag is invisible.
+            assert (
+                len([toast for toast in app.query(Toast) if toast.display]) == 0
+            ), "the parked conversation's toast followed the user onto another session"
+
+            await _switch(app, pilot, home)
+            for _ in range(10):
+                await pilot.pause()
+
+            # And the row the toast was raised for is still there, past the
+            # repaint that exposes a late loss.
+            assert app._splash_notice == warning
+            assert app._welcome is not None
+            app._welcome.refresh_info()
+            for _ in range(5):
+                await pilot.pause()
+            assert (
+                app._welcome._info.notice == warning
+            ), "withdrawing the toast cost the splash notice it was raised for"
+            rendered = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+            assert warning in rendered, "the notice is on the app but not on the painted splash"

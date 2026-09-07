@@ -4035,9 +4035,10 @@ class OperatorApp(App[None]):
             # still lands on its own number rather than on zero.
             #
             # `retire=False`: the outgoing conversation is PARKED, not destroyed.
-            # The splash notice and the dock density are the two pieces of state
-            # in there that nothing on this path restores, and both belong to the
-            # conversation the user can click straight back to.
+            # The splash notice, the dock density and the band's fork indicator
+            # are the three pieces of state in there that nothing on this path
+            # restores, and all belong to the conversation the user can click
+            # straight back to.
             self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
             self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
@@ -6903,10 +6904,22 @@ class OperatorApp(App[None]):
         context reading, the MCP segment and the model label are all overwritten
         a few lines later whichever path called this, so blanking them costs a
         park nothing and is what stops a never-used conversation inheriting the
-        previous one's figures. Only TWO things here have nobody to restore them
-        on the sidebar path — the splash notice and the dock density — and both
-        are therefore gated on ``retire``. They were not, and a park-and-return
-        silently discarded a standing setup warning and a user's ``ctrl+g``.
+        previous one's figures. THREE things here have nobody to restore them on
+        the sidebar path — the splash notice, the dock density and the band's
+        fork indicator — and all three are therefore gated on ``retire``. They
+        were not, and a park-and-return silently discarded a standing setup
+        warning, a user's ``ctrl+g``, and the ``forking`` segment of a request
+        that was still live and still cancellable.
+
+        Every other field the ungated ``status.update`` below writes was audited
+        against both restore paths (``_adopt_session``'s explicit repaint and
+        ``_apply_frontend_state``'s snapshot repaint) and all ten come back.
+        ``fork_pending`` is the sole structural exception, which is why it needs
+        the gate rather than a restore: ``FrontendSessionState`` carries no
+        fork-pending field, so no snapshot can repaint it, and the only writer of
+        the truth — :meth:`_sync_fork_pending` — is called from neither
+        ``_adopt_session`` nor ``_commit_sidebar_session``. A clear on the park
+        leg is therefore permanent for the lifetime of the pending request.
 
         The ledger figures themselves (`_total_cost`, `_spend_is_floor`, the
         naming bookkeeping) are properties of ``self._interaction`` and are
@@ -6939,8 +6952,17 @@ class OperatorApp(App[None]):
             # returning watched the only explanation of why it cannot answer
             # disappear on its own.
             self._splash_notice = None
-            for toast in self.query(Toast):
-                toast.withdraw(SPLASH_NOTICE)
+        # The TOAST goes on both legs, unlike the notice it was raised for. They
+        # are different objects with different lifetimes, as `_announce_on_splash`
+        # says: "The toast is the interruption; the splash row is what is still
+        # there after the toast dismisses." The row is the parked conversation's
+        # own empty-state content and must survive the round trip; the toast is a
+        # transient overlay ABOUT the conversation being left, and gating it with
+        # the notice made a park carry it onto the session switched TO — "No
+        # provider configured" sitting over a working session with real spend
+        # (design round 2, D2).
+        for toast in self.query(Toast):
+            toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -6963,7 +6985,15 @@ class OperatorApp(App[None]):
             # Cleared with the name it qualifies: the dead session's fork tag
             # must not describe the conversation replacing it.
             forked=False,
-            fork_pending=False,
+            # Retire-only, and `None` here means leave-alone rather than clear.
+            # Unlike its ten siblings in this call, nothing repaints this one:
+            # see the docstring's audit. A `/fork` deferred to a turn boundary
+            # stays live and cancellable across a park, so blanking the segment
+            # on that leg is the inverse of the lie `_schedule_fork_report`
+            # forbids — the band stops saying `forking` while the request the
+            # user could still Ctrl+C is pending, and the fork lands later with
+            # no cue that it was coming.
+            fork_pending=False if retire else None,
             mcp=McpStatus(),
             context_tokens=0,
             context_is_estimate=False,
