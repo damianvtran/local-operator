@@ -46,6 +46,44 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
         self.action_more()
 
 
+class OlderHistoryNotice(NoticeBlock, can_focus=True):
+    """The HEAD notice, and the twin of :class:`HistoryPageNotice` above it.
+
+    The two ends of one transcript solve the same problem — "there is more
+    conversation off this edge of the screen" — and they must not solve it in
+    opposite ways. The tail notice has always been a control: focusable,
+    clickable, `enter`-bound, with the `interactive-notice` styling that gives
+    it hover and focus affordances. The head notice was a bare label that
+    recited a keyboard chord (`ctrl+home`) which appears NOWHERE else in the
+    product — not in the footer hints, not in the `?` help screen — and which
+    on most Mac keyboards is itself a chord (`fn+ctrl+←`). A reader who had
+    learned to click the bottom notice would click this one and get nothing.
+
+    Making it a control is what lets the copy stay a plain statement: the row
+    no longer has to explain how to operate it, because it IS the thing you
+    operate. That matters most in the state this notice exists for — a frame
+    too tall to scroll, where the history is otherwise a dead end.
+    """
+
+    BINDINGS = [Binding("enter", "older", "Older messages", show=False)]
+
+    class Requested(Message):
+        def __init__(self, notice: OlderHistoryNotice) -> None:
+            super().__init__()
+            self.notice = notice
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text, "note")
+        self.add_class("interactive-notice")
+
+    def action_older(self) -> None:
+        self.post_message(self.Requested(self))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_older()
+
+
 class DraftRecoveryNotice(NoticeBlock, can_focus=True):
     BINDINGS = [Binding("enter", "restore", "Restore unsent prompt", show=False)]
 
@@ -175,7 +213,7 @@ class PreparedReplay(ReplayState):
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
-            self._resume_head_notice = NoticeBlock(RESUME_OLDER_NOTICE, "note")
+            self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
             self._resume_tail_notice = HistoryPageNotice()
@@ -394,7 +432,7 @@ def project_settled_rows(
     # #451/#452 exist to prevent. One extra mount of a one-line notice is
     # not the cost this bound is avoiding.
     if self._block_sink is None and self._resume_pending_head and self._resume_head_notice is None:
-        notice = NoticeBlock(RESUME_OLDER_NOTICE, "note")
+        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
         self._resume_head_notice = notice
         self._append_block(notice)
         appended = True

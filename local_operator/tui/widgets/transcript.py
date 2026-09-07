@@ -2597,9 +2597,26 @@ class TranscriptView(ScrollableContainer):
             self._blocks[-1] if self._blocks else None,
         )
         anchor_gap = anchor_block.virtual_region.y - old_scroll if anchor_block is not None else 0.0
+        # A reader who is FOLLOWING THE TAIL is not holding a position for this
+        # insert to preserve — they are holding the END, and `_size_updated`'s
+        # first branch already carries them there on every extent change. Two
+        # rules for one offset is one too many, and this is the direction that
+        # loses: the held anchor targets `max(0, anchor_y - gap)`, so an insert
+        # that lands while the frame is not yet scrollable (`scroll_y` and
+        # `max_scroll_y` both 0, which is exactly the initial resume fill) pins
+        # the reader to row 0 and keeps re-pinning them there as the extent
+        # grows beneath them. Measured before this guard: a resumed 401-message
+        # conversation at 120x200 settled at `scroll_y=0` against
+        # `max_scroll_y=210` — the reader opened ~120 messages BEHIND the
+        # newest, on a session they opened to see the latest state.
+        #
+        # Anchoring only when NOT following keeps the jitter fix exactly where
+        # it was written for (a reader who scrolled up to read history) and
+        # hands the tail case back to the one rule that owns it.
+        following_tail = self._tail_anchor.following
         # Armed BEFORE the mount so the very first extent change this insert
         # causes is already corrected; `_size_updated` fires during mount.
-        if anchor_block is not None:
+        if anchor_block is not None and not following_tail:
             self._insert_anchor = (anchor_block, anchor_gap)
         before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
@@ -2611,6 +2628,11 @@ class TranscriptView(ScrollableContainer):
         # The mount itself may not have triggered a resize yet; correct now so
         # no frame can be painted at the displaced offset even once.
         self._reanchor_insert()
+        if following_tail:
+            # Same reasoning in the tail direction, and for the same frame: the
+            # extent grew above the reader, so the end moved, and a follower is
+            # entitled to it on THIS frame rather than one refresh later.
+            self._scroll_to_tail()
 
         def settle_then_restore() -> None:
             self._settle_gaps(additions)
@@ -2626,6 +2648,15 @@ class TranscriptView(ScrollableContainer):
                     if on_settled is not None:
                         on_settled()
                     return
+                if self._tail_anchor.following:
+                    # The reader is on the tail (see the arming guard above):
+                    # restoring a held offset here would drag them off the end
+                    # they never left. Land them on it instead, and only then
+                    # hand the gate back.
+                    self._scroll_to_tail()
+                    if on_settled is not None:
+                        on_settled()
+                    return
                 # Inside the programmatic guard: this scroll is the insert's
                 # own, not a reader's, so it must not release the tail anchor
                 # (`watch_scroll_y` skips the resync) — and, for the resume
@@ -2634,9 +2665,34 @@ class TranscriptView(ScrollableContainer):
                 # zone by construction: the rows above were just inserted, so
                 # the anchor lands where it was, which was the top.
                 with self._tail_anchor.programmatic_scroll():
+                    # `immediate=True` for the SAME reason `_reanchor_insert`
+                    # needs it, and its omission here was the deeper half of
+                    # that defect. Textual's `scroll_to` defers the offset
+                    # change with `call_after_refresh` unless `immediate`, so
+                    # the deferred `_scroll_to` runs AFTER this `with` block
+                    # has exited — outside the very guard that marks the
+                    # scroll as this widget's own. `watch_scroll_y` then reads
+                    # `programmatic == False` and treats the insert's own
+                    # restore as a READER's scroll, with two measured
+                    # consequences: it resyncs the tail anchor to
+                    # `at_end=False` (so a resume whose fill inserted at y=0
+                    # stops following the tail and lands the reader on the
+                    # OLDEST row instead of the newest), and it drives the
+                    # resume page-back hook, which spends `_resume_in_zone` on
+                    # a scroll no human made and leaves a wheel reader parked
+                    # at the top unable to earn another page.
+                    #
+                    # Traced on a 401-message resume at 120x200:
+                    #   scroll_to y=0 programmatic=True   <- inside the guard
+                    #   APPLY     y=0 programmatic=False  <- deferred, outside
+                    #
+                    # Applying inside the guard makes that window not exist
+                    # rather than not matter — the same trade the `on_settled`
+                    # placement below already documents.
                     self.scroll_to(
                         y=max(0, anchor_block.virtual_region.y - anchor_gap),
                         animate=False,
+                        immediate=True,
                     )
                     # INSIDE the guard, not after it: `on_settled` re-opens the
                     # caller's page gate, and the guard is what keeps THIS

@@ -40,7 +40,13 @@ from scripts.visual_capture import isolate_capture  # noqa: E402
 
 isolate_capture()
 
-from local_operator.tui.app import OperatorApp  # noqa: E402
+from textual.events import MouseScrollUp  # noqa: E402
+
+from local_operator.tui.app import (  # noqa: E402
+    RESUME_PAGE_MESSAGES,
+    RESUME_PAGE_TRIGGER_ROWS,
+    OperatorApp,
+)
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     NoticeBlock,
     TranscriptView,
@@ -112,6 +118,29 @@ SHAPES = {
     "ordinary": lambda: _shape(60, 3),
     "short": lambda: _shape(4, 2),
 }
+
+
+def _wheel_to_trigger(view: TranscriptView) -> None:
+    """Post ONE real wheel notch at the transcript.
+
+    The widget's own input surface, so it routes through `note_user_scroll`
+    and the page-back latch exactly as a hand on a mouse does. One notch is
+    enough when the reader is already parked inside the trigger zone, and one
+    is the point: the contract under test is "one arrival, one page".
+    """
+    view.post_message(
+        MouseScrollUp(
+            widget=view,
+            x=5,
+            y=5,
+            delta_x=0,
+            delta_y=-1,
+            button=0,
+            shift=False,
+            meta=False,
+            ctrl=False,
+        )
+    )
 
 
 def _rows(app: OperatorApp, view: TranscriptView) -> list[str]:
@@ -199,13 +228,19 @@ async def run_jitter(shape: str, size: tuple[int, int]) -> None:
         if not app._resume_pending_head:
             print(json.dumps({"error": "no deferred head to page", "shape": shape}))
             return
-        # Park the reader just below the trigger so the mount is a real page.
+        # Park the reader just below the trigger so the notch below lands
+        # INSIDE the trigger zone and earns a real page.
         # `note_user_scroll` FIRST: a bare `scroll_to` leaves the tail anchor
         # following, and `_size_updated` then drags the viewport back to the
         # end the moment the mount grows the extent — which measures the tail
         # follow, not the insert. A reader who scrolled up has released it.
         view.note_user_scroll()
-        view.scroll_to(y=6, animate=False)
+        # Just below the trigger row, measured from the CURRENT extent rather
+        # than assumed to be near 0: the fill now makes the first frame
+        # scrollable and lands the reader on the tail, so a hard-coded `y=6`
+        # parks them wherever the tail happens to be and the notch below earns
+        # nothing.
+        view.scroll_to(y=RESUME_PAGE_TRIGGER_ROWS + 2, animate=False)
         for _ in range(8):
             await pilot.pause()
 
@@ -233,6 +268,28 @@ async def run_jitter(shape: str, size: tuple[int, int]) -> None:
                 }
             )
 
+        # A REAL GESTURE, not `app._mount_older_resume_page()`.
+        #
+        # Calling the mount directly bypasses the three layers that sit between
+        # a reader and a page — the page-back latch (`_resume_in_zone`), the
+        # single-flight requeue, and the scroll animation — and every defect
+        # this probe was written to catch lived in exactly that bypassed layer:
+        # the fill spending the reader's latch, the cap that could not iterate,
+        # and the resume landing at the top instead of the tail. Measurements
+        # taken through the direct call were CORRECT and still could not see
+        # any of it — a blind spot in the instrument, not in the reading. So
+        # the page is earned the way a user earns it.
+        pending_before = len(app._resume_pending_head)
+        _wheel_to_trigger(view)
+
+        # The baseline is taken AFTER the notch's own travel has landed, and
+        # BEFORE the page it earned has mounted. A wheel notch legitimately
+        # moves the reader by its own delta — that is the scroll they asked
+        # for — and the invariant under test is that the MOUNT adds no motion
+        # on top of it. Sampling before the notch folds the gesture's own rows
+        # into the verdict and reports a correct insert as displaced.
+        for _ in range(2):
+            await pilot.pause()
         sample("baseline")
         baseline_gap = samples[0]["gap"]
 
@@ -263,7 +320,6 @@ async def run_jitter(shape: str, size: tuple[int, int]) -> None:
         view._size_updated = size_updated  # type: ignore[method-assign]
         screen._compositor_refresh = compositor_refresh  # type: ignore[method-assign]
         try:
-            app._mount_older_resume_page()
             for _ in range(16):
                 await pilot.pause()
                 sample("frame")
@@ -273,6 +329,7 @@ async def run_jitter(shape: str, size: tuple[int, int]) -> None:
             screen._compositor_refresh = original_refresh  # type: ignore[method-assign]
 
         sample("settled")
+        pages_mounted = (pending_before - len(app._resume_pending_head)) // RESUME_PAGE_MESSAGES
 
         # PAINTED frames are the ones that matter: a `frame` sample is taken
         # after a `pause`, so the terminal has been written. `extent` samples
@@ -289,6 +346,10 @@ async def run_jitter(shape: str, size: tuple[int, int]) -> None:
                     "grid": f"{size[0]}x{size[1]}",
                     "baseline_gap": baseline_gap,
                     "samples": samples,
+                    # Proof the gesture actually earned a page: a run where
+                    # nothing mounted measures an insert that never happened
+                    # and reports a flat, meaningless zero.
+                    "pages_mounted": pages_mounted,
                     "painted_frames": len(painted),
                     "displaced_painted_frames": len(displaced),
                     "painted_max_gap_excursion": painted_excursion,
@@ -354,7 +415,9 @@ async def run_reader(shape: str, size: tuple[int, int]) -> None:
 
         screen._compositor_refresh = compositor_refresh  # type: ignore[method-assign]
         try:
-            app._mount_older_resume_page()
+            # A real gesture, for the reason documented in `run_jitter`: the
+            # direct mount skips the latch, the requeue and the animation.
+            _wheel_to_trigger(view)
             for _ in range(16):
                 await pilot.pause()
         finally:

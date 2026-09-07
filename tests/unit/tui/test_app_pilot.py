@@ -376,6 +376,13 @@ class FakeSession:
         #: reads it: a switch made mid-turn says when it starts applying, and a
         #: hard-coded False could never exercise that branch.
         self.streaming = False
+        #: The server-paging cursor a `RemoteSession` exposes: non-None means
+        #: "older history continues on the server". Declared here (rather than
+        #: set ad hoc by the one test that needs it) because the resume fill
+        #: branches on it, and a fake that lacks the attribute silently sends
+        #: every test down the LOCAL path — which is how the remote branch
+        #: reached review with no coverage at all.
+        self.history_before_token: str | None = None
         # The REAL holder, not a bare string: `user_set` precedence (a human
         # rename outranks every generated title, forever) is behaviour the TUI
         # relies on, and a fake that reimplements it as a plain assignment

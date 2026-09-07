@@ -24,6 +24,7 @@ from local_operator.tui.app import (
     OperatorApp,
     _resume_tail_start,
 )
+from local_operator.tui.session_presentation import OlderHistoryNotice
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
@@ -738,17 +739,45 @@ async def test_the_fill_does_not_arm_or_consume_the_page_back_latch() -> None:
     page; if it consumed one, that scroll's legitimate page would be swallowed.
     Either way the hard-won "ONE page per user gesture" contract breaks, so it
     is pinned rather than trusted.
+
+    PINNED AT 120x170, NOT 120x40, and that is the whole value of this test.
+    At 40 rows the frame is already scrollable, the fill returns at its
+    scrollable-exit having mounted NOTHING, and the assertion below reads back
+    a value no code touched — it passed while the latch was in fact being
+    consumed on every taller frame. A guard that cannot go red is worse than
+    no guard, so the size is chosen to be one where the fill really mounts.
     """
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(120, 40)) as pilot:
+    # Counted by instrumenting the mount, NOT by sampling a "pending before"
+    # after `_wait_for_resume`: the fill starts as soon as the initial mount
+    # settles, so by the time the first frame paints it may already have run
+    # and a before/after comparison silently reads zero.
+    fill_mounts = 0
+    async with app.run_test(size=(120, 170)) as pilot:
+        original_mount = app._mount_older_resume_page
+
+        def counting_mount(*args: Any, **kwargs: Any) -> None:
+            nonlocal fill_mounts
+            fill_mounts += 1
+            original_mount(*args, **kwargs)
+
+        app._mount_older_resume_page = counting_mount  # type: ignore[assignment]
         await _wait_for_resume(pilot, app)
         view = app.query_one(TranscriptView)
-        for _ in range(40):
+        for _ in range(60):
             await pilot.pause()
-        # The latch is still armed: no gesture has happened yet, so the
-        # reader's first arrival at the top is still owed a page.
+        app._mount_older_resume_page = original_mount  # type: ignore[assignment]
+
+        # PRECONDITION, asserted rather than assumed: the fill actually did
+        # the thing whose side effects this test is about.
+        assert fill_mounts, (
+            "the fill mounted no pages at this size, so the latch assertion "
+            "below would pin a value nothing touched"
+        )
+        # The latch is still armed: the fill is not a gesture, so the reader's
+        # first arrival at the top is still owed a page.
         assert app._resume_in_zone is True
         assert app._resume_paging is False
 
@@ -757,6 +786,60 @@ async def test_the_fill_does_not_arm_or_consume_the_page_back_latch() -> None:
         assert before
         await _press_and_settle(pilot, view, "ctrl+home")
         assert len(app._resume_pending_head) == before - RESUME_PAGE_MESSAGES
+
+
+@pytest.mark.asyncio
+async def test_a_wheel_reader_at_the_top_can_still_page_after_the_fill() -> None:
+    """The latch guarantee, from the READER's side rather than the flag's.
+
+    The flag assertion above says the fill left the latch armed. This says what
+    that is FOR, through the only input that cannot re-arm it: a wheel notch
+    arriving while the viewport is already clamped at the top moves nothing, so
+    it is not evidence the reader left and came back, so it never re-arms. If
+    the fill spends the latch, such a reader is stuck forever — measured before
+    the fix as 60 settled notches at y=0 mounting exactly nothing, while the
+    first row of that transcript told them to scroll up.
+
+    A wheel gesture rather than a keypress on purpose: `pageup`, `home` and
+    `ctrl+home` are discrete acts and re-arm unconditionally, so they cannot
+    observe this defect at all.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 170)) as pilot:
+        await _wait_for_resume(pilot, app)
+        view = app.query_one(TranscriptView)
+        for _ in range(60):
+            await pilot.pause()
+        before = len(app._resume_pending_head)
+        assert before, "no deferred head to page"
+
+        # Real wheel events through the widget's own input surface, which is
+        # what routes through `note_user_scroll` and the latch. Enough notches
+        # to travel the whole frame and sit clamped at the top afterwards.
+        for _ in range(40):
+            view.post_message(
+                MouseScrollUp(
+                    widget=view,
+                    x=5,
+                    y=5,
+                    delta_x=0,
+                    delta_y=-1,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                )
+            )
+            for _ in range(14):
+                await pilot.pause()
+
+        assert len(app._resume_pending_head) < before, (
+            "a wheel reader scrolling to the top of a filled resume earned no "
+            f"page: pending {before} -> {len(app._resume_pending_head)} at "
+            f"y={view.scroll_y}"
+        )
 
 
 @pytest.mark.asyncio
@@ -839,38 +922,89 @@ async def test_an_unreachable_head_never_says_scroll_up_to_load() -> None:
     terminal, a head of rows that measure to almost nothing, or the fill's own
     iteration cap — and in that state the instruction is still unfollowable.
 
-    The cap is forced to zero here rather than contriving such a history: it is
-    the honest way to reach the state on demand, and it exercises exactly the
-    branch that runs when the real cap is hit.
+    REACHED THROUGH GEOMETRY, not by monkeypatching the cap to 0. The earlier
+    version did that, which routed past the stand-down return that was blocking
+    this branch in production: the test was green while the notice fired in 0
+    of 35 real frames. 600 rows is where three genuinely-mounted fill pages
+    still fit inside the viewport, so this reaches the state the same way a
+    reader on a large display at a small font does.
     """
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
-    monkey = pytest.MonkeyPatch()
-    # A tall viewport plus no fill: 80 short messages cannot exceed 161 rows.
-    monkey.setattr(app_module, "RESUME_FILL_MAX_PAGES", 0)
-    try:
-        async with app.run_test(size=(120, 170)) as pilot:
-            await _wait_for_resume(pilot, app)
-            for _ in range(40):
-                await pilot.pause()
-            view = app.query_one(TranscriptView)
-            viewport = view.container_size.height or view.size.height
-            # Precondition: this really is the unreachable state.
-            assert view.virtual_size.height <= viewport
-            assert app._resume_pending_head
+    async with app.run_test(size=(120, 600)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(80):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        viewport = view.container_size.height or view.size.height
+        # Precondition: this really is the unreachable state, reached by
+        # geometry alone.
+        assert view.virtual_size.height <= viewport
+        assert app._resume_pending_head
 
-            notices = [b.text() for b in view.blocks() if isinstance(b, NoticeBlock)]
-            assert notices, "the head notice vanished"
-            assert (
-                app_module.RESUME_OLDER_NOTICE not in notices
-            ), "the transcript cannot be scrolled, but still tells the reader to scroll up"
-            # And it does not claim the conversation starts here either — more
-            # history genuinely exists.
-            assert app_module.RESUME_START_NOTICE not in notices
-            assert app_module.RESUME_UNREACHABLE_NOTICE in notices
-    finally:
-        monkey.undo()
+        notices = [b.text() for b in view.blocks() if isinstance(b, NoticeBlock)]
+        assert notices, "the head notice vanished"
+        assert (
+            app_module.RESUME_OLDER_NOTICE not in notices
+        ), "the transcript cannot be scrolled, but still tells the reader to scroll up"
+        # And it does not claim the conversation starts here either — more
+        # history genuinely exists.
+        assert app_module.RESUME_START_NOTICE not in notices
+        assert app_module.RESUME_UNREACHABLE_NOTICE in notices
+
+        # The state is a dead end for SCROLLING by construction, so the notice
+        # itself has to be the way out: it is a control, and activating it
+        # loads the page no gesture could reach.
+        notice = app._resume_head_notice
+        assert isinstance(notice, OlderHistoryNotice)
+        assert notice.focusable
+        before = len(app._resume_pending_head)
+        notice.action_older()
+        for _ in range(60):
+            await pilot.pause()
+        assert len(app._resume_pending_head) < before, (
+            "activating the head notice in the unreachable state loaded " "nothing"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_head_notice_stops_saying_unreachable_once_it_is_reachable() -> None:
+    """The notice must restate BOTH ways, not latch on its darkest state.
+
+    ``_reconcile_head_notice`` only ever demoted: there was no path from
+    "unreachable" back to "scroll up to load", so after the reader activated
+    the notice — with a scrollbar now on screen and rows of travel available —
+    the top row still told them it could not be scrolled to. That is precisely
+    the stale-copy failure `NoticeBlock.restate` exists to prevent, one state
+    over from the one this file fixes.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 600)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(80):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+
+        def notices() -> list[str]:
+            return [b.text() for b in view.blocks() if isinstance(b, NoticeBlock)]
+
+        assert app_module.RESUME_UNREACHABLE_NOTICE in notices()
+
+        # Obey the notice. The frame becomes scrollable, so the copy must go
+        # back to the promise it can now keep.
+        app._resume_head_notice.action_older()  # type: ignore[union-attr]
+        for _ in range(80):
+            await pilot.pause()
+        viewport = view.container_size.height or view.size.height
+        assert view.virtual_size.height > viewport, "expected the frame to become scrollable"
+        assert app_module.RESUME_UNREACHABLE_NOTICE not in notices(), (
+            "the frame is scrollable again but the notice still tells the "
+            "reader it cannot be reached by scrolling"
+        )
+        assert app_module.RESUME_OLDER_NOTICE in notices()
 
 
 @pytest.mark.asyncio
@@ -903,3 +1037,133 @@ async def test_the_fill_makes_a_tall_terminal_scrollable() -> None:
             <= (RESUME_RENDER_MESSAGES + app_module.RESUME_FILL_MAX_PAGES * RESUME_PAGE_MESSAGES)
             * 2
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [40, 170, 200, 250, 300])
+async def test_a_resumed_conversation_opens_on_its_newest_message(rows: int) -> None:
+    """A resume must land on the TAIL, at every viewport height.
+
+    The bounded-resume feature exists to make the HEAD cheap; it must never
+    move the tail. This is parametrized across the band where the fill mounts
+    because the regression it guards lived only there: the fill's insert ran
+    while the frame was still unscrollable (`scroll_y` and `max_scroll_y` both
+    0), the held insert anchor clamped the target to row 0, and the offset
+    change released tail-following so nothing recovered it. The reader opened a
+    resumed conversation ~120 messages BEHIND its newest message, on a session
+    they opened to see the latest state — a worse outcome than the missing
+    scrollbar this file repairs.
+
+    40 rows is included as the control: the fill mounts nothing there, so this
+    height passed throughout and is what made the defect look absent.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, rows)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(80):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        assert view.is_near_bottom(), (
+            f"resume opened away from the newest message at 120x{rows}: "
+            f"scroll_y={view.scroll_y} max_scroll_y={view.max_scroll_y} "
+            f"blocks={len(view.blocks())}"
+        )
+        # Following, not merely parked at the end by luck: the next thing the
+        # conversation appends must carry the viewport with it.
+        assert view.is_following_tail
+
+
+@pytest.mark.asyncio
+async def test_the_fill_pages_a_remote_session_through_its_fetch_worker() -> None:
+    """The remote/``history_before_token`` branch, which nothing reached before.
+
+    This is the riskiest path in the fill: it is the only one that sets the
+    paging gate by hand, spawns a worker, and re-enters itself from that
+    worker's completion across a network round trip. Every other test in this
+    file uses a local ``FakeSession`` with no token, so the branch had zero
+    coverage while carrying the generation guard and the latch restore.
+
+    The fetch itself is stubbed — the point is the fill's control flow around
+    it (does it terminate, does it re-enter, does it leave the gate closed),
+    not ``RemoteSession``'s wire format.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    # A token means "the conversation continues on the server", which is the
+    # condition the remote branch keys on.
+    session.history_before_token = "cursor-0"
+    app = OperatorApp(lambda: _factory(session))
+    fetches = 0
+
+    async def fake_fetch(source: Any) -> None:
+        # Stands in for the round trip: prepend a page's worth of history and
+        # release the gate, exactly as the real fetch does on success.
+        nonlocal fetches
+        fetches += 1
+        app._resume_pending_head = _agentic_history(30) + app._resume_pending_head
+        if fetches >= 2:
+            session.history_before_token = None
+        app._resume_paging = False
+
+    async with app.run_test(size=(120, 600)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        app._fetch_older_display_page = fake_fetch  # type: ignore[assignment]
+        # Drain the local head so the fill must take the REMOTE branch.
+        app._resume_pending_head = []
+        app._fill_resume_until_scrollable()
+        for _ in range(120):
+            await pilot.pause()
+
+    assert fetches, "the fill never took the remote branch"
+    # Terminates rather than spinning: the cap still bounds a branch whose
+    # geometry never improves.
+    assert fetches <= app_module.RESUME_FILL_MAX_PAGES
+    # And it leaves the gate open, so a real gesture is not locked out.
+    assert app._resume_paging is False
+    # The latch is untouched by the fetch's own mount, same as the local path.
+    assert app._resume_in_zone is True
+
+
+@pytest.mark.asyncio
+async def test_the_fill_can_mount_more_than_one_page() -> None:
+    """``RESUME_FILL_MAX_PAGES`` must be reachable, not decorative.
+
+    The fill chained its re-measure with ``call_after_refresh`` while the
+    paging gate is released from the settle callback ``insert_blocks``
+    schedules — which runs strictly later. So attempt 1 always found the gate
+    held, took the stand-down return, and nothing rescheduled it: the effective
+    cap was ONE page regardless of the constant, and on a viewport needing two
+    the resume stayed unscrollable with its head unreachable.
+
+    600 rows needs more than one page here, so a single-page fill cannot
+    satisfy the assertion.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(300)
+    app = OperatorApp(lambda: _factory(session))
+    fill_mounts = 0
+    async with app.run_test(size=(120, 600)) as pilot:
+        original_mount = app._mount_older_resume_page
+
+        def counting_mount(*args: Any, **kwargs: Any) -> None:
+            nonlocal fill_mounts
+            fill_mounts += 1
+            original_mount(*args, **kwargs)
+
+        # Instrumented before the resume paints, because the fill runs off the
+        # initial mount's settle and a before/after count misses it entirely.
+        app._mount_older_resume_page = counting_mount  # type: ignore[assignment]
+        await _wait_for_resume(pilot, app)
+        for _ in range(120):
+            await pilot.pause()
+        app._mount_older_resume_page = original_mount  # type: ignore[assignment]
+
+    assert fill_mounts > 1, (
+        f"the fill mounted {fill_mounts} page(s): the cap of "
+        f"{app_module.RESUME_FILL_MAX_PAGES} is unreachable, so it cannot "
+        "iterate on a viewport that needs more than one"
+    )
