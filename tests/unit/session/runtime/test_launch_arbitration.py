@@ -800,3 +800,81 @@ async def test_a_dense_window_does_not_outlive_its_welcome(tmp_path: Path, monke
     # ...and the fallback restarts the backoff from the top rather than from a
     # value that decayed while the child looked healthy.
     assert coarse[0] == _POLL_INITIAL_S
+
+
+@pytest.mark.asyncio
+async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live runtime that will not answer must stay on the SLOW path.
+
+    The lease is held for a session's whole life -- ``session_factory``
+    registers its release as a dispose hook -- so ``_lease_holder`` names a
+    live pid for a fully constructed, happily serving runtime, not merely one
+    that is starting. A runtime that has published a record but refuses the
+    dial (wedged control socket, port exhaustion) therefore takes the loop's
+    ``ConnectionError`` retry path with its lease still held.
+
+    Reading that as "constructing" turned a slow retry into a hot spin:
+    measured at 301 dial attempts inside a 3 s window against 8 under the
+    open-ended grid (review round 1, MAJOR-1). The guard is the shape of the
+    schedule -- no dense wake may be requested while a record exists -- which
+    is a fact about what the loop decided and cannot flake under load.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id=SESSION_ID,
+        conversation_name="wedged",
+        cwd=str(tmp_path),
+        model_label="test/model",
+        control_port=1,
+        control_key="k" * 16,
+    )
+    # A record IS present and the lease IS held by a live pid: construction is
+    # over and this runtime is simply unreachable. `find_owner_record` is a
+    # function-local import in the loop, so it is patched at its source module.
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_owner_record",
+        lambda config_dir, session_id: (record, os.getpid()),
+    )
+    monkeypatch.setattr(launch_module, "_lease_holder", lambda config_dir, session_id: os.getpid())
+
+    dials = 0
+
+    async def refuses_the_dial(*args: Any, **kwargs: Any) -> tuple[str, bool]:
+        nonlocal dials
+        dials += 1
+        raise ConnectionError("control socket refuses")
+
+    monkeypatch.setattr(launch_module, "_deliver", refuses_the_dial)
+    # Nothing may be spawned: a record exists, so the loop must only be
+    # retrying the dial. A spawn here would be a separate (arbitration) bug.
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise: pytest.fail("spawned despite a live record"),
+    )
+
+    slept: list[float] = []
+    clock = {"now": 0.0}
+    monkeypatch.setattr(launch_module, "asyncio", _sleep_recorder(slept, clock))
+    monkeypatch.setattr(launch_module, "time", _virtual_clock(clock))
+
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path, deadline_s=3.0
+        )
+
+    assert dials > 0, "the dial was never attempted; the repro no longer exercises the retry path"
+    assert (
+        _CONSTRUCTING_POLL_S not in slept
+    ), f"a published record was polled at the dense interval: {sorted(set(slept))}"
+    # The open-ended shape is what should be running here, from the top.
+    assert slept[0] == _POLL_INITIAL_S
+    assert max(slept) > _CONSTRUCTING_POLL_S, "the schedule never backed off"
+    # Retries are bounded by the backoff, not by the poll floor: an order of
+    # magnitude fewer than the ~300 the dense regime produced over 3 s.
+    assert dials < 30, f"{dials} dial attempts in a 3 s window is a retry storm"
