@@ -36,6 +36,10 @@ from lop_osworld_v2_adapter.providers.aws import (
     _Clients,
     ttl_seconds_for,
 )
+from lop_osworld_v2_adapter.providers.base import (
+    GUEST_COMMAND_TIMEOUT_S,
+    guest_deadline_for,
+)
 
 from local_operator.evaluation.adapters.api import ScopedInfraValue
 from tests.unit.evaluation.adapters.osworld import fixtures
@@ -1347,10 +1351,16 @@ async def test_execute_settles_after_the_batch_and_respond_without_simulator_is_
         provider._public_ip = "127.0.0.1"
         await provider.execute(["pyautogui.click(1, 2)"])
         await provider.execute([])
+        # The body carries the guest's OWN subprocess deadline alongside the
+        # command. It is derived from -- and strictly inside -- the socket
+        # deadline, so a slow command expires on the guest and comes back as a
+        # definite answer instead of expiring on our socket with the command
+        # still running. ``test_guest_deadline.py`` pins the derivation.
         assert stubs.guest_posts == [
             {
                 "command": ["python", "-c", "import pyautogui; pyautogui.click(1, 2)"],
                 "shell": False,
+                "timeout": guest_deadline_for(GUEST_COMMAND_TIMEOUT_S),
             }
         ]
         assert "executed" not in env.kwargs
