@@ -3,13 +3,27 @@
 Run from the worktree root:
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/sidebar_new_shot.py OUT.svg [splash|band] [COLSxROWS]
+        scripts/sidebar_new_shot.py OUT.svg [splash|band|return|notice] [COLSxROWS]
 
-Both frames are only reachable through the sidebar's prepare/commit pair, which
-is why this drives that pair rather than `/new` alone: plain `/new` was never
-broken. ``splash`` switches onto a conversation WITH history and then runs
+Every frame here is only reachable through the sidebar's prepare/commit pair,
+which is why this drives that pair rather than `/new` alone: plain `/new` was
+never broken. ``splash`` switches onto a conversation WITH history and then runs
 `/new`; ``band`` parks on a conversation carrying cost and context, switches
 back to the untouched `/new` conversation, and captures the status band.
+
+``return`` and ``notice`` are the PARK-AND-RETURN frames — the leg where the
+sidebar differs from `/new`, `/resume` and `/reload`, because it comes back to
+the conversation it left instead of retiring it:
+
+* ``return`` is the operator's reported flow with an infrastructure notice
+  present (`/new`, switch to a busy session, switch back). The notice is posted
+  through the production `_system_notice`, the same call `_check_build_skew`
+  makes on every swap, so the frame shows the splash standing UNDER it rather
+  than being retired by it.
+* ``notice`` raises a real setup warning on the splash, parks the conversation,
+  returns, and drives the `refresh_info()` repaint that used to take the row
+  away — so the captured frame is the one AFTER the poll that exposed the loss,
+  not the stale frame that survived the switch.
 """
 
 from __future__ import annotations
@@ -91,8 +105,46 @@ async def main() -> None:
             for _ in range(20):
                 await pilot.pause()
 
-            await _switch(app, pilot, busy)
-            if which == "splash":
+            if which == "notice":
+                # The warning belongs to the conversation being PARKED, so it is
+                # raised before the switch and read back after the return.
+                app._announce_on_splash(
+                    "/login openai to get started - no provider configured.", "warning"
+                )
+                for _ in range(10):
+                    await pilot.pause()
+                await _switch(app, pilot, busy)
+                await _switch(app, pilot, home)
+                if app._welcome is not None:
+                    # The repaint that exposed the loss: the splash reads its
+                    # facts through a closure, so a cleared notice left the drawn
+                    # row standing and removed it at the next poll.
+                    app._welcome.refresh_info()
+                for _ in range(20):
+                    await pilot.pause()
+            elif which == "return":
+                app._run_slash_command("/new")
+                for _ in range(80):
+                    await pilot.pause()
+                await asyncio.sleep(0.4)
+                for _ in range(40):
+                    await pilot.pause()
+                # The notice `_adopt_session` re-emits on every swap, posted the
+                # way the product posts it. Counting it as conversation content
+                # is what retired the splash on the return leg.
+                app._system_notice(
+                    "this session is running an older version than this window — it will "
+                    "move to the new version when its current work finishes.",
+                    "note",
+                )
+                for _ in range(10):
+                    await pilot.pause()
+                await _switch(app, pilot, busy)
+                await _switch(app, pilot, fresh)
+                for _ in range(20):
+                    await pilot.pause()
+            elif which == "splash":
+                await _switch(app, pilot, busy)
                 app._run_slash_command("/new")
                 for _ in range(80):
                     await pilot.pause()
@@ -102,6 +154,7 @@ async def main() -> None:
             else:
                 # Away and back: the frame that carried the other conversation's
                 # money and context over a session that has never had a turn.
+                await _switch(app, pilot, busy)
                 await _switch(app, pilot, fresh)
 
             status = app._status
@@ -110,6 +163,11 @@ async def main() -> None:
             print(f"cost={status._cost!r} context_tokens={status._context_tokens}")
             print(f"welcome={app._welcome!r} welcome_visible={app._welcome_visible}")
             print(f"blocks={len(view.blocks())} boot_class={app.screen.has_class('boot')}")
+            # Defensive so this script can also be run from a pre-fix checkout to
+            # capture a before-frame, where the predicate does not exist yet.
+            started = getattr(view, "conversation_started", None)
+            print(f"conversation_started={started() if started else 'n/a'}")
+            print(f"splash_notice={app._splash_notice!r}")
             print(f"screen size={tuple(app.screen.size)} virtual={tuple(app.screen.virtual_size)}")
             print(f"scrollbar={app.screen.show_vertical_scrollbar}")
             save_capture(app, out)

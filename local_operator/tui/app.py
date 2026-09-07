@@ -282,6 +282,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
     WakeBlock,
     WorkingBlock,
+    conversation_started,
 )
 from local_operator.tui.widgets.usage_panel import (
     UsageDismissed,
@@ -1950,8 +1951,12 @@ class OperatorApp(App[None]):
         #: not started — a quota fallback, a provider that is missing. The
         #: splash is the empty state, and treating one of these as a
         #: transcript block retired it for an empty message view. Latest
-        #: one only: the splash is one row. Cleared on a session swap
-        #: because it describes the session that just died.
+        #: one only: the splash is one row. Cleared on a swap that RETIRES
+        #: the conversation (`/new`, `/resume`, `/reload`) because it
+        #: describes the session that just died — but NOT on a sidebar
+        #: switch, which parks that conversation and can return to it with
+        #: the warning still the only account of why it cannot answer
+        #: (see :meth:`_reset_band_for_swap`).
         self._splash_notice: str | None = None
         #: PyPI version strictly newer than this install, filled by the
         #: one-shot mount worker. ``None`` until then AND when current —
@@ -3387,7 +3392,11 @@ class OperatorApp(App[None]):
             conversation = self.query_one("#session-conversation")
             conversation.styles.layers = "session-cache default"
             await conversation.mount(replay.view)
-            if not replay.blocks:
+            # The same predicate the commit path applies on the return leg. Two
+            # tests of "is this conversation empty" on the two halves of one
+            # switch would eventually disagree, and the visible failure is a
+            # target that arrives with no empty state and no way to grow one.
+            if not conversation_started(replay.blocks):
                 welcome = WelcomeView(
                     lambda: session_welcome_info(
                         session,
@@ -4024,7 +4033,12 @@ class OperatorApp(App[None]):
             # Immediately BEFORE the adopt, never after: the incoming snapshot
             # is what puts a real figure back, so a session with genuine spend
             # still lands on its own number rather than on zero.
-            self._reset_band_for_swap()
+            #
+            # `retire=False`: the outgoing conversation is PARKED, not destroyed.
+            # The splash notice and the dock density are the two pieces of state
+            # in there that nothing on this path restores, and both belong to the
+            # conversation the user can click straight back to.
+            self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
             self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
             history = session.display_history_window()
@@ -4089,7 +4103,12 @@ class OperatorApp(App[None]):
                 editor.focus()
         finally:
             self._swapping_session = False
-        self._set_welcome_visible(not bool(incoming.replay.view.blocks()))
+        # `conversation_started`, not `bool(blocks())`: the infrastructure
+        # notices `_adopt_session` re-emits on EVERY swap (build skew, a failed
+        # MCP server) are blocks that deliberately do not end the empty state,
+        # and counting them retired the splash on the return leg — a `/new`
+        # conversation lost its empty state just by being glanced away from.
+        self._set_welcome_visible(not incoming.replay.view.conversation_started())
         if outgoing_presentation is not None:
             self.run_worker(self._release_sidebar_preparation((outgoing, outgoing_presentation)))
         if displaced is not None and displaced is not incoming:
@@ -6861,7 +6880,7 @@ class OperatorApp(App[None]):
         self._reset_band_for_swap()
         return (*carried_spend, was_floor)
 
-    def _reset_band_for_swap(self) -> None:
+    def _reset_band_for_swap(self, *, retire: bool = True) -> None:
         """Blank the session-scoped BAND segments, without touching the transcript.
 
         The band half of :meth:`_reset_ledger_for_swap`, split out because the
@@ -6872,15 +6891,30 @@ class OperatorApp(App[None]):
         preserves. Calling the whole of `_reset_ledger_for_swap` from there
         would destroy the presentation the switch just spent a frame preparing.
 
-        Everything reset here is APP-SCOPED — it lives on the band widget, on
-        the dock, or on the app — which is exactly what makes it the half the
-        sidebar needs. The ledger figures themselves (`_total_cost`,
-        `_spend_is_floor`, the naming bookkeeping) are properties of
-        ``self._interaction`` and are therefore already per-conversation: on the
-        sidebar path ``_adopt_session`` swaps the interaction, so those come back
-        correct on their own, and zeroing them HERE would blank the outgoing
-        conversation's real spend — which, unlike a reload's, is parked and
-        returned to rather than retired.
+        RETIRE vs PARK is the distinction that decides what may be blanked, and
+        it is the concept to carry away from this method. ``/new``, ``/resume``
+        and ``/reload`` RETIRE the conversation they leave: it is gone, and
+        state describing it is correctly discarded with it. The sidebar PARKS
+        one and returns to it, so ``retire=False`` — state that no path puts
+        back must survive.
+
+        Most of what is cleared here does not care, because ``_adopt_session``
+        unconditionally repaints it from the incoming snapshot: the cost, the
+        context reading, the MCP segment and the model label are all overwritten
+        a few lines later whichever path called this, so blanking them costs a
+        park nothing and is what stops a never-used conversation inheriting the
+        previous one's figures. Only TWO things here have nobody to restore them
+        on the sidebar path — the splash notice and the dock density — and both
+        are therefore gated on ``retire``. They were not, and a park-and-return
+        silently discarded a standing setup warning and a user's ``ctrl+g``.
+
+        The ledger figures themselves (`_total_cost`, `_spend_is_floor`, the
+        naming bookkeeping) are properties of ``self._interaction`` and are
+        therefore already per-conversation: on the sidebar path
+        ``_adopt_session`` swaps the interaction, so those come back correct on
+        their own, and zeroing them HERE would blank the outgoing conversation's
+        real spend — which, unlike a reload's, is parked and returned to rather
+        than retired.
 
         ORDERING: call this BEFORE ``_adopt_session``, never after. The incoming
         snapshot's repaint is leave-alone on absent values (`cumulative_cost` is
@@ -6891,11 +6925,22 @@ class OperatorApp(App[None]):
         spend still lands on its own number, because its snapshot carries it.
         """
         assert self._status is not None
-        # The splash notice describes the session being replaced. Left
-        # standing, a `/new` would open on the dead session's quota warning.
-        self._splash_notice = None
-        for toast in self.query(Toast):
-            toast.withdraw(SPLASH_NOTICE)
+        if retire:
+            # The splash notice describes the session being replaced. Left
+            # standing, a `/new` would open on the dead session's quota warning.
+            #
+            # Retire-only: it describes ONE conversation's empty state (the
+            # `/login`, unknown-provider and no-model-set warnings
+            # `_announce_on_splash` raises), and nothing on the sidebar path puts
+            # it back. Clearing it on a park lost it in the worst way — silently
+            # and LATE, because `WelcomeView` reads the notice through a closure,
+            # so the row survived the switch frame and vanished at the next
+            # `refresh_info()`. A user parking an unconfigured session and
+            # returning watched the only explanation of why it cannot answer
+            # disappear on its own.
+            self._splash_notice = None
+            for toast in self.query(Toast):
+                toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -6931,7 +6976,11 @@ class OperatorApp(App[None]):
         # replacement session re-reads `display.dock` on its first roster and
         # a `ctrl+g` pressed against the old children does not pin the new
         # ones (#525 design §2).
-        if self._subagent_panel is not None:
+        #
+        # Retire-only for the mirror-image reason: on the sidebar path the "old
+        # children" ARE the ones the user is coming back to, so their explicit
+        # `ctrl+g` still applies and nothing would re-seed it.
+        if retire and self._subagent_panel is not None:
             self._subagent_panel.reset_density()
 
     def _conversation_id(self) -> str:
@@ -16615,6 +16664,12 @@ class OperatorApp(App[None]):
                 block.navigation_anchor_id = self._projection_message_id
                 block.navigation_anchor_part = self._projection_part
             self._projection_part += 1
+        # Recorded on the BLOCK, not merely acted on here, because the sidebar
+        # parks a transcript and comes back to it: the return leg has to ask the
+        # same "has this conversation started" question this call is answering,
+        # long after the append that answered it. See
+        # `transcript.conversation_started`.
+        block.ends_empty_state = ends_empty_state
         if self._block_sink is not None:
             self._block_sink.append(block)
             return

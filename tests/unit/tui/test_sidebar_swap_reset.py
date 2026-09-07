@@ -265,3 +265,161 @@ async def test_sidebar_commit_clears_the_previous_conversations_cost_and_context
             await _switch(app, pilot, busy)
             assert app._status._cost == "$12.35", "restored spend was zeroed by the reset"
             assert app._status._context_tokens == 98_765
+
+
+@pytest.mark.asyncio
+async def test_a_parked_conversation_keeps_its_splash_notice():
+    """A sidebar round trip must not discard the setup warning on the splash.
+
+    `_splash_notice` describes ONE conversation's empty state — the `/login`,
+    unknown-provider and no-model-set warnings. `/new`, `/resume` and `/reload`
+    RETIRE the conversation they leave, so clearing it there is right; the
+    sidebar PARKS one and comes back to it, and nothing on that path puts the
+    notice back.
+
+    The loss was delayed rather than immediate, which is what made it worth a
+    guard: `WelcomeView` reads the notice through a closure, so the row survives
+    the switch frame and vanishes at the next `refresh_info()` — the 0.25 s poll
+    or any model change. Asserting the ATTRIBUTE rather than the painted row is
+    therefore deliberate: it is the state the next repaint reads, and it fails
+    at the moment of the loss instead of a quarter-second later.
+    """
+    home = SidebarRemote("home-session")
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            warning = "/login openai to get started - no provider configured."
+            app._announce_on_splash(warning, "warning")
+            assert app._splash_notice == warning
+
+            await _switch(app, pilot, busy)
+            await _switch(app, pilot, home)
+
+            assert app._splash_notice == warning, (
+                "the parked conversation's setup warning was discarded by a " "sidebar round trip"
+            )
+            # And it must survive the repaint that exposes the loss. The splash
+            # reads its facts through a closure, so a cleared notice leaves the
+            # already-drawn row standing and takes it away at the next poll —
+            # this is that poll, driven explicitly rather than waited for.
+            assert app._welcome is not None
+            app._welcome.refresh_info()
+            for _ in range(5):
+                await pilot.pause()
+            assert (
+                app._welcome._info.notice == warning
+            ), "the warning survived on the app but the splash repainted without it"
+
+
+@pytest.mark.asyncio
+async def test_a_parked_conversation_keeps_its_dock_density():
+    """A `ctrl+g` set on the conversation the user returns to must survive.
+
+    `reset_density()` exists for a swap that retires: "a `ctrl+g` pressed
+    against the old children does not pin the new ones" (#525 design §2). On
+    the sidebar path the old children ARE the ones being returned to, and the
+    re-seed happens at the panel's next non-empty sync — so the user's explicit
+    choice was discarded by the act of glancing elsewhere.
+    """
+    home = SidebarRemote("home-session")
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+    )
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            panel = app._subagent_panel
+            assert panel is not None
+            # The state a `ctrl+g` leaves behind: seeded, and pinned by the user.
+            panel._density_seeded = True
+            panel._user_density = True
+
+            await _switch(app, pilot, busy)
+            await _switch(app, pilot, home)
+
+            assert panel._user_density, "the user's ctrl+g was discarded by a sidebar switch"
+            assert panel._density_seeded, "the dock density was re-seeded on a park"
+
+
+@pytest.mark.asyncio
+async def test_returning_to_an_empty_conversation_shows_the_splash_under_a_notice():
+    """The operator's reported flow, end to end, with an infrastructure notice.
+
+    `/new` → click a session with history → click back. The returned-to
+    conversation is the same untouched `/new` it was, so it must land on the
+    splash — but `_adopt_session` re-emits infrastructure notices (build skew, a
+    failed MCP server) on EVERY swap, and the commit path asked
+    `bool(view.blocks())`, which counts them. That is the wrong question: those
+    blocks are appended with `ends_empty_state=False` precisely so they land
+    UNDER the splash rather than retiring it, and a user on a skewed build or
+    with one broken MCP server therefore never got an empty state back.
+
+    The notice is raised through the production `_system_notice`, the same call
+    `_check_build_skew` makes, so this pins the predicate and not a fixture.
+    """
+    fresh = SidebarRemote("fresh-session")
+    home = SidebarRemote("home-session")
+    busy = SidebarRemote(
+        "busy-session",
+        history=[_message("user", "a question"), _message("assistant", "an answer")],
+        cost=12.3456,
+        context=98_765,
+    )
+
+    async def resume_factory(_resume_id):
+        return fresh
+
+    app = OperatorApp(lambda: _factory(home), resume_factory=resume_factory)
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            app._run_slash_command("/new")
+            for _ in range(80):
+                await pilot.pause()
+            await asyncio.sleep(0.4)
+            for _ in range(40):
+                await pilot.pause()
+
+            # The infrastructure notice the swap re-emits, posted the way the
+            # product posts it. The splash stays up under it — that is the
+            # documented contract of `ends_empty_state=False`, asserted here so
+            # step 4 is compared against a step 2 that is known to be right.
+            app._system_notice("this session is running an older version than this window", "note")
+            for _ in range(10):
+                await pilot.pause()
+            assert app._transcript_view().blocks(), "the notice did not reach the transcript"
+            assert app._welcome_visible is True, "the notice retired the splash on `/new` itself"
+
+            await _switch(app, pilot, busy)
+            assert app._welcome_visible is not True
+
+            await _switch(app, pilot, fresh)
+            for _ in range(20):
+                await pilot.pause()
+
+            view = app._transcript_view()
+            # The precondition that made the old predicate wrong: the returned-to
+            # transcript is NOT empty, it just has not started a conversation.
+            assert view.blocks(), "no notice on the return leg — the flow is not reproduced"
+            assert not view.conversation_started()
+            welcome = app._welcome
+            assert welcome is not None, "no splash after returning to the `/new` conversation"
+            assert welcome in list(view.children), "the splash is not in the visible transcript"
+            assert welcome.display, "the splash is mounted but hidden"
+            assert app._welcome_visible is True
+            assert app.screen.has_class("boot")
