@@ -21,14 +21,18 @@ import pytest
 from rich.cells import cell_len
 from textual import events
 from textual.binding import Binding
+from textual.geometry import Size
 
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.copy_picker import (
     HEADER_ROWS,
+    MIN_GUTTER_TRACK_ROWS,
     PREVIEW_HINT,
     PREVIEW_WRAP_BUDGET,
+    PREVIEW_WRAP_STRIDE,
     TOO_SMALL_NOTICE,
+    TOO_SMALL_NOTICE_SHORT,
     CopyPickerScreen,
 )
 
@@ -1235,23 +1239,38 @@ async def test_the_hover_highlight_follows_the_window_under_a_resting_pointer() 
 
 
 @pytest.mark.asyncio
-async def test_the_thumb_reaches_the_bottom_exactly_when_the_cue_goes() -> None:
-    """Round 1, D11. `_thumb_span` anchored on the window's fraction of the
-    LIST and then clamped, so the clamp won one window position early: the
-    thumb sat at the bottom of the track while the rule still read `↓ 1 more`,
-    two distinct positions painted an identical gutter, and the user's final
-    arrow press moved the one CONTINUOUS signal not at all.
+async def test_the_thumb_reaches_each_end_exactly_when_that_cue_goes() -> None:
+    """Round 1 D11, and round 2 MAJOR-1/D16 — the SAME invariant at both ends.
 
-    The invariant asserted here is the whole point of the component: thumb at
-    the bottom of the track if and only if there is nothing below.
+    D11: `_thumb_span` anchored on the window's fraction of the LIST and then
+    clamped, so the clamp won one window position early — the thumb sat at the
+    bottom of the track while the rule still read `↓ 1 more`, two distinct
+    positions painted an identical gutter, and the user's final arrow press
+    moved the one CONTINUOUS signal not at all.
 
-    **The row counts are chosen because they DISCRIMINATE.** The old formula
-    is accidentally correct at many shapes — at 32 rows in a 12-row pane it
-    has no violation at all — so a single convenient fixture passes against
-    the broken code. 19 is the shape D11 was reported against (it bottoms out
-    one window early, at `start=6` of 7); 15, 26 and 40 are the other
-    published failures, 40 breaking at three consecutive positions. A test
-    that pinned only one shape here would be a guard that cannot go red.
+    Round 1 fixed that with a floored proportion and asserted only the bottom
+    half. **That is why this test had to change shape rather than gain a
+    fixture.** The floor moved the contradiction to the TOP — `top == 0` for a
+    RANGE of early windows, so at the very 19-row shape D11 was filed against,
+    `start=0` and `start=1` painted an identical gutter while the cue changed
+    from `↓ 7 more` to `↑ 1 more ↓ 6 more`. Enumerated, floor scored 0 bottom
+    contradictions and 427,381 top ones. The round-1 guard could not see any
+    of it: it asserted `at_bottom == nothing_below` and nothing else, and all
+    four of its fixtures VIOLATE the top invariant on the code they pass
+    against. A guard that structurally cannot observe the defect it is named
+    for is worse than no guard, so both directions are pinned here now:
+
+        thumb flush with the bottom of the track ⟺ nothing below
+        thumb flush with the top of the track    ⟺ nothing above
+
+    **The row counts are chosen because they DISCRIMINATE.** The round-1
+    formula is accidentally correct at many shapes — at 32 rows in a 12-row
+    pane it has no violation at all — so a single convenient fixture passes
+    against broken code. 19 is the shape D11 and D16 were both reported
+    against; 15, 26 and 40 are the other published failures, 40 breaking at
+    three consecutive positions. Each of the four also fails the TOP assertion
+    on the round-1 floor (at `start=1`; 26 at 1–2 and 40 at 1–3), so the same
+    fixtures discriminate in the new direction — verified by reverting.
     """
     for total_rows in (15, 19, 26, 40):
         app = _real_app()
@@ -1271,6 +1290,12 @@ async def test_the_thumb_reaches_the_bottom_exactly_when_the_cue_goes() -> None:
                 assert at_bottom == nothing_below, (
                     f"{total} rows in {tree_rows}: start={start}/{max_start} thumb "
                     f"{span.start}..{span.stop}, {total - start - tree_rows} rows still below"
+                )
+                at_top = span.start == 0
+                nothing_above = start == 0
+                assert at_top == nothing_above, (
+                    f"{total} rows in {tree_rows}: start={start}/{max_start} thumb "
+                    f"{span.start}..{span.stop}, {start} rows still above"
                 )
             # And it actually travels rather than sitting still.
             first = screen._thumb_span(tree_rows, 0)
@@ -1427,3 +1452,286 @@ async def test_a_resize_keeps_the_reading_position_instead_of_dropping_it() -> N
             await pilot.pause()
             assert screen._preview_offset > 0, f"the position was dropped resizing to {size}"
             assert screen._preview_offset <= 40
+
+
+@pytest.mark.asyncio
+async def test_the_thumb_holds_both_ends_across_every_shape_it_can_draw() -> None:
+    """Round 2, MAJOR-1/D16 — the same invariant as the test above, ENUMERATED.
+
+    The test above drives the real app, so it can afford four shapes; this one
+    calls `_thumb_span` directly and sweeps the whole space both reviewers
+    scored, which is what turns "0 violations" from a claim into a measurement.
+    Both are kept: the four-shape version proves the invariant holds on a card
+    that is actually laid out and painted, this one proves no shape escapes it.
+
+    Restricted to `rows >= MIN_GUTTER_TRACK_ROWS`, because below that the
+    gutter is SHED rather than drawn (round 1, D14) and an undrawn thumb
+    cannot contradict a cue.
+
+    The five residuals are `travel == 1` with `max_start > 1` — a one-cell
+    travel has two expressible positions for three or more window states, so
+    by pigeonhole one must share a cell with an extreme. They are asserted
+    EXACTLY rather than tolerated: the set is pinned by shape, so a formula
+    that regressed a sixth position would fail here even though the count is
+    non-zero, and the forfeited end is asserted to be the top.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets("a", "b"), pilot)
+
+        top_bad: list[tuple[int, int, int]] = []
+        bottom_bad: list[tuple[int, int, int]] = []
+        states = 0
+        for rows in range(MIN_GUTTER_TRACK_ROWS, 60):
+            for total in range(rows + 1, 400):
+                screen._flat = [None] * total  # type: ignore[assignment]
+                max_start = total - rows
+                for start in range(max_start + 1):
+                    span = screen._thumb_span(rows, start)
+                    states += 1
+                    if (span.stop == rows) != (start == max_start):
+                        bottom_bad.append((rows, total, start))
+                    if (span.start == 0) != (start == 0):
+                        top_bad.append((rows, total, start))
+
+        assert states > 3_800_000, f"the sweep must be a sweep: {states} states"
+        assert bottom_bad == [], f"the thumb bottoms out away from the list's end: {bottom_bad[:5]}"
+        assert top_bad == [
+            (3, 5, 1),
+            (3, 6, 1),
+            (3, 6, 2),
+            (4, 6, 1),
+            (5, 7, 1),
+        ], f"unexpected top-end residual: {top_bad[:8]}"
+
+
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (140, 44)])
+@pytest.mark.asyncio
+async def test_a_fully_scrolled_preview_ends_on_a_full_pane_at_every_length(size) -> None:
+    """Round 2, BLOCKER-1/U11 — MAJOR-2's clamp did not survive the wrap budget.
+
+    `_preview_tail_offset` walked only the LAST wrap window. `_wrap_window_start`
+    snaps to `PREVIEW_WRAP_STRIDE`, so a document of `100k + 1 … 100k + rows`
+    lines has a final window holding fewer lines than the pane draws: the walk
+    ran out of MAP before it ran out of PANE and fell through to `window_start`,
+    which for that band IS the `source_lines - 1` ceiling round 1 removed. A
+    fully scrolled 205-line answer ended on five lines of text above eleven
+    blank rows — the exact frame MAJOR-2 was filed against, restored by its own
+    fix, on this surface's headline case (one long answer).
+
+    **Enumerated across lengths AND sizes because both reviewers found it that
+    way and neither found it by spot-checking.** The band is `preview_rows`
+    wide, so it widens with the terminal — measured on the pre-fix code at
+    17/60 sampled lengths at 80x24, 30/60 at 100x30 and 43/60 at 140x44 — and
+    a fixture at one size and one length is exactly the guard that missed it.
+    The round-1 tests used 40- and 201-line documents and asserted `0 < offset
+    <= 40`, never that the end frame was FULL, which is why this asserts the
+    painted pane rather than the offset.
+
+    The lengths deliberately straddle two stride boundaries and include the
+    lengths either side, so a fix that merely special-cased one boundary fails.
+    """
+    lengths = (
+        [PREVIEW_WRAP_BUDGET - 1, PREVIEW_WRAP_BUDGET]
+        + list(range(PREVIEW_WRAP_BUDGET + 1, PREVIEW_WRAP_BUDGET + 32))
+        + [3 * PREVIEW_WRAP_STRIDE + 1, 3 * PREVIEW_WRAP_STRIDE + 6, 4 * PREVIEW_WRAP_STRIDE + 1]
+    )
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        drained = []
+        for length in lengths:
+            body = "\n".join(f"line {index}" for index in range(length))
+            screen = await _open(app, _targets(body), pilot)
+
+            # Past any reachable end, so this is the CEILING and not a stop.
+            screen._scroll_preview_to(10**6)
+            await pilot.pause()
+
+            lines = screen.render_lines_for_test()
+            top = screen._preview_top_row
+            pane = lines[top + 1 : top + 1 + screen._preview_rows]
+            blank = sum(1 for line in pane if not line.strip())
+            if blank > 1:
+                drained.append((length, screen._preview_offset, blank, len(pane)))
+            assert any(
+                f"line {length - 1}" in line for line in pane
+            ), f"{length} lines: the last line is not on screen"
+            app.pop_screen()
+            await pilot.pause()
+
+        assert not drained, "a fully scrolled preview drained its own pane at " + ", ".join(
+            f"{n} lines (offset {o}, {b}/{p} rows blank)" for n, o, b, p in drained
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_wheel_or_a_key_between_the_clicks_refuses_rather_than_copying() -> None:
+    """Round 2, U10. The U1 anchor binds the copy to the row the FIRST click
+    resolved, which is right while nothing moves in between. But Textual breaks
+    a click chain on only two things — a changed screen offset and the clock —
+    and a wheel notch changes neither, nor does a keypress. So the second click
+    still arrived as `chain=2`, the anchor fired, and the CLIPBOARD got the
+    pre-wheel row while the caret and preview had moved on: measured 5/5
+    disagreements with a wheel between the clicks, 5/5 with a key, 0/5 plain.
+
+    That is the same silent failure U1 was filed for — the clipboard receives
+    something other than what the frame promised — through a narrower but
+    entirely natural gesture: click a row, realise it is not the one, nudge the
+    wheel, click again.
+
+    **The refusal is the fix, not a re-hit-test.** Re-resolving the row under
+    the pointer was measured first: because a wheel over the tree moves the
+    cursor and `_window_start` recentres it, the pointer's row equals the
+    previewed row in only 1 of 9 pane positions, so that fallback copies a
+    third row that is neither aimed at nor shown. A disturbed chain therefore
+    selects and previews without copying, exactly as a chain broken by the
+    clock already does.
+
+    Asserted on the CLIPBOARD PAYLOAD, not on the anchor attribute: the defect
+    was what the user got, and an attribute assertion would pass against a
+    fix that cleared the anchor and copied the wrong row anyway.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        bodies = [f"Answer {index} unique body." for index in range(20, 0, -1)]
+
+        async def _drive(interlude: str, pane_row: int) -> tuple[CopyTarget, CopyTarget | None]:
+            got: list[CopyTarget | None] = []
+            screen = await _open(app, _targets(*bodies), pilot, got.append)
+            x, y = _tree_row(screen, pane_row)
+
+            screen.post_message(_click(screen, x, y, chain=1))
+            await pilot.pause()
+            if interlude == "wheel":
+                screen.post_message(_wheel(screen, x, y, down=True))
+                await pilot.pause()
+            elif interlude == "key":
+                await pilot.press("down")
+                await pilot.pause()
+
+            framed = screen.selected_target()
+            assert framed is not None, "the frame must be previewing something to disagree with"
+            screen.post_message(_click(screen, x, y, chain=2))
+            await pilot.pause()
+            await pilot.pause()
+            copied = got[0] if got else None
+            if screen.is_attached:
+                app.pop_screen()
+                await pilot.pause()
+            return framed, copied
+
+        # The plain double-click still copies, and copies what it aimed at.
+        # Without this the "fix" could be `never copy`, which passes the rest.
+        for pane_row in (0, 4, 8):
+            framed, copied = await _drive("none", pane_row)
+            assert copied is not None, f"a plain double-click at row {pane_row} did not copy"
+            assert copied.content == framed.content, "the plain double-click copied a stale row"
+
+        for interlude in ("wheel", "key"):
+            for pane_row in (0, 2, 4, 6, 8):
+                framed, copied = await _drive(interlude, pane_row)
+                if copied is None:
+                    continue  # refused, which is the fix's chosen behaviour
+                got, shown = copied.content or "", framed.content or ""
+                assert got == shown, (
+                    f"a {interlude} between the clicks copied {got.splitlines()[0]!r} "
+                    f"while the frame showed {shown.splitlines()[0]!r}"
+                )
+
+
+@pytest.mark.asyncio
+async def test_the_too_small_notice_never_picks_a_form_wider_than_its_box() -> None:
+    """Round 2, D17. `_repaint` chose the notice's form against
+    `self._screen_size()[0]`, but the notice is laid out in the SCREEN'S
+    CONTENT BOX, which `Screen { padding: 1 }` makes two cells narrower. Those
+    agree once laid out; `_screen_size`'s two fallbacks do not — it answers
+    `self.app.size` before layout resolves and a hardcoded (80, 24) on
+    exception, both reporting more room than the notice has. At 34 and 35
+    columns that selects the 34-cell long form for a 32- or 33-cell box, and
+    it clips back to `terminal too small for /copy ·` — the dangling separator
+    U8 removed.
+
+    The design round kept a captured frame of that rendering but could not
+    reproduce it across 22 repeats, so this asserts the PROPERTY rather than
+    the race: whatever form is chosen must fit the box it is laid out in, at
+    every width, and an unresolved measurement must fall back to the short
+    form because it fits everywhere the long one does.
+    """
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = await _open(app, _targets("body"), pilot)
+
+        # Down to 17 columns, where the SHORT form still fits its box. Below
+        # that neither form does and the notice truncates whatever it is given
+        # — the 13–16 column residue UX round 2 recorded as a follow-up under
+        # U8, which is about the short form's own width and not about D17's
+        # choice between the two.
+        for columns in (60, 40, 37, 36, 35, 34, 33, 32, 30, 24, 20, 18, 17):
+            await pilot.resize_terminal(columns, 10)
+            await pilot.pause()
+            await pilot.pause()
+            assert not screen.is_drawable, f"{columns} cols must be too small for the card"
+            notice = screen._too_small
+            painted = str(notice.content)
+            box = notice.size.width
+            assert box, f"{columns} cols: the notice has no resolved width"
+            assert cell_len(painted) <= box, (
+                f"{columns} cols: the notice is {cell_len(painted)} cells in a {box}-cell box "
+                f"and will clip: {painted!r}"
+            )
+            assert not painted.rstrip().endswith("·"), f"dangling separator at {columns}"
+            assert "esc" in painted, f"the way out was shed at {columns} columns"
+            # And the widest form that FITS is the one chosen — the fix must
+            # not degrade to "always short", which would pass everything above.
+            if cell_len(TOO_SMALL_NOTICE) <= box:
+                assert (
+                    painted == TOO_SMALL_NOTICE
+                ), f"{columns} cols: short form in a box that fits the long one"
+
+        # THE DISCRIMINATING FIXTURE, and the reason this test exists at all.
+        # On the laid-out path every source agrees (`app.size` 34 → `self.size`
+        # 32 → the notice's box 32, measured at every width above), so no
+        # resize can tell the old code from the new one: a test that only
+        # swept widths would be exactly the guard that cannot see its own
+        # defect. The discrepancy is `_screen_size`'s FALLBACK — with
+        # `self.size` unresolved it answers `self.app.size`, the terminal,
+        # which is two cells wider than the box `Screen { padding: 1 }` leaves
+        # the notice.
+        #
+        # 34x8, not 34x10, and that is load-bearing: the same fallback feeds
+        # `is_drawable`, and at height 10 the patched screen reports itself
+        # DRAWABLE, so `_repaint` skips the notice branch and the assertion
+        # reads a stale string that passes against either code. Height 8 is
+        # below `MIN_CARD_INNER_ROWS` however the width is measured, so the
+        # notice branch really runs. Verified: the pre-fix expression paints
+        # the 34-cell long form into the 32-cell box here.
+        await pilot.resize_terminal(34, 8)
+        await pilot.pause()
+        await pilot.pause()
+        assert screen._too_small.size.width == 32, "the fixture's premise: a 32-cell box at 34 cols"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(type(screen), "size", property(lambda self: Size(0, 0)))
+            assert screen._screen_size()[0] == 34, "the fallback reports the terminal, not the box"
+            assert not screen.is_drawable, "the notice branch must actually run"
+            screen._repaint()
+            painted = str(screen._too_small.content)
+        assert cell_len(painted) <= 32, (
+            f"the unresolved-layout path chose a {cell_len(painted)}-cell form for a "
+            f"32-cell box, which clips to a dangling separator: {painted!r}"
+        )
+        assert painted == TOO_SMALL_NOTICE_SHORT
+
+        # And with NOTHING resolved it must still prefer the short form: it
+        # fits everywhere the long one does, so an uncertain measurement must
+        # not select the one that can clip.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(type(screen._too_small), "size", property(lambda self: Size(0, 0)))
+            patch.setattr(type(screen), "size", property(lambda self: Size(0, 0)))
+            screen._repaint()
+        assert (
+            str(screen._too_small.content) == TOO_SMALL_NOTICE_SHORT
+        ), "with no resolved width the notice chose the form that can clip"

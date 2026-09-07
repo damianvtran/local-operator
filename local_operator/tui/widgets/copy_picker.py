@@ -250,6 +250,13 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # coordinate, because the first click recentres the tree under the
         # pointer — see `on_click` (round 1, U1/Q1).
         self._click_anchor: tuple[int, tuple[int, int]] | None = None
+        # Set when something moved the window while an anchor was live, which
+        # Textual's chain cannot see: it breaks a chain on a changed screen
+        # offset or the clock, and a wheel notch or an arrow key is neither
+        # (round 2, U10). `on_click` reads it to refuse a copy for a chain
+        # that is no longer one gesture, rather than copying a row the frame
+        # stopped showing.
+        self._anchor_disturbed = False
         # Wrapped preview rows, keyed `(target.id, width)`. See
         # `_wrap_preview` for why that key is total and why the cache exists.
         self._wrap_cache: dict[tuple[str, int, int], tuple[list[Text], list[int]]] = {}
@@ -456,6 +463,22 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             self._repaint()
             return
         clamped = max(0, min(len(self._flat) - 1, index))
+        # ANY movement DISTURBS a live double-click anchor. Textual breaks a
+        # click chain on only two things — a changed screen offset and the
+        # clock — and a wheel notch or an arrow key changes neither, so the
+        # second click still arrived as `chain=2` and copied the PRE-WHEEL row
+        # while the caret and the preview had moved on (round 2, U10: 5/5
+        # frame/clipboard disagreements with a wheel between the clicks, 5/5
+        # with a key, 0/5 plain). That is the same silent wrong-clipboard
+        # failure U1 was filed for, through a narrower but entirely natural
+        # gesture: click a row, realise it is not the one, nudge the wheel,
+        # click again. This is the single path every gesture and key moves
+        # through, so it is the one place that can see them all; `on_click`
+        # re-arms after its own call, so a click cannot erase the anchor it is
+        # establishing.
+        if self._click_anchor is not None:
+            self._anchor_disturbed = True
+        self._click_anchor = None
         # The preview is a DIFFERENT DOCUMENT once the selection changes, so
         # the offset resets — but ONLY when the index actually changed.
         # Resetting unconditionally meant a movement that is a complete visual
@@ -518,6 +541,26 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         width, without ever subtracting a row count from a line count. That
         subtraction is the defect `_preview_lines` documents at length and the
         one this method exists not to re-introduce.
+
+        The walk crosses WRAP WINDOWS rather than stopping at the last one,
+        and that is what makes the ceiling hold on long documents.
+        `_wrap_window_start` snaps to :data:`PREVIEW_WRAP_STRIDE`, so a
+        document of ``100k + 1 … 100k + content_rows`` lines has a final
+        window holding fewer lines than the pane draws: walking only that
+        window ran out of MAP before it ran out of PANE and returned
+        ``window_start``, which for that band is exactly the
+        ``source_lines - 1`` ceiling MAJOR-2 removed — a fully scrolled
+        205-line answer ended on five lines above eleven blank rows at 100x30
+        (round 2, BLOCKER-1/U11). The band is ``content_rows`` wide, so it
+        grew with the terminal: 17/60 sampled lengths at 80x24, 30/60 at
+        100x30, 43/60 at 140x44. Stepping to the previous window and
+        continuing costs one further wrap (cached, and only on documents past
+        the stride) and makes the ceiling independent of where the document's
+        length happens to fall against it.
+
+        Reaching ``window_start == 0`` with the pane still unfilled is the
+        only proof the DOCUMENT fits, and it returns **0** — the "does not
+        overflow" answer the whole surface gates on.
         """
         target = self.selected_target()
         source_total = self._preview_source_lines()
@@ -534,29 +577,30 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # Wrapped from the LAST window, so a long document costs one wrap of
         # the tail rather than of the whole body: only the final rows can
         # decide where the tail begins. The cache makes a repeat free.
-        window_start = self._wrap_window_start(max(0, source_total - 1))
         width = max(1, self._card_width() - 2)
-        _, rows_per_source = self._wrap_preview(target, width, window_start)
-        if not rows_per_source:
-            return max(0, source_total - 1)
-
-        # Lines below the mapped window are not wrapped here (the map covers
-        # at most PREVIEW_WRAP_BUDGET); they cannot be part of a tail that
-        # begins inside the window, so the ceiling stays the last line.
-        mapped_end = window_start + len(rows_per_source)
-        if mapped_end < source_total:
-            return max(0, source_total - 1)
-
+        line = max(0, source_total - 1)
+        window_start = self._wrap_window_start(line)
         rows = 0
-        for back, count in enumerate(reversed(rows_per_source), start=1):
-            rows += count
-            if rows >= content_rows:
-                # `back` source lines fill the pane, so the tail starts at the
-                # first of them. One earlier line would overflow it.
-                return max(0, source_total - back)
-        # The whole mapped window fits the pane. Only a window that starts at
-        # line 0 proves the DOCUMENT fits; otherwise the tail is the window.
-        return window_start
+        while True:
+            _, rows_per_source = self._wrap_preview(target, width, window_start)
+            if not rows_per_source:
+                return max(0, source_total - 1)
+            # The map covers at most PREVIEW_WRAP_BUDGET lines from
+            # `window_start`, and `line` is the highest one this pass may
+            # consume, so a window the budget truncated is walked over the
+            # part it does cover rather than trusted past its end.
+            top = min(line, window_start + len(rows_per_source) - 1)
+            for index in range(top, window_start - 1, -1):
+                rows += rows_per_source[index - window_start]
+                if rows >= content_rows:
+                    # The lines from `index` to the last one fill the pane, so
+                    # the tail starts at `index`; one line earlier overflows it.
+                    return index
+            if window_start <= 0:
+                # Walked to the document's first line without filling the pane.
+                return 0
+            line = window_start - 1
+            window_start = self._wrap_window_start(line)
 
     def _preview_overflows(self) -> bool:
         """Whether the preview has anything the pane is not already showing.
@@ -775,33 +819,69 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         captured). Two clicks of one gesture must mean one row, so the chain
         remembers which. This does not re-open the arbitration that made a
         double-click the copy gesture; it is what makes that gesture honest.
+
+        The anchor binds only while the chain is UNDISTURBED. A chained click
+        is by definition the same physical spot, but a spot is not a row: the
+        window can move under a still pointer, so anything that moves it
+        clears the anchor in `_move_to` and the second click SELECTS WITHOUT
+        COPYING (round 2, U10). What survives is the case the anchor was built for —
+        the app moved the row under a hand that did not move — and what no
+        longer survives is the case where the USER moved it, where the frame
+        they are looking at is the honest answer. QA round 2 (Q6) noted this
+        boundary while it still cut the other way and recommended documenting
+        rather than changing it; the UX round measured the same mechanism
+        destroying the clipboard silently, so it is a fix here and not a note.
         """
         if getattr(event, "button", 1) != 1:
             return
         index = self._index_at(event)
         if index is None:
             # A chain broken off the tree cannot be continued onto it: the
-            # next click on a row must read as a fresh first click.
+            # next click on a row must read as a fresh first click — which is
+            # why the disturbance flag clears with it rather than surviving to
+            # refuse that click.
             self._click_anchor = None
+            self._anchor_disturbed = False
             return
         event.stop()
-        # `Click.chain` is Textual's own double-click count (0.5 s threshold),
-        # so the contract needs no timing invented here. Textual only
-        # increments the chain while the pointer stays on ONE screen offset,
-        # which is what makes the anchor safe: a chained click is by
-        # definition the same physical spot, so the row the user aimed at is
-        # the row the first click bound.
+        # `Click.chain` is Textual's own double-click count, so the contract
+        # needs no timing invented here. The window is `App.CLICK_CHAIN_TIME_
+        # THRESHOLD`, which this app deliberately widens to **0.9 s** (see the
+        # constant's own rationale in `app.py`); round 2 corrected a "0.5 s"
+        # written here, which understated the exposure by 80%. Cited rather
+        # than restated so a Textual upgrade cannot make this comment false.
+        #
+        # Textual increments the chain only while the pointer stays on ONE
+        # screen offset, so a chained click is the same physical SPOT. That is
+        # not the same as the same ROW: the window can move under a still
+        # pointer, which is why `_move_to` clears the anchor and why the fall
+        # back below re-hit-tests rather than trusting a stale one (U10).
         chain = getattr(event, "chain", 1)
         anchor = self._click_anchor
         coordinate = (event.screen_x, event.screen_y)
-        if chain >= 2 and anchor is not None and anchor[1] == coordinate:
-            target_index = anchor[0]
-        else:
-            target_index = index
-            self._click_anchor = (index, coordinate)
+        chained = chain >= 2 and anchor is not None and anchor[1] == coordinate
+        # A chain the window moved under is no longer ONE gesture, so it does
+        # not copy — it selects and previews, exactly as a chain broken by the
+        # clock already does (verified in round 2 as "the right refusal").
+        # Re-hit-testing instead was considered and measured: because a wheel
+        # over the tree moves the CURSOR and `_window_start` recentres it, the
+        # row under the pointer equals the row the preview is showing in only
+        # **1 of 9** pane positions, so that fallback copies a third row that
+        # is neither aimed at nor displayed. Refusing is the conservative
+        # direction for the reason this docstring already gives: a wrong copy
+        # is silent and destroys the clipboard, a refusal is visible in the
+        # frame and one more click away from the right answer.
+        disturbed = chain >= 2 and not chained and self._anchor_disturbed
+        target_index = anchor[0] if chained and anchor is not None else index
         if target_index != self._selected:
             self._move_to(target_index)
-        if chain >= 2:
+        if not chained:
+            # Re-armed AFTER the move, which disturbs any anchor: this click is
+            # the one binding the chain, so its anchor must outlive the
+            # movement it causes.
+            self._click_anchor = (index, coordinate)
+            self._anchor_disturbed = False
+        if chain >= 2 and not disturbed:
             self.action_choose()
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -860,8 +940,11 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
         self._pointer_at = None
-        # A chain cannot survive the pointer leaving the card.
+        # A chain cannot survive the pointer leaving the card. Cleared as a
+        # pair: the next click is a fresh first click, so it must not inherit
+        # a disturbance recorded against the anchor being dropped here.
         self._click_anchor = None
+        self._anchor_disturbed = False
         if self._hovered is not None:
             self._hovered = None
             self._repaint()
@@ -989,8 +1072,17 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         # its docstring always claimed: the position is kept and clamped
         # rather than dropped, so widening the terminal to read a long block
         # more comfortably no longer throws the reader back to line 1
-        # (round 1, U7). The order matters — the clamp reads `_preview_rows`,
-        # which `_card_text` only refreshes during that repaint.
+        # (round 1, U7).
+        #
+        # The order is DEFENSIVE, not load-bearing. The reasoning for it — the
+        # clamp reads `_preview_rows`, which `_card_text` only refreshes
+        # during that repaint — is sound, but review round 2 (MINOR-1) swapped
+        # the two statements and found no frame where it shows: identical
+        # rows, tail, offset and painted output at 140x44, 100x30, 80x24 and
+        # 90x14 with the offset at the tail, and the whole file green. It is
+        # kept in this order because deriving geometry before reading it is
+        # the right dependency, and recorded as unobservable so the next
+        # reader does not go looking for the frame that needs it.
         self._move_to(self._selected)
         self._scroll_preview_to(self._preview_offset)
 
@@ -1015,12 +1107,34 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
             notice.display = not drawable
             if not drawable:
                 # The notice is pinned to ONE row in the stylesheet, so a
-                # string wider than the screen wraps and the pin clips it —
-                # the notice that exists to explain a degraded frame becoming
-                # degraded itself. Choosing the form that fits keeps `esc`
-                # down to fourteen columns instead of shedding it first (U8,
-                # NIT-1).
-                columns = self._screen_size()[0]
+                # string wider than the box it lands in wraps and the pin
+                # clips it — the notice that exists to explain a degraded
+                # frame becoming degraded itself. Choosing the form that fits
+                # keeps `esc` down to fourteen columns instead of shedding it
+                # first (U8, NIT-1).
+                #
+                # Measured against the NOTICE'S OWN box, not the screen's.
+                # `_screen_size` agrees with it once laid out, but its two
+                # fallbacks do not: it answers `self.app.size` before layout
+                # and a hardcoded (80, 24) on exception, both of which report
+                # the terminal rather than the content box `Screen
+                # { padding: 1 }` insets by two cells — so a 34- or 35-column
+                # terminal could be told it had room for the 34-cell long form
+                # and clip it back to `terminal too small for /copy ·`, the
+                # exact dangling separator U8 removed. Design round 2 (D17)
+                # kept a captured frame of that rendering but could not
+                # reproduce it on demand across 22 repeats, so this closes the
+                # question rather than chasing the race: take the NARROWEST
+                # width any resolved source reports, and when nothing is
+                # resolved prefer the short form — it fits everywhere the long
+                # one does, so an uncertain measurement must not select the
+                # one that can clip.
+                candidates = [
+                    size.width
+                    for size in (getattr(notice, "size", None), getattr(self, "size", None))
+                    if size is not None and size.width
+                ]
+                columns = min(candidates) if candidates else 0
                 notice.update(
                     TOO_SMALL_NOTICE
                     if cell_len(TOO_SMALL_NOTICE) <= columns
@@ -1328,16 +1442,48 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         already use — span from the viewport fraction, top from the offset's
         fraction of its own range — so the app's three bars agree.
 
-        The division FLOORS rather than rounds, and that is the part carrying
-        the invariant. ``floor(start * travel / max_start) == travel`` exactly
-        when ``start == max_start``, so **"thumb at the bottom of the track"
-        means "no `↓ N more`" at every shape**. Rounding is very nearly right
-        and fails the same way the original did on shapes where the fraction
-        crosses ``travel - 0.5`` early: at 32 rows in a 12-row pane
-        (``span=4``, ``travel=8``, ``max_start=20``) ``round(19*8/20) = 8``
-        bottoms the thumb at ``start=19``, one window before the end, exactly
-        the defect being fixed. Verified over every ``start`` for both that
-        shape and the 19-row one D11 was reported against.
+        The invariant is SYMMETRIC, and both halves are load-bearing:
+
+            thumb flush with the bottom of the track ⟺ nothing below
+            thumb flush with the top of the track    ⟺ nothing above
+
+        Round 2 (reviewer MAJOR-1, design D16) found that a bare floored
+        proportion holds the first and breaks the second. ``floor`` puts
+        ``top == travel`` exactly at ``start == max_start`` — the bottom
+        invariant, and why round 1 chose it over ``round`` — but it also
+        yields ``top == 0`` for a RANGE of early windows, so the thumb sat
+        pinned at the top of the track while `↑ N more` said rows were hidden
+        above. That is verbatim D11's own defect, mirrored: at the 19-row
+        shape D11 was filed against, ``start=0`` and ``start=1`` painted an
+        identical gutter while the cue changed, and at 80x24 three
+        consecutive positions did. Enumerated over ``total`` 2–399 ×
+        ``rows`` 1–59, floor scored 0 bottom contradictions and 427,381 top
+        ones.
+
+        So the extremes of the track are RESERVED for the extremes of the
+        list, and the interior is mapped over the interior cells only. Over
+        the same space, restricted to shapes that actually draw a gutter
+        (``rows >= MIN_GUTTER_TRACK_ROWS``): **0 contradictions at either end
+        across 3,898,762 window positions**, bar the five noted below.
+
+        The interior mapping spreads ``1 … max_start-1`` over
+        ``1 … travel-1`` rather than re-flooring the full-range proportion.
+        Both forms satisfy the invariant identically — the difference is only
+        how evenly interior windows land on interior cells, where this one
+        measures 1.17x the ideal crowding against 1.78x for a clamped
+        full-range floor, i.e. the thumb tracks the list more faithfully in
+        the middle where the user is actually reading.
+
+        The five residuals are all ``travel == 1`` with ``max_start > 1``
+        (only ``rows``/``total`` of 3/5, 3/6, 4/6, 5/7): a one-cell travel has
+        two expressible positions for three or more states, so by pigeonhole
+        SOME window must share a cell with an extreme. It is a geometric
+        limit, not a formula defect, and it is resolved deliberately in favour
+        of the BOTTOM — an interior window shares the top cell rather than the
+        bottom one — because the bottom is where the list ends and where the
+        user stops, and because `↑`/`↓` cues carry the fine signal at sizes
+        that small (see ``MIN_GUTTER_TRACK_ROWS``, which sheds the track
+        entirely once it cannot say anything true at all).
         """
         total = len(self._flat)
         if total <= rows:
@@ -1345,8 +1491,20 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         span = max(1, round(rows * rows / total))
         travel = rows - span
         max_start = total - rows
-        top = (start * travel) // max_start if travel > 0 and max_start > 0 else 0
-        top = max(0, min(travel, top))
+        if travel <= 0 or max_start <= 0:
+            top = 0
+        elif start <= 0:
+            top = 0
+        elif start >= max_start:
+            top = travel
+        elif travel < 2:
+            # One cell of travel cannot express an interior at all. Share the
+            # TOP cell, so "flush with the bottom" keeps meaning "nothing
+            # below" — see the docstring on which end this forfeits and why.
+            top = 0
+        else:
+            top = 1 + ((start - 1) * (travel - 2)) // max(1, max_start - 2)
+            top = max(1, min(travel - 1, top))
         return range(top, top + span)
 
     @staticmethod
@@ -1495,6 +1653,18 @@ class CopyPickerScreen(ModalScreen[CopyTarget | None]):
         scroll. The caller compares the windowed map against the true source
         length, so budgeting changes how much is WRAPPED and never the number
         the user is shown.
+
+        Two entries are live on the paint path of a long preview, not one:
+        `_preview_lines` wraps the window holding the CURRENT offset while
+        `_footer_text` → `_preview_overflows` → `_preview_tail_offset` walks
+        the window(s) holding the document's END, and on a document scrolled
+        to its middle those are different keys (review round 2, MINOR-2). So
+        the first paint of a long preview pays two cold wraps rather than one,
+        and the walk added for BLOCKER-1 can touch a third on the band of
+        lengths that straddles a stride boundary. The memo absorbs the repeats
+        — warm hits are ~0.00025 ms below — and the cold cost is bounded by
+        the same per-window budget, so the ratio the table reports still holds
+        per entry; the count of entries is what changed.
 
         **Memoised on ``(target.id, width, window_start)``**, which supersedes
         this method's former "no per-target cache" note. That note's objection
