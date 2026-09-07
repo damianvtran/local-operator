@@ -46,6 +46,92 @@ class HistoryPageNotice(NoticeBlock, can_focus=True):
         self.action_more()
 
 
+class OlderHistoryNotice(NoticeBlock, can_focus=True):
+    """The HEAD notice, and the twin of :class:`HistoryPageNotice` above it.
+
+    The two ends of one transcript solve the same problem — "there is more
+    conversation off this edge of the screen" — and they must not solve it in
+    opposite ways. The tail notice has always been a control: focusable,
+    clickable, `enter`-bound, with the `interactive-notice` styling that gives
+    it hover and focus affordances. The head notice was a bare label that
+    recited a keyboard chord (`ctrl+home`) which appears NOWHERE else in the
+    product — not in the footer hints, not in the `?` help screen — and which
+    on most Mac keyboards is itself a chord (`fn+ctrl+←`). A reader who had
+    learned to click the bottom notice would click this one and get nothing.
+
+    Making it a control is what lets the copy stay a plain statement: the row
+    no longer has to explain how to operate it, because it IS the thing you
+    operate. That matters most in the state this notice exists for — a frame
+    too tall to scroll, where the history is otherwise a dead end.
+    """
+
+    BINDINGS = [Binding("enter", "older", "Older messages", show=False)]
+
+    class Requested(Message):
+        def __init__(self, notice: OlderHistoryNotice) -> None:
+            super().__init__()
+            self.notice = notice
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text, "note")
+        self._interactive = True
+        self.add_class("interactive-notice")
+
+    def set_interactive(self, interactive: bool) -> None:
+        """Advertise an action only while there is one to take.
+
+        The head notice restates rather than removing itself when the history
+        runs out (removing the first row would shift every row below it and
+        undo the anchor an insert just held), so unlike its tail twin it
+        outlives its own action. A row that keeps `interactive-notice`, keeps
+        `can_focus`, and paints the full-width focus band while activating it
+        does nothing is a focus stop that answers Enter with silence.
+
+        `can_focus` is an instance attribute here, shadowing the class-level
+        value Textual's `can_focus=True` keyword set. Textual reads
+        `allow_focus()` -> `can_focus` per widget at focus time, so flipping it
+        removes the row from the focus chain without touching the class or the
+        twin.
+
+        Idempotent, and reversible in both directions: a remote page can refill
+        an exhausted head, and a control that only ever went one way would be
+        the same stale-state defect the copy already guards against.
+        """
+        if interactive == self._interactive:
+            return
+        self._interactive = interactive
+        if not interactive and self.has_focus:
+            # Focus cannot rest on a row that just left the focus chain: it
+            # would keep the band painted and keep swallowing Enter.
+            #
+            # ORDER IS LOAD-BEARING: blur BEFORE `can_focus` is cleared.
+            # `blur()` -> `Screen._reset_focus(self)` locates this widget in
+            # the focus chain to hand focus to an ordered NEIGHBOUR. Clearing
+            # `can_focus` first removes the row from that chain, so the lookup
+            # raises and Textual takes its "widget was made invisible" fallback
+            # instead: the first focusable VISIBLE SIBLING, which in a
+            # transcript is the topmost `ToolCard` — measured ~770 rows above a
+            # reader sitting at the tail, with the reader's next `enter`
+            # silently expanding a card they cannot see (review round 3, R9).
+            # Blurring while still in the chain lands focus on `TranscriptView`,
+            # which is on screen and answers `enter` with nothing.
+            self.blur()
+        self.can_focus = interactive
+        self.set_class(interactive, "interactive-notice")
+
+    def action_older(self) -> None:
+        self.post_message(self.Requested(self))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if not self._interactive:
+            # Stopped anyway: the row still occupies its cells, and letting the
+            # click fall through to the transcript beneath would scroll a
+            # surface the reader was pointing at, not aiming past.
+            return
+        self.action_older()
+
+
 class DraftRecoveryNotice(NoticeBlock, can_focus=True):
     BINDINGS = [Binding("enter", "restore", "Restore unsent prompt", show=False)]
 
@@ -179,7 +265,7 @@ class PreparedReplay(ReplayState):
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
-            self._resume_head_notice = NoticeBlock(RESUME_OLDER_NOTICE, "note")
+            self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
             self._resume_tail_notice = HistoryPageNotice()
@@ -398,7 +484,7 @@ def project_settled_rows(
     # #451/#452 exist to prevent. One extra mount of a one-line notice is
     # not the cost this bound is avoiding.
     if self._block_sink is None and self._resume_pending_head and self._resume_head_notice is None:
-        notice = NoticeBlock(RESUME_OLDER_NOTICE, "note")
+        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
         self._resume_head_notice = notice
         self._append_block(notice)
         appended = True
