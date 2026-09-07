@@ -57,6 +57,7 @@ from pydantic import AnyUrl
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.callback_page import callback_response
+from local_operator.interpreter import python_argv
 
 if TYPE_CHECKING:
     # The SDK is an optional extra: these names are needed for annotations
@@ -317,9 +318,13 @@ async def open_browser_quietly(url: str) -> bool:
 
     try:
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            _BROWSER_OPEN_SNIPPET,
+            # ``python_argv``: ``-c`` puts the cwd on ``sys.path`` too, so a
+            # file named ``webbrowser.py`` sitting in the session's directory
+            # shadows the stdlib module this snippet depends on (verified: the
+            # child raises out of the stray file instead of opening a browser).
+            # A user's OAuth login is not the place to execute whatever happens
+            # to share a name with a stdlib module.
+            *python_argv("-c", _BROWSER_OPEN_SNIPPET),
             url,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,

@@ -53,6 +53,7 @@ import ast
 import contextlib
 import io
 import json
+import os
 import reprlib
 import shlex
 import subprocess
@@ -573,10 +574,34 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _enable_cwd_imports() -> None:
+    """Put the worker's cwd back on ``sys.path`` for USER code.
+
+    The parent launches this worker with ``-P`` (see
+    :mod:`local_operator.interpreter`) so that the harness modules imported
+    during startup resolve to the INSTALLED distribution rather than to a
+    checkout of this project that merely happens to be the session's working
+    directory. That flag also suppresses the implicit cwd entry that ordinary
+    Python gives a script, which user code legitimately relies on: a cell doing
+    ``import my_module`` beside the session's cwd must keep working, and
+    without this it fails with ``ModuleNotFoundError``.
+
+    Called AFTER this module's own imports have already bound — the ordering is
+    the whole point, and reversing it would reintroduce the defect ``-P`` is
+    here to fix. Appended, never inserted at position 0: user code gets its
+    workspace, but a stray module in the cwd still cannot shadow a stdlib or
+    harness import that the protocol itself depends on.
+    """
+    cwd = os.getcwd()
+    if cwd and cwd not in sys.path:
+        sys.path.append(cwd)
+
+
 def main() -> None:
     """Read requests, run them, answer — until stdin closes or the tool kills
     the process. Either ending is normal from this side: the tool owns the
     lifecycle (idle reaping, LRU eviction, timeout kill)."""
+    _enable_cwd_imports()
     namespace: dict[str, Any] = {
         "__name__": "__eval__",
         "__doc__": NAMESPACE_DOC,

@@ -42,7 +42,6 @@ import subprocess
 import sys
 import time
 import traceback
-from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -129,10 +128,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
         " ~/.local-operator/sessions. Pass --resume with no id to reopen the most recent"
         " session.",
     )
+    # ``installed_version()``, not ``version("local-operator")``: install
+    # metadata is written once and never moves when the checkout's
+    # ``pyproject.toml`` does, so the bare metadata call reports the version an
+    # editable install was CREATED at rather than the one it is running — and a
+    # leftover ``*.egg-info`` shadows the real dist-info downward on top of
+    # that. Both were live here: the reported symptom this change ships with
+    # was a wrong version number, and `--version` is the surface a user checks
+    # first, so it must not be the one place that still answers from the stale
+    # channel. See :func:`local_operator.update.installed_version`.
+    #
+    # Imported inside the function because ``local_operator.update`` pulls
+    # ``ssl``/``urllib.request`` (measured ~28 ms cumulative against an ~84 ms
+    # `import local_operator.cli` baseline). This parser is built once per
+    # invocation, so the cost lands only on runs that build it, and the
+    # startup-path guards in tests/unit/test_import_graph.py stay satisfied.
+    from local_operator.update import installed_version
+
     parser.add_argument(
         "--version",
         action="version",
-        version=f"v{version('local-operator')}",
+        version=f"v{installed_version()}",
         help="Show program's version number and exit",
     )
     parser.add_argument(

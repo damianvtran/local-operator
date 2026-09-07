@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from local_operator.interpreter import python_argv
+
 
 def logs_dir() -> Path:
     """Root for detached-exec logs and the jobs ledger: ``config_dir()/logs``.
@@ -125,7 +127,13 @@ def slugify(command: str, max_length: int = 40) -> str:
 def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     """Serialize the exec request into ``python -m local_operator.exec_worker``
     argv. Only set flags are passed so defaults stay in one place (worker)."""
-    argv = [sys.executable, "-m", "local_operator.exec_worker", "--prompt", command]
+    # ``python_argv``: `exec --background` is launched from wherever the user
+    # happens to be standing, and the worker imports the whole harness
+    # (session_factory, agents, config) — so a run started inside a checkout of
+    # this project would execute that checkout rather than the installed build,
+    # silently answering with different code than `lop --version` reports.
+    # Same defect as the runtime spawn; see :mod:`local_operator.interpreter`.
+    argv = python_argv("-m", "local_operator.exec_worker", "--prompt", command)
     if exec_args.json_mode:
         argv.append("--json")
     if exec_args.yolo:

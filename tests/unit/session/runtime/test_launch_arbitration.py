@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,10 @@ from local_operator.session.runtime.types import SessionRecord
 from local_operator.session_lease import SessionLeaseHeldError, acquire_session_lease
 
 SESSION_ID = "sessionaaa01"
+
+#: Distinguishes "no ``cwd=`` was passed" from "``cwd=None`` was passed"; the
+#: spawn contract under test is the ABSENCE of the kwarg, not a null value.
+_MISSING = object()
 
 
 class FakeRuntimeFleet:
@@ -485,6 +490,78 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
     assert "Settings > Providers" in raised.value.actionable
     assert "Traceback" not in raised.value.actionable
     assert "x.py" not in raised.value.actionable
+
+
+def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
+    tmp_path, monkeypatch
+) -> None:
+    """The REAL argv `_spawn_runtime` builds -- the line that fixes the bug.
+
+    WHY THIS EXISTS AND WHY IT ASSERTS ON THE PRODUCTION CALL. Every other
+    reference to `_spawn_runtime` in this module monkeypatches it away, because
+    arbitration is what those tests are about. The consequence was that the one
+    line this PR exists for -- the isolation flag on the `/new` spawn -- was
+    pinned by NOTHING: reverting it to the base argv left the whole suite green
+    (measured: 368 passed), while the PR's five other spawn sites were each
+    explicitly pinned. A guard that cannot go red is a decoration, which is this
+    change's own thesis, so its headline fix must not be the exception (QA Q2).
+
+    So `subprocess.Popen` is faked and `_spawn_runtime` itself is REAL. A test
+    that stubs `_spawn_runtime` cannot observe this argv at all, which is
+    exactly how the hole was created.
+
+    Both properties are asserted together because they are built at one call and
+    a clean merge can drop either half independently: the flag must sit at index
+    1 (interpreter options are only recognised BEFORE `-m`), and argv[0] carries
+    the process label whenever a branded image exists.
+    """
+    from local_operator.interpreter import SAFE_PATH_FLAG
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: dict[str, Any] = {}
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded["argv"] = list(argv)
+        recorded["executable"] = kwargs.get("executable")
+        # No `cwd=` is the whole reason the flag is required: the child would
+        # otherwise inherit the viewer's directory and import a checkout there.
+        recorded["cwd"] = kwargs.get("cwd", _MISSING)
+        return _Popen()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    process = launch_module._spawn_runtime("sess-argv01", str(tmp_path), defer_materialise=True)
+    capture = getattr(process, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    argv = recorded["argv"]
+    assert argv[1] == SAFE_PATH_FLAG, (
+        "the /new spawn lost its import-isolation flag: a session whose cwd is a "
+        f"checkout of this project will run THAT checkout, not the install. argv={argv}"
+    )
+    assert argv.index(SAFE_PATH_FLAG) < argv.index(
+        "-m"
+    ), f"the flag must precede -m or the interpreter ignores it; argv={argv}"
+    assert argv[2:] == ["-m", "local_operator.session.runtime.process"], argv
+    # Still no `cwd=`: if one is ever added the flag stops being the thing that
+    # protects the import, and this assertion should be revisited deliberately.
+    assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"
+
+    # argv[0] is the process LABEL when a branded image exists (`executable=`
+    # then carries the real image), and the bare interpreter when it does not.
+    if recorded["executable"]:
+        assert argv[0].startswith("Local Operator [session] id="), argv[0]
+    else:
+        assert argv[0] == sys.executable, argv[0]
 
 
 def test_spawn_capture_is_private_and_anonymous(tmp_path, monkeypatch) -> None:
