@@ -210,6 +210,38 @@ def test_oversized_file_never_renders_without_disclosure(
     assert "you MUST" in rendered, f"{name}: no imperative to read the rest"
 
 
+def test_a_file_that_sections_with_h1_gets_those_sections_named(tmp_path: Path) -> None:
+    """Several H1s mean the file sections with them; one means it titles with it.
+
+    Excluding H1 unconditionally handed an H1-sectioned file a single
+    undifferentiated range covering hundreds of lines, while the scan already
+    held the section names. A lone H1 is still excluded: a row spanning the
+    whole file only restates the bare pointer.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "# Alpha\n"
+        + "background prose here\n" * 400
+        + "\n# Beta rules\n"
+        + "detail line\n" * 400
+        + "\n# Gamma\nnever do X\n"
+    )
+    rendered = load_repo_guidance(repo)
+
+    assert re.search(r"- L\d+-\d+: Beta rules", rendered)
+    assert re.search(r"- L\d+-\d+: Gamma", rendered)
+
+    # A single H1 (the title) plus H2 sections must be unaffected: the title
+    # spans the file, so listing it adds nothing.
+    other = _make_repo(tmp_path / "other")
+    (other / "AGENTS.md").write_text(
+        "# The Title\n\n## Head\n\n" + "padding prose line here\n" * 500 + "\n## Late\n\nrule\n"
+    )
+    rendered_titled = load_repo_guidance(other)
+    assert re.search(r"- L\d+-\d+: Late", rendered_titled)
+    assert not re.search(r"- L\d+-\d+: The Title", rendered_titled)
+
+
 def test_unterminated_code_fence_still_indexes_the_tail(tmp_path: Path) -> None:
     """A fence left open at EOF is a formatting slip, not a 60KB code block.
 
@@ -387,6 +419,180 @@ def test_guidance_cap_bounds_ingestion_before_hash_and_render(
     assert len(rendered.encode()) < GUIDANCE_HEAD_BYTES + 2_000
     # A heading-free oversized file must still say the tail exists.
     assert "NOT included above" in rendered
+
+
+def test_bare_pointer_discloses_the_scan_ceiling_instead_of_a_wrong_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clipped line count must be labelled a floor, never stated as a length.
+
+    ``total_lines`` is counted over the bytes the scan read, so under the
+    ceiling it is short. Passing it to the bare pointer unqualified announced a
+    confident WRONG length and capped the offered range there -- silently
+    stranding everything past it, inside the very branch added to guarantee
+    nothing is stranded silently.
+    """
+    import local_operator.context_files as module
+
+    monkeypatch.setattr(module, "MAX_SCAN_BYTES", 9_000)
+    repo = _make_repo(tmp_path)
+    body = "\n".join(f"prose line {i}" for i in range(900))  # heading-free
+    (repo / "AGENTS.md").write_text(body)
+    rendered = load_repo_guidance(repo)
+
+    assert "NOT included above" in rendered
+    # No bare "(N lines)" claim: that number would be the ceiling's, not the
+    # file's, and the reader cannot tell the difference.
+    assert not re.search(r"\(\d+ lines\)", rendered), "clipped count stated as the length"
+    assert "floor" in rendered and "scan stopped" in rendered
+    # The range must not stop at the clipped count either.
+    assert "END of the file" in rendered
+    assert not re.search(rf"L\d+-{len(body.splitlines())}\b", rendered)
+
+
+def test_index_falls_back_to_a_pointer_when_the_scan_cannot_read_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head can be read and the scan then fail (a race, or a permission
+    change between the two opens). That path is the blocker's own code path, so
+    it must still disclose rather than return an empty index."""
+    import local_operator.context_files as module
+
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(_oversized())
+    real_scan = module._scan_sections
+
+    def fail_after_head(*args: object, **kwargs: object) -> object:
+        raise OSError("vanished between head and scan")
+
+    monkeypatch.setattr(module, "_scan_sections", fail_after_head)
+    rendered = load_repo_guidance(repo)
+    monkeypatch.setattr(module, "_scan_sections", real_scan)
+
+    assert "NOT included above" in rendered, "scan failure dropped the tail silently"
+    assert "AGENTS.md" in rendered
+    assert "you MUST" in rendered
+
+
+def test_tail_beyond_the_last_listed_section_is_disclosed(tmp_path: Path) -> None:
+    """Rows can be non-empty and still not reach EOF; that remainder is offered
+    explicitly rather than left implied.
+
+    On real input the last listed section always spans to EOF (a section ends
+    at the next same-or-higher heading, else at the last line), so this is a
+    DEFENSIVE guard rather than a live path -- which is exactly why it is
+    asserted directly on the renderer instead of through a file fixture that
+    cannot reach it. Driving it via ``_render_index`` would leave the branch
+    unexecuted and the guard a decoration.
+    """
+    from local_operator.context_files import _render_index_rows, _Section
+
+    # Sections that stop well short of the file's end.
+    sections = [_Section(2, "Early", 200), _Section(2, "Seen", 300)]
+    sections[0].end = 299
+    sections[1].end = 400
+    rendered = _render_index_rows(
+        "AGENTS.md",
+        head_lines=150,
+        sections=sections,
+        total_lines=900,
+        scan_truncated=False,
+        unterminated=False,
+    )
+
+    assert re.search(r"- L\d+-\d+: Seen", rendered), "expected a listed section"
+    assert "not under any listed heading" in rendered, "unlisted tail was not disclosed"
+    assert "L401-900" in rendered, "the unlisted range itself must be offered"
+
+
+def test_files_sharing_a_digest_prefix_but_differing_in_length_are_kept_apart(
+    tmp_path: Path,
+) -> None:
+    """Only the first MAX_DIGEST_BYTES are hashed, so length is folded in.
+
+    Without it, a nested repo whose two guidance files share a long prefix
+    dedups to one, and the survivor ships an index describing the OTHER file --
+    every range off by however much they differ.
+    """
+    from local_operator.context_files import MAX_DIGEST_BYTES
+
+    repo = _make_repo(tmp_path)
+    nested = repo / "pkg"
+    nested.mkdir()
+    shared = "# Shared\n\n" + "x" * (MAX_DIGEST_BYTES + 1000)
+    (repo / "AGENTS.md").write_text(shared)
+    (nested / "AGENTS.md").write_text(shared + "\n## Only in the deeper file\n\nrule\n")
+
+    assert len(discover_context_files(nested)) == 2, "same-prefix files collapsed"
+    # Identical files still dedup: the fold must not defeat that.
+    (nested / "AGENTS.md").write_text(shared)
+    assert len(discover_context_files(nested)) == 1
+
+
+def test_index_lists_h3_rows_not_only_top_level_sections(tmp_path: Path) -> None:
+    """INDEX_MAX_HEADING_LEVEL is a real knob: H3 is where the individually
+    actionable rules live, so lowering it to 2 would quietly coarsen every
+    index. Pinned as a property -- deeper rows exist and nest -- rather than as
+    a row count, which would break on any edit to the fixture."""
+    from local_operator.context_files import INDEX_MAX_HEADING_LEVEL
+
+    assert INDEX_MAX_HEADING_LEVEL >= 3
+    repo = _make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "# Doc\n\n## Head\n\n"
+        + "padding prose line here\n" * 500
+        + "\n## Gates\n\ntext\n\n### Never skip QA\n\nrule\n\n### Never force push\n\nrule\n"
+    )
+    rendered = load_repo_guidance(repo)
+
+    assert re.search(r"- L\d+-\d+: Gates", rendered)
+    assert re.search(r"  - L\d+-\d+: Never skip QA", rendered), "H3 rows missing or unindented"
+    assert "Never force push" in rendered
+
+
+def test_head_retains_the_start_of_the_file_that_adherence_depends_on(
+    tmp_path: Path,
+) -> None:
+    """The head size is load-bearing and nothing else pins it.
+
+    Halving GUIDANCE_HEAD_BYTES passed the whole suite, which would silently
+    evict the unconditional gates the constant's docstring reasons about -- the
+    same overstatement Q2 was raised about, arriving by a different route. This
+    pins the PROPERTY (an early-file gate is resident, and the head is a
+    meaningful fraction of the budget) rather than the literal number, so the
+    constant stays tunable but not quietly halvable.
+    """
+    from local_operator.context_files import GUIDANCE_HEAD_BYTES
+
+    repo = _make_repo(tmp_path)
+    marker = "NEVER merge without a green pipeline."
+    # The marker sits at a FIXED offset just under 8 KiB -- deliberately not
+    # derived from GUIDANCE_HEAD_BYTES, because a fixture that scales with the
+    # constant shrinks along with a mutant and pins nothing (8K->4K and 8K->6K
+    # both left the suite green that way). This asserts the shipped contract:
+    # roughly the first 8 KiB of a guidance file stays resident, so a gate
+    # written there is not silently evicted by a future retuning.
+    preamble = "# Project\n\n## Gates\n\nreference material line\n"
+    target_offset = 8 * 1024 - 200
+    filler = "reference material line\n" * (
+        (target_offset - len(preamble.encode())) // len("reference material line\n")
+    )
+    (repo / "AGENTS.md").write_text(
+        preamble + filler + f"{marker}\n" + "trailing reference line\n" * 2000
+    )
+    rendered = load_repo_guidance(repo)
+    head = rendered.split("\nThe rest of this file is NOT included")[0]
+
+    assert marker in head, (
+        "a gate lying inside the documented head budget was evicted; "
+        f"GUIDANCE_HEAD_BYTES={GUIDANCE_HEAD_BYTES} is smaller than the "
+        "docstring's reasoning assumes"
+    )
+    resident = len(head.encode())
+    assert resident >= GUIDANCE_HEAD_BYTES * 0.75, (
+        f"head shipped {resident} B against a {GUIDANCE_HEAD_BYTES} B budget; "
+        "the constant is being under-spent"
+    )
 
 
 def test_scan_ceiling_is_disclosed_rather_than_silently_dropping_sections(

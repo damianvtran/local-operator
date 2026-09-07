@@ -73,6 +73,21 @@ turn — strictly worse than a one-time re-cache when the file changes.
 The whole feature can be switched off with ``LOCAL_OPERATOR_CONTEXT_FILES=0``
 when a directory's guidance files should not be trusted or the context budget
 matters more than the conventions.
+
+Measuring this block: two traps that produce plausible wrong numbers
+---------------------------------------------------------------------
+
+Both were hit by real measurement passes on this module, and both fail
+silently with a believable figure rather than an error.
+
+1. ``create_session()`` returns with block 0 UNRENDERED -- the system-blocks
+   provider builds it lazily. Reading ``_context.system_blocks`` straight
+   after boot reports ``block0_chars = 0`` and understates this block's cost
+   as nothing. Await the provider first (the call ``build_initial_blocks``
+   makes), then read ``context_breakdown()``.
+2. A guidance file differs between git refs, so rendering "the repo's
+   AGENTS.md" under two code versions measures two different inputs. Copy one
+   md5-verified file into a fixture directory and render THAT under both.
 """
 
 from __future__ import annotations
@@ -268,9 +283,17 @@ def _scan_sections(
     # block running to the end of a rules file. Believing it swallows every
     # heading after the slip and strands that whole tail unnamed, which is the
     # silent-loss failure this module exists to prevent. So when the file ends
-    # mid-fence AND that cost us headings, re-scan ignoring fences: a spurious
-    # row pointing at a shell comment is a far cheaper error than an
-    # unreachable half of the operator's rules.
+    # mid-fence AND that cost us headings, re-scan ignoring fences.
+    #
+    # The price is paid in LABELLING, not in reachability, and it is worse than
+    # just "a spurious row": a `## ...` line inside the unclosed block becomes a
+    # row, which also TRUNCATES the preceding real section's range at that
+    # point. A reader following the real section's offered range can get a
+    # fraction of it and miss the rest of the rule. No content becomes
+    # unreachable -- the spurious row's own range covers the remainder, and the
+    # rescan is disclosed in the index -- so this is mislabelling rather than
+    # loss, and mislabelling a range is strictly better than stranding the
+    # whole tail with no range at all.
     if unterminated_fence:
         recovered = collect(track_fences=False)
         if len(recovered) > len(sections):
@@ -383,14 +406,35 @@ def _read_head(path: Path) -> tuple[str, int, bool]:
     return text, len(_split_lines_like_read(head)), True
 
 
-def _render_bare_pointer(shown: str, head_lines: int, total_lines: int | None) -> str:
+def _render_bare_pointer(
+    shown: str,
+    head_lines: int,
+    total_lines: int | None,
+    scan_truncated: bool = False,
+) -> str:
     """Disclosure for an oversized file that yielded no listable sections.
 
     The floor this module must never fall below: the reader learns the file
     continues, where it is, and what to read. Without a section list the range
     is simply everything after the head.
+
+    ``scan_truncated`` is NOT optional information. ``total_lines`` is counted
+    over the bytes the scan actually read, so when the scan stopped at
+    :data:`MAX_SCAN_BYTES` that count is a FLOOR, not the file's length.
+    Presenting it as the length states a confident wrong number and caps the
+    offered range short of EOF -- silent loss plus a plausible-looking figure,
+    which is both failure classes this module exists to prevent, reappearing
+    in the branch added to close the first one. So a clipped count is always
+    labelled as a floor and the range is left open-ended.
     """
-    if total_lines is not None and total_lines > head_lines:
+    if total_lines is not None and scan_truncated:
+        where = (
+            f"`{shown}` (MORE than {total_lines} lines: the index scan stopped "
+            f"at {MAX_SCAN_BYTES // 1024}KiB, so that count is a floor, not the "
+            f"file's length); the part not shown runs from L{head_lines + 1} to "
+            f"the END of the file"
+        )
+    elif total_lines is not None and total_lines > head_lines:
         where = (
             f"`{shown}` ({total_lines} lines); the part not shown is "
             f"L{head_lines + 1}-{total_lines}"
@@ -426,21 +470,54 @@ def _render_index(path: Path, shown: str, head_lines: int) -> str:
         # The head still shipped, so say the file continues even though its
         # shape is unknown; total_lines is unavailable, hence the bare form.
         return _render_bare_pointer(shown, head_lines, None)
-    # Level 1 is the document's title, not a section: it spans the whole file,
-    # so an index row for it says nothing the path and line count do not. Its
-    # span is still scanned, because an H2's range must end at the next H1 too.
-    remaining = [s for s in sections if s.end > head_lines and s.level >= 2]
+    # A SINGLE level-1 heading is the document's title: it spans the whole
+    # file, so a row for it says nothing the path and line count do not, and
+    # listing it would just restate the bare pointer less precisely. But a file
+    # with SEVERAL H1s is sectioning with them rather than titling with them (a
+    # legitimate style -- "# Alpha" / "# Beta rules" / "# Gamma"), and there
+    # the H1s are the only structure the reader has. Excluding them
+    # unconditionally handed those files one undifferentiated range covering
+    # hundreds of lines while the module held the section names all along.
+    # Their spans are scanned either way, because an H2's range must end at the
+    # next H1 too.
+    titles_only = sum(1 for s in sections if s.level == 1) < 2
+    floor = 2 if titles_only else 1
+    remaining = [s for s in sections if s.end > head_lines and s.level >= floor]
     if not remaining:
         # H1-only files, heading-free files, and files whose every heading sits
         # inside the head all land here. Nothing to index, but the tail is
         # still real and must stay reachable.
-        return _render_bare_pointer(shown, head_lines, total_lines)
+        return _render_bare_pointer(shown, head_lines, total_lines, scan_truncated)
+    return _render_index_rows(
+        shown, head_lines, remaining, total_lines, scan_truncated, unterminated, floor
+    )
+
+
+def _render_index_rows(
+    shown: str,
+    head_lines: int,
+    sections: list[_Section],
+    total_lines: int,
+    scan_truncated: bool,
+    unterminated: bool,
+    floor: int = 2,
+) -> str:
+    """Format listable sections as the index block.
+
+    Split from :func:`_render_index` so the disclosure branches below can be
+    driven directly. The unlisted-tail guard in particular is unreachable
+    through a file fixture -- the last section always spans to EOF -- so
+    testing it through discovery would leave it unexecuted and therefore a
+    decoration rather than a guard.
+    """
     rows = []
-    for section in remaining:
+    for section in sections:
         # A section that STARTS inside the head is still listed: the model saw
         # its opening and not its rest, so the range offered is the remainder.
         start = max(section.start, head_lines + 1)
-        indent = "  " * (section.level - 2)
+        # Indent relative to the shallowest level actually listed, so the tree
+        # reads the same whether the file sections with H1 or with H2.
+        indent = "  " * (section.level - floor)
         rows.append(f"{indent}- L{start}-{section.end}: {section.title}")
     listing = "\n".join(rows)
     note = (
@@ -454,7 +531,7 @@ def _render_index(path: Path, shown: str, head_lines: int) -> str:
     # that does. A row set can be non-empty and still leave a tail unlisted
     # (e.g. every heading sits inside the head, or the scan stopped early), and
     # an unreachable tail is the one outcome this module must never produce.
-    covered_to = max(section.end for section in remaining)
+    covered_to = max(section.end for section in sections)
     if covered_to < total_lines:
         note += (
             f"\n(L{covered_to + 1}-{total_lines} is not under any listed "
