@@ -21,6 +21,7 @@ ledger.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ from local_operator.tui.widgets.tool_card import (
     format_duration,
     truncate_cells,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Spinner cadence shared with the status band: 12.5 fps is the app's one
 #: notion of "this is moving", and two different speeds on one screen would
@@ -75,6 +78,23 @@ GLYPH_QUEUED = "⏳"
 #: media-control marks (``⏸``/``⏯``, siblings of the wide ``⏳`` queued glyph) it
 #: cannot balloon to a two-cell colour emoji and shear the time column.
 GLYPH_INTERRUPTED = "↺"
+
+#: A child the parent stopped ON PURPOSE, meaning to come back to it.
+#:
+#: It needs its own mark because ``SubagentComms.pause`` is MECHANICALLY A
+#: CANCEL — the row it leaves behind carries ``status == "cancelled"`` — so
+#: without this a pause and an abandonment painted the identical ``⊘ cancelled``
+#: row. That was survivable while both expired on the same timer; once the dock
+#: began keeping paused rows forever and expiring cancelled ones after five
+#: minutes, two pixel-identical rows had opposite lifetimes, and the frame
+#: contradicted the intent the user had recorded (design round 2, D5).
+#:
+#: ``⏸`` (U+23F8) over the ``‖``/``∥`` alternatives: it is the one mark whose
+#: meaning is "paused" rather than "two lines", and it is ``east_asian_width=N``
+#: — checked, because the neighbouring media-control marks are exactly the trap
+#: :data:`GLYPH_INTERRUPTED` documents. Unlike its sibling ``⏳`` (W, two cells)
+#: it locks to ONE cell, so it cannot shear the time column.
+GLYPH_PAUSED = "⏸"
 
 #: Rows the panel spends on chrome rather than on jobs: the ``Subagents``
 #: caption. Named because :meth:`SubagentPanel.predicted_rows` adds it to the
@@ -200,7 +220,21 @@ DEFAULT_DOCK_DENSITY = Density.FULL
 #: ``hidden`` at all. The ``Subagents`` word goes before the numbers: on a
 #: 50-column terminal the reader can tell a row of ✗/⣾ counts from the todo
 #: list without the label, and cannot tell ``1 failed`` from nothing.
-_SUMMARY_SHED_ORDER = ("cancelled", "interrupted", "queued", "done", "label", "running", "failed")
+#: ``paused`` sheds just before ``running`` and after every quietly-settled
+#: count: it is a state the user deliberately created and will come back to
+#: (its row now outlives the window), so it outranks the outcomes that merely
+#: happened — but a child working RIGHT NOW still outranks one deliberately
+#: stopped, and a failure still outranks both.
+_SUMMARY_SHED_ORDER = (
+    "cancelled",
+    "interrupted",
+    "queued",
+    "done",
+    "label",
+    "paused",
+    "running",
+    "failed",
+)
 
 #: Eviction rank for the collapsed preview, lowest kept first. Running and
 #: queued children are the ones the user is waiting on; a failure is the one
@@ -213,11 +247,18 @@ _SUMMARY_SHED_ORDER = ("cancelled", "interrupted", "queued", "done", "label", "r
 #: together, so adding a queued rank later — the obvious edit, since the
 #: design names queued explicitly — would have silently changed behaviour for
 #: a state this table appears to describe (round 1, F4).
+#: ``paused`` ranks beside ``interrupted``, and it has to be here rather than
+#: falling to the default: those rows now OUTLIVE the retention window, so a
+#: preview that evicted one in favour of a quiet success would drop the row the
+#: user is coming back to while keeping one that is about to expire on its own
+#: (design round 2, D5). Below ``failed``, which still outranks everything
+#: settled.
 _EVICTION_RANK: dict[str, int] = {
     "running": 0,
     "queued": 0,
     "failed": 1,
     "interrupted": 2,
+    "paused": 2,
 }
 
 #: Seam between the numbers on a row. The same ` · ` the full-page view's
@@ -302,7 +343,7 @@ _DEFAULT_ROW_WIDTH = 120
 
 
 def status_glyph(
-    status: str, *, queued: bool = False, spinner_glyph: str = ""
+    status: str, *, queued: bool = False, spinner_glyph: str = "", paused: bool = False
 ) -> tuple[str, str, str]:
     """``(glyph, word, semantic colour token)`` for one task job's state.
 
@@ -310,6 +351,13 @@ def status_glyph(
     full-page view render the SAME job side by side — a user who leaves the
     page and reads the row must not meet a second vocabulary for the state
     they were just looking at.
+
+    ``paused`` is passed IN rather than read off the status, for the same
+    reason the roster filter takes it that way: a paused child's job row says
+    ``cancelled`` (pause is implemented as a cancel) and the intent lives on
+    ``_ChildRecord.paused``, which the comms graph owns. It outranks every
+    other state here exactly as it does in ``SubagentComms._describe``, so one
+    child cannot read as two things on two surfaces.
 
     The WORD comes back with the glyph rather than being read off the job,
     and that is not tidiness: a queued job's ``status`` is still ``running``,
@@ -320,6 +368,12 @@ def status_glyph(
     A running job's glyph is the caller's spinner frame: motion says "alive"
     and the ink stays neutral, so the accent green is not spent a sixth time.
     """
+    if paused and status != "running":
+        # Gated on "not running" so a pause still LANDING (the flag is set
+        # before the cancel it awaits) does not paint a stopped child while it
+        # is demonstrably still going — the same window ``_describe`` guards
+        # with its ``pausing`` state.
+        return GLYPH_PAUSED, "paused", "muted"
     if queued:
         return GLYPH_QUEUED, "queued", "dim"
     if status == "running":
@@ -488,6 +542,12 @@ class RowFacts:
     label: str
     status: str
     queued: bool
+    #: The parent stopped this child MEANING to come back to it. Carried as its
+    #: own fact rather than derived from ``status``, because a pause is
+    #: implemented as a cancel and the row cannot tell the two apart — see
+    #: :data:`GLYPH_PAUSED`. Sourced from the comms graph by the app and handed
+    #: down, so the panel stays a pure renderer of facts it is given.
+    paused: bool
     running: bool
     elapsed: str
     activity: str
@@ -508,7 +568,7 @@ class RowFacts:
     agent_role: str = ""
 
 
-def row_facts(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
+def row_facts(job: Any, *, fallback_id: str, current: bool, paused: bool = False) -> RowFacts:
     """Read one job into the strings a row paints. Never raises.
 
     Guarded whole, and not merely with ``getattr`` defaults: a default only
@@ -519,19 +579,20 @@ def row_facts(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
     message-handler exception, i.e. the whole app, for a status row.
     """
     try:
-        return _read_row(job, fallback_id=fallback_id, current=current)
+        return _read_row(job, fallback_id=fallback_id, current=current, paused=paused)
     except Exception:
         return RowFacts(
             label=fallback_id,
             status="running",
             queued=False,
+            paused=False,
             running=False,
             elapsed="0s",
             activity="",
         )
 
 
-def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
+def _read_row(job: Any, *, fallback_id: str, current: bool, paused: bool = False) -> RowFacts:
     """:func:`row_facts` without the net. Everything here may raise."""
     status = str(getattr(job, "status", "running"))
     queued = bool(getattr(job, "queued", False))
@@ -566,7 +627,14 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         activity = " ".join(
             strip_control_sequences(str(getattr(job, "result_text", "") or "")).split()
         )
-        if not activity and status == "cancelled":
+        if not activity and paused:
+            # A paused child records no ``result_text`` — it was cancelled
+            # mid-run — so without this its row rests on the 1-cell ``⏸``
+            # alone, exactly the gap the cancelled and interrupted branches
+            # below already fill. Ahead of them because ``paused`` outranks the
+            # ``cancelled`` its job row actually carries.
+            activity = status_glyph(status, paused=True)[1]
+        elif not activity and status == "cancelled":
             # ``cancelled`` was the only state that painted no word: a job
             # cancelled mid-run records no ``result_text``, so the row's whole
             # state rested on a 1-cell ``⊘`` while the page it opens prints
@@ -601,6 +669,7 @@ def _read_row(job: Any, *, fallback_id: str, current: bool) -> RowFacts:
         label=strip_control_sequences(str(getattr(job, "label", "") or fallback_id)),
         status=status,
         queued=queued,
+        paused=paused,
         running=running,
         elapsed=job_elapsed(job),
         activity=activity,
@@ -789,7 +858,7 @@ def _glyph_cells(facts: RowFacts) -> int:
     the row draws is what lets ``compose_row``'s own truncate eat the last
     cell of a dollar figure.
     """
-    glyph, _word, _token = status_glyph(facts.status, queued=facts.queued)
+    glyph, _word, _token = status_glyph(facts.status, queued=facts.queued, paused=facts.paused)
     return max(_GLYPH_COL, cell_len(glyph))
 
 
@@ -1020,7 +1089,7 @@ def compose_row(
     role_width = _role_width(rung, role, role_column)
     role_pad = " " * max(0, role_width - cell_len(role))
     glyph, _word, token = status_glyph(
-        facts.status, queued=facts.queued, spinner_glyph=spinner_glyph
+        facts.status, queued=facts.queued, spinner_glyph=spinner_glyph, paused=facts.paused
     )
 
     row = Text(no_wrap=True, overflow="ellipsis")
@@ -1106,13 +1175,49 @@ class SummaryCounts(NamedTuple):
     failed: int = 0
     cancelled: int = 0
     interrupted: int = 0
+    #: Children the parent stopped meaning to return to. Its OWN bucket rather
+    #: than riding ``cancelled``: those two now have opposite lifetimes on the
+    #: dock (a pause persists, a cancel expires), so folding them together
+    #: would put the collapsed caption back in the position the expanded rows
+    #: just left — two states, one word (design round 2, D5).
+    paused: int = 0
 
     @property
     def total(self) -> int:
         return sum(self)
 
 
-def summary_counts(jobs: Sequence[Any]) -> SummaryCounts:
+def paused_child_ids(comms: Any) -> set[str]:
+    """Job ids the parent PAUSED, read from the graph that owns the fact.
+
+    THE one lookup, shared by the dock's roster filter (``OperatorApp``), the
+    panel's rows and the full-page view's title — because all three now render
+    or age a paused child differently from a cancelled one, and three copies of
+    "how do I tell?" is how they end up disagreeing. A pause is recorded on
+    ``_ChildRecord.paused`` and surfaces as ``node.status == "paused"``
+    (``SubagentComms._node``, where it outranks every other status for the same
+    reason it matters here), so this stays a pure consumer of that projection
+    rather than a second interpretation of the record.
+
+    Never raises: these are status surfaces, and a graph that cannot answer
+    must not take the app down. An empty set degrades to the previous
+    behaviour — a paused child painted as the cancel it mechanically is —
+    which is a wrong word, not a broken frame.
+    """
+    try:
+        nodes = comms.nodes() if callable(getattr(comms, "nodes", None)) else ()
+        return {str(node.job_id) for node in nodes if str(getattr(node, "status", "")) == "paused"}
+    except Exception:  # noqa: BLE001 — a status surface must not fail on a lookup
+        logger.warning("reading paused subagents failed", exc_info=True)
+        return set()
+
+
+def _paused_ids(session: Any) -> set[str]:
+    """:func:`paused_child_ids` for the comms graph hanging off a session."""
+    return paused_child_ids(getattr(session, "_subagent_comms", None))
+
+
+def summary_counts(jobs: Sequence[Any], *, paused_ids: set[str] | None = None) -> SummaryCounts:
     """Bucket task jobs by the state the row vocabulary already names.
 
     Reads through :func:`row_facts` rather than ``job.status`` directly so a
@@ -1121,9 +1226,13 @@ def summary_counts(jobs: Sequence[Any]) -> SummaryCounts:
     Restored rows arrive as ``interrupted``/``completed`` and bucket there.
     """
     counts = dict.fromkeys(SummaryCounts._fields, 0)
+    paused_ids = paused_ids or set()
     for job in jobs:
-        facts = row_facts(job, fallback_id="", current=False)
-        if facts.queued:
+        job_id = str(getattr(job, "id", "") or "")
+        facts = row_facts(job, fallback_id="", current=False, paused=job_id in paused_ids)
+        if facts.paused and facts.status != "running":
+            counts["paused"] += 1
+        elif facts.queued:
             counts["queued"] += 1
         elif facts.status == "running":
             counts["running"] += 1
@@ -1169,6 +1278,8 @@ def _summary_segments(
             segments.append(("failed", f"{GLYPH_FAILED}{counts.failed}", "danger"))
         else:
             segments.append(("failed", f"{counts.failed} failed", "danger"))
+    if counts.paused and "paused" not in dropped:
+        segments.append(("paused", f"{counts.paused} paused", "muted"))
     if counts.queued and "queued" not in dropped:
         segments.append(("queued", f"{counts.queued} queued", "dim"))
     if counts.cancelled and "cancelled" not in dropped:
@@ -1505,7 +1616,9 @@ class SubagentPanel(Container):
         #: than the expensive one (round 1, F3). One entry per job of
         #: ``(identity, status, queued)`` — see the method for why the flag is
         #: a term and not redundant with the status (round 2, Q2/F7).
-        self._summary_counts_key: tuple[tuple[int, str, bool], ...] | None = None
+        #: ``(id, status, queued, paused)`` per job — see ``_summary_counts``
+        #: for why each field is in the key and what a missing one costs.
+        self._summary_counts_key: tuple[tuple[int, str, bool, bool], ...] | None = None
         self._summary_counts_value: SummaryCounts = SummaryCounts()
         # Logical focus within the full roster. The expanded DOM displays only
         # one screenful around it; every job remains keyboard-reachable without
@@ -1516,6 +1629,12 @@ class SubagentPanel(Container):
         #: spinner tick repaints from it between refreshes rather than
         #: re-querying the manager eight times a second.
         self._jobs_by_id: dict[str, Any] = {}
+        #: Job ids the parent PAUSED, refreshed from the comms graph on every
+        #: sync. Held here rather than passed to each render call because a
+        #: pause is invisible on the job row itself (it reads ``cancelled``),
+        #: so every path that paints a row needs the same lookup — see
+        #: :data:`GLYPH_PAUSED`.
+        self._paused_ids: set[str] = set()
         self._selected_job_id = ""
         self._spinner_index = 0
         self._spinner_timer = None
@@ -1956,10 +2075,22 @@ class SubagentPanel(Container):
             # non-deterministically, since whether the row got a paint before
             # this sync depends on tick timing (it failed ~50% of runs in
             # isolation). It is the same staleness as F2, one function over.
-            facts = row_facts(self._jobs_by_id.get(job_id), fallback_id=job_id, current=False)
+            facts = row_facts(
+                self._jobs_by_id.get(job_id),
+                fallback_id=job_id,
+                current=False,
+                paused=job_id in self._paused_ids,
+            )
             # `queued` by its own name: the table ranks it explicitly, so
             # there is no longer a substitution here to keep in step.
-            status = "queued" if facts.queued else facts.status
+            # `paused` before `queued`, matching `summary_counts` and
+            # `status_glyph`: the job row underneath says `cancelled`, which
+            # ranks at the default, so reading the status alone would rank a
+            # deliberately-kept row below the successes about to expire.
+            if facts.paused and facts.status != "running":
+                status = "paused"
+            else:
+                status = "queued" if facts.queued else facts.status
             # Newest first within a rank: a negative index sorts later starts
             # ahead, which is the `[-budget:]` rule the slice had before.
             return (_EVICTION_RANK.get(status, 3), -index)
@@ -2034,6 +2165,7 @@ class SubagentPanel(Container):
             self._stats_for(selected_id, selected_job, True)
         if not task_jobs:
             self._jobs_by_id = {}
+            self._paused_ids = set()
             self._stats = {key: value for key, value in self._stats.items() if key == selected_id}
             self._sync_rows([])
             self.display = False
@@ -2050,6 +2182,7 @@ class SubagentPanel(Container):
         # and un-hiding on each tick would make `hidden` last one second.
         self.display = self._density is not Density.HIDDEN
         self._jobs_by_id = {str(getattr(job, "id", "") or ""): job for job in task_jobs}
+        self._paused_ids = _paused_ids(session)
         changed = self._sync_rows(task_jobs)
         self._apply_visibility()
         if changed:
@@ -2174,7 +2307,9 @@ class SubagentPanel(Container):
             job = self._jobs_by_id.get(job_id)
             if job is None:
                 continue
-            facts = row_facts(job, fallback_id=job_id, current=row.current)
+            facts = row_facts(
+                job, fallback_id=job_id, current=row.current, paused=job_id in self._paused_ids
+            )
             measured.append((job_id, row, facts, self._stats_for(job_id, job, reread_stats)))
         self._rung, self._column, self._clock, self._role_column = panel_layout(
             [(facts, stats) for _, _, facts, stats in measured], width
@@ -2384,15 +2519,27 @@ class SubagentPanel(Container):
         that stale tuple was the whole surface.
 
         Anything added to :func:`summary_counts`' bucketing belongs here too.
+
+        ``paused`` is the THIRD such field and it is the same trap as
+        ``queued``, one layer out: pausing a child changes the caption without
+        changing anything on the job row (the row already read ``cancelled``
+        the instant the pause landed), and the flag lives on the comms record.
+        Keyed on membership of ``_paused_ids`` so a pause or a resume moves the
+        key at the moment it moves the counts.
         """
         jobs = list(self._jobs_by_id.values())
         key = tuple(
-            (id(job), getattr(job, "status", ""), bool(getattr(job, "queued", False)))
+            (
+                id(job),
+                getattr(job, "status", ""),
+                bool(getattr(job, "queued", False)),
+                str(getattr(job, "id", "") or "") in self._paused_ids,
+            )
             for job in jobs
         )
         if self._summary_counts_key != key:
             self._summary_counts_key = key
-            self._summary_counts_value = summary_counts(jobs)
+            self._summary_counts_value = summary_counts(jobs, paused_ids=self._paused_ids)
         return self._summary_counts_value
 
     def _ledger_has_running(self) -> bool:
@@ -2532,7 +2679,12 @@ class SubagentPanel(Container):
                 job = self._jobs_by_id.get(job_id)
                 if job is not None and row.running:
                     row.paint(
-                        row_facts(job, fallback_id=job_id, current=row.current),
+                        row_facts(
+                            job,
+                            fallback_id=job_id,
+                            current=row.current,
+                            paused=job_id in self._paused_ids,
+                        ),
                         stats=self._stats_for(job_id, job, False),
                         spinner_glyph=glyph,
                         width=width,
