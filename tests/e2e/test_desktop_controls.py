@@ -96,8 +96,13 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             client.headers["Authorization"] = "Bearer " + token
             catalog = (await client.get("/v1/desktop/commands")).json()["result"]["commands"]
             # The catalogue is the registry MINUS the entries deliberately not
-            # offered on the desktop (no `desktop_destination` — today just
-            # `/mobile`, whose provisioning has no desktop proxy). Derived from
+            # offered on the desktop (no `desktop_destination`): `/mobile`,
+            # whose provisioning has no desktop proxy, and `/info`, whose every
+            # field describes the PROCESS AND HOST it runs in — install prefix,
+            # resolved import path, pid, control port, this machine's session
+            # registry. Proxied to a desktop surface it would faithfully report
+            # the wrong machine, which is the one failure the screen exists to
+            # prevent. Derived from
             # the registry rather than pinned as a literal, because the equality
             # against EVERY registry name could only ever hold if the withheld
             # commands were offered, which is the bug the field exists to
@@ -106,7 +111,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             offered = {spec.name for spec in SLASH_COMMANDS if spec.desktop_destination}
             withheld = {spec.name for spec in SLASH_COMMANDS if not spec.desktop_destination}
             assert {row["name"] for row in catalog} == offered
-            assert withheld == {"mobile"}
+            assert withheld == {"mobile", "info"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             assert sum(len(row["aliases"]) for row in catalog) == 8
             created = await client.post(

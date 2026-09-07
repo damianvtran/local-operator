@@ -322,6 +322,37 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "Current-session usage, cost and request diagnostics",
         desktop_destination="session.diagnostics",
     ),
+    # Beside `/session` because it is the same family — a read-only diagnostic
+    # screen with no owner execution — but a WIDER scope: `/session` describes
+    # one conversation's spend, `/info` describes the INSTALL and every runtime
+    # on the machine. It is the screen a user is asked to paste into an issue,
+    # which is why it takes no argument at all: there is one answer, and making
+    # someone name it would be a gate in front of a command that has one.
+    #
+    # No `desktop_destination`: every field it renders is a fact about THIS
+    # process and THIS host (install prefix, pids, RSS, the in-memory subagent
+    # graph), so a desktop surface pointed at it would describe the machine the
+    # host runs on rather than the one the user is asking about. Like `/context`
+    # it needs no `native_action` branch or `OWNER_COMMANDS` entry.
+    SlashCommand(
+        "info",
+        # "running sessions", not "sessions": `/analytics` describes past
+        # CONVERSATIONS and this describes live PROCESSES, and both descriptions
+        # sit in one picker where the shared word read as the same thing (UX
+        # round 1, U9). One word buys the distinction.
+        "Install, version, and running sessions on this machine",
+        # NO ALIASES, deliberately — `version`/`about` were added for UX round 1
+        # U8 and reverted the same round. The claim that alias rows "cost no
+        # space" is false here: the picker measures ONE name column across every
+        # row, so `/info  /version  /about` at 23 cells became the widest entry
+        # (previous max `/settings  /config`, 18) and took those 5 cells from
+        # every other command's description. Measured consequence at 80 columns:
+        # `/help`'s description collapsed to `List all co…`, and the `/model`
+        # and `ctrl+v` rows in `/help` wrapped. Discoverability for one command
+        # is not worth truncating the descriptions of all of them, and `/help`
+        # already lists this one. See `test_descriptions_come_back_above_the_
+        # collapse_width`, which is the guard that caught it.
+    ),
     # The screen it opens IS the receipt (same rule as `/usage`). The argument
     # names WHICH analytics view; today only `usage` exists, so the list is an
     # OFFER — a bare `/analytics` opens the usage view rather than doing
