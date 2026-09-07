@@ -107,10 +107,17 @@ class MoveError(ValueError):
 def format_label(path: str | Path, *, home: Path | None = None) -> str:
     """``~/rel/path`` inside the home tree, the absolute path outside it.
 
-    The same rendering :func:`local_operator.tui.widgets.status_line.format_cwd`
-    gives the band, and deliberately so: the row the user picks and the segment
-    they then read on the band must be the same string, or the move looks like
-    it landed somewhere else.
+    Matches :func:`local_operator.tui.widgets.status_line.format_cwd`
+    deliberately: the row the user picks and the segment they then read on the
+    band should be the same string, or the move looks like it landed somewhere
+    else.
+
+    ONE case diverges, and the claim is narrowed rather than overstated because
+    the difference is real. For the home directory ITSELF this renders ``~``
+    while the band renders ``~/.``. They name the same directory, and the band
+    has rendered it that way for every surface since long before ``/move``
+    existed, so correcting it belongs in ``format_cwd`` — where every other
+    caller would be affected — and not here (QA Q3).
     """
     text = str(path)
     if not text:
