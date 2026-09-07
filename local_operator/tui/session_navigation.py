@@ -16,6 +16,10 @@ Prepared = TypeVar("Prepared")
 logger = logging.getLogger(__name__)
 
 
+class PreparationInvalidated(RuntimeError):
+    """The authoritative replay changed before presentation ownership moved."""
+
+
 class SessionNavigation(Generic[Prepared]):
     def __init__(
         self,
@@ -86,15 +90,18 @@ class SessionNavigation(Generic[Prepared]):
         async with self._preparation_lock:
             if self._closed or generation != self.generation:
                 return
-            await self._prepare_and_commit(session_id, generation)
+            while not self._closed and generation == self.generation:
+                if not await self._prepare_and_commit(session_id, generation):
+                    break
 
-    async def _prepare_and_commit(self, session_id: str, generation: int) -> None:
+    async def _prepare_and_commit(self, session_id: str, generation: int) -> bool:
         prepared: Prepared | None = None
         transferred = False
+        retry = False
         try:
             prepared = await self._prepare(session_id)
             if self._closed or generation != self.generation or session_id != self.requested_id:
-                return
+                return False
             # There is deliberately no await between the final identity check
             # and commit. The app swaps every source-bound presentation field
             # together, then enables input on that exact authoritative facade.
@@ -108,6 +115,10 @@ class SessionNavigation(Generic[Prepared]):
                 self.committed_id = session_id
         except asyncio.CancelledError:
             raise
+        except PreparationInvalidated:
+            # Keep the requested/input boundary raised while the stale widgets
+            # are released and the same latest intent prepares a canonical cut.
+            retry = True
         except Exception as error:
             if not self._closed and generation == self.generation:
                 self._failed(session_id, error)
@@ -116,10 +127,11 @@ class SessionNavigation(Generic[Prepared]):
                 if prepared is not None and not transferred:
                     await self._release(prepared)
             finally:
-                if not self._closed and generation == self.generation:
+                if not retry and not self._closed and generation == self.generation:
                     self.requested_id = ""
                     self.intent_id = ""
                     self._pending("")
+        return retry
 
     def cancel(self) -> None:
         self.generation += 1

@@ -861,6 +861,7 @@ class ToolCard(ExpandableActionBlock):
     ) -> None:
         super().__init__()
         self.tool_call_id = tool_call_id
+        self.navigation_anchor_id = f"tool:{tool_call_id}"
         # tool_name is MODEL-CONTROLLED: the loop takes it from the tool call
         # itself, so a hallucinated or injected name reaches the frame. It was
         # the one raw-text entry point the sanitisation pass missed, and it is
@@ -1028,6 +1029,16 @@ class ToolCard(ExpandableActionBlock):
         self.add_class("tool-error")
         self._refresh_row()
         self._apply_open_on_settle()
+        self.finalize()
+
+    def mark_waiting(self) -> None:
+        """Project a canonical pending gate without inventing execution events."""
+        self._settle_live()
+        self._state = "waiting"
+        self._duration = None
+        self._error = ""
+        self.remove_class("tool-running", "tool-interrupted", "tool-error")
+        self._refresh_row()
         self.finalize()
 
     def mark_interrupted(self) -> None:
@@ -1219,6 +1230,17 @@ class ToolCard(ExpandableActionBlock):
         self._summary = f"composing… {facts}"
         self._refresh_row()
 
+    def set_navigation_visible(self, visible: bool) -> None:
+        super().set_navigation_visible(visible)
+        if not visible:
+            if self._clock_timer is not None:
+                self._clock_timer.pause()
+        elif self._state in ("running", "composing"):
+            self._start_clock()
+            if self._clock_timer is not None:
+                self._clock_timer.resume()
+            self._tick_clock()
+
     def _start_clock(self) -> None:
         """Run the 1 Hz repaint for as long as this row is live (idempotent).
 
@@ -1233,7 +1255,7 @@ class ToolCard(ExpandableActionBlock):
         no start time to count from and nothing streams into it, so every
         tick would repaint an unchanged row. See :attr:`_started`.
         """
-        if self._started is None:
+        if self._started is None or not self._navigation_visible:
             return
         if self._clock_timer is None and self.is_running:
             self._clock_timer = self.set_interval(CLOCK_INTERVAL_S, self._tick_clock)
@@ -2269,6 +2291,12 @@ class ToolCard(ExpandableActionBlock):
         it wrote is meta. ``terse`` goes one step further and drops the
         failure reason too; see :meth:`_outcome_runs`.
         """
+        if self._state == "waiting":
+            # A pending approval is not an interruption or an execution clock.
+            # At very narrow widths omit the label, never replace it with an
+            # outcome glyph that falsely says the tool completed.
+            text = "waiting" if not cap or cap >= len("waiting") else ""
+            return [(text, bindings.style("tool.status.running_duration"))]
         if self._state == "composing":
             # Nothing has RUN, so there is no execution time to report. The
             # dictation clock rides in the summary instead (`_render_composing`)

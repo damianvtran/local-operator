@@ -200,3 +200,145 @@ async def test_real_attach_pages_without_viewer_journal_parse_and_records_shell_
             await remote.dispose()
         server.close()
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_replay_mutations_refresh_without_replacing_the_connection(
+    tmp_path, monkeypatch
+):
+    from local_operator.harness.types import CompactionEndEvent, NoticeEvent
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    directory = config / "sessions" / "window-live"
+    messages = [Message.user(f"canonical {index}") for index in range(250)]
+    await seed_transcript(directory, messages)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    assert server._record is not None
+    remote = None
+    try:
+        remote = await RemoteSession.connect(
+            server._record,
+            "window-live",
+            config_dir=config,
+            takeover_factory=_never_take_over,
+            display_window=True,
+        )
+        connection = remote._client
+        received = asyncio.Event()
+        remote.subscribe(
+            lambda event: received.set() if isinstance(event, CompactionEndEvent) else None
+        )
+        old_token = remote.history_before_token
+        await session._transcript.append_compaction("canonical summary", messages[-1].id, 1000)
+        await session._emit(CompactionEndEvent(reason="manual", success=True))
+        await asyncio.wait_for(received.wait(), 3)
+        await remote.ensure_display_current()
+        assert remote._client is connection
+        assert remote.display_history_current
+        assert remote.history_message_count == 2
+        assert remote._display_history is not None
+        assert remote._display_history.history_generation == session._transcript._history_generation
+        assert any(
+            isinstance(row, CustomMessage) and row.custom_type == "compaction_summary"
+            for row in remote.display_history_window()
+        )
+        assert old_token is not None and (await remote.history_page(old_token)).status == "reset"
+        # Non-compaction mutations publish the same generation fence before
+        # ordinary events; callers need not page an obsolete token to find out.
+        await session._transcript.append_prune(messages[-1].id, "pruned")
+        await session._emit(NoticeEvent(text="pruned", kind="info"))
+        for _ in range(100):
+            if remote.frontend_state.history_generation == session._transcript._history_generation:
+                break
+            await asyncio.sleep(0.01)
+        await remote.ensure_display_current()
+        assert remote._client is connection
+        assert [row.model_dump() for row in remote.display_history_window()] == [
+            row.model_dump() for row in session._transcript.build_llm_history()
+        ]
+        assert remote._display_history.history_generation == session._transcript._history_generation
+        assert len(server._clients) == 1
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        server.close()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_prompt_and_wait_does_not_complete_on_admission(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    directory = config / "sessions" / "window-loop"
+    await seed_transcript(directory, [Message.user("initial")])
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def stream(request, signal=None):
+        # The session also issues a tool-less naming errand off the first
+        # prompt. Only a real agent turn carries the tool schema, and counting
+        # the errand would make "how many turns ran" unreadable here.
+        if not getattr(request, "tools", None):
+            for event in text_turn("named"):
+                yield event
+            return
+        calls.append(len(calls) + 1)
+        started.set()
+        await release.wait()
+        for event in text_turn("completed"):
+            yield event
+
+    session = build_session(directory, stream, cwd=tmp_path)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    assert server._record is not None
+    remote = None
+    task = None
+    try:
+        remote = await RemoteSession.connect(
+            server._record,
+            "window-loop",
+            config_dir=config,
+            takeover_factory=_never_take_over,
+            display_window=True,
+        )
+        task = asyncio.create_task(
+            remote.prompt_and_wait("one", message_id="11111111-1111-4111-8111-111111111111")
+        )
+
+        async def provider_started():
+            while not started.is_set():
+                if task.done():
+                    await task
+                    raise AssertionError("turn completed before the provider started")
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(provider_started(), 3)
+        await asyncio.sleep(0.05)
+        assert not task.done(), "durable admission is not terminal completion"
+        assert calls == [1]
+        # A refresh can pause UI event delivery. The scheduler still observes
+        # the authenticated terminal outcome, not whether a card was painted.
+        remote._ready_for_events = False
+        release.set()
+        await asyncio.wait_for(task, 3)
+        remote._ready_for_events = True
+        await asyncio.wait_for(
+            remote.prompt_and_wait("two", message_id="22222222-2222-4222-8222-222222222222"), 3
+        )
+        assert calls == [1, 2]
+        assert not remote._prompt_completion_waiters
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if remote is not None:
+            await remote.dispose()
+        server.close()
+        await handle.dispose()

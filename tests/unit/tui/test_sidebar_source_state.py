@@ -200,3 +200,121 @@ async def test_pending_choice_snapshot_restores_typed_and_checked_state():
         assert restored.selected_index == restored.other_row
         assert restored.has_focus == snapshot.focused
         app._unmount_prompt(restored)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_kind", ["approval", "ask"])
+async def test_hidden_stopped_callback_cannot_answer_selected_sources_gate(gate_kind):
+    class Watched(FakeSession):
+        is_remote = True
+
+        def set_stopped_callback(self, callback):
+            self.stopped_callback = callback
+
+    first, second = Watched(), FakeSession()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        source_a = app._interaction
+        source_a.turn.open = True
+        stopped = first.stopped_callback
+        app._adopt_session(second)
+        source_b = app._interaction
+        stopped_id = app._stopped_session_id
+        if gate_kind == "approval":
+            pending = asyncio.create_task(app.request_tool_approval("write", "only B"))
+        else:
+            pending = asyncio.create_task(
+                app._request_user_choice_on_app_loop(
+                    [
+                        AskQuestion(
+                            id="only-b",
+                            question="Only B",
+                            options=[AskOption(label="yes"), AskOption(label="no")],
+                        )
+                    ],
+                    source=source_b,
+                )
+            )
+        await pilot.pause()
+        stopped()
+        await pilot.pause()
+        assert app._session is second
+        assert app._stopped_session_id == stopped_id
+        assert not pending.done()
+        assert not source_a.turn.open and source_a.loop.cancelled
+        assert not source_b.loop.cancelled
+        if gate_kind == "approval":
+            assert app._approval is not None
+            app._approval.resolve(False)
+        else:
+            assert app._ask_screen is not None
+            await pilot.press("escape")
+        await pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["achieved", "cancelled", "error"])
+async def test_goal_loop_releases_one_worker_lease_on_every_exit(outcome, monkeypatch):
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        source = app._interaction
+        source.loop.running = True
+
+        async def prompt(*_args, **_kwargs):
+            assert source.active_workers == 1
+            if outcome == "cancelled":
+                source.loop.cancelled = True
+                raise asyncio.CancelledError
+            if outcome == "error":
+                raise RuntimeError("synthetic source failure")
+
+        async def judge(_session, _goal):
+            return True, "achieved"
+
+        monkeypatch.setattr(session, "prompt", prompt)
+        monkeypatch.setattr(app, "_judge_goal", judge)
+        if outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await app._loop_goal_worker("goal", source)
+        else:
+            await app._loop_goal_worker("goal", source)
+        await pilot.pause()
+        assert source.active_workers == 0
+        assert not source.loop.running
+        assert not source.must_retain
+
+
+@pytest.mark.asyncio
+async def test_replay_invalidation_retries_without_clearing_pending_intent():
+    from local_operator.tui.session_navigation import PreparationInvalidated
+
+    prepared, released, pending, committed = [], [], [], []
+
+    async def prepare(_session_id):
+        prepared.append(len(prepared) + 1)
+        return prepared[-1]
+
+    async def release(value):
+        released.append(value)
+
+    def commit(_session_id, value, _generation):
+        if value == 1:
+            raise PreparationInvalidated("replay changed")
+        committed.append(value)
+
+    navigation = SessionNavigation(
+        prepare=prepare,
+        commit=commit,
+        release=release,
+        pending=pending.append,
+        failed=lambda *_args: pytest.fail("must retry canonical replay"),
+    )
+    navigation.select("source-b")
+    assert navigation._task is not None
+    await navigation._task
+    assert prepared == [1, 2] and released == [1] and committed == [2]
+    assert pending == ["source-b", ""]
+    await navigation.close()

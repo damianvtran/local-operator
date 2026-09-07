@@ -130,15 +130,16 @@ class PreparedReplay(ReplayState):
     def _append_block(
         self, block: Any, *, ends_empty_state: bool = True, pin_tail: bool = False
     ) -> None:
-        block.navigation_anchor_id = self._projection_message_id
-        block.navigation_anchor_part = self._projection_part
+        if not block.navigation_anchor_id:
+            block.navigation_anchor_id = self._projection_message_id
+            block.navigation_anchor_part = self._projection_part
         self._projection_part += 1
         self.blocks.append(block)
 
     def _append_image_blocks(
         self, images: list[ImageContent], *, marker_text: str | None = None
     ) -> list[ImageBlock]:
-        return append_image_blocks(self, images, marker_text=marker_text)
+        return append_image_blocks(self, images, marker_text=marker_text, navigation_visible=False)
 
     def _painted_tool_card(self, call_id: str) -> None:
         return None
@@ -186,6 +187,7 @@ class PreparedReplay(ReplayState):
 class SessionPresentation:
     replay: PreparedReplay
     revision: int = 0
+    replay_revision: int = 0
     source_stamp: tuple[Any, ...] = ()
     source_token: str = ""
     history_size: int = 0
@@ -538,10 +540,6 @@ def project_settled_rows(
             self._replay_bang_pending = False
             if text:
                 block = AssistantBlock()
-                # Replayed completions must stay acknowledgeable: the viewed
-                # receipt is keyed by the anchoring message id, so a block
-                # rebuilt from history carries the same id the live render
-                # would have (upstream #697).
                 block.completion_anchor_id = str(getattr(message, "id", ""))
                 block.update_text(text)
                 block.finalize_text()
@@ -666,7 +664,11 @@ def replay_tool_call(
 
 
 def append_image_blocks(
-    self: ReplayTarget, images: list[ImageContent], *, marker_text: str | None = None
+    self: ReplayTarget,
+    images: list[ImageContent],
+    *,
+    marker_text: str | None = None,
+    navigation_visible: bool = True,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -706,7 +708,12 @@ def append_image_blocks(
         else:
             label = f"#{index + 1}"
         try:
-            block = ImageBlock(image.data or None, image.mime_type, label=label)
+            block = ImageBlock(
+                image.data or None,
+                image.mime_type,
+                label=label,
+                navigation_visible=navigation_visible,
+            )
         except Exception:
             logger.debug("image block construction failed", exc_info=True)
             continue
