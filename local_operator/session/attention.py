@@ -172,8 +172,12 @@ class AttentionStore:
                     # ever observe an unbaselined table. `unseen` is a LEVEL,
                     # not an edge: without this, the first observer to upgrade
                     # would claim every historical completion still unread and
-                    # fire a banner for each one (measured: 8 on this machine's
-                    # live store). Baselining at creation also means the
+                    # fire a banner for each one (measured on the maintainer's
+                    # live store: 171 unseen conversations out of 332
+                    # completions; the "8" an earlier draft of this comment
+                    # cited was the test fixture's count, not a live
+                    # measurement — review round 1, n1). Baselining at creation
+                    # also means the
                     # eleventh observer to start INHERITS the baseline rather
                     # than re-deriving one of its own — the watermark is a
                     # property of the database, not of a process.
@@ -370,6 +374,20 @@ class AttentionStore:
         stays in the sidebar, and `lop sessions` still reports it \u2014 whereas a
         duplicate is visible and repeats. Backends that can report their own
         failure hand the claim back through :meth:`release_delivery`.
+
+        THE ACCEPTED RISK, stated plainly so the next reader does not have to
+        rediscover it: a claimant killed between the claim and the spawn leaves
+        that completion delivered-but-unannounced FOREVER. There is no lease,
+        no owner pid and no expiry \u2014 a re-claim returns False for good, and
+        nothing sweeps it. That is bounded in CONSEQUENCE (one transient toast,
+        for one completion, on a process that crashed) and unbounded in TIME,
+        and it is accepted here because the alternative trade is worse: a lease
+        needs a clock, and a clock in this predicate is what lets two observers
+        with disagreeing time both deliver. The durable signal survives
+        regardless, which is what makes the transient one safe to lose. A lease
+        carrying an owner pid is the natural fix if this ever stops being
+        acceptable; the schema has no room for one today (review round 1 m1,
+        QA round 1 Q3 \u2014 both judged the trade correct).
 
         A store that does not exist yet holds no completion to claim, so this
         never creates one: an arbitration read must not be the thing that

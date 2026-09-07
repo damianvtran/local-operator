@@ -24,6 +24,8 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+import pytest
+
 from local_operator.tui.notify import (
     APP_NAME,
     BEL,
@@ -336,16 +338,25 @@ def test_a_parked_turn_notifies_even_with_children_running() -> None:
 
 
 def test_each_kind_says_which_state_it_is() -> None:
-    """Four states have distinct details and actionable context: completion is
-    unlike a blocked turn, while ask and approval share the need for input."""
+    """Five states have distinct details and actionable context: completion is
+    unlike a blocked turn, while ask and approval share the need for input.
+
+    ``interrupted`` is its own state rather than a synonym for ``error``. The
+    attention store admits exactly complete/error/interrupted, and on the
+    maintainer's real store the non-success completions are 14 interrupted and
+    0 error — so a fold made every non-success banner misreport (design round
+    1, D3). The distinct-bodies assertion is what pins that: it fails the
+    moment someone re-points ``interrupted`` at ``BODY_ERROR``.
+    """
     assert len(set(BODIES.values())) == len(BODIES)
     assert CONTEXTS == {
         "complete": "Complete",
         "approval": "Input required",
         "ask": "Input required",
         "error": "Needs attention",
+        "interrupted": "Interrupted",
     }
-    for kind in ("complete", "approval", "ask", "error"):
+    for kind in ("complete", "approval", "ask", "error", "interrupted"):
         notifier, sink = unfocused()
         notifier.send(kind)  # type: ignore[arg-type]
         assert BODIES[kind] in sink.joined
@@ -676,3 +687,40 @@ def test_the_built_click_command_actually_runs(tmp_path, monkeypatch) -> None:
 
     assert result.returncode == 0, result.stderr
     assert receipt.read_text().strip() == "resume-click abc123def456"
+
+
+def test_the_privacy_flag_governs_the_attached_session_toast_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`display.notification_session_name` off keeps the name off THIS leg too.
+
+    Review round 1, M2: the flag governed only the observer path, while the
+    attached session's own toasts title themselves from ``set_label`` and
+    ignored it — and those are the majority of a user's toasts. The settings
+    copy ("A session's name appears on banners, including the lock screen.") is
+    unqualified, so a flag that covered one leg made its own promise false. A
+    privacy control that half works is worse than one that is clearly scoped,
+    because the copy reads as a guarantee.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: False)
+    notifier, sink = unfocused()
+    notifier.set_label("Secret client migration")
+    notifier.send("complete")
+    assert "Secret client migration" not in sink.joined
+    assert APP_NAME in sink.joined
+
+
+def test_the_privacy_flag_defaults_to_naming_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The widened gate must not change the DEFAULT, which is to name it.
+
+    Guards M2's fix from over-applying: a missing key resolves to True through
+    ``settings_get``'s default, exactly as every notification here has always
+    behaved.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: default)
+    notifier, sink = unfocused()
+    notifier.set_label("Fix quota reporting")
+    notifier.send("complete")
+    assert "Fix quota reporting" in sink.joined

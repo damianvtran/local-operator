@@ -506,6 +506,24 @@ _SUBAGENT_DOCK_ROWS = 10
 #: number.
 _BAND_SETTLE_PASSES = 3
 
+#: Background-completion banners one observer tick may SPAWN. Everything past
+#: the cap is still claimed — the arbitration is unchanged — and collapsed into
+#: a single "N more sessions finished" digest.
+#:
+#: The no-flood baseline only covers the tick that CREATES the deliveries
+#: table. A store already migrated, with no observer running while background
+#: sessions finish, has an unbounded backlog on the next open: measured at 30
+#: banners on one tick from a store at rest (review round 1, B1), which is the
+#: overnight case — close every window, let daemons finish, open one TUI in the
+#: morning.
+#:
+#: Three, because a macOS banner stack shows about that many before it starts
+#: collapsing them itself, and the digest carries the remainder losslessly. It
+#: bounds a BACKLOG and nothing else: coalescing several sessions finishing
+#: within seconds of each other is a separate mechanism on a separate PR, and
+#: deliberately not half-built here.
+_BACKGROUND_NOTIFY_MAX_PER_TICK = 3
+
 
 # The registry, its policy commentary and `slash_command_for` live in
 # `local_operator.slash_commands`, which the server front ends import too; both
@@ -13489,6 +13507,95 @@ class OperatorApp(App[None]):
 
         return conversation_identity(config_dir() / "sessions" / session_id)
 
+    def _announce_background_digest(self, count: int) -> None:
+        """One line standing in for the completions the per-tick cap held back.
+
+        The cap exists to stop a backlog flooding the notification centre; on
+        its own it would silently drop 25 of 30 finished sessions, which is a
+        second defect rather than a fix. This says how many, so the count is
+        never lost — the sidebar still carries every row's `✓`, and the user
+        now knows to go and look at it.
+
+        Titled with the neutral sentence rather than any session's name: it is
+        about several sessions, so naming one of them would be wrong, and it
+        also costs nothing to a user who has opted out of names entirely.
+
+        Same best-effort contract as every other delivery here — this runs off
+        the loop inside `collect()`, and a digest that failed to send must not
+        take the scan down with it.
+        """
+        from local_operator.proc import spawn_detached
+        from local_operator.tui.notify import (
+            BACKGROUND_FALLBACK_TITLE,
+            CONTEXT_COMPLETE,
+            cmux_command,
+            cmux_surface_id,
+            detached_notify,
+        )
+
+        body = f"{count} more session{'s' if count != 1 else ''} finished"
+        try:
+            surface = cmux_surface_id()
+            if surface is not None:
+                spawn_detached(
+                    cmux_command(surface, BACKGROUND_FALLBACK_TITLE, CONTEXT_COMPLETE, body)
+                )
+            else:
+                # No `session_id`: a digest covers several sessions, so there is
+                # no single transcript for a click to reopen. The banner is
+                # informational and the sidebar is where the user goes next.
+                detached_notify(BACKGROUND_FALLBACK_TITLE, body, subtitle=CONTEXT_COMPLETE)
+        except Exception:  # noqa: BLE001 — a toast must never affect the poll
+            logger.debug("background completion digest failed", exc_info=True)
+
+    def _background_completion_title(self, entry: CatalogEntry) -> str:
+        """The banner title for a background session: its STORED name, or a sentence.
+
+        Deliberately NOT ``entry.row.name``. That is the picker's display name,
+        which falls back to the session's opening user message when no
+        ``title.json`` exists — and macOS clips a banner title at ~43
+        characters, while an agent-spawned session's opener begins with its
+        role preamble. Measured on the maintainer's store: 15 of 67 rows have
+        no stored title, and 11 of 67 are not uniquely identifiable at the
+        clip, producing banners like ``[team: lopdev] You are reviewer on this
+        te…`` where every discriminating word is past the cut (design round 1,
+        D1). Those are disproportionately the BACKGROUND sessions this feature
+        exists to announce, so the fallback has to be the one that fails
+        gracefully rather than the one that fails silently.
+
+        The sidebar keeps using the opener because its row is on screen beside
+        the others and one keypress from the transcript; a lock-screen banner
+        has neither, so the two surfaces answer the same question differently
+        on purpose.
+
+        Reads the sidecar directly rather than through ``session_name`` because
+        that helper's whole contract is the opener fallback this must not take.
+        Tolerant like every other call on this path: an unreadable directory
+        yields the neutral sentence rather than raising into the poll.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import stored_session_title
+        from local_operator.tui.notify import (
+            BACKGROUND_FALLBACK_TITLE,
+            sanitize_text,
+            session_names_in_notifications,
+        )
+
+        if not session_names_in_notifications():
+            # The opt-out keeps the BRAND, which is what a user who turned this
+            # off is asking for: no statement about their sessions at all. The
+            # nameless case below is a different meaning and gets a different
+            # sentence, so the two banners are no longer identical (D2).
+            from local_operator.tui.notify import APP_NAME
+
+            return APP_NAME
+        try:
+            stored = stored_session_title(config_dir() / "sessions" / entry.id)
+        except Exception:  # noqa: BLE001 — a title is chrome; delivery is not
+            logger.debug("background completion title unavailable", exc_info=True)
+            stored = ""
+        return sanitize_text(stored) or BACKGROUND_FALLBACK_TITLE
+
     def _deliver_background_completion(self, entry: CatalogEntry, identity: str) -> bool:
         """Announce one finished background session; report whether a toast went out.
 
@@ -13522,41 +13629,51 @@ class OperatorApp(App[None]):
         from local_operator.proc import spawn_detached
         from local_operator.session.attention import AttentionStore
         from local_operator.tui.notify import (
-            APP_NAME,
-            BODIES,
+            BODY_BACKGROUND,
             CONTEXTS,
+            argv_safe,
             cmux_command,
             cmux_surface_id,
             detached_notify,
-            sanitize_text,
-            session_names_in_notifications,
         )
 
-        # `interrupted` folds to `error` for the same reason the sidebar paints
-        # both with `✗`: the user's question is "did it finish or not", and a
-        # third word on a banner they read in under a second does not answer it.
-        kind = "error" if entry.completion_kind in ("error", "interrupted") else "complete"
+        # THREE STATES, THREE SENTENCES. `interrupted` is not folded into
+        # `error`: the store constrains a kind to exactly complete/error/
+        # interrupted, and the maintainer's real store holds 318 complete, 14
+        # interrupted and 0 error — so a fold made every non-success banner
+        # this can raise today say a session failed when it did not (design
+        # round 1, D3). The sidebar's shared `✗` does not justify it either: a
+        # glyph is a pointer one keypress from the row, while banner prose is
+        # read once on a lock screen with nothing to check it against. Note the
+        # sidebar's own `CatalogEntry.state_description` keeps the two distinct
+        # as well — it is only the GLYPH that folds.
+        kind = entry.completion_kind if entry.completion_kind in CONTEXTS else "complete"
         surface = cmux_surface_id()
         backend = "cmux" if surface is not None else "detached"
         store = AttentionStore(config_dir() / "attention.db")
         if not store.claim_delivery(identity, entry.completion_token, backend):
             return False
-        # Falls back to the brand rather than to a bare directory name: the
-        # point of the title is that the user can tell WHICH session finished,
-        # and a name they opted out of showing is not improved by a worse one.
-        title = sanitize_text(entry.row.name) if session_names_in_notifications() else ""
-        title = title or APP_NAME
+        title = self._background_completion_title(entry)
+        # The body says why this banner exists — the session that finished is
+        # not the one on screen — because the subtitle already carries the
+        # state and repeating it there spent both lines on one word (D5).
+        body = BODY_BACKGROUND
         try:
             if surface is not None:
                 delivered = bool(
-                    spawn_detached(
-                        cmux_command(surface, title, CONTEXTS.get(kind, ""), BODIES.get(kind, ""))
-                    )
+                    spawn_detached(cmux_command(surface, title, CONTEXTS.get(kind, ""), body))
                 )
             else:
                 delivered = detached_notify(
-                    title,
-                    BODIES.get(kind, ""),
+                    # `argv_safe` for parity with the cmux branch above, which
+                    # applies it inside `cmux_command`. A model-written name can
+                    # begin with `-`; this title lands in argv slot 1 of the
+                    # signed bundle, where it is positional and so not misparsed
+                    # today — the wrap exists so the two branches cannot drift
+                    # into disagreeing about whether a title is shape-safe
+                    # (review round 1, m2).
+                    argv_safe(title),
+                    body,
                     session_id=entry.id,
                     subtitle=CONTEXTS.get(kind, ""),
                 )
@@ -13604,8 +13721,20 @@ class OperatorApp(App[None]):
         in-app `Notifier` on `TurnEnded`), which is what stops one completion
         being announced twice by one process.
 
+        A row ATTACHED IN ANOTHER WINDOW is skipped by the same rule, not by a
+        different one: `live_state == "attached"` means some other TUI holds
+        that session open and its own `Notifier` already owns the toast, so the
+        only thing this process would add is a duplicate (B2).
+
+        BOUNDED PER TICK. At most `_BACKGROUND_NOTIFY_MAX_PER_TICK` banners are
+        spawned in one scan; the rest are still claimed and reported as one
+        digest line, so a backlog cannot flood the notification centre and
+        cannot be silently swallowed either (B1).
+
         Never raises and never blocks the loop: a notification is chrome, and
         the work below is a SQLite read plus a directory scan plus a spawn.
+        Every row is delivered under its own guard, so one unreadable row
+        cannot mute its siblings (Q2).
         """
         if getattr(self, "_background_notify_pending", False):
             return
@@ -13633,21 +13762,88 @@ class OperatorApp(App[None]):
             # value afterwards would skip the next poll and lose that event.
             self._background_notify_revision = revision
             current = str(getattr(self._session, "session_id", "") or "")
+            announced = 0
+            claimed_silently = 0
+            released = False
             for entry in load_catalog(directory):
                 if (
                     not entry.unseen
                     or not entry.completion_token
                     or entry.row.pending
                     or entry.id == current
+                    or entry.row.live_state == "attached"
                 ):
                     # A pending row is a GATE, not a finished turn: the runtime
                     # already announces those itself (`_announce_pending`), and
                     # a second toast for one parked question is the duplicate
                     # that routing was built to avoid.
+                    #
+                    # `live_state == "attached"` is the SAME rule as the
+                    # `entry.id == current` skip beside it, applied to a window
+                    # this process cannot see. It means another TUI has that
+                    # session open, and that TUI's own in-app `Notifier` owns
+                    # its completion toast — so announcing it here is the
+                    # double notification the routing design forbids (X8/X9;
+                    # review round 1, B2). The operator runs ~11 concurrent
+                    # sessions, so attached-elsewhere is the NORMAL state of
+                    # their catalog rather than an edge case. Delivering
+                    # THROUGH the attached surface is a later PR; suppressing
+                    # is the correct behaviour to ship here.
+                    #
+                    # Reading `live_state` and not `busy`: #720 re-pointed
+                    # `busy` at a conversational-activity predicate but left
+                    # `attached` meaning exactly what it did — a record whose
+                    # runtime reports a watching surface.
                     continue
-                self._deliver_background_completion(
-                    entry, self._background_completion_identity(entry.id)
-                )
+                try:
+                    if announced >= _BACKGROUND_NOTIFY_MAX_PER_TICK:
+                        # OVER THE CAP: claim it and stay quiet. The claim must
+                        # still be taken or the backlog re-floods on the next
+                        # revision change, and the digest below tells the user
+                        # the count rather than silently dropping it.
+                        if store.claim_delivery(
+                            self._background_completion_identity(entry.id),
+                            entry.completion_token,
+                            "digest",
+                        ):
+                            claimed_silently += 1
+                        continue
+                    if self._deliver_background_completion(
+                        entry, self._background_completion_identity(entry.id)
+                    ):
+                        announced += 1
+                    else:
+                        released = True
+                except Exception:  # noqa: BLE001 — one bad row must not mute the rest
+                    # PER-ROW, deliberately. `claim_delivery` sits outside the
+                    # delivery helper's own try/except and touches SQLite, so a
+                    # corrupt store (`DatabaseError`) or a read-only one
+                    # (`OperationalError`) raised straight out of the first row
+                    # and dropped every remaining session that tick — measured
+                    # at 0 of 5 toasts (QA round 1, Q2). A notification is
+                    # chrome; it may lose itself, never its siblings.
+                    logger.debug("background completion row skipped", exc_info=True)
+                    released = True
+            if claimed_silently:
+                self._announce_background_digest(claimed_silently)
+            if released:
+                # A RELEASED CLAIM MUST BE RE-EXAMINED, and `revision()` cannot
+                # see that it was: it reads `completions` and `receipts` only,
+                # so claiming and handing back leaves it byte-identical and the
+                # gate above short-circuits every later tick until some
+                # unrelated completion moves it — measured at 0 retries across
+                # 60 ticks with the backend healthy again (review M1 / QA Q1).
+                # On a one-session machine that is silence, which is the exact
+                # hole `release_delivery` exists to close.
+                #
+                # Forgetting the revision rather than widening `revision()` to
+                # read `deliveries`: the store's change detector is consumed by
+                # the mobile attention API and by the acknowledgement path, and
+                # a delivery — a purely local, per-observer concern — has no
+                # business moving a number those read as "something happened to
+                # this conversation". The retry is this observer's problem, so
+                # it is fixed in this observer's state.
+                self._background_notify_revision = None
 
         async def run() -> None:
             try:

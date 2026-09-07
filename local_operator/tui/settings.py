@@ -87,8 +87,11 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # its own because the observer path (a BACKGROUND session finishing while
     # you are looking at a different one) widens where a model-written session
     # name appears — including on a lock screen, where macOS repeats banner
-    # titles. Off falls back to the brand name, which still says a session
-    # finished without saying which work it was.
+    # titles. Governs EVERY notification leg, not only the observer's: the
+    # attached session's own toasts and a detached runtime's gate toasts reach
+    # the same lock screen, and a flag that covered only some of them would
+    # make its own copy false (review round 1, M2). Off falls back to the brand
+    # name, which still says a session finished without saying which work.
     "display.notification_session_name": True,
     # The dock subagent panel's density when a session STARTS: `full` (one
     # row per child), `summary` (one row of counts) or `hidden`. Defaults to
