@@ -137,8 +137,14 @@ class FakeSession:
         )
         self.emit(SteeringDeliveredEvent(count=1))
 
+    #: Children this double reports as live. A test that stages a cancel must
+    #: move this too: the abort receipt counts what the roster says SURVIVED,
+    #: not what `cancel_subagents` claims it dispatched, so a stub that returns
+    #: a number while this stays put proves only that a call was made.
+    running_children = 0
+
     def running_subagents(self) -> int:
-        return 0
+        return self.running_children
 
     def abort(self, reason: str = "interrupted") -> None:
         """Part of SessionProtocol, and the control op's first act. Recorded
@@ -1414,16 +1420,27 @@ async def test_the_abort_op_stops_the_children_too() -> None:
     """
     handle, session = make_handle()
     cancelled: list[str] = []
-    session.cancel_subagents = lambda reason="interrupted": (  # type: ignore[attr-defined]
-        cancelled.append(reason),
-        3,
-    )[1]
+    # The double reports its children through the SAME predicate the receipt
+    # reads, so "stopped" has to be earned by the roster emptying rather than
+    # by the stub's return value — the hole QA named in the first version of
+    # this test, where a stubbed count proved a call was made and nothing more.
+    session.running_children = 3  # type: ignore[attr-defined]
+
+    def _cancel(reason: str = "interrupted") -> int:
+        cancelled.append(reason)
+        dispatched = session.running_children  # type: ignore[attr-defined]
+        session.running_children = 0  # type: ignore[attr-defined]
+        return dispatched
+
+    session.cancel_subagents = _cancel  # type: ignore[attr-defined]
 
     receipt = await handle.abort()
 
     assert session.aborts, "the turn itself must still be stopped"
     assert cancelled, "the abort op must reach the children; it is the only rung it has"
+    assert session.running_subagents() == 0, "the roster must actually drain"
     assert "stopped 3 subagents" in receipt
+    assert "did NOT stop" not in receipt
 
 
 @pytest.mark.asyncio
@@ -1450,6 +1467,81 @@ async def test_the_abort_receipt_does_not_claim_more_than_it_did() -> None:
     assert "jobs cancel" in receipt
     # No children ran, so the receipt must not invent a number for them.
     assert "subagent" not in receipt
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
+    """MAJOR-1: the count must be what DIED, not what was asked to die.
+
+    `cancel_subagents` returns `len(running)` sampled at DISPATCH time, and
+    per-child cancellation is fire-and-forget with failures swallowed by
+    design. Reporting that number said "stopped 3 subagents" while two children
+    were still running and spending — the exact overstatement this PR exists to
+    remove, reintroduced one layer up.
+
+    Deliberately driven against a REAL Session and real `task` rows, and
+    asserted on the ROSTER rather than on a stubbed return: a double that
+    reports its own count can only prove a call was made, never that anything
+    died.
+    """
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.session.session import ModelSpec, Session
+    from local_operator.session.transcript import Transcript
+
+    def stream(request, signal):  # noqa: ANN001, ANN202
+        async def gen():
+            await asyncio.sleep(0.01)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = Session(
+        model=ModelSpec(
+            provider="test", model_id="T", context_window=100_000, supports_images=True
+        ),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    started = asyncio.Event()
+
+    async def child(job_id, signal, report_progress):  # noqa: ANN001, ANN202
+        started.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    ids = [session.jobs.register("task", f"c{n}", child) for n in range(3)]
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.2)
+
+    # Two of three children refuse to die: their cancel raises, which is the
+    # failure `_cancel_job_quietly` swallows by design.
+    real_cancel = session.jobs.cancel
+
+    async def flaky_cancel(job_id, *, owner_id=None):  # noqa: ANN001, ANN202
+        if job_id in (ids[1], ids[2]):
+            raise RuntimeError("child refuses to die")
+        return await real_cancel(job_id, owner_id=owner_id)
+
+    session.jobs.cancel = flaky_cancel  # type: ignore[assignment]
+
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    receipt = await handle.abort()
+
+    # The rows are the ground truth, exactly as QA read them.
+    statuses = [session.jobs.get(job_id) for job_id in ids]
+    assert [row.status for row in statuses if row is not None] == [
+        "cancelled",
+        "running",
+        "running",
+    ]
+    assert "stopped 1 subagent" in receipt
+    assert "2 subagents did NOT stop" in receipt
+    assert "stopped 3 subagents" not in receipt, "the receipt must not claim the two that survived"
+
+    session.jobs.cancel = real_cancel  # type: ignore[assignment]
+    await session.dispose()
 
 
 @pytest.mark.asyncio

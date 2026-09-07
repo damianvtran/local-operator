@@ -940,8 +940,10 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
     """
     target = _record(77777, "the runaway")
     stopped: list[str] = []
+    selectors: list[dict[str, Any]] = []
 
     def fake_resolve(**kwargs: Any):
+        selectors.append(kwargs)
         return target, [], ""
 
     async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
@@ -967,6 +969,10 @@ async def test_stop_reaches_a_live_session_the_viewer_lost_its_binding_to(
                 break
         assert stopped, "an unbound viewer must still be able to stop what it is watching"
         assert "session is still starting…" not in _notices(app)
+        # The kill switch addresses the watched session by the EXACT selector,
+        # never the substring vocabulary — see the wrong-session test below.
+        assert selectors and selectors[0]["session"] == "sess"
+        assert not selectors[0]["target"]
 
 
 @pytest.mark.asyncio
@@ -1064,3 +1070,110 @@ async def test_an_unbound_stop_does_not_recurse_into_itself() -> None:
         # command: at most one delegation, and no unbounded growth.
         assert len(calls) == 0, calls
         assert any("lost its link" in text for text in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_the_unbound_stop_never_reaches_a_look_alike_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BLOCKER-1: the kill switch must not stop a session it did not name.
+
+    The unbound fallback used the `target=` SUBSTRING vocabulary, which matches
+    against conversation_name, session_id AND the cwd basename of every live
+    record. The state this path exists for is precisely the one where the
+    watched session is not resolvable, so the needle fell through to whatever
+    else contained it — resolving to a different live session with no error and
+    no ambiguity candidates, which the ladder then stopped.
+
+    This is the operator's machine with several live sessions on it: stopping
+    the wrong one destroys someone's in-flight work while the runaway keeps
+    billing. Found independently by both the reviewer and QA.
+    """
+    watched = "00264921d0d9"
+    # The ONLY live record is an unrelated session whose NAME contains the
+    # watched id. The watched session itself is gone from the registry.
+    decoy = _record(4242, f"notes about {watched}")
+    stopped: list[str] = []
+
+    async def fake_stop(record, *, timeout_s=10.0, _root=None):  # noqa: ANN001, ANN202
+        stopped.append(record.session_id)
+        return control.StopOutcome(
+            record.pid, record.session_id, record.conversation_name, "socket", "stopped"
+        )
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.registry.scan", lambda *a, **k: [(decoy, "live")]
+    )
+    monkeypatch.setattr(control, "stop_session", fake_stop)
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._adopted_session_id = watched
+        app._session = None
+        await app._stop_unbound_worker(watched)
+        await pilot.pause()
+
+        assert stopped == [], f"the kill switch stopped a session it never named: {stopped}"
+        # And it says so honestly rather than silently doing nothing.
+        assert any("lost its link" in text for text in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_reload_does_not_take_the_unbound_branch() -> None:
+    """BLOCKER-2: a transition is not a lost binding.
+
+    `_adopted_session_id` was set on adopt but cleared in one place, while four
+    paths null `_session`. So for the whole window between "old session
+    disposed" and "replacement adopted" — an ordinary `/reload`, `/new`,
+    `/resume` or attach — the viewer was sessionless with a stale id, and a
+    bare `/stop` both painted "this viewer lost its link…" in the error weight
+    AND dispatched the stop worker against the session being replaced. That is
+    what made BLOCKER-1 reachable day to day rather than only in the rare
+    lost-binding state.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    dispatched: list[str] = []
+
+    async def spy(session_id: str) -> None:
+        dispatched.append(session_id)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        app._stop_unbound_worker = spy  # type: ignore[assignment]
+        # Exactly what `_reload_session` does to the binding mid-transition.
+        app._session_transition_pending = True
+        app._session = None
+        app._run_slash_command("/stop")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert dispatched == [], "a /reload must not dispatch a stop for the outgoing session"
+        notices = _notices(app)
+        # "Still starting" is TRUE here: a replacement really is on its way.
+        assert any("still starting" in text for text in notices), notices
+        assert not any("lost its link" in text for text in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_watched_id_is_dropped_when_a_reload_unbinds_the_session() -> None:
+    """The other half of BLOCKER-2: clear the id where the binding is nulled.
+
+    The transition guard covers the window while a replacement is arriving; the
+    id itself must not outlive the session either, or a path that unbinds
+    without setting the transition flag leaves the same stale lever behind.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(app, pilot, session)
+        assert app._adopted_session_id == "sess"
+        await app._reload_session()
+        for _ in range(20):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        # Either cleared, or re-stamped by the session that replaced it —
+        # never left naming a session this viewer no longer watches.
+        assert app._adopted_session_id in ("", getattr(app._session, "session_id", ""))
