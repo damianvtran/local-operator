@@ -20,6 +20,15 @@ MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
 _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
 
+#: What the reply-channel function tells the model it is for. Kept beside the
+#: envelope it describes so the two cannot drift, and deliberately short: it
+#: rides in the request's cache prefix on every call of every episode.
+PUBLIC_REPLY_TOOL_DESCRIPTION = (
+    "Submit your decision for the current observation. This means exactly the "
+    "same thing as replying with the JSON envelope described in your "
+    "instructions -- use whichever is natural, and never both."
+)
+
 
 def is_public_reply(value: Any) -> bool:
     # Reserve every envelope key: a misspelled/missing version must not silently
@@ -131,15 +140,22 @@ def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
     return canonical_bytes(value).decode("utf-8")
 
 
-def public_reply_contract() -> dict[str, Any]:
-    """Publish a reproducible reply identity separately from the tool surface.
+def public_reply_schema() -> dict[str, Any]:
+    """The envelope's JSON Schema, shared by the contract and the reply channel.
 
-    The action array schema is borrowed, not copied: its vocabulary and bounds
-    remain owned by ActionBatch. Negotiated execution restrictions are declared
-    by the existing action_surface metadata/tool digest and still gate parsing.
+    One definition with two readers. It is published in the evidence bundle's
+    reply contract (below) AND handed to the harness's structured reply channel
+    as that function's parameters, so the tool the model may call and the prose
+    envelope it may write are provably the same shape rather than two hand-kept
+    copies that drift apart.
+
+    Derived from :class:`ActionBatch` on every call rather than cached: it is
+    built from frozen model metadata, so it is deterministic — which is what
+    lets it ride in the prompt-cache prefix unchanged across an episode's
+    turns — and recomputing keeps a new action kind from drifting out.
     """
     batch_schema = ActionBatch.model_json_schema()
-    schema = {
+    return {
         "$defs": batch_schema["$defs"],
         "type": "object",
         "additionalProperties": False,
@@ -155,6 +171,16 @@ def public_reply_contract() -> dict[str, Any]:
             "public_observations": {"type": "string", "maxLength": MAX_PUBLIC_OBSERVATIONS_CHARS},
         },
     }
+
+
+def public_reply_contract() -> dict[str, Any]:
+    """Publish a reproducible reply identity separately from the tool surface.
+
+    The action array schema is borrowed, not copied: its vocabulary and bounds
+    remain owned by ActionBatch. Negotiated execution restrictions are declared
+    by the existing action_surface metadata/tool digest and still gate parsing.
+    """
+    schema = public_reply_schema()
     contract = {
         "schema": schema,
         "legacy_plain_action_batch": True,
