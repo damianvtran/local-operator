@@ -60,6 +60,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -300,7 +301,7 @@ def _spawn_runtime(
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
-            # ``python_argv``'s flag supplies import isolation: this spawn passes
+            # ``SAFE_PATH_FLAG`` supplies import isolation: this spawn passes
             # no ``cwd=``, so the child inherits the viewer's directory, and
             # ``-m`` would put that directory on ``sys.path`` ahead of
             # site-packages. A session whose cwd is a checkout of this project

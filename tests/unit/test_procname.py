@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from local_operator import procname
+from local_operator.interpreter import SAFE_PATH_FLAG
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -713,3 +714,58 @@ def test_branded_image_actually_renames_the_process(branded):
     )
     assert result.returncode == 0, f"branded image failed to launch: {result.stderr}"
     assert result.stdout.strip() == procname.BRAND
+
+
+def test_branded_image_and_import_isolation_hold_on_the_same_spawn(branded, tmp_path):
+    """BOTH properties on ONE process — the pair a clean merge can silently halve.
+
+    Branding and import isolation were developed in parallel and land on the
+    SAME spawn calls with disjoint arguments: branding replaces ``argv[0]`` and
+    passes ``executable=``, isolation inserts ``SAFE_PATH_FLAG`` before ``-m``.
+    Git merges that without a conflict, and neither side's own tests can observe
+    the other being dropped — a child that keeps isolation but loses
+    ``executable=`` imports the right code while going back to an anonymous
+    ``python3.x`` row, and the reverse keeps the name while keeping the
+    version-skew bug that left live runtimes reporting a superseded build.
+
+    So this asserts the CONJUNCTION from a real spawn, with a decoy checkout as
+    the working directory (the exact condition that produced the skew):
+
+    * the kernel reports ``proc_name == BRAND`` — Activity Monitor's axis, and
+    * the child imports ``local_operator`` from the install, not from the cwd.
+    """
+    decoy = tmp_path / "decoy-checkout"
+    (decoy / "local_operator").mkdir(parents=True)
+    (decoy / "local_operator" / "__init__.py").write_text("", encoding="utf-8")
+    decoy_module = (decoy / "local_operator" / "__init__.py").resolve()
+
+    probe = (
+        "import ctypes,os,local_operator;"
+        "l=ctypes.CDLL('/usr/lib/libSystem.dylib');"
+        "b=ctypes.create_string_buffer(64);"
+        "l.proc_name(ctypes.c_int(os.getpid()),b,ctypes.c_uint(64));"
+        "print(b.value.decode());"
+        "print(local_operator.__file__)"
+    )
+    # The branded link is planted into a throwaway prefix that has no
+    # site-packages, so the "install" this child must prefer is supplied on
+    # PYTHONPATH. That is deliberate and does not weaken the test: `-P` strips
+    # the implicit sys.path[0] (the cwd) and leaves PYTHONPATH alone, so the
+    # decoy and the install compete exactly as they do in production.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    result = subprocess.run(
+        # Exactly the argv shape the spawn sites build: branded argv[0], then
+        # the isolation flag, then the request.
+        [procname.branded_argv0(procname.LABEL_WAKES), SAFE_PATH_FLAG, "-c", probe],
+        executable=str(branded),
+        cwd=str(decoy),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"spawn failed: {result.stderr}"
+    name, module = result.stdout.strip().splitlines()[:2]
+    assert name == procname.BRAND
+    assert Path(module).resolve() != decoy_module

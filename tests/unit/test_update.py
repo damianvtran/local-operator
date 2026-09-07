@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from local_operator import update as update_mod
+from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.update import (
     TTL_S,
     InstallKind,
@@ -534,8 +535,12 @@ def test_refresh_restarts_via_new_distribution() -> None:
         result = refresh_mobile_after_upgrade()
     assert result == MobileRefresh(kind="restarted")
     run.assert_called_once()
+    # `SAFE_PATH_FLAG`, and BEFORE `-m`: this runs with no `cwd=`, so a bare
+    # `-m` would restart the daemon through a checkout that merely happened to
+    # be the update's working directory -- pre-upgrade code reporting success.
     assert run.call_args.args[0] == [
         sys.executable,
+        SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
@@ -634,8 +639,12 @@ def test_update_command_restarted_prints_phone_line(capsys: pytest.CaptureFixtur
     ):
         assert update_command(check=False) == 0
     captured = capsys.readouterr()
+    # See `test_refresh_restarts_via_new_distribution`: the isolation flag has
+    # to survive the `lop update` path too, which is one of the two callers
+    # that runs with a user cwd.
     assert run.call_args.args[0] == [
         sys.executable,
+        SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
         "mobile",
@@ -856,6 +865,102 @@ def test_editable_source_version_never_raises() -> None:
     """ "Cheap and total": a version readout must degrade to `""`, never throw."""
     with patch.object(update_mod, "_editable_install_root", side_effect=OSError("boom")):
         assert update_mod._editable_source_version() == ""
+
+
+def _metadata_dir(root: Path, name: str, version: str, direct_url: str | None = None) -> Path:
+    """Write a real on-disk metadata directory `importlib.metadata` can discover."""
+    path = root / name
+    path.mkdir(parents=True)
+    key = "METADATA" if name.endswith(".dist-info") else "PKG-INFO"
+    (path / key).write_text(
+        f"Metadata-Version: 2.1\nName: local-operator\nVersion: {version}\n", encoding="utf-8"
+    )
+    if direct_url is not None:
+        (path / "direct_url.json").write_text(direct_url, encoding="utf-8")
+    return path
+
+
+def test_direct_url_payload_ignores_a_shadowing_egg_info(tmp_path: Path) -> None:
+    """A stale `*.egg-info` must not make a real editable install look absent.
+
+    THE REGRESSION THIS PINS. `local_operator.egg-info/` is a gitignored build
+    artifact that any `pip install -e` / `setup.py` run leaves in the checkout,
+    so it is present in real trees. Whenever the cwd is on `sys.path` it sorts
+    AHEAD of site-packages, and `distribution("local-operator")` -- which
+    returns the first name match in path order -- resolves to it. Egg-info
+    metadata predates PEP 610 and carries no `direct_url.json`, so reading the
+    marker through that single lookup answered "not an editable install" for an
+    install that plainly was one: `_editable_install_root()` returned `None`,
+    the identity check failed against its own tree, and `installed_version()`
+    fell through to the stale `PKG-INFO` number.
+
+    Measured on a genuine `uv pip install -e` with `pyproject.toml` at 0.51.7
+    and a leftover `PKG-INFO` at 0.46.23, that reported **0.46.23** -- the
+    Settings > Updates staleness (QA Q3 / UX U13) reintroduced by the shadow.
+
+    Real metadata directories on disk, not a patched payload: the ordering IS
+    the defect, so a fixture that hands over one distribution cannot observe it.
+    """
+    site = tmp_path / "site"
+    # Written egg-info first so it is the earlier entry in discovery order,
+    # which is the shape that shadowed the dist-info on a real checkout.
+    _metadata_dir(site, "local_operator.egg-info", "0.46.23")
+    _metadata_dir(
+        site,
+        "local_operator-0.51.7.dist-info",
+        "0.51.7",
+        direct_url='{"url": "file:///real/checkout", "dir_info": {"editable": true}}',
+    )
+
+    def _scan(*, name: str) -> list[object]:
+        from importlib.metadata import distributions
+
+        return list(distributions(name=name, path=[str(site)]))
+
+    with patch.object(update_mod, "distributions", _scan):
+        # The egg-info is found FIRST and has no marker; the dist-info's must
+        # still be the answer, or a real editable install reads as no install.
+        assert update_mod._direct_url_payload() == {
+            "url": "file:///real/checkout",
+            "dir_info": {"editable": True},
+        }
+        assert update_mod._editable_install_root() == Path("/real/checkout").resolve()
+
+
+def test_installed_version_survives_a_shadowing_egg_info(tmp_path: Path) -> None:
+    """End to end: the checkout's version wins over the shadowed stale number.
+
+    `_direct_url_payload` is the unit; this is the number the user actually
+    sees. `version("local-operator")` still resolves to the egg-info's stale
+    0.46.23 (that shadowing is `importlib.metadata`'s behaviour and not ours to
+    change), so this asserts the correction survives all the way out.
+    """
+    site = tmp_path / "site"
+    checkout = tmp_path / "checkout"
+    (checkout / "local_operator").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        '[project]\nname = "local-operator"\nversion = "0.51.7"\n', encoding="utf-8"
+    )
+    _metadata_dir(site, "local_operator.egg-info", "0.46.23")
+    _metadata_dir(
+        site,
+        "local_operator-0.51.7.dist-info",
+        "0.51.7",
+        direct_url=json.dumps({"url": checkout.resolve().as_uri(), "dir_info": {"editable": True}}),
+    )
+
+    def _scan(*, name: str) -> list[object]:
+        from importlib.metadata import distributions
+
+        return list(distributions(name=name, path=[str(site)]))
+
+    with (
+        patch.object(update_mod, "distributions", _scan),
+        patch.object(update_mod, "__file__", str(checkout / "local_operator" / "update.py")),
+        # The shadow the egg-info casts over the metadata channel, reproduced.
+        patch.object(update_mod, "version", return_value="0.46.23"),
+    ):
+        assert update_mod.installed_version() == "0.51.7"
 
 
 # ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
-from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.headless_print import PrintRenderer, printable_event, run_print_mode
+from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
@@ -772,8 +772,12 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         assert argv[0].startswith("Local Operator [exec] job=")
     else:
         assert argv[0] == sys.executable
-    assert argv[1:5] == [
-        SAFE_PATH_FLAG,
+    # Offset DERIVED, not hardcoded: a fixed slice is what broke when this PR
+    # inserted the isolation flag ahead of `-m`, and it failed as an opaque
+    # index error rather than naming the cause. Deriving it means another
+    # interpreter flag later cannot silently reintroduce that.
+    assert argv[1] == SAFE_PATH_FLAG
+    assert argv[argv.index("-m") :][:4] == [
         "-m",
         "local_operator.exec_worker",
         "--prompt",
