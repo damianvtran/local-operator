@@ -642,6 +642,26 @@ class AttachClient:
         """
         return await self._request("refresh_if_idle")
 
+    async def retire_now(self) -> str:
+        """Ask an IDLE owner to retire so a successor can start elsewhere.
+
+        ``/move``'s transport. The session's working directory is fixed when
+        its runtime is spawned, so changing it means retiring the current
+        runtime and engaging one at the new path — and the runtime leaves by
+        the ``retiring`` route rather than the ``stopping`` one, which is the
+        whole reason this is a distinct op. A stop tells the viewer the SESSION
+        ended (it parks, and ``/resume`` is the way back); ``retiring`` tells it
+        a successor is owed and it should engage one, which is exactly what a
+        move wants and what the build-refresh path already does.
+
+        As with ``retire_if_pristine`` and ``request_refresh`` the answer is the
+        runtime's own ("retiring", or "kept: …"): it re-asks its idle predicate
+        and refuses if work arrived. An owner too old to know the op answers the
+        standard unknown-op error, which the caller surfaces as a refusal to
+        move rather than moving anyway.
+        """
+        return await self._request("retire_now")
+
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         """Fetch one page of a child job's retained events from the owner.
 

@@ -1851,6 +1851,40 @@ SessionPickerScreen .session-picker {
 }
 
 
+/* ── /move directory picker ────────────────────────────────────────────── *
+ *
+ * The `/resume` picker's twin, and deliberately identical to it: both answer
+ * a "read a list, pick a row" question with a cursor and hand a value back,
+ * so giving them different visual language would make one more screen look
+ * like a different app.
+ *
+ * `max-width` rather than a fixed width so an 80-column terminal gets the
+ * card it can hold; the widget measures its own columns against
+ * PICKER_MAX_WIDTH and truncates the path from the LEFT, which is the one
+ * column that can give up cells. Content-sized in both axes like `/resume`,
+ * because the row budget is computed in Python (`_page_rows`) and a second
+ * cap in the sheet is how a card loses its footer to a clip from the outside. */
+MovePickerScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+MovePickerScreen .move-picker {
+    width: auto;
+    height: auto;
+    max-width: 86;
+    max-height: 80%;
+    background: $lo-overlay;
+    padding: 1 2;
+}
+
+#move-picker-body {
+    width: auto;
+    height: auto;
+    color: $lo-fg;
+}
+
+
 /* ── /analytics /usage: the aggregated token-consumption screen ────────── *
  *
  * The same centred card over a dimmed transcript as `/resume`, because it is
