@@ -1932,10 +1932,21 @@ def _live_row_cost(value: Any) -> int:
     """
     try:
         return len(json.dumps(value, default=str))
-    except (TypeError, ValueError):
+    except Exception:  # noqa: BLE001 — see below; narrowing this reopens the hole
         # A payload that will not serialize cannot be sized, so it is treated
         # as too big to keep rather than waved through unmeasured — the exact
         # mistake this function exists to stop making.
+        #
+        # Deliberately EVERY exception, not the `TypeError`/`ValueError` that
+        # `json.dumps` documents. `default=str` calls `str()` on whatever it
+        # does not recognise, so the failure mode is the payload's own
+        # `__str__`, which may raise anything at all; a narrower clause lets
+        # that propagate out of `sync_wire_payload` and fail the whole attach
+        # over one unmeasurable block. Unreachable today — rows are built from
+        # `event.model_dump(mode="json")` and are JSON-safe by construction —
+        # but this function's entire contract is that nothing passes it
+        # unmeasured, and a contract with a gap for "raised something
+        # unexpected" is not that contract (round-4 MINOR-1).
         return LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
 
 
@@ -1968,6 +1979,19 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
         result["details"] = None
     blocks = [block for block in (result.get("content") or []) if isinstance(block, dict)]
     remaining = share
+    # Per ROW, not per block: a result of many blocks would otherwise multiply
+    # its own share and reinstate the unbounded shape one level further down.
+    # The floor is a promise that the CARD stays legible, so it is spent once —
+    # granting it to every block turns a shared ceiling into a per-block
+    # entitlement, and N blocks then cost N x floor with no ceiling at all.
+    # Measured when this guard was briefly lost in a rewrite: at the 100-row
+    # cap the crossover was 42 text blocks per row, 1,102,743 B against a
+    # 1,048,576 B limit, while the per-row form stays flat. ``content`` is
+    # typed ``list[dict[str, Any]]`` and this module deliberately does not
+    # enumerate what rides in it, so COUNT has to be bounded here for the same
+    # reason SIZE is — a producer emitting many blocks is a change in data,
+    # not a change in this file.
+    floor_spent = False
     for block in blocks:
         cost = _live_row_cost(block)
         if cost <= remaining:
@@ -1979,7 +2003,11 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
             # overhead of the block's own envelope, so a clipped block lands
             # under the share rather than merely smaller than it was.
             envelope = cost - len(text)
-            allowance = max(LIVE_EVENT_TEXT_FLOOR_CHARS, remaining - envelope)
+            allowance = remaining - envelope
+            if not floor_spent:
+                allowance = max(LIVE_EVENT_TEXT_FLOOR_CHARS, allowance)
+                floor_spent = True
+            allowance = max(0, allowance)
             if len(text) > allowance:
                 block["text"] = text[:allowance] + "…"
         else:
