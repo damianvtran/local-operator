@@ -4135,6 +4135,15 @@ class RemoteSession:
                 if self._disposed or self._client is not client:
                     client.close()
 
+    @property
+    def can_detach_runtime(self) -> bool:
+        """Whether replacing this viewer leaves execution in another process.
+
+        Legacy owner recovery can install an in-process takeover target behind
+        this facade, so ``is_remote`` alone is not a survival guarantee.
+        """
+        return self._takeover_target is None
+
     async def detach_viewer_gates(self) -> None:
         """Withdraw this UI's waiters without answering the owner's questions.
 

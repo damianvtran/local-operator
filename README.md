@@ -441,6 +441,15 @@ with its title and age:
 | `/skills`, `/mcp` | List loaded skills · MCP servers |
 | `/theme`, `/rename` | Pick from 20+ built-in themes (arrows preview live) · rename the session |
 
+`/reload` and `/update` can replace the terminal while its detached session
+runtime keeps working. The new terminal reattaches to the same saved conversation,
+including streamed output and unanswered approval or ask prompts. The runtime
+adopts installed code only when all work is safely idle: active turns, tools,
+compaction, gates, loops, child agents, background jobs, and imminent wakes defer
+that refresh. Reloading an unchanged build does not restart the runtime. Local
+in-process work and terminal-owned `!` shell commands must finish first. A failed
+update leaves the current terminal and runtime running.
+
 ### Keys worth knowing
 
 - `$<skill>`: run a named skill on the rest of the line

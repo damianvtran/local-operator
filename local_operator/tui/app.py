@@ -3313,6 +3313,10 @@ class OperatorApp(App[None]):
         self._interaction.draft.approve_all = value
 
     async def _on_message(self, message: TextualMessage) -> None:
+        # The owner keeps publishing while this viewer exits. Already queued
+        # messages outlive subscription disposal and must not paint a pruned DOM.
+        if self._restart_plan is not None and isinstance(message, SessionEvent):
+            return
         if isinstance(message, SessionEvent) and message.origin is not None:
             source = self._event_sources.get(message.origin)
             if source is not None:
@@ -5576,6 +5580,8 @@ class OperatorApp(App[None]):
         self.call_later(self._apply_pending_frontend_state, generation)
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
+        if self._restart_plan is not None:
+            return
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
@@ -8150,12 +8156,10 @@ class OperatorApp(App[None]):
         self._request_relaunch()
 
     def _turn_is_live(self) -> bool:
-        """A mid-turn exec would drop work the user can still abort with esc.
+        """Include lock-held compaction and loops, not only streamed tokens.
 
-        Compaction holds the session lock with ``is_streaming`` False (see
-        the hold in :meth:`on_editor_submitted`), so it has to count here
-        too: ``/update`` and ``/reload`` would otherwise tear the process
-        down while history is being rewritten.
+        Local execution cannot survive a terminal exec; a detached owner can.
+        ``_relaunch_refusal`` makes that ownership distinction separately.
         """
         session = self._session
         streaming = session is not None and bool(getattr(session, "is_streaming", False))
@@ -8173,16 +8177,47 @@ class OperatorApp(App[None]):
             return "esc first — a loop is still running"
         return "esc first — a turn is still running"
 
+    def _relaunch_refusal(self) -> str:
+        """Only out-of-process work survives replacing the terminal image."""
+        from local_operator.session.remote import RemoteSession
+
+        for source in self._interactions.values():
+            worker = source.shell.worker
+            if worker is not None and not worker.is_finished:
+                return "wait for the local shell command to finish before relaunching"
+            session = source.session
+            if (
+                session is not None
+                and session is not self._session
+                and (not isinstance(session, RemoteSession) or not session.can_detach_runtime)
+                and (
+                    getattr(session, "is_streaming", False)
+                    or source.loop.running
+                    or source.compaction.active
+                )
+            ):
+                return "wait for local session work to finish before relaunching"
+        if not self._turn_is_live():
+            return ""
+        session = self._session
+        if not isinstance(session, RemoteSession) or not session.can_detach_runtime:
+            return self._live_turn_refuse_copy()
+        if not self._resumable_session_id():
+            return "wait for this conversation to be saved before relaunching"
+        return ""
+
     def _request_relaunch(self, *, force: bool = False) -> None:
         """Stash a :class:`RestartPlan` and exit 75 so ``cli.main`` re-execs.
 
-        ``force`` is the completed-upgrade path: the wheel is already on
-        disk, so a turn that started during the installer must not cancel
-        the relaunch. The composer is locked for that window; this is the
-        belt if something still looks live.
+        ``force`` identifies the completed-upgrade path so a refusal releases
+        the installer mutex. Recheck ownership even then: an in-process legacy
+        takeover during installation must not have its work killed by exec.
         """
-        if not force and self._turn_is_live():
-            self._system_notice(self._live_turn_refuse_copy(), "warning")
+        refusal = self._relaunch_refusal()
+        if refusal:
+            self._system_notice(refusal, "warning")
+            if force:
+                self._finish_update()
             return
         from local_operator.reexec import REEXEC_CODE, make_plan, stash_plan
 
@@ -8195,7 +8230,14 @@ class OperatorApp(App[None]):
         # carries no ``--resume`` and comes back as a cold launch. The
         # completed-upgrade path already painted ``restarting…`` on the
         # same tick, so it does not get a second line.
-        if not force:
+        from local_operator.session.remote import RemoteSession
+
+        if isinstance(self._session, RemoteSession) and self._session.can_detach_runtime:
+            self._system_notice(
+                "relaunching terminal; runtime work continues. "
+                "New runtime code waits until all work is safely idle."
+            )
+        elif not force:
             if resume_id is None:
                 self._system_notice("relaunching… this will open a new session")
             else:
@@ -8224,8 +8266,9 @@ class OperatorApp(App[None]):
         if self._update_in_progress:
             self._system_notice("an update is already running", "warning")
             return
-        if self._turn_is_live():
-            self._system_notice(self._live_turn_refuse_copy(), "warning")
+        refusal = self._relaunch_refusal()
+        if refusal:
+            self._system_notice(refusal, "warning")
             return
         # Armed BEFORE the worker so a second ``/update`` typed while the
         # first is still scheduling cannot start a second installer. The
@@ -8334,7 +8377,10 @@ class OperatorApp(App[None]):
                     "the foreground lop mobile serve process to pick up the new UI",
                     "warning",
                 )
-            self._system_notice(f"updated to v{installed} — restarting…")
+            if self._relaunch_refusal():
+                self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
+            else:
+                self._system_notice(f"updated to v{installed} — restarting…")
             self._request_relaunch(force=True)
 
         self.call_from_thread(_relaunch_after_upgrade)
@@ -14699,6 +14745,8 @@ class OperatorApp(App[None]):
         # Unlike paint-only workers, bang-mode owns a subprocess and a durable
         # receipt. Abort and join it BEFORE the blanket cancellation: cancelling
         # execute_bash directly can bypass its normal result/persistence path.
+        if self._restart_plan is not None:
+            await self._detach_relaunch_gates()
         await self._settle_shell_command()
         self.workers.cancel_all()
         await super()._shutdown()
@@ -16030,8 +16078,35 @@ class OperatorApp(App[None]):
             logger.info("terminal front end closed; session is quiescent — exiting cleanly")
             self.exit()
 
+    async def _detach_relaunch_gates(self) -> None:
+        """Withdraw every viewer bridge before widget cleanup resolves futures.
+
+        Approval/ask widget teardown normally answers its local future. On a
+        relaunch that must not become a denial sent to the still-running owner;
+        the next viewer receives the unanswered gate from canonical state.
+        Sidebar sources can hold gates too, not just the visible conversation.
+        """
+        from local_operator.session.remote import RemoteSession
+
+        sessions = [source.session for source in self._interactions.values()]
+        sessions.append(self._session)
+        seen: set[int] = set()
+        for session in sessions:
+            if (
+                isinstance(session, RemoteSession)
+                and session.can_detach_runtime
+                and id(session) not in seen
+            ):
+                seen.add(id(session))
+                await session.detach_viewer_gates()
+
     async def on_unmount(self) -> None:
         from textual.worker import WorkerCancelled, WorkerFailed
+
+        # Keep direct hook callers safe too; normal shutdown already withdrew
+        # these bridges before Textual pruned the widgets or cancelled workers.
+        if self._restart_plan is not None:
+            await self._detach_relaunch_gates()
 
         if self._sidebar_prefetch is not None:
             self._sidebar_prefetch.cancel()
