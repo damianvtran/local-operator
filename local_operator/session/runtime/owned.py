@@ -2354,6 +2354,20 @@ class OwnedSessionHandle(SessionHandle):
             for name in names:
                 self._journal_credential(name, action="forgot")
             return {"ok": True, "count": count, "names": names}
+        if action == "persist":
+            # §5.4's promotion route, executed on the OWNER because both stores
+            # that matter are the owner's: the session memory holding the value
+            # and the config dir holding the encrypted long-term store. Only a
+            # name and an outcome sentence cross back — never the value.
+            from local_operator.secrets.promote import promote_session_credential
+
+            outcome = promote_session_credential(store, key)
+            return {
+                "ok": True,
+                "promoted": outcome.ok,
+                "key": key,
+                "message": outcome.message,
+            }
         if action == "store":
             result = store.store_credential(key, value, "command")
             credential = getattr(result, "credential", None)

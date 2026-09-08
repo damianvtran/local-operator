@@ -393,20 +393,70 @@ State SURVIVES across calls: variables, imports and functions defined in one
 call are still present in the next. The kernel runs in the session's working
 directory. Use display(value) to show a value to the USER only — it is never
 added to the model's context.
+
+secrets["NAME"] retrieves a stored secret from the encrypted long-term store
+(`lop secret list` names them). The value stays in this process: it is scrubbed
+out of stdout, stderr, display and the cell's result, so use it directly in the
+call that needs it and never print it. `import secrets` still gets the stdlib
+module, as usual.
 """
 
 
+def _scrub_secrets(text: str) -> str:
+    """Strip values retrieved through ``local_operator.secrets`` out of ``text``.
+
+    The §6 sink for the eval surface. A cell that fetches a secret through the
+    library (design §5.3) holds real bytes in the worker; this is what keeps
+    them from riding stdout, stderr, a trailing expression, a ``display`` item
+    or a streaming frame into the model's transcript.
+
+    **Checked through ``sys.modules`` rather than imported.** This function is
+    on the path of EVERY cell in every kernel, and the secrets runtime pulls
+    SQLite and the AES binding behind it. A worker that never touched a secret
+    must not pay that import. The check is also exactly correct rather than
+    merely cheap: if the module was never imported, nothing obtained a value
+    through it, so there is provably nothing to scrub.
+
+    Failure here is swallowed on purpose — but it FAILS CLOSED. A scrubber that
+    raised would surface as a broken cell, and a scrubber that silently
+    returned the input would publish the secret. So an unexpected failure drops
+    the text entirely and says why, because losing output is recoverable (re-run
+    the cell) and leaking a credential is not.
+    """
+    if not text:
+        return text
+    runtime = sys.modules.get("local_operator.secrets.runtime")
+    if runtime is None:
+        return text
+    try:
+        scrubbed = runtime.scrub(text)
+    except BaseException:  # noqa: BLE001 — see the fail-closed note above
+        return (
+            "[output withheld: the secret redaction filter failed, and this worker "
+            "has retrieved at least one secret value. Re-run the cell.]"
+        )
+    return scrubbed if isinstance(scrubbed, str) else text
+
+
 def _safe_repr(value: Any) -> str:
-    """``repr(value)`` that cannot raise.
+    """``repr(value)`` that cannot raise, with retrieved secrets scrubbed.
 
     A user-defined ``__repr__`` is arbitrary code; one that raises would turn
     a successful computation into a lost result, so the failure is reported
     in-band instead.
+
+    The scrub covers the case :class:`~local_operator.secrets.runtime.\
+SecretValue`'s own ``__repr__`` cannot: a secret nested inside a container,
+    whose repr is built by the CONTAINER (``[token]`` renders through
+    ``list.__repr__``, which calls ``repr`` on the element — that one is
+    covered — but ``"".join`` or an f-string inside a user ``__repr__`` is
+    not). Scrubbing the finished string catches every route at one point.
     """
     try:
-        return _REPR.repr(value)
+        rendered = _REPR.repr(value)
     except BaseException as exc:  # noqa: BLE001 — user code, any failure is data
-        return f"<unrepresentable result: {type(exc).__name__}: {exc}>"
+        rendered = f"<unrepresentable result: {type(exc).__name__}: {exc}>"
+    return _scrub_secrets(rendered)
 
 
 def _make_display(sink: _DisplaySink) -> Callable[..., None]:
@@ -504,11 +554,18 @@ class _StreamingTextIO(_CappedTextIO):
     def write(self, value: str) -> int:
         written = super().write(value)
         if value:
+            # SCRUBBED HERE TOO, not only in the final response. A streaming
+            # frame reaches `jobs(op='peek')` and the live card while the cell
+            # is still running, so a secret printed by a long-running cell
+            # would paint in the live view for as long as the cell ran even
+            # though the final response redacted it. Same hole as the bash
+            # pipe filter, same fix.
+            #
             # A failure to emit must never break the user's code, which is what
             # an exception raised inside ``print`` would do. The frame is
             # advisory; the authoritative copy rides the final response.
             with contextlib.suppress(Exception):
-                self._emit(value)
+                self._emit(_scrub_secrets(value))
         return written
 
 
@@ -563,14 +620,22 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         # Background threads left behind by arbitrary Python code cannot issue
         # tool calls between cells using an expired turn's authority.
         _ACTIVE_BRIDGE = ("", False)
+    # EVERY model-visible channel of the response passes the secret scrubber,
+    # at the single point where the response is assembled rather than at each
+    # producer. `result` is already scrubbed by `_safe_repr`; it is re-scrubbed
+    # here anyway because this choke point is the invariant ("nothing leaves
+    # the worker unscrubbed") and a second pass over a redacted string is a
+    # no-op. `error` matters as much as `stdout`: a traceback renders the
+    # arguments of the failing frame, so a request that fails WITH a secret in
+    # scope puts it in the error text.
     return {
         "id": request.get("id", ""),
         "ok": ok,
-        "stdout": stdout.getvalue(),
-        "stderr": stderr.getvalue(),
-        "error": error,
-        "result": result,
-        "display": display_sink.finish(),
+        "stdout": _scrub_secrets(stdout.getvalue()),
+        "stderr": _scrub_secrets(stderr.getvalue()),
+        "error": _scrub_secrets(error) if error is not None else None,
+        "result": _scrub_secrets(result) if result is not None else None,
+        "display": [_scrub_secrets(item) for item in display_sink.finish()],
     }
 
 
@@ -597,6 +662,62 @@ def _enable_cwd_imports() -> None:
         sys.path.append(cwd)
 
 
+class _LazySecrets:
+    """``secrets`` in the cell namespace, importing the store on FIRST USE.
+
+    Bound into every kernel's namespace so a cell can write ``secrets["NAME"]``
+    with no import line, while a kernel that never asks for a secret never
+    loads SQLite or the AES binding — the import this proxy exists to defer.
+    That deferral is also what keeps :func:`_scrub_secrets`'s ``sys.modules``
+    check honest: the runtime module appears there exactly when a lookup has
+    been attempted.
+
+    Only the mapping operations are forwarded, and each one re-resolves through
+    the real object rather than caching it, so this stays a thin alias for
+    ``local_operator.secrets.secrets`` instead of a second implementation that
+    could drift from it.
+
+    **It shadows the stdlib ``secrets`` module, and that is survivable rather
+    than accidental.** The name comes from design §5.3. A cell that wants
+    ``secrets.token_hex()`` writes ``import secrets`` first, which REBINDS the
+    name in this namespace to the stdlib module for the rest of the kernel's
+    life — the ordinary Python behaviour, unaffected by the pre-binding. The
+    only case the pre-binding changes is a cell that used ``secrets.token_hex``
+    with no import at all, which raised ``NameError`` before and now raises
+    ``AttributeError``: a different message for code that was already broken.
+    """
+
+    __slots__ = ()
+
+    def _target(self) -> Any:
+        from local_operator.secrets.runtime import secrets as target
+
+        return target
+
+    def __getitem__(self, name: str) -> Any:
+        return self._target()[name]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self._target().get(name, default)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._target()
+
+    def __iter__(self) -> Any:
+        return iter(self._target())
+
+    def __len__(self) -> int:
+        return len(self._target())
+
+    def keys(self) -> Any:
+        return self._target().keys()
+
+    def __repr__(self) -> str:
+        # Does not resolve the target: a repr must not import the crypto stack
+        # (nor touch the store) just because a traceback rendered the namespace.
+        return "<local_operator secrets: secrets['NAME'] retrieves one value>"
+
+
 def main() -> None:
     """Read requests, run them, answer — until stdin closes or the tool kills
     the process. Either ending is normal from this side: the tool owns the
@@ -605,6 +726,9 @@ def main() -> None:
     namespace: dict[str, Any] = {
         "__name__": "__eval__",
         "__doc__": NAMESPACE_DOC,
+        # Pre-bound so the documented form works with no import line; see
+        # _LazySecrets for why this is a proxy rather than the real mapping.
+        "secrets": _LazySecrets(),
     }
     for line in sys.stdin:
         line = line.strip()
