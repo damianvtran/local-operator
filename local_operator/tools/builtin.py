@@ -4827,10 +4827,12 @@ class WakeParams(BaseModel):
 
 
 def _wake_due_label(schedule: WakeSchedule) -> str:
-    due = datetime.fromtimestamp(schedule.next_due_at / 1000, tz=UTC)
+    from local_operator.wakes.display import format_wake_time
+
+    due = format_wake_time(schedule.next_due_at)
     every = f" every {format_duration(schedule.every_ms)}" if schedule.every_ms else ""
     fired = f" (fired {schedule.fired_count}x)" if schedule.fired_count else ""
-    return f"next at {due.isoformat()}{every}{fired}"
+    return f"next at {due}{every}{fired}"
 
 
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
@@ -4865,11 +4867,13 @@ async def _wake_create(
     schedule = outcome["schedule"]
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
     await scheduler.update(updated)
-    due = datetime.fromtimestamp(schedule.next_due_at / 1000, tz=UTC)
+    from local_operator.wakes.display import format_wake_time
+
+    due = format_wake_time(schedule.next_due_at)
     return _text(
         tool_call_id,
         "wake",
-        f"Scheduled wake '{schedule.id}' at {due.isoformat()}: \"{schedule.message}\"",
+        f"Scheduled wake '{schedule.id}' at {due}: \"{schedule.message}\"",
     )
 
 

@@ -53,7 +53,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
@@ -10237,8 +10237,11 @@ class Session:
         schedule contributes its verbatim message exactly once."""
 
         def _due_label(schedule: WakeSchedule) -> str:
-            due = datetime.fromtimestamp(schedule.next_due_at / 1000).astimezone()
-            return due.strftime("%Y-%m-%d %H:%M")
+            from local_operator.wakes.display import format_wake_time
+
+            return format_wake_time(
+                schedule.next_due_at, now=datetime.fromtimestamp(now_ms / 1000, tz=UTC)
+            )
 
         lines = []
         for entry in missed:
