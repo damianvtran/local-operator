@@ -15,10 +15,13 @@ import pytest
 from local_operator.harness.jobs import AsyncJob
 from local_operator.harness.types import (
     AgentEndEvent,
+    AgentEvent,
     AgentStartEvent,
     Message,
     ModelSpec,
     SubagentProgressEvent,
+    ToolCallComposeEvent,
+    ToolExecutionStartEvent,
     Usage,
 )
 from local_operator.session.frontend_state import (
@@ -1027,3 +1030,183 @@ def test_agent_end_records_last_turn_outcome() -> None:
     store.observe_event(session, AgentStartEvent(generation=5))
     store.observe_event(session, AgentEndEvent(error="boom"))
     assert store.state.last_turn_outcome == "error"
+
+
+# ---------------------------------------------------------------------------
+# The in-flight seed and the placeholder compose key.
+#
+# `_fold_live_event` keys the seed by `tool_call_id`. A provider that announces
+# a call's name before its id makes the loop announce the row under
+# `compose:{index}` while every `tool_execution_start`/`_end` carries the real
+# id, so without the supersession hand-off the seed keeps BOTH id spaces. A
+# viewer joining mid-turn then receives a composing row that no start or end
+# can ever match, and turn-end retirement paints it `⊘ interrupted` on a call
+# that SUCCEEDED (the round-1 Q2 bug, reached by a new route).
+# ---------------------------------------------------------------------------
+
+
+def _fold(store: FrontendStateStore, *events) -> list[dict[str, Any]]:  # noqa: ANN002
+    session = SimpleNamespace(effective_model=_spec())
+    for event in events:
+        store.observe_event(session, event)
+    return list(store.state.live_events)
+
+
+def test_seed_drops_the_placeholder_row_when_the_real_id_is_announced() -> None:
+    """One call, one seed entry — keyed by the id execution will actually use."""
+    store = FrontendStateStore(_state())
+    live = _fold(
+        store,
+        AgentStartEvent(generation=1),
+        ToolCallComposeEvent(tool_call_id="compose:0", tool_name="bash", argument_bytes=10),
+        ToolCallComposeEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            argument_bytes=20,
+            supersedes_tool_call_id="compose:0",
+        ),
+    )
+    tool_rows = [row for row in live if row.get("type") == "tool_call_compose"]
+    assert [row["tool_call_id"] for row in tool_rows] == ["real_0"]
+
+
+def test_seed_supersession_is_per_call_with_several_in_flight() -> None:
+    """Three concurrent calls: each promotion drops ONLY its own placeholder.
+
+    This is why the promotion is announced rather than inferred from a start.
+    A rule like "any tool_execution_start clears the composing entries" cannot
+    tell which placeholder a real id belongs to, so it would drop the rows of
+    calls still being dictated.
+    """
+    store = FrontendStateStore(_state())
+    events = [AgentStartEvent(generation=1)]
+    events += [
+        ToolCallComposeEvent(tool_call_id=f"compose:{i}", tool_name="bash", argument_bytes=5)
+        for i in range(3)
+    ]
+    # Only the middle call learns its id.
+    events.append(
+        ToolCallComposeEvent(
+            tool_call_id="real_1",
+            tool_name="bash",
+            argument_bytes=9,
+            supersedes_tool_call_id="compose:1",
+        )
+    )
+    live = _fold(store, *events)
+
+    ids = [row["tool_call_id"] for row in live if row.get("type") == "tool_call_compose"]
+    # The other two rows are still being dictated and must survive.
+    assert sorted(ids) == ["compose:0", "compose:2", "real_1"]
+
+
+def test_seed_carries_one_row_per_call_through_start_and_end() -> None:
+    """End to end: the joiner's seed never holds a row it cannot settle.
+
+    Without the hand-off this seed held six entries — three unadoptable
+    `compose:N` rows beside the three real ones.
+    """
+    store = FrontendStateStore(_state())
+    events = [AgentStartEvent(generation=1)]
+    events += [
+        ToolCallComposeEvent(tool_call_id=f"compose:{i}", tool_name="bash", argument_bytes=5)
+        for i in range(3)
+    ]
+    events += [
+        ToolCallComposeEvent(
+            tool_call_id=f"real_{i}",
+            tool_name="bash",
+            argument_bytes=9,
+            supersedes_tool_call_id=f"compose:{i}",
+        )
+        for i in range(3)
+    ]
+    events += [
+        ToolExecutionStartEvent(tool_call_id=f"real_{i}", tool_name="bash", args={})
+        for i in range(3)
+    ]
+    live = _fold(store, *events)
+
+    assert len(live) == 3
+    assert [row["type"] for row in live] == ["tool_execution_start"] * 3
+    assert [row["tool_call_id"] for row in live] == ["real_0", "real_1", "real_2"]
+
+
+def test_seed_fold_is_unchanged_when_an_older_runtime_omits_the_field() -> None:
+    """BACKWARD COMPATIBILITY, pinned.
+
+    `supersedes_tool_call_id` is additive: an older runtime relaying through a
+    newer viewer simply never sets it. The fold must then behave exactly as it
+    did before the field existed — replace by `tool_call_id`, drop nothing
+    else — so a viewer cannot break on a payload that omits it.
+
+    Asserted on a RAW wire payload with the key genuinely absent, not merely
+    set to None, because that is the shape an older owner actually sends.
+    Built through ``model_validate`` on the base ``AgentEvent``, which is
+    exactly how ``deserialize_event`` rehydrates a frame whose type an older
+    peer relayed: extras are allowed and the absent field stays absent, so the
+    dump is the old payload byte for byte rather than a null-valued imitation.
+    """
+    store = FrontendStateStore(_state())
+    session = SimpleNamespace(effective_model=_spec())
+    store.observe_event(session, AgentStartEvent(generation=1))
+
+    for call_id in ("compose:0", "compose:1"):
+        legacy = AgentEvent.model_validate(
+            {
+                "type": "tool_call_compose",
+                "tool_call_id": call_id,
+                "tool_name": "bash",
+                "argument_bytes": 7,
+            }
+        )
+        assert "supersedes_tool_call_id" not in legacy.model_dump(mode="json")
+        store.observe_event(session, legacy)
+
+    live = list(store.state.live_events)
+    rows = [row for row in live if row.get("type") == "tool_call_compose"]
+    # Today's behaviour: both rows kept, keyed by their own ids, and no
+    # `supersedes_tool_call_id` key anywhere in the payload.
+    assert [row["tool_call_id"] for row in rows] == ["compose:0", "compose:1"]
+    assert all("supersedes_tool_call_id" not in row for row in rows)
+
+
+def test_compose_event_tolerates_a_payload_without_the_field() -> None:
+    """A viewer deserializing an older owner's frame must not raise.
+
+    The field is optional with a None default precisely so this validates.
+    """
+    event = ToolCallComposeEvent.model_validate(
+        {"type": "tool_call_compose", "tool_call_id": "c1", "tool_name": "bash"}
+    )
+    assert event.supersedes_tool_call_id is None
+
+
+def test_a_repeated_supersession_is_idempotent_in_the_seed() -> None:
+    """The hand-off is repeated on every later frame; replaying it changes nothing.
+
+    The repeat exists so a lossy path cannot drop the only copy of the identity
+    change. That is only safe if applying it twice is the same as applying it
+    once — the second time there is no placeholder left to drop, and the fold
+    must simply replace the real id's own row as it always does.
+    """
+    store = FrontendStateStore(_state())
+    events = [
+        AgentStartEvent(generation=1),
+        ToolCallComposeEvent(tool_call_id="compose:0", tool_name="bash", argument_bytes=5),
+    ]
+    events += [
+        ToolCallComposeEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            argument_bytes=size,
+            supersedes_tool_call_id="compose:0",
+        )
+        for size in (10, 20, 30)
+    ]
+    live = _fold(store, *events)
+
+    assert len(live) == 1
+    assert live[0]["tool_call_id"] == "real_0"
+    # The newest frame wins, so the size the viewer reads is the current one.
+    assert live[0]["argument_bytes"] == 30

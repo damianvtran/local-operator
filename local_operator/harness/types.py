@@ -1186,6 +1186,36 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     row reads worse than no label. This is the highest-value place the field
     appears: ``argument_bytes`` says the agent is alive, and only the intent
     says what for, across the longest silence of the turn.
+
+    ``supersedes_tool_call_id`` announces that THIS frame and the frames that
+    carried ``supersedes_tool_call_id`` as their id are the SAME call, whose
+    real id has arrived. It is set only when the row was first announced under
+    an index-derived placeholder, and then on EVERY later frame for that call:
+    the identity moves once, but the announcement is repeated so a compacted or
+    overflowing queue cannot drop the only copy of it. Applying it twice is
+    defined to be the same as applying it once — the second time there is no
+    placeholder left to retire.
+
+    It exists because the two id spaces otherwise never meet. A provider that
+    sends a call's ``name`` before its ``id`` makes the loop announce the row as
+    ``compose:{index}``, while ``tool_execution_start``/``_end`` carry the
+    provider's real id. Anything that keys rows by ``tool_call_id`` — the
+    in-flight seed in ``_fold_live_event``, the TUI's composing cards, the
+    mobile projection's rows — then holds TWO records for one call, and a
+    viewer joining mid-turn is handed a composing row nothing can ever adopt or
+    settle: at turn end it is painted ``⊘ interrupted`` on a call that
+    SUCCEEDED. The promotion frame is what lets each of those consumers rekey
+    the row it already has instead of opening a second one.
+
+    Why an explicit announcement rather than silently re-deriving the key each
+    frame: re-deriving is what this code used to do, and it changed the key
+    mid-stream with nobody told, so the UI mounted a second row for one call and
+    then marked the abandoned one interrupted (see the latch comment in
+    ``harness/loop.py``). The identity moves exactly once, and it says so.
+
+    Additive on purpose. An older runtime never sets it and every consumer
+    keeps today's behaviour; an older viewer receiving it ignores it, because
+    ``AgentEvent`` allows extra fields.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
@@ -1193,6 +1223,7 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     tool_name: str
     argument_bytes: int = 0
     intent: str | None = None
+    supersedes_tool_call_id: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):

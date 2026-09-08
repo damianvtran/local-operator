@@ -1138,13 +1138,27 @@ async def test_a_composing_call_reports_its_final_size():
 
 
 @pytest.mark.asyncio
-async def test_a_late_call_id_does_not_change_the_compose_key():
-    """The key is latched on the first announcement.
+async def test_a_late_call_id_never_changes_the_compose_key_unannounced():
+    """The key never moves SILENTLY. It may move, but only by announcement.
 
     An OpenAI-compatible endpoint may send the tool NAME before the call id.
     Recomputing the key each time changed it mid-stream, and the UI — which keys
     its rows by it — mounted a second row and then marked the abandoned one
     interrupted, for a call that had in fact succeeded.
+
+    This test originally asserted the proxy for that: one distinct id across the
+    whole stream. The proxy stopped describing the invariant once the key
+    acquired a way to move that consumers can FOLLOW — a frame naming both the
+    old and the new id, which is how a row announced under a placeholder is
+    reconciled with the real id every ``tool_execution_start``/``_end`` carries
+    (without it a mid-turn joiner is left holding a composing row nothing can
+    adopt, painted ``⊘ interrupted`` on a call that SUCCEEDED).
+
+    So the assertion is now the invariant itself rather than its proxy: an id
+    the stream introduces without saying what it replaces is the original bug,
+    and a second unannounced id is exactly what mounted the second row. The
+    proof that no second row results is in ``tests/unit/tui``, driven against
+    the real app.
     """
     stream = ScriptedStream(
         [
@@ -1167,7 +1181,22 @@ async def test_a_late_call_id_does_not_change_the_compose_key():
         async for event in loop.run([Message.user("go")], context, make_config(stream), None)
         if isinstance(event, ToolCallComposeEvent)
     ]
-    assert len({event.tool_call_id for event in composes}) == 1
+
+    # Walk the stream the way a consumer does and retire each superseded key.
+    # Anything still standing at the end is a row that consumer would be
+    # holding; more than one of those is the two-rows-for-one-call bug.
+    outstanding: list[str] = []
+    for event in composes:
+        superseded = event.supersedes_tool_call_id
+        if superseded and superseded in outstanding:
+            outstanding.remove(superseded)
+        if event.tool_call_id not in outstanding:
+            outstanding.append(event.tool_call_id)
+    assert outstanding == ["call_late"]
+
+    # And the surviving key is the one execution uses, which is the equality
+    # whose absence stranded the row in the first place.
+    assert executed == ["echo"]
 
 
 class TestSystemBlocksAreReadAtEveryCall:
@@ -3378,3 +3407,344 @@ async def test_connectivity_continuation_request_is_wire_legal_for_anthropic() -
     # the transcript can stay byte-identical to what was displayed.
     assistant_text = body["messages"][1]["content"][0]["text"]
     assert assistant_text == "The answer is "
+
+
+# ---------------------------------------------------------------------------
+# The placeholder compose key and its supersession.
+#
+# A provider that announces a call's NAME before its ID makes the loop announce
+# the row under `compose:{index}`, because that is the only identity available
+# at the moment the UI needs a row. The real id arrives later and every
+# `tool_execution_start`/`_end` carries it, so without an explicit hand-off the
+# two id spaces never meet: anything keying rows by `tool_call_id` holds two
+# records for one call, and a viewer joining mid-turn is left with a composing
+# row nothing can adopt, painted `⊘ interrupted` at turn end on a call that
+# SUCCEEDED.
+#
+# This branch had NO coverage before these tests, which is why a provider
+# ordering change could start exercising it silently.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_late_id_announces_under_a_placeholder_then_supersedes_it():
+    """Name-before-id: the row is announced as `compose:N`, then promoted ONCE.
+
+    The promotion frame is the only carrier of the identity change, so it must
+    name both ids and must not be swallowed by the compose throttle.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                # Name with no id — the shape `providers/clients.py` tolerates
+                # on the Responses API, where `call_id` defaults to "".
+                tool_call_delta(0, name="echo"),
+                tool_call_delta(0, args='{"text":"hi"}'),
+                # The id lands only now.
+                tool_call_delta(0, id="real_0"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    # The row is announced before the id exists — that is the whole point of
+    # the event, and the placeholder is the only key available then.
+    assert composes[0].tool_call_id == "compose:0"
+    assert composes[0].supersedes_tool_call_id is None
+
+    promotions = [c for c in composes if c.supersedes_tool_call_id]
+    assert promotions, "the real id arrived but no hand-off was announced"
+    # The identity moves ONCE and always names the same pair. The announcement
+    # is then REPEATED on later frames so a lossy path cannot drop the only
+    # copy of it, which is safe precisely because it is idempotent: a consumer
+    # that already rekeyed finds no placeholder left to drop. What must never
+    # happen is a SECOND distinct promotion, which would mean the key was being
+    # re-derived per frame — the latch bug that mounted two rows for one call.
+    assert {(c.supersedes_tool_call_id, c.tool_call_id) for c in promotions} == {
+        ("compose:0", "real_0")
+    }
+
+    # Every compose frame after the first promotion uses the real id, so
+    # nothing downstream is left keyed on a placeholder.
+    tail = composes[composes.index(promotions[0]) :]
+    assert {c.tool_call_id for c in tail} == {"real_0"}
+
+    # And the promoted key is the one execution actually uses: this is the
+    # equality that was missing before, and its absence is what stranded rows.
+    start = next(e for e in events if isinstance(e, ToolExecutionStartEvent))
+    assert start.tool_call_id == "real_0"
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_id_before_name_never_supersedes():
+    """The common ordering (OpenAI-compat, Anthropic, Gemini) is unchanged.
+
+    The id is already latched when the row is announced, so there is no
+    placeholder and no promotion frame — the wire for these providers must be
+    byte-identical to before this field existed.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="call_1"),
+                tool_call_delta(0, name="echo"),
+                tool_call_delta(0, args='{"text":"hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    assert composes
+    assert {c.tool_call_id for c in composes} == {"call_1"}
+    assert all(c.supersedes_tool_call_id is None for c in composes)
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_id_arriving_before_the_first_announcement_needs_no_promotion():
+    """A name+id pair split across deltas with no compose frame in between.
+
+    Nothing has been announced yet, so there is no row to supersede: the key is
+    corrected in place and no promotion frame is emitted. Emitting one anyway
+    would tell every consumer to rekey a row that does not exist.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                # Name and id in the same delta: the key latches straight to the
+                # real id, exactly as `:3380` (Anthropic) and `:3696` (Gemini) send it.
+                tool_call_delta(0, id="real_0", name="echo"),
+                tool_call_delta(0, args='{"text":"hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    assert {c.tool_call_id for c in composes} == {"real_0"}
+    assert all(c.supersedes_tool_call_id is None for c in composes)
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_late_id_calls_each_supersede_their_own_placeholder():
+    """Three calls in flight, each promoted to its OWN id.
+
+    This is the screenshot's shape, and it is why the promotion is announced
+    per call rather than inferred: with several rows composing at once nothing
+    downstream could otherwise tell which placeholder a real id belongs to.
+    """
+    executed: list[str] = []
+    deltas: list[StreamEvent] = [tool_call_delta(i, name="echo") for i in range(3)]
+    deltas += [tool_call_delta(i, args='{"text":"hi"}') for i in range(3)]
+    deltas += [tool_call_delta(i, id=f"real_{i}") for i in range(3)]
+    deltas.append(StreamEndEvent(stop_reason="toolUse"))
+    stream = ScriptedStream(
+        [deltas, [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    promotions = {
+        c.supersedes_tool_call_id: c.tool_call_id
+        for c in events
+        if isinstance(c, ToolCallComposeEvent) and c.supersedes_tool_call_id
+    }
+    assert promotions == {"compose:0": "real_0", "compose:1": "real_1", "compose:2": "real_2"}
+    assert executed == ["echo", "echo", "echo"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_id_never_arrives_keeps_its_placeholder_while_streaming():
+    """No id at all: the placeholder stays latched for the whole STREAM.
+
+    Re-deriving the key mid-stream is what mounted a second row for one call,
+    so a call that never learns its provider id keeps the identity it was
+    announced under for as long as arguments are arriving.
+
+    Scoped to the streaming phase deliberately. At stream END the identity must
+    be settled, because ``_assemble_tool_call`` would otherwise mint a fresh
+    uuid and execute under an id this row has never seen — see
+    ``test_a_call_whose_id_never_arrives_is_promoted_at_stream_end``. The
+    invariant is "never re-keyed silently mid-stream", not "never re-keyed".
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, name="echo"),
+                tool_call_delta(0, args='{"text":"hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    # Every frame emitted WHILE the arguments stream keeps the placeholder and
+    # announces no hand-off: the row a viewer is watching does not move under
+    # it. Only the stream-end settle promotes, and it announces when it does.
+    streaming = [c for c in composes if c.supersedes_tool_call_id is None]
+    assert {c.tool_call_id for c in streaming} == {"compose:0"}
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_the_supersession_is_repeated_so_a_dropped_frame_cannot_strand_the_row():
+    """The hand-off survives a lossy path, and stays idempotent.
+
+    A single announcement is a single point of failure: the per-connection
+    queue compacts and can overflow, and a viewer that was away sees only what
+    the seed retained, so the one frame carrying the identity change is exactly
+    the one that may be lost — and losing it strands the row this mechanism
+    exists to rescue. Every compose frame after the promotion therefore repeats
+    the placeholder it replaced. Safe because it is idempotent: a consumer that
+    already rekeyed has no placeholder left to drop.
+    """
+    executed: list[str] = []
+    payload = '{"text":"' + "z" * 200 + '"}'
+    deltas: list[StreamEvent] = [tool_call_delta(0, name="echo")]
+    deltas.append(tool_call_delta(0, args=payload[:10]))
+    deltas.append(tool_call_delta(0, id="real_0"))
+    # Enough argument frames after the promotion to outlast the compose
+    # throttle, so later announcements really are emitted.
+    deltas += [tool_call_delta(0, args=ch) for ch in payload[10:]]
+    deltas.append(StreamEndEvent(stop_reason="toolUse"))
+    stream = ScriptedStream(
+        [deltas, [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    after = [c for c in composes if c.tool_call_id == "real_0"]
+    assert len(after) > 1, "not enough post-promotion frames to prove the repeat"
+    # EVERY frame under the real id carries the hand-off, so whichever survives
+    # is enough to rekey the row.
+    assert all(c.supersedes_tool_call_id == "compose:0" for c in after)
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_id_never_arrives_is_promoted_at_stream_end():
+    """THE SHAPE THE RESPONSES API ACTUALLY PRODUCES (review round 1, R1).
+
+    ``clients.py`` yields the Responses API's id and name in ONE delta, with
+    ``call_id`` falling back to the empty string, and the argument deltas that
+    follow carry no id at all. So on that path the real id does not arrive
+    LATE — it never arrives, and the late-arrival hand-off cannot fire.
+
+    Left alone, ``_assemble_tool_call`` mints a fresh uuid for the ToolCall, so
+    execution proceeds under an id the composing row has never seen and strands
+    it exactly as a late id would. The identity is therefore minted once at
+    stream end and ANNOUNCED, so the row and the execution agree.
+
+    This is the only ordering a shipping provider is known to produce, which is
+    why the PR that added the late-id hand-off had to cover it too.
+    """
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                # id and name together, id EMPTY — verbatim `clients.py:2568`.
+                tool_call_delta(0, id="", name="echo"),
+                # Argument deltas carry no id — verbatim `clients.py:2578`.
+                tool_call_delta(0, args='{"text":"hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    composes = [e for e in events if isinstance(e, ToolCallComposeEvent)]
+    # The row is announced under the placeholder, because that is all there is.
+    assert composes[0].tool_call_id == "compose:0"
+
+    promotions = [c for c in composes if c.supersedes_tool_call_id]
+    assert promotions, "the id never arrived and no identity was ever announced"
+    assert {c.supersedes_tool_call_id for c in promotions} == {"compose:0"}
+
+    # THE EQUALITY THAT MATTERS: the announced id is the one execution uses.
+    # Its absence is the whole defect — a stranded row and an unrenderable end.
+    start = next(e for e in events if isinstance(e, ToolExecutionStartEvent))
+    assert start.tool_call_id == promotions[-1].tool_call_id
+    assert executed == ["echo"]
+
+    # The minted id goes back to the provider as Anthropic's ``tool_use.id``
+    # and Responses' ``call_id``, so it must be an ordinary opaque token —
+    # never the ``compose:{index}`` placeholder, which contains a colon and
+    # which no provider has agreed to accept.
+    assert start.tool_call_id != "compose:0"
+    assert start.tool_call_id.isalnum()
+
+    # And the assistant message carries that same id, so the tool_use/
+    # tool_result pairing the next request depends on stays legal.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assistant = next(
+        m for m in end.messages if isinstance(m, Message) and m.role == "assistant" and m.tool_calls
+    )
+    assert [c.id for c in assistant.tool_calls] == [start.tool_call_id]
+
+
+@pytest.mark.asyncio
+async def test_a_never_id_call_is_promoted_once_not_per_state():
+    """Three never-id calls each mint their OWN identity, announced per call."""
+    executed: list[str] = []
+    deltas: list[StreamEvent] = [tool_call_delta(i, id="", name="echo") for i in range(3)]
+    deltas += [tool_call_delta(i, args='{"text":"hi"}') for i in range(3)]
+    deltas.append(StreamEndEvent(stop_reason="toolUse"))
+    stream = ScriptedStream(
+        [deltas, [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[echo_tool(executed)])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    promotions = {
+        c.supersedes_tool_call_id: c.tool_call_id
+        for c in events
+        if isinstance(c, ToolCallComposeEvent) and c.supersedes_tool_call_id
+    }
+    assert sorted(promotions) == ["compose:0", "compose:1", "compose:2"]
+    # Distinct identities: one shared id would collapse three rows into one and
+    # break tool_use/tool_result pairing on the next request.
+    assert len(set(promotions.values())) == 3
+
+    starts = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
+    assert sorted(starts) == sorted(promotions.values())
+    assert executed == ["echo", "echo", "echo"]

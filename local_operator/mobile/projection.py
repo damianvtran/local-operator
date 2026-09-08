@@ -921,6 +921,32 @@ class ProjectionFold:
                 row.final = True
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
+            # Same rekey the TUI does: the call's real id has arrived for a row
+            # opened under an index-derived placeholder, so move the existing
+            # row's correlation onto the real id. Without it ``_tool_row``
+            # misses and appends a SECOND row for one call, and the placeholder
+            # row is left composing forever because every later start/end
+            # carries the real id.
+            #
+            # The entry's own ``id`` is deliberately left alone: clients diff
+            # the transcript by row id, so re-identifying a row mid-turn would
+            # read as the row being replaced. Only the correlation key moves.
+            # Plain attribute read is safe HERE, unlike in the TUI: this branch
+            # sits behind ``isinstance(event, ToolCallComposeEvent)``, so the
+            # field is guaranteed to exist with its ``None`` default. The TUI's
+            # equivalent keeps ``getattr`` because its dispatch routes on
+            # ``event.type`` without re-validating, so a legacy relayed frame
+            # reaches it as a bare ``AgentEvent`` (see the comment there).
+            # An older owner that omits the field arrives as ``None`` and takes
+            # the falsy no-op path below.
+            superseded = event.supersedes_tool_call_id
+            if superseded:
+                entry_id = self._tool_rows.pop(str(superseded), None)
+                if entry_id is not None:
+                    self._tool_rows[event.tool_call_id] = entry_id
+                    promoted = self._find(entry_id)
+                    if promoted is not None:
+                        promoted.tool_call_id = event.tool_call_id
             row = self._tool_row(event.tool_call_id, event.tool_name)
             row.tool_state = "composing"
             row.summary = event.intent or f"dictating {event.tool_name}"
