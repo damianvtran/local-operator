@@ -2987,7 +2987,7 @@ class SessionStreamFn:
             return []
         selector = f"{model.provider}/{model.model_id}"
         chain = resolve_chain(selector, retry.fallback_chains)
-        return expand_fallback_targets(selector, chain or [])
+        return expand_fallback_targets(selector, chain or [], primary_effort=model.reasoning_effort)
 
     async def _target_has_auth(self, target: Any) -> bool:
         from local_operator.providers.failover import parse_selector

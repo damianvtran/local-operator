@@ -1343,12 +1343,16 @@ def _fallback_target(entry: Any) -> FallbackTarget | None:
     return FallbackTarget(selector=selector, effort=effort)
 
 
-def expand_fallback_targets(selector: str, chain: Sequence[Any]) -> list[FallbackTarget]:
+def expand_fallback_targets(
+    selector: str, chain: Sequence[Any], *, primary_effort: str | None = None
+) -> list[FallbackTarget]:
     """Materialize configured entries into unique provider/model/effort targets.
 
     ``provider/*`` keeps the failing model id. A mapping may explicitly repeat
     the current selector with a different effort; that is a real fallback
-    route, while an unchanged legacy string is still suppressed.
+    route, while an unchanged legacy string is still suppressed. Callers that
+    know the selected effort pass it so quota preflight and the stream agree:
+    an explicitly identical effort is not another route to spend or pin.
     """
     _, _, bare_id = selector.partition("/")
     targets: list[FallbackTarget] = []
@@ -1358,7 +1362,7 @@ def expand_fallback_targets(selector: str, chain: Sequence[Any]) -> list[Fallbac
             continue
         if target.selector.endswith("/*"):
             target = dataclasses.replace(target, selector=f"{target.selector[:-1]}{bare_id}")
-        if target.selector == selector and target.effort is None:
+        if target.selector == selector and target.effort in (None, primary_effort):
             continue
         if target not in targets:
             targets.append(target)
@@ -2338,7 +2342,9 @@ async def stream_with_failover(
     if retry.enabled and retry.model_fallback:
         chain = resolve_chain(primary_selector, retry.fallback_chains)
         if chain:
-            for candidate in expand_fallback_targets(primary_selector, chain):
+            for candidate in expand_fallback_targets(
+                primary_selector, chain, primary_effort=request.model.reasoning_effort
+            ):
                 if candidate not in targets:
                     targets.append(candidate)
     # The list as CONFIGURED, kept before the route-state trim below: the
