@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -1600,3 +1602,807 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
                         checked += 1
     # 3 kinds x 5 states x 3 gates x 3 wake shapes.
     assert checked == 135, checked
+
+
+# --- notification-click routing (PR #750, round 1 remediation) ---------------
+#
+# These drive `OperatorApp.viewer_resume_session` — the method a notification
+# click reaches over the viewer endpoint — against the REAL app rather than a
+# double, because the findings they guard are both about the app-side path the
+# double cannot have: which switch route runs (D1) and what "displayed" means
+# when the target cannot open (D2).
+
+
+def _call_from_viewer_thread(app: OperatorApp, session_id: str) -> "Future[str]":
+    """Invoke the click's entry point the way the endpoint does: off the app's
+    thread, on its own PERSISTENT loop.
+
+    Calling it from Textual's thread is refused by contract
+    (``call_from_thread`` raises), so faking that would exercise a path that
+    does not exist.
+
+    THE LOOP IS NOT ``asyncio.run``, and that is load-bearing rather than
+    stylistic. ``asyncio.run`` calls ``shutdown_default_executor`` on the way
+    out, which JOINS any worker thread still blocked in ``to_thread`` — so a
+    timeout that fired correctly at 0.5 s did not return to the caller until the
+    stranded worker finished 30 s later, and the wedge test below read that as
+    an unbounded hop. Measured in isolation: ``wait_for`` fired at 0.50 s,
+    ``asyncio.run`` returned at 30.02 s. ``ViewerServer`` runs its loop with
+    ``run_until_complete`` on a long-lived thread and never tears it down per
+    call, so the harness matches production and the test measures the bound
+    rather than the teardown.
+    """
+    pool = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.new_event_loop()
+
+    def run() -> str:
+        try:
+            return loop.run_until_complete(app.viewer_resume_session(session_id))
+        finally:
+            # Deliberately NOT `shutdown_default_executor`; see above.
+            loop.close()
+
+    future = pool.submit(run)
+    pool.shutdown(wait=False)
+    return future
+
+
+@pytest.mark.asyncio
+async def test_a_notification_click_switches_by_the_sidebars_own_route():
+    """D1: the click must not answer a gate the user parked in the session it
+    leaves.
+
+    ``/resume`` reloads through ``_deny_queued_approvals``, so routing the click
+    that way silently answered "no" to a pending approval in the OUTGOING
+    session and rendered no receipt — a click about session B spending session
+    A's decision. ``docs/SESSION_SIDEBAR.md`` forbids it of a switch in as many
+    words, and ``viewer_resume_session``'s own docstring claimed to inherit that
+    invariant while taking the other path.
+
+    Asserted structurally, on WHICH route runs: the sidebar navigation is the
+    one that suspends gates (``_suspend_sidebar_gates``) rather than denying
+    them, so "the click starts a sidebar navigation and runs no /resume" is the
+    property, and it cannot drift the way a re-derived gate assertion could.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        selected: list[str] = []
+        commands: list[str] = []
+
+        def settle(session_id: str):
+            selected.append(session_id)
+            done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            done.set_result(None)
+            task = asyncio.ensure_future(asyncio.sleep(0))
+            # Pretend the navigation landed: the ack is resolved against what
+            # is on screen, so the identity has to move for a success.
+            app._adopted_session_id = session_id
+            return task
+
+        with (
+            patch.object(app, "_select_sidebar_session", side_effect=settle),
+            patch.object(app, "_run_slash_command", side_effect=commands.append),
+            patch.object(type(app._session), "session_id", property(lambda _s: "target-session")),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            for _ in range(200):
+                if future.done():
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            detail = future.result(timeout=5)
+
+        assert detail == "displayed target-session"
+        assert selected == ["target-session"], "the click must use the sidebar's navigation"
+        assert commands == [], (
+            "no slash command may run: /resume denies the outgoing session's "
+            "parked approval, which a switch must never do"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_a_session_that_cannot_open_does_not_claim_success():
+    """D2: the ack means DISPLAYED, not dispatched.
+
+    ``open_session`` skips its spawn fallback on this ack, so reporting success
+    for a session that failed to open cost the user both outcomes — no new
+    window AND the conversation they were reading. ``SessionNavigation`` reports
+    failure through its ``failed`` callback and completes its task NORMALLY, so
+    the task's own outcome is not the answer; what is on screen is.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+
+        def settle(session_id: str):
+            # The navigation runs and finishes; the binding never moves, which
+            # is exactly what a failed boot looks like from here.
+            return asyncio.ensure_future(asyncio.sleep(0))
+
+        with (
+            patch.object(app, "_select_sidebar_session", side_effect=settle),
+            patch.object(
+                type(app._session), "session_id", property(lambda _s: "still-the-old-one")
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "cannot-open")
+            for _ in range(200):
+                if future.done():
+                    break
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            with pytest.raises(Exception) as excinfo:
+                future.result(timeout=5)
+
+        assert "cannot-open" in str(excinfo.value), (
+            "a failed switch must raise so the ack is an error frame and the "
+            "click falls through to its spawn fallback"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_app_hop_does_not_outlast_the_click_bound():
+    """MAJOR-2: the hop into Textual is bounded, and now really is.
+
+    ``App.call_from_thread`` ends in a bare ``future.result()`` — it blocks its
+    caller with no timeout of its own — so a ``wait_for`` placed AFTER it never
+    applied to the hazard the docstring named, and an app wedged in a nested
+    pump ran 30 s against a 12 s outer bound. The blocking enqueue is inside the
+    bound now, via ``to_thread``.
+
+    **THE HAZARD IS SIMULATED IN ``call_from_thread`` ITSELF, not by wedging the
+    app's loop, and that is not a shortcut.** A first version of this test
+    blocked Textual's loop with ``call_later`` — but the pilot's own coroutine
+    runs ON that loop, so the test body could not advance until the block
+    expired either. It measured its own suspension (32 s per run) rather than
+    the bound, and would have reported success for the wrong reason. Patching
+    the blocking call reproduces exactly the property under test — an enqueue
+    that never returns — while leaving the loop able to run the assertions.
+    """
+    from local_operator.session.runtime.viewers import VIEWER_RESUME_TIMEOUT_S
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entered = threading.Event()
+        released = threading.Event()
+
+        def never_returns(callback, *args, **kwargs):
+            # What a wedged app does to its caller: the callback is enqueued and
+            # nothing ever services it.
+            entered.set()
+            released.wait(timeout=30)
+
+        try:
+            with (
+                patch.object(type(app), "call_from_thread", never_returns),
+                patch("local_operator.session.runtime.viewers.VIEWER_RESUME_TIMEOUT_S", 0.5),
+            ):
+                started = time.monotonic()
+                future = _call_from_viewer_thread(app, "anything")
+                with pytest.raises(asyncio.TimeoutError):
+                    # Generous relative to the 0.5 s bound and far below the
+                    # 30 s block, so the two outcomes are unambiguous.
+                    await asyncio.to_thread(future.result, 10)
+                elapsed = time.monotonic() - started
+        finally:
+            released.set()
+
+        assert entered.is_set(), "precondition: the blocking hop must have been entered"
+        assert elapsed < 5.0, (
+            f"the bound did not apply to the blocking hop: gave up after "
+            f"{elapsed:.1f}s against a 0.5s bound (the real one is "
+            f"{VIEWER_RESUME_TIMEOUT_S}s)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_real_hosts_focus_call_runs_off_the_serving_loop():
+    """MAJOR-1/Q2: the property asserted against the METHOD THAT SHIPS.
+
+    ``tests/unit/session/test_viewer_routing.py`` guards this shape too, but
+    through a double — so it proves the contract is expressible, not that
+    ``OperatorApp.viewer_focus_window`` honours it. Deleting the ``to_thread``
+    hop in ``app.py`` leaves that test green (verified). This one is the guard
+    that goes red for it, which is what both review streams asked for: this is
+    the method whose blocking ``subprocess.run`` would freeze the TUI, and the
+    frozen-loop class is invisible to a Python-level probe once it happens.
+
+    ``activate_window`` is patched to report its thread rather than to touch the
+    window server: the question is WHERE it ran, and a real OS call would make
+    this test depend on a macOS window server that CI does not have.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        ran_on: list[int] = []
+
+        def fake_activate() -> bool:
+            ran_on.append(threading.get_ident())
+            return True
+
+        with patch("local_operator.tui.window_focus.activate_window", fake_activate):
+            handler_thread: list[int] = []
+
+            async def call() -> str:
+                handler_thread.append(threading.get_ident())
+                return await app.viewer_focus_window()
+
+            loop = asyncio.new_event_loop()
+            try:
+                detail = await asyncio.to_thread(loop.run_until_complete, call())
+            finally:
+                loop.close()
+
+        assert detail == "activated"
+        assert ran_on, "precondition: the activation must actually have been attempted"
+        assert handler_thread, "precondition: the host coroutine must have run"
+        # PRECONDITION: the coroutine ran on its own loop thread, not Textual's
+        # — otherwise "different from the handler" says nothing about the loop
+        # this endpoint has to keep serving.
+        assert handler_thread[0] != threading.get_ident()
+        assert ran_on[0] != handler_thread[0], (
+            "the OS call ran on the loop serving the click; a slow window "
+            "server would stall the endpoint and the click would fall back to "
+            "spawning the very window this feature removes"
+        )
+
+
+async def _pump_until(pilot, predicate, *, what: str, turns: int = 2000) -> None:
+    """Pump Textual until ``predicate`` holds, then return immediately.
+
+    Bounded by TURNS rather than by a wall-clock budget: per-test durations here
+    vary by orders of magnitude under xdist contention, and a fixed drain both
+    flakes and taxes every run with time the work did not need. The deadline is
+    a backstop against a wedge, never the assertion — see AGENTS.md, "Wait on
+    the event, never on the clock".
+    """
+    for _ in range(turns):
+        if predicate():
+            return
+        await pilot.pause()
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_overruns_the_bound_cannot_also_commit():
+    """Q3: never both — a click causes a switch or a spawn, never one of each.
+
+    The derived bounds fixed the CLIENT giving up first; they did not stop the
+    APP from committing behind the endpoint's back. ``wait_for`` cancels the
+    waiter, not the navigation, so a switch slower than
+    ``VIEWER_RESUME_TIMEOUT_S`` still landed on screen after the endpoint had
+    answered failure — ``deliver_click`` reported ``switched=False``,
+    ``resume_click.open_session`` spawned a window, and the session switched
+    underneath it. QA measured the threshold move rather than close: clean at
+    9.8 s, both outcomes at 10.2 s and every value above.
+
+    THE ASSERTION IS THE CONJUNCTION, not the timeout. A test that only checked
+    "the endpoint raised" passes with the defect fully present — that is the
+    whole shape of this bug. So this checks what the CALLER would do with the
+    answer against what is actually on screen: a raise means the caller spawns,
+    so the binding must not have moved; a success means it does not spawn, so
+    the binding must have. Either is correct; only the pair is the defect.
+
+    The navigation is slowed inside ``prepare`` — where a cold transcript's real
+    seconds go — so the commit is genuinely still ahead of it when the bound
+    expires, rather than being suppressed before it starts.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+
+        async def slow_prepare(session_id: str, *args, **kwargs):
+            # Comfortably longer than the patched bound, so the endpoint gives
+            # up while the switch is genuinely still in flight. Both are scaled
+            # down together: what is under test is the ORDER of the bound, the
+            # fence and the commit, which is scale-free.
+            await asyncio.sleep(1.0)
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            # What a real commit does that matters here: move the binding.
+            committed.append(session_id)
+            app._adopted_session_id = session_id
+            return None
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", slow_prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+            patch.object(
+                type(app._session),
+                "session_id",
+                property(lambda _s: committed[-1] if committed else "origin"),
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            try:
+                detail = future.result(timeout=5)
+                switched = True
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
+                detail = ""
+                switched = False
+
+            # The defect commits AFTER the endpoint has answered, so answering
+            # is not the end of it: settle the navigation itself before reading
+            # what landed, or a late commit is simply missed.
+            task = navigation._task
+            await _pump_until(
+                pilot,
+                lambda: task is None or task.done(),
+                what="the navigation to settle",
+            )
+
+        landed = "target-session" in committed
+        spawn_would_run = not switched
+        assert not (landed and spawn_would_run), (
+            "DOUBLE ACTION: the switch committed at "
+            f"{committed!r} while the endpoint answered failure, so the click "
+            "delivers a session switch AND a duplicate window — the exact "
+            "outcome this feature exists to prevent"
+        )
+        assert switched == landed, (
+            f"the ack must describe what happened: switched={switched} "
+            f"detail={detail!r} committed={committed!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_abandoning_an_overrun_click_leaves_the_outgoing_session_whole():
+    """Q3, the other half: the cure must not be worse than the disease.
+
+    Cancelling mid-switch was the stated reason for NOT adding cancellation in
+    round 2 — a half-swapped app is worse than a duplicate window. This asserts
+    the outcome rather than the reasoning.
+
+    THE PREPARATION HERE REFUSES TO BE CANCELLED, deliberately. That models the
+    case the endpoint's own docstring concedes — enqueued work that cannot be
+    recalled — and it is what makes this a test of the FENCE rather than of
+    ``task.cancel()``. If the guarantee rested on cancellation being delivered
+    in time it would be a race; it rests instead on the generation bump, which
+    is synchronous, and on ``SessionNavigation`` running no await between its
+    final generation check and ``_commit``. So the un-cancellable navigation
+    below runs to completion and STILL cannot commit, and its preparation is
+    released through the same path a user's own cancel uses.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._editor().load_text("half-typed thought")
+        await pilot.pause()
+        released: list[str] = []
+        committed: list[str] = []
+        prepared_fully: list[str] = []
+
+        async def stubborn_prepare(session_id: str, *args, **kwargs):
+            # Work that outlives its cancellation, as a blocking enqueue does.
+            inner = asyncio.ensure_future(asyncio.sleep(1.0))
+            while not inner.done():
+                try:
+                    await asyncio.shield(inner)
+                except asyncio.CancelledError:
+                    pass
+            prepared_fully.append(session_id)
+            return session_id
+
+        async def release(prepared) -> None:
+            released.append(prepared)
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", stubborn_prepare),
+            patch.object(navigation, "_commit", lambda *a: committed.append(a[0])),
+            patch.object(navigation, "_release", release),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            with pytest.raises(Exception):
+                future.result(timeout=5)
+            # The un-cancellable preparation must be allowed to FINISH: the
+            # property is that it cannot commit even then.
+            task = navigation._task
+            await _pump_until(
+                pilot,
+                lambda: bool(prepared_fully) and (task is None or task.done()),
+                what="the stubborn preparation to run to completion",
+            )
+
+        assert prepared_fully == ["target-session"], (
+            "precondition: the preparation must have survived cancellation and "
+            "run to completion, or this proves nothing about the fence"
+        )
+        assert committed == [], (
+            "the fence must stop a completed preparation from committing after "
+            "the endpoint answered failure"
+        )
+        assert released == [
+            "target-session"
+        ], f"the fenced preparation must be released, not leaked: {released!r}"
+        # The outgoing conversation is untouched: still bound, still typed in.
+        assert app._session is not None
+        assert (
+            app._editor().text == "half-typed thought"
+        ), "the draft the user was holding must survive an abandoned click"
+        assert navigation.requested_id == "", "the navigation boundary must be released"
+        assert not [t for t in navigation._tasks if not t.done()], "no navigation task may leak"
+
+
+@pytest.mark.asyncio
+async def test_a_click_the_app_services_late_cannot_start_a_switch_at_all():
+    """MAJOR-3: the give-up must bind the app that is merely SLOW, not only the
+    one that is wedged.
+
+    The `not started` branch used to raise on the premise that an expired bound
+    with no recorded navigation meant none could exist — true for an app that
+    NEVER services the enqueue, false for one that services it LATE. The
+    endpoint's own docstring concedes the second case: a timeout strands the
+    worker until Textual gets to the callback, which cannot be recalled. When
+    that worker finally ran it started a real navigation behind an endpoint that
+    had already answered failure, so the caller had spawned its window and the
+    session then switched underneath it — a switch AND a duplicate window, the
+    exact pair this feature removes, reached through the sibling branch of the
+    one Q3 closed.
+
+    NOTHING ON THE CLICK PATH IS PATCHED HERE, and that is the point. Textual's
+    loop is simply blocked past the bound, which on a box running 8-17 sessions
+    at load 150+ is the ordinary state rather than an exotic one. A probe that
+    patched `call_from_thread` to be slow would prove only that the patch works.
+
+    The guarantee is a REFUSAL rather than a check: the endpoint publishes that
+    it has given up before it hops, and `apply` reads that on Textual's thread
+    before it can create anything. A check would race the creation it is trying
+    to catch, since the two run on different threads; a refusal is ordered by
+    the same thread that would do the work.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+
+        async def prepare(session_id: str, *args, **kwargs):
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            committed.append(session_id)
+            app._adopted_session_id = session_id
+            return None
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+            patch.object(
+                type(app._session),
+                "session_id",
+                property(lambda _s: committed[-1] if committed else "origin"),
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            # Block Textual's own thread past the bound with no pump at all, so
+            # the enqueue is not serviced until after the endpoint has given up.
+            # A sleep on this thread IS the condition under test.
+            time.sleep(0.9)
+
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            try:
+                detail = future.result(timeout=5)
+                switched = True
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
+                detail = ""
+                switched = False
+
+            # The stranded hop is still pending. Servicing it is the whole
+            # hazard, so pump well past it rather than stopping at the answer.
+            for _ in range(400):
+                await pilot.pause()
+                await asyncio.sleep(0.005)
+                task = navigation._task
+                if committed and (task is None or task.done()):
+                    break
+
+        landed = "target-session" in committed
+        spawn_would_run = not switched
+        assert not (landed and spawn_would_run), (
+            "DOUBLE ACTION via a LATE-serviced hop: the switch committed at "
+            f"{committed!r} while the endpoint answered failure, so the click "
+            "delivers a session switch AND a duplicate window"
+        )
+        assert switched == landed, (
+            f"the ack must describe what happened: switched={switched} "
+            f"detail={detail!r} committed={committed!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_click_cannot_cancel_the_switch_the_user_began():
+    """MINOR-7: `abandon` is scoped to ONE task, and the scoping is load-bearing.
+
+    `cancel()` stops whatever navigation is current, which is right for a user
+    changing their mind and catastrophic for a click giving up on itself: by the
+    time an overrunning click abandons, the current navigation may be the USER'S,
+    started meanwhile from the sidebar. Cancelling that loses a switch they asked
+    for and commits nothing — worse than the duplicate window being fixed.
+
+    THE INTERLEAVING IS CONSTRUCTED, NOT RACED. Wall-clock racing cannot reach
+    it reliably: measured, the click's abandon fires ~13 ms before the user's
+    select, so the ordering under test simply does not occur on its own. Driving
+    the user's select from inside the click's own preparation makes the hazardous
+    order the only one this test can produce, which is what lets it hold the
+    guard down. Mutating the scoping check out (`if self._task is not task or
+    task.done(): return False` → `pass`) turns this red; it left the rest of the
+    suite green, which is why the guard needed a test of its own.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+        navigation = app._sidebar_navigation
+        started_user: list["asyncio.Task[None]"] = []
+        user_may_finish = asyncio.Event()
+
+        async def prepare(session_id: str, *args, **kwargs):
+            if session_id == "click-session":
+                # The user reaches the sidebar while the click is still
+                # preparing, so THEIR navigation is the current one when the
+                # click below gives up. This is the ordering the guard exists
+                # for, made deterministic rather than waited for.
+                if not started_user:
+                    started_user.append(navigation.select("user-session"))
+                await asyncio.sleep(1.0)
+                return session_id
+            # The user's own preparation is held OPEN across the abandon, so
+            # their navigation is genuinely in flight when the click gives up.
+            # Letting it commit first would make an unscoped abandon look
+            # harmless: the damage is to a switch still being prepared.
+            await user_may_finish.wait()
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            committed.append(session_id)
+            return None
+
+        with (
+            patch.object(navigation, "_prepare", prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+        ):
+            click_task = navigation.select("click-session")
+            await _pump_until(pilot, lambda: bool(started_user), what="the user's own switch")
+
+            user_task = started_user[0]
+            # Exactly what the endpoint's timeout does, on Textual's thread,
+            # while the user's switch is still preparing.
+            stopped = navigation.abandon(click_task)
+            user_may_finish.set()
+            await _pump_until(pilot, lambda: user_task.done(), what="the user's switch to settle")
+
+        # The CONSEQUENCE first: an unscoped abandon does not merely return the
+        # wrong value, it cancels the user's switch and commits nothing, which
+        # is a worse outcome than the duplicate window this feature removes.
+        assert committed == ["user-session"], (
+            "the switch the USER began must still commit after an overrunning "
+            f"click gave up: committed={committed!r}"
+        )
+        assert user_task.cancelled() is False, (
+            "the user's switch must not be cancelled by a click abandoning "
+            "its own overrun request"
+        )
+        assert stopped is False, (
+            "abandon must refuse a task that is no longer the current "
+            "navigation: the click's own switch was superseded by the user's"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_hop_the_pool_starts_late_is_refused_rather_than_fenced():
+    """MAJOR-3, the ordering the abandon hop alone cannot cover.
+
+    The endpoint has two mechanisms and they carry DIFFERENT orderings, which is
+    why both exist. Normally `apply` is enqueued first and Textual services it
+    first, so by the time the timeout hops back there is a real navigation and
+    the fence stops it — that is
+    ``test_a_click_the_app_services_late_cannot_start_a_switch_at_all``.
+
+    This is the other order. When the endpoint's first ``to_thread`` cannot even
+    start — a saturated pool on a box already running 8-17 sessions — the
+    abandon callback is serviced BEFORE `apply` is. The fence then has nothing
+    to fence: `started` is empty because no navigation exists yet, and one is
+    created afterwards, behind an endpoint that has already answered failure.
+
+    Only the refusal covers this, and it is why the give-up is published as a
+    decision rather than performed as a check. Proven by mutation: removing the
+    refusal while KEEPING the symmetric hop leaves this red
+    (``committed=['target-session']`` against ``switched=False``) while the
+    sibling test above stays green, so neither mechanism is a decoration.
+
+    Only the enqueue is delayed; nothing on the click path is patched.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+
+        async def prepare(session_id: str, *args, **kwargs):
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            committed.append(session_id)
+            app._adopted_session_id = session_id
+            return None
+
+        navigation = app._sidebar_navigation
+        real_call_from_thread = app.call_from_thread
+        serviced: list[str] = []
+
+        def late_pool(fn, *args, **kwargs):
+            serviced.append(getattr(fn, "__name__", "?"))
+            if getattr(fn, "__name__", "") == "apply":
+                # The pool cannot start this worker until after the bound has
+                # expired and the abandon hop has run. The delay is on the
+                # ENQUEUE, not on the navigation.
+                time.sleep(0.8)
+            return real_call_from_thread(fn, *args, **kwargs)
+
+        with (
+            patch.object(navigation, "_prepare", prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 0.3),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+            patch.object(app, "call_from_thread", late_pool),
+            patch.object(
+                type(app._session),
+                "session_id",
+                property(lambda _s: committed[-1] if committed else "origin"),
+            ),
+        ):
+            future = _call_from_viewer_thread(app, "target-session")
+            await _pump_until(pilot, future.done, what="the endpoint to answer")
+            try:
+                detail = future.result(timeout=5)
+                switched = True
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
+                detail = ""
+                switched = False
+
+            for _ in range(600):
+                await pilot.pause()
+                await asyncio.sleep(0.005)
+                task = navigation._task
+                if committed and (task is None or task.done()):
+                    break
+
+        landed = "target-session" in committed
+        assert not (landed and not switched), (
+            "DOUBLE ACTION via a hop the pool started late: the switch "
+            f"committed at {committed!r} while the endpoint answered failure"
+        )
+        assert switched == landed, (
+            f"the ack must describe what happened: switched={switched} "
+            f"detail={detail!r} committed={committed!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_click_superseded_by_a_click_for_the_same_session_does_not_spawn():
+    """Q4: two clicks on the SAME session must not yield a switch and a spawn.
+
+    ``SessionNavigation.select`` bumps the generation and cancels the current
+    navigation — correct for a user changing their mind, and it means a second
+    click inside the preparation window retires the first. The first click was
+    then truthfully told "not displayed" (its successor had not committed yet)
+    and fell through to its spawn, so the app switched to the session a window
+    had just been opened for. The fence never ran here: neither click exceeded
+    its bound, so this is a different path from the overrun cases above.
+
+    The question a click actually asks is "is the user going to end up here",
+    so a navigation retired for heading to the SAME place is followed rather
+    than reported on. A different target is untouched — that click really is
+    about a session that is not being displayed, and it should still spawn.
+    """
+    from local_operator.session.runtime import viewers
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        committed: list[str] = []
+
+        async def prepare(session_id: str, *args, **kwargs):
+            # Long enough that the second click lands while the first is still
+            # preparing, which is the window this defect lives in.
+            await asyncio.sleep(0.5)
+            return session_id
+
+        def commit(session_id: str, prepared, generation: int):
+            committed.append(session_id)
+            app._adopted_session_id = session_id
+            return None
+
+        navigation = app._sidebar_navigation
+        with (
+            patch.object(navigation, "_prepare", prepare),
+            patch.object(navigation, "_commit", commit),
+            patch.object(navigation, "_release", lambda prepared: asyncio.sleep(0)),
+            patch.object(viewers, "VIEWER_RESUME_TIMEOUT_S", 5.0),
+            patch.object(viewers, "VIEWER_ABANDON_SETTLE_S", 2.5),
+            patch.object(
+                type(app._session),
+                "session_id",
+                property(lambda _s: committed[-1] if committed else "origin"),
+            ),
+        ):
+            first = _call_from_viewer_thread(app, "target-session")
+            # A few turns, not a sleep: the second click must arrive while the
+            # first is preparing, and the preparation is what bounds that.
+            for _ in range(3):
+                await pilot.pause()
+                await asyncio.sleep(0.005)
+            second = _call_from_viewer_thread(app, "target-session")
+
+            await _pump_until(
+                pilot,
+                lambda: first.done() and second.done(),
+                what="both clicks to answer",
+            )
+            outcomes = []
+            for future in (first, second):
+                try:
+                    future.result(timeout=5)
+                    outcomes.append("switch")
+                except (TimeoutError, RuntimeError):
+                    # Narrow for the same reason as the tests above: only these
+                    # two mean "the click spawns", and an unexpected error
+                    # recorded as a spawn would let this pass vacuously.
+                    outcomes.append("spawn")
+
+        # THE INVARIANT IS AGREEMENT, NOT A COUNT. Whether the second click
+        # lands inside the first's preparation or after it has committed is a
+        # scheduling outcome this test cannot pin under contention — and both
+        # are correct. What must never happen is a click reporting failure, and
+        # so spawning a window, for a session that is on screen.
+        assert "spawn" not in outcomes, (
+            "a click superseded by another click for the SAME session must not "
+            f"spawn a window the successor then switches underneath: {outcomes}"
+        )
+        assert committed and set(committed) == {"target-session"}, (
+            "every switch that landed must be the session the clicks asked " f"for: {committed!r}"
+        )

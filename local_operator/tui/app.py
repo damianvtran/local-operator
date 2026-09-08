@@ -27,6 +27,7 @@ import inspect
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -2784,6 +2785,12 @@ class OperatorApp(App[None]):
         #: first session is adopted; torn down in ``on_unmount``.
         self._mobile_registrant: Any = None
         self._mobile_handle: Any = None
+        #: The PROCESS-scoped viewer endpoint, distinct from the session-scoped
+        #: mobile registrant above and with a deliberately different lifetime:
+        #: it survives every `/resume`, because the thing a notification click
+        #: must reach is precisely the thing that outlives a session swap. See
+        #: `_viewer_adopted`.
+        self._viewer_server: Any = None
         # Separate from user inactivity: this watches the OS-backed terminal
         # reader. A mounted but untouched TUI remains alive indefinitely.
         from local_operator.session.runtime.process import _grace_seconds
@@ -3777,7 +3784,30 @@ class OperatorApp(App[None]):
             if session.is_cold:
                 if speculative:
                     raise RuntimeError("The prepared owner is no longer ready")
-                await asyncio.wait_for(session._ensure_bound(), 15)
+                # NO outer wall clock. The removed `wait_for(..., 15)` was not
+                # redundant with anything — it was DESTRUCTIVE: it replaced
+                # `_ensure_bound`'s `ConnectionError`, which carries a sentence
+                # worth showing, with a bare `TimeoutError` whose `str()` is the
+                # empty string, so the sidebar's "Could not open conversation:
+                # {error}" rendered with nothing after the colon. It was also
+                # the last bare wall clock left on this seam, which is the shape
+                # this change exists to replace (review round 2, MINOR-1).
+                #
+                # BUT it was the only thing bounding this call at 15 s, so be
+                # precise about what does bound it now (review round 3, M3-2).
+                # `_FOREGROUND_BIND_BUDGET_S` (15 s) covers only the retry/sync
+                # half: that deadline is computed AFTER `engage_runtime` has
+                # returned, and the foreground engage passes no `deadline_s`, so
+                # it takes `DEFAULT_DEADLINE_S` (30 s) first. Worst case here is
+                # therefore ~45 s, not 15 s — measured 30.00 s in the engage
+                # alone against a stalling owner. That is a deliberate trade,
+                # not an oversight: capping the foreground engage would halve
+                # the spawn/discovery window on a cold start, which is the path
+                # this change exists to make more reliable, and the wait is
+                # cancellable and reports progress rather than being silent.
+                # Do not re-add an outer `wait_for` to "restore" the 15 s; bound
+                # the engage itself if that worst case ever needs shortening.
+                await session._ensure_bound()
             if session.is_cold:
                 raise RuntimeError("The conversation has not finished connecting")
             await session.ensure_display_current()
@@ -4692,8 +4722,27 @@ class OperatorApp(App[None]):
                 self._set_sidebar_open(False)
             self._editor().focus()
             return
+        self._select_sidebar_session(message.session_id)
+
+    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None]:
+        """Start a sidebar navigation to ``session_id`` — the ONE way to switch.
+
+        Extracted so the notification-click path (:meth:`viewer_resume_session`)
+        starts a switch by literally the same code as the user's keystroke,
+        rather than by a second route that merely resembles it. That distinction
+        is not cosmetic: ``/resume`` looks equivalent and is not — it calls
+        ``_deny_queued_approvals``, so switching that way silently answers "no"
+        to an approval the user had parked in the session being left, which
+        ``docs/SESSION_SIDEBAR.md`` explicitly forbids of a switch. Sidebar
+        navigation instead *suspends* those gates (``_suspend_sidebar_gates``
+        snapshots the card and ``_restore_gate_draft`` puts it back on return).
+
+        Cancelling the outgoing session's worker group first is part of that
+        contract and not an optimisation: those workers still hold the
+        presentation the navigation is about to replace.
+        """
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
-        self._sidebar_navigation.select(message.session_id)
+        return self._sidebar_navigation.select(session_id)
 
     def _apply_sidebar_settings(self) -> None:
         settings = SidebarSettings.from_values(self._config_values())
@@ -11257,24 +11306,45 @@ class OperatorApp(App[None]):
         membership FOLLOW the card rather than the moment the notice was
         written: a notice gains the class and the card's exact width while the
         card is up, and sheds both — back to the full-width spine — when it is
-        not. ``set_class`` only fires the block's re-centre (``NoticeBlock.set_class``)
-        on a real change, so an unchanged sync costs nothing.
+        not. An unchanged sync still costs nothing, but the guard is Textual's
+        own: ``add_class``/``remove_class`` return early when the class set is
+        already what was asked for, so no style update is queued. The block has
+        no ``set_class`` override to fire — the re-wrap comes from ``on_resize``,
+        which is how the width assigned below arrives.
         """
         transcript = self._transcript_view()
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        # The card sits inside the transcript's content box with equal ground on
-        # both sides, so a notice given the card's width and offset by the same
-        # half-difference lands on the card's exact column. The transcript's own
-        # one-cell left gutter is inside that box, so the centre of the CONTENT
-        # is what the offset aims at. The block cannot be centred BY the
-        # stylesheet: `align-horizontal` aligns a container's children, never the
-        # node carrying it, so the offset is computed here alongside the width
-        # the same clamp resolves. When the card is gone the width is RESET to
-        # `1fr` — left at the boot value it narrowed the notice for the rest of
-        # the session, dead space to its right at any width.
-        content_box = box - transcript.styles.gutter.width
-        offset = max(0, (content_box - card) // 2)
+        # The card is centred by the stylesheet in `box` — the screen's own
+        # content box — so the offset that lands a notice on the card's column
+        # has to be computed against THAT box, then rebased into the transcript's
+        # coordinate space. The block cannot be centred BY the stylesheet:
+        # `align-horizontal` aligns a container's children, never the node
+        # carrying it, so the offset is computed here alongside the width the
+        # same clamp resolves. When the card is gone the width is RESET to `1fr`
+        # — left at the boot value it narrowed the notice for the rest of the
+        # session, dead space to its right at any width.
+        #
+        # The gutter is SUBTRACTED rather than excluded from the centring, and
+        # the distinction is the whole bug. An offset is relative to the block's
+        # own parent, so the transcript's one-cell left gutter is already spent
+        # before the offset applies; centring inside `box - gutter` instead
+        # centred the notice in a box the card is not centred in. The old form
+        # resolved to `(box - card - 1) // 2` against this one's `(box - card)
+        # // 2`, so the two agreed only where `box - card` happened to be EVEN:
+        # `(d - 1) // 2 == d // 2 - 1` holds for even `d` alone.
+        #
+        # Measured on the unfixed code, over the CARDED widths only — below the
+        # card threshold this offset never applies at all, so 70 and 80 (no
+        # card) say nothing about it either way. One cell of drift at 86, 88,
+        # 90, 100 and 110 (`box - card` odd), zero at 85, 87, 120, 140, 160 and
+        # 190 (even) — a defect that hides at exactly the width its own
+        # regression test ran at, which is why the guard is parametrized across
+        # both parities. The threshold itself: 85 is the FIRST carded width
+        # (`box=83`, `card=75`, `d=8 == BOOT_CARD_MIN_INSET`) and 84 (`d=7`) the
+        # last uncarded one; 86 is merely the lowest carded width that drifts,
+        # since 85's `d` is even.
+        offset = max(0, (box - card) // 2 - transcript.styles.gutter.left)
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
             if card_up:
@@ -11514,7 +11584,12 @@ class OperatorApp(App[None]):
 
         async def run() -> None:
             try:
-                await cast(Callable[[], Awaitable[None]], ensure)()
+                # BACKGROUND envelope. Nobody is waiting on this engage and it
+                # is silent on failure, so it can afford to outlast an owner
+                # whose authoritative loop is busy with a turn — which is the
+                # condition that used to leave the session cold and make the
+                # user's first command pay for a fresh bind.
+                await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
             except Exception:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent: the user
                 # has not asked for anything yet, and the message they send
@@ -11691,9 +11766,60 @@ class OperatorApp(App[None]):
                 # Clear the latch as the other two triggers do, so the next
                 # keystroke or command retries rather than finding it stuck.
                 self._warm_engage_started = False
-                self._system_notice(
-                    f"could not start a runtime for this session: {error}", "warning"
-                )
+                # "could not start a runtime for this session" was wrong on
+                # both halves for the common case: a runtime very likely DID
+                # start (``engage_runtime`` returned, ``find_owner_record``
+                # found it, the socket authenticated) and the session is not
+                # broken — the bind ran out of its envelope while the owner's
+                # authoritative loop was busy. Reporting that as a boot failure
+                # told the user their session was lost when it was running in
+                # the background the whole time.
+                #
+                # Gated on the SYNC condition, never on "not actionable".
+                # ``runtime_alive`` is set only by ``RuntimeUnresponsiveError``,
+                # which is raised at the one place that establishes the claim —
+                # a live socket whose owner did not sync in time. Branching on
+                # ``not actionable`` instead put "it is running" over three
+                # sentences where it was false: a deliberate `/stop`, an owner
+                # mid-reconnect, and the no-record case (review round 1,
+                # MAJOR-1). Those are plain ``ConnectionError``s and their own
+                # text is the honest answer, so they keep relaying it.
+                #
+                # A VETTED sentence is different again: those are real
+                # configuration faults the user has to act on (a missing
+                # credential, an unusable model), so they keep their own text
+                # and stay a warning.
+                if getattr(error, "actionable", False):
+                    self._system_notice(str(error), "warning")
+                elif getattr(error, "runtime_alive", False):
+                    # Past tense for the ATTEMPT, present for the RUNTIME. At
+                    # the moment this paints the retry is over — all three
+                    # attempts are spent and the `finally` below has already
+                    # cleared the band — so a present participle ("still
+                    # connecting") promises background progress the code
+                    # deliberately is not making, and a user who believes it
+                    # waits, which is the one action that cannot work (design
+                    # round 1, D1). "in the background" is dropped for the same
+                    # reason: it is the implementation's word and it is what
+                    # made the sentence sound like work in flight.
+                    #
+                    # `note`, not `info`: this row is the sole receipt for a
+                    # command that was DROPPED (the return below never reaches
+                    # the dispatch), which is NoticeBlock's definition of the
+                    # middle tier — the answer to something the user just did.
+                    # `info` rendered it in the same dim ink as the decorative
+                    # boot hint two rows above (design round 1, D2).
+                    self._system_notice(
+                        "could not reach this session's runtime in time — it is "
+                        "still running; try that again in a moment",
+                        "note",
+                    )
+                else:
+                    # Everything else keeps the reason it was given. The old
+                    # copy at least relayed `{error}`; dropping it for a
+                    # reassurance would regress this change's own goal of
+                    # honest failure strings.
+                    self._system_notice(str(error), "warning")
                 return
             finally:
                 self._set_starting(False)
@@ -15312,6 +15438,16 @@ class OperatorApp(App[None]):
         if self._notifier is not None:
             self._notifier.set_focused(True)
         self._set_animation_focused(True)
+        # Stamp when the user was last HERE. When several windows could take a
+        # notification click, this is the tiebreak that sends it to the one they
+        # were most recently working in. Only the gaining edge is recorded — a
+        # blur carries no routing information, so an alt-tab costs no write.
+        server = self._viewer_server
+        if server is not None:
+            try:
+                server.note_focused(True)
+            except Exception:  # noqa: BLE001 — focus bookkeeping is never worth an event
+                logger.debug("viewer focus stamp failed", exc_info=True)
 
     def on_app_blur(self, event: AppBlur) -> None:
         """The terminal lost OS focus \u2014 notify, and slow every animation."""
@@ -15450,6 +15586,362 @@ class OperatorApp(App[None]):
         if self._notify(kind):
             self._waiting_kind = kind
 
+    def _viewer_adopted(self, session: Any) -> None:
+        """Publish (once) and keep current the record that makes this window
+        reachable by a notification click.
+
+        WHY THIS IS NOT PART OF ``_mobile_adopted``. That method manages a
+        SESSION-scoped registrant and tears it down whenever the app follows a
+        ``RemoteSession`` — which is the normal sidebar state — because a second
+        registrant for one transcript corrupts daemon routing. Correct, and it
+        leaves a sidebar user's TUI listening on nothing, which is why a
+        notification click had no live process to route to and spawned a whole
+        new window instead.
+
+        This endpoint describes the PROCESS: which window can put a session on
+        screen. It is published once and then merely re-stamped with whichever
+        session is current, local or remote alike, so it is available in exactly
+        the state the session registrant is not. Its record lives in a separate
+        run directory, so no older binary's ``registry.scan`` can mistake it for
+        a stoppable, routable session — see ``session/runtime/viewers``.
+
+        Best-effort by contract, like the mobile bridge: click-through is chrome
+        and must never be a startup gate for the terminal.
+        """
+        session_id = str(getattr(session, "session_id", "") or "")
+        if self._viewer_server is None:
+            try:
+                from local_operator.session.runtime.viewer_server import ViewerServer
+
+                self._viewer_server = ViewerServer(self)
+                self._viewer_server.start()
+            except Exception:  # noqa: BLE001 — a viewer record is never worth the TUI
+                logger.debug("viewer endpoint failed to start", exc_info=True)
+                self._viewer_server = None
+                return
+        try:
+            self._viewer_server.note_session(session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("viewer record refresh failed", exc_info=True)
+
+    def _viewer_teardown(self) -> None:
+        """Stop serving and remove the record. Idempotent, and called on the
+        one clean-exit path so a closed window stops advertising a port."""
+        server = self._viewer_server
+        if server is None:
+            return
+        self._viewer_server = None
+        try:
+            server.close()
+        except Exception:  # noqa: BLE001 — an exit path must not raise
+            logger.debug("viewer endpoint close failed", exc_info=True)
+
+    # -- ViewerHost: what a notification click may ask of this window ---------
+
+    async def viewer_resume_session(self, session_id: str) -> str:
+        """Display ``session_id`` here — the click's whole purpose.
+
+        THE SIDEBAR'S NAVIGATION, LITERALLY. This calls
+        :meth:`_select_sidebar_session`, the same function the user's sidebar
+        keystroke reaches, so the click inherits the sidebar's invariants by
+        construction rather than by resemblance. It used to run ``/resume``
+        instead, which *looks* equivalent and is not: ``/resume`` reloads
+        through ``_deny_queued_approvals``, so a click about session B silently
+        answered "no" to an approval the user had parked in session A and
+        rendered no receipt for it — measured, and forbidden in as many words by
+        ``docs/SESSION_SIDEBAR.md`` ("Switching does not answer a gate, cancel a
+        turn, or redirect its eventual result"). This docstring asserted that
+        inheritance while the code did not have it; a docstring outrunning its
+        code on this exact path is the defect this whole module was written to
+        fix, so it is now the same code rather than a matching promise.
+
+        THE ACK MEANS DISPLAYED, NOT DISPATCHED. The click's caller skips its
+        spawn fallback on this ack, so returning success for a session that
+        failed to open cost the user both outcomes: no new window AND the loss
+        of the conversation they were reading. Resolution therefore waits for
+        the navigation task and then checks what is actually on screen. The
+        sidebar path helps twice here — it prepares off-screen and commits only
+        once the target is ready, so a failure leaves the outgoing conversation
+        exactly where it was, and this raises so ``switched`` stays False and
+        the spawn runs.
+
+        BOUNDED END TO END, and the bound is real this time. ``call_from_thread``
+        blocks its caller with no timeout of its own (textual 8.2.8 ends in a
+        bare ``future.result()``), so the previous ``wait_for`` sat *after* the
+        hazard it named and an app wedged in a nested pump ran past it
+        indefinitely — measured at 30 s against a 12 s outer bound. The blocking
+        call is now inside the ``wait_for`` via a worker thread. A timeout
+        strands that worker until Textual services the callback, which is
+        unavoidable (an enqueued ``call_from_thread`` cannot be recalled) and
+        acceptable: it is a pooled thread rather than this endpoint's loop, so
+        the endpoint keeps answering and the click falls back on time.
+
+        ONE CLICK YIELDS A SWITCH OR A SPAWN, NEVER BOTH — unconditionally
+        while no switch has started, and for a switch already under way as long
+        as the app services the give-up hop within ``VIEWER_ABANDON_SETTLE_S``.
+        That is the property this endpoint owes its caller, and the condition is
+        in the claim rather than in a footnote because the two mechanisms below
+        genuinely differ in what they need: the refusal asks nothing of the app,
+        while the fence has to actually run to fence anything. Both residues —
+        a PAIR of clicks, and a wedge outlasting the settle budget — are written
+        out at the end of this docstring rather than papered over. This file
+        exists because a docstring asserted an invariant its code did not have,
+        and this clause has now been caught claiming more than the code delivers
+        three times, so a headline that a later paragraph has to walk back would
+        be the same defect in a new place.
+
+        The bound alone never delivered even the single-click property:
+        ``wait_for`` cancels the waiter, not the navigation, so a switch slower
+        than the bound still committed *after* this had answered failure, and
+        the caller spawned a window for a session that then switched underneath
+        it. Raising the bound only moved the delay at which that happened —
+        measured clean at 9.8 s and doubled at 10.2 s.
+
+        So an overrun is now stopped rather than merely stopped waiting for,
+        and the give-up binds TWO orderings because the app can be slow in two
+        different places:
+
+        * **A navigation that already exists** is fenced. The timeout hops back
+          and calls ``SessionNavigation.abandon``, whose generation bump fences
+          it out of committing, and then reads what is on screen: a switch that
+          beat the fence is reported as the success it is, and one that did not
+          can no longer land.
+        * **A navigation that does not exist yet** is refused. The bound can
+          expire while the enqueue is still queued, so an app that services the
+          hop LATE would otherwise start a switch behind an endpoint that had
+          already answered failure — the same double action reached through the
+          sibling branch, and reproducible with nothing patched at all, merely a
+          loop busy past the bound. The endpoint therefore publishes that it has
+          given up BEFORE it hops, and ``apply`` reads that on Textual's thread
+          before it can create anything. A check would race the creation it is
+          trying to catch, because the two run on different threads; a refusal
+          is ordered by the thread that would do the work.
+
+        Both are needed: which one carries a given run depends on whether
+        Textual services ``apply`` before or after the abandon callback, and
+        each has a test that goes red when only that mechanism is removed.
+
+        ``abandon`` is scoped to the task this call started, so a switch the
+        USER began while this one overran is not cancelled with it.
+
+        A CLICK SUPERSEDED BY ANOTHER CLICK FOR THE SAME SESSION follows its
+        successor instead of reporting failure. ``select`` retires the current
+        navigation, so two clicks on one session inside the preparation window
+        used to give the first a truthful "not displayed" — its successor had
+        not committed yet — and that click spawned a window the successor then
+        switched underneath. Neither click overran anything, so this is not the
+        fence's path; the resolution above is where it is fixed.
+
+        WHAT REMAINS, stated rather than implied. First, two clicks on DIFFERENT
+        sessions in that window still produce a spawn and a switch. That is one
+        outcome each for two distinct requests rather than two for one, and it
+        is arguably correct — the superseded click really is about a session
+        that is not on screen. It is called out here because the guarantee
+        above is per click, and a reader is owed the boundary of it.
+
+        Second, and this is why the guarantee above is conditional: a wedge that
+        outlasts ``VIEWER_RESUME_TIMEOUT_S`` and then ``VIEWER_ABANDON_SETTLE_S``
+        on top of it can still deliver both, in the one ordering where ``apply``
+        was serviced early enough that a navigation EXISTS. The settle hop below
+        expires too, so ``abandon`` never runs, nothing fences the live
+        navigation, and the bare ``raise`` answers failure while the switch
+        commits behind it. That residue predates this change — it is the
+        ``except`` arm's ``raise``, which reproduces identically before it — and
+        removing it needs a fence that does not depend on the app answering at
+        all, which is a larger change than this one. It is recorded because the
+        headline would otherwise deny it.
+
+        A cancelled navigation cannot half-swap the app: ``SessionNavigation``
+        commits with no await between its final generation check and
+        ``_commit_sidebar_session``, so the fence lands strictly before or
+        strictly after the swap, and preparation is discarded through the same
+        ``release``/``pending("")`` path a user's own cancel uses — leaving the
+        outgoing conversation, its draft and its suspended gates as they were.
+
+        ``VIEWER_RESUME_TIMEOUT_S`` is shared with the client's ack deadline,
+        which is derived from it — see ``session/runtime/viewers``. The client
+        MUST outlast this bound plus the abandon budget spent above; when it did
+        not, a slow switch delivered the switch *and* a duplicate window, which
+        is the exact bug this feature removes.
+        """
+        # The same set-once helper the mobile handle's app hop uses, imported
+        # rather than re-declared: two spellings of "resolve this future unless
+        # a cancellation already did" is exactly the duplication that lets one
+        # of them drift into swallowing an error.
+        from local_operator.mobile.tui_handle import _set_unless_done
+        from local_operator.session.runtime.viewers import (
+            VIEWER_ABANDON_SETTLE_S,
+            VIEWER_RESUME_TIMEOUT_S,
+        )
+
+        if threading.get_ident() == getattr(self, "_thread_id", None):
+            # Preserved from before the worker-thread hop below, which would
+            # otherwise make this reachable and self-deadlocking. The endpoint
+            # always calls from its own thread; anything calling from Textual's
+            # is a wiring mistake and should hear so rather than hang.
+            raise RuntimeError("viewer_resume_session must not run on the app's own thread")
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+
+        # Written on Textual's thread by `apply`, read on Textual's thread by
+        # `abandon`; the hop between them is what makes that safe. ONE slot, and
+        # spelled as one: it holds the single navigation this call started, and
+        # a list made "no navigation yet" and "navigation, then abandoned" look
+        # like the same emptiness at a glance.
+        started: "asyncio.Task[None] | None" = None
+
+        #: Set by the endpoint thread the instant it gives up, read on Textual's
+        #: thread by `apply` before it starts anything. A REFUSAL, not a check:
+        #: the endpoint cannot poll for a navigation that has not been created
+        #: yet, so the only race-free way to stop one is to leave a decision
+        #: where the thread that would create it must read it first.
+        abandoned = False
+
+        def apply() -> None:
+            """On Textual's thread: start the switch and report where it landed."""
+            nonlocal started
+            if abandoned:
+                # The caller already answered failure and its spawn is running.
+                # Starting the switch now would deliver BOTH outcomes, which is
+                # the whole defect; refusing is what makes the endpoint's answer
+                # true after the fact rather than merely true when it was given.
+                #
+                # CANCELLED RATHER THAN FAILED, because nobody is left to read a
+                # failure. `abandoned` is only ever set after `wait_for` has
+                # already cancelled `hop_and_wait`, so the `await future` that
+                # would have retrieved an exception here no longer exists —
+                # resolving it with one instead made asyncio report "Future
+                # exception was never retrieved" on stderr at collection time.
+                # A cancellation carries the same "this hop produced nothing"
+                # and is not owed a reader.
+                loop.call_soon_threadsafe(future.cancel)
+                return
+            try:
+                task = self._select_sidebar_session(session_id)
+            except Exception as exc:  # noqa: BLE001 — the error IS the answer
+                loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
+                return
+            started = task
+
+            def settled(_task: "asyncio.Task[None]") -> None:
+                # Still on Textual's thread, so reading the binding is safe.
+                # `SessionNavigation` reports failure through its `failed`
+                # callback and completes normally, so the task's own outcome
+                # cannot be trusted as the answer — what is on screen can.
+                current = getattr(self._session, "session_id", "") if self._session else ""
+                if current == session_id:
+                    loop.call_soon_threadsafe(
+                        _set_unless_done, future, f"displayed {session_id}", None
+                    )
+                    return
+                # SUPERSEDED BY A SWITCH TO THE SAME PLACE IS NOT A FAILURE.
+                # `SessionNavigation.select` cancels the current navigation, so
+                # a second click on the same session inside the preparation
+                # window retires this one — and answering "could not display"
+                # for it made that click spawn a window while its successor
+                # switched the app to the very session it spawned for (Q4). The
+                # question is only ever "is the user going to end up here", so
+                # follow the navigation that replaced this one rather than
+                # reporting on a task that was retired for heading the right
+                # way. Bounded by the endpoint's own `wait_for`, and only ever
+                # re-armed onto a DIFFERENT task, so it cannot spin.
+                successor = self._sidebar_navigation._task
+                if (
+                    successor is not None
+                    and successor is not _task
+                    and not successor.done()
+                    and self._sidebar_navigation.requested_id == session_id
+                ):
+                    successor.add_done_callback(settled)
+                    return
+                error = _task.exception() if not _task.cancelled() else None
+                loop.call_soon_threadsafe(
+                    _set_unless_done,
+                    future,
+                    None,
+                    error or RuntimeError(f"could not display {session_id}"),
+                )
+
+            task.add_done_callback(settled)
+
+        async def hop_and_wait() -> str:
+            # `to_thread` is what puts the blocking enqueue INSIDE the bound.
+            await asyncio.to_thread(self.call_from_thread, apply)
+            return await future
+
+        def abandon() -> str:
+            """On Textual's thread: stop the overrun switch, then report truthfully.
+
+            Reading the binding here rather than assuming failure is the whole
+            point. The navigation may have committed in the moment between the
+            bound expiring and this callback running, and answering "failed"
+            for a switch that is on screen is exactly the lie that spawns the
+            duplicate window.
+            """
+            task = started
+            if task is not None:
+                self._sidebar_navigation.abandon(task)
+            current = getattr(self._session, "session_id", "") if self._session else ""
+            return f"displayed {session_id}" if current == session_id else ""
+
+        try:
+            return await asyncio.wait_for(hop_and_wait(), timeout=VIEWER_RESUME_TIMEOUT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            # REFUSE BEFORE HOPPING, and the order is the correctness argument.
+            # The bound can expire while the enqueue is still queued, so there
+            # may be no navigation to abandon *yet* — an app that services the
+            # hop late runs `apply` after this branch, starting a switch behind
+            # an endpoint that has already answered failure. Reading `started`
+            # here and raising when it is empty was that hole: a check races the
+            # creation it is trying to catch, because the two run on different
+            # threads. Setting the refusal first closes it without a race — it
+            # is published before this thread does anything else, and `apply`
+            # reads it on Textual's thread before it can create anything, so
+            # every ordering ends in one outcome. The hop below then handles the
+            # other case, a navigation that already exists.
+            abandoned = True
+            # Bounded again, and inside the client's remaining grace: this hop
+            # is enqueued behind whatever made the switch slow, so an app wedged
+            # badly enough to swallow it must not convert a duplicate window
+            # into an endpoint that never answers at all. It runs even when no
+            # navigation was recorded — Textual serialises it against `apply`,
+            # so arriving first means the refusal above is what `apply` sees,
+            # and arriving second means there is a real task to fence.
+            landed = await asyncio.wait_for(
+                asyncio.to_thread(self.call_from_thread, abandon),
+                timeout=VIEWER_ABANDON_SETTLE_S,
+            )
+            if landed:
+                # It committed before the fence. The switch the user asked for
+                # happened, late; saying so is what stops the second window.
+                return landed
+            raise
+
+    async def viewer_focus_window(self) -> str:
+        """Bring this window forward. Best-effort, bounded, off the event loop.
+
+        THE SUBPROCESS RUNS IN A THREAD, and that is not incidental. This is an
+        OS call on a path whose whole contract is that a notification is chrome:
+        a blocking `subprocess.run` on Textual's loop would freeze the UI for as
+        long as the window server took to answer, which is the frozen-event-loop
+        class ``tests/e2e/watchdog.py`` exists to catch and which a Python-level
+        probe cannot see. It runs on the viewer endpoint's thread instead, and
+        the helper bounds it with a timeout regardless.
+
+        Solicited focus only: this is reachable exclusively from a click the
+        user made. Nothing else in the codebase may call it.
+        """
+        from local_operator.tui.window_focus import activate_window
+
+        activated = await asyncio.to_thread(activate_window)
+        if not activated:
+            # An honest "no" rather than a lie: the session is switched and the
+            # user finds the window themselves. The client treats this as a
+            # non-failure precisely because the switch already succeeded.
+            raise ValueError("no window activation available here")
+        return "activated"
+
     def _mobile_adopted(self, session: Any) -> None:
         """Bring the mobile bridge up (once) or re-point it at a new session.
 
@@ -15468,6 +15960,10 @@ class OperatorApp(App[None]):
         # transcript and corrupt daemon routing. If this process previously
         # owned a local session, tear its record down while following remotely;
         # takeover calls this again with a real Session and starts a fresh owner.
+        # The viewer endpoint is published for EVERY session, remote included —
+        # that is the whole point of it being process-scoped, and it is what the
+        # teardown below would otherwise take away in the normal sidebar state.
+        self._viewer_adopted(session)
         if bool(getattr(session, "is_remote", False)):
             self._mobile_teardown()
             return
@@ -15609,6 +16105,12 @@ class OperatorApp(App[None]):
         # the common case so the phone list drops the session immediately
         # rather than at the next scan.
         self._mobile_teardown()
+        # And the viewer record, for the same reason and with an extra one of
+        # its own: it advertises a LISTENING PORT, so a record left behind
+        # costs the next notification click its full dial timeout before it
+        # falls back to a spawn. A killed process leaves the file, which the
+        # reader reaps on the pid-liveness check.
+        self._viewer_teardown()
         # Alongside the mobile record and for the same reason: this is a clean
         # exit, so the pane must stop advertising a session the user has just
         # closed. A crash never reaches this line, which is what leaves the
@@ -19281,8 +19783,8 @@ class OperatorApp(App[None]):
           a fresh one on its ``retiring`` frame with no notice at all. Every
           other outcome \u2014 a busy runtime, a ``kept`` answer, an old runtime
           that does not know the op \u2014 is a runtime that is STAYING on the old
-          build, and earns one ``note`` line saying it will move over when its
-          current work finishes. No notice ever asks the user to ``/stop``
+          build, and earns one ``note`` line saying it will switch over once it
+          is next idle. No notice ever asks the user to ``/stop``
           (design-runtime-autorefresh \u00a73.3/\u00a73.5).
 
         The COPY deliberately says "session" and "window" rather than
@@ -19409,14 +19911,23 @@ class OperatorApp(App[None]):
         # warning: nothing is wrong and nothing is asked of the user; not
         # ``info`` either, whose dim ink the widget reserves for a receipt
         # nobody has to read \u2014 this answers "why is my session on an older
-        # version?") saying it will move over when its work finishes, which
-        # the runtime's own reaper does.
+        # version?") saying it will switch over once it is idle, which the
+        # runtime's own reaper does.
+        #
+        # "when it is next idle", NOT "when its current work finishes": the
+        # notice paints on a brand-new ``/new`` splash with no work in flight,
+        # where promising the end of work that does not exist is confusing and
+        # arguably untrue. ``may_refresh`` gates the retire on ``is_busy()``
+        # being false, so idleness \u2014 not the completion of a particular task \u2014
+        # is literally the condition the runtime waits for, and it is the one
+        # that is also true of a session sitting at an empty prompt (design
+        # review round 1, D3).
         idle_probe = getattr(session, "owner_idle", None)
         ask = getattr(session, "request_refresh", None)
         owner_idle = bool(idle_probe()) if callable(idle_probe) else False
 
         def announce_stale() -> None:
-            """C\u2032: this session is on an older build and will move on its own.
+            """C\u2032: this session is on an older build and will switch on its own.
 
             One function, two callers (the busy branch and the ``kept`` answer
             of the idle branch) so the two states cannot drift into two
@@ -19444,7 +19955,7 @@ class OperatorApp(App[None]):
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
-                    f"will move to the new version when its current work finishes.",
+                    "will switch to the new version when it is next idle.",
                     scope,
                     notice_kind="note",
                 )
@@ -19454,7 +19965,7 @@ class OperatorApp(App[None]):
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
-                f"move to the new version when its current work finishes.",
+                "switch to the new version when it is next idle.",
                 scope,
                 notice_kind="note",
             )
@@ -19621,10 +20132,19 @@ class OperatorApp(App[None]):
                 # against whatever runtime is live by then (design review
                 # round 1, D2). Kept ``warning`` because the lost attach is
                 # still the headline; the tail states the automatic repair.
+                #
+                # "once it is next idle", NOT "when its current work finishes",
+                # for the reason the build-skew notices give at the same wording
+                # (design review round 1, D3): ``may_refresh`` gates the retire
+                # on ``is_busy()`` being false, so idleness is literally the
+                # condition, and a session that has no work in flight is told
+                # about the end of work that does not exist. This notice paints
+                # on the same runtime-refresh mechanism as those two, so it
+                # states the same promise in the same words.
                 self._notice(
                     "this session is running a version too old to attach a team "
                     "(before 0.46.25); nothing was attached. It will move to the new "
-                    "version on its own when its current work finishes.",
+                    "version on its own once it is next idle.",
                     "warning",
                 )
                 return
@@ -29503,6 +30023,34 @@ class OperatorApp(App[None]):
         reasonable reading of that frame was that the agent had hung.
         """
         event = message.event
+        # The call's real id has just arrived for a row this surface mounted
+        # under an index-derived placeholder: REKEY the row rather than letting
+        # the lookup below miss and mount a second one. Without this the
+        # promotion frame reads as a brand-new call, so the screen carries two
+        # rows for one call and the abandoned one is marked ``⊘ interrupted`` at
+        # turn end — precisely the failure the compose key is latched to avoid.
+        # ``getattr`` with a default, NOT a plain attribute read, and that is
+        # load-bearing rather than defensive habit. ``EventController._on_event``
+        # dispatches on ``event.type`` alone and never re-validates to the
+        # declared class, so an event relayed from an owner whose build predates
+        # this field arrives here as a bare ``AgentEvent`` — which allows extra
+        # fields but declares none of them. A plain read raises
+        # ``AttributeError: 'AgentEvent' object has no attribute
+        # 'supersedes_tool_call_id'`` and takes the turn down.
+        #
+        # Reviewer round 1 (R5) suggested the plain read on the grounds that the
+        # field is always defaulted. That holds for the pydantic model but not
+        # for the object that actually reaches this method; the compat test
+        # below fails outright on the plain read. Pinned there deliberately.
+        superseded = getattr(event, "supersedes_tool_call_id", None)
+        if superseded:
+            promoted = self._composing_cards.pop(str(superseded), None)
+            if promoted is not None:
+                promoted.tool_call_id = event.tool_call_id
+                # The anchor is the row's scroll identity; leaving it on the
+                # placeholder would strand a restored scroll position.
+                promoted.navigation_anchor_id = f"tool:{event.tool_call_id}"
+                self._composing_cards[event.tool_call_id] = promoted
         card = self._composing_cards.get(event.tool_call_id)
         if card is None:
             card = ToolCard(event.tool_call_id, event.tool_name)

@@ -29,7 +29,9 @@ def engagements(monkeypatch):  # noqa: ANN201
     """Record every engage the supervisor makes, without starting a process."""
     calls: list[dict[str, object]] = []
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         calls.append({"session_id": session_id, "cwd": cwd, "work": work})
         return None
 
@@ -153,7 +155,9 @@ async def test_one_session_failing_does_not_stop_the_others(
     """A sweep is not all-or-nothing: the schedule is untouched, so it retries."""
     seen: list[str] = []
 
-    async def flaky(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def flaky(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         seen.append(session_id)
         if session_id == "sessionbadaa":
             raise TimeoutError("no runtime")

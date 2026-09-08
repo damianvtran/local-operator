@@ -310,7 +310,9 @@ async def test_the_tui_engages_a_runtime_without_any_input(tmp_path: Path, monke
 
     engaged = asyncio.Event()
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         engaged.set()
         raise ConnectionError("no runtime in this test")
 
@@ -412,7 +414,9 @@ async def test_an_engage_that_lands_after_dispose_does_not_bind(
     release = asyncio.Event()
     looked_for_record = False
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         parked.set()
         await release.wait()
 
@@ -461,7 +465,9 @@ async def test_a_session_swap_cancels_the_engage_in_flight(tmp_path: Path, monke
     parked = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         parked.set()
         try:
             await asyncio.Event().wait()  # park until cancelled
@@ -520,7 +526,9 @@ async def test_no_provider_configured_skips_the_mount_engage(tmp_path: Path, mon
 
     engaged = False
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         nonlocal engaged
         engaged = True
         raise AssertionError("must not be reached")
@@ -611,7 +619,9 @@ async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, mon
 
     engaged = asyncio.Event()
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         engaged.set()
         raise ConnectionError("no runtime in this test")
 

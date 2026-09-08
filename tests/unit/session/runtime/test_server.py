@@ -2134,3 +2134,391 @@ async def test_tui_send_timeout_is_five_seconds(monkeypatch: pytest.MonkeyPatch)
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+# -- compose-frame folding ----------------------------------------------------
+#
+# ``_compact_event_queue`` is exercised here against a bare ``_ClientConn`` and
+# a bare ``RuntimeServer`` rather than a live socket: the property under test is
+# a pure function of the FIFO's contents.
+#
+# What the neighbouring coverage does and does NOT give. The GENERIC overflow
+# drop is driven over a real socket by
+# ``test_high_volume_event_relay_bounds_nonreader_and_preserves_healthy_order``,
+# but that test emits only ``NoticeEvent`` — it never puts a compose frame on
+# the wire, so it is not evidence for this path (review R2). The compose path
+# itself was driven end to end against a production ``RuntimeServer`` and a real
+# ``RemoteSession`` viewer in QA's round-1 cell, which reproduced the reported
+# frame on base (viewer dropped by overflow; three composing rows never adopted
+# or retired; the turn never completed) and showed this branch adopting and
+# retiring all three. That cell needs two processes and a real socket, so it
+# lives with the PR evidence; these tests are the fast structural guard for the
+# same property.
+
+
+def _compose_frame(call_id: str, argument_bytes: int, intent: str | None = None) -> dict[str, Any]:
+    return {
+        "op": "event",
+        "data": {
+            "type": "tool_call_compose",
+            "tool_call_id": call_id,
+            "tool_name": "bash",
+            "argument_bytes": argument_bytes,
+            "intent": intent,
+        },
+    }
+
+
+def _stalled_conn() -> Any:
+    """A connection whose reader never drains, i.e. the case the bound is for."""
+    from local_operator.session.runtime.server import _EVENT_QUEUE_MAX, _ClientConn
+
+    conn = _ClientConn(writer=cast(Any, object()), kind=cast(Any, "attach"))
+    conn.event_queue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
+    conn.wants_events = True
+    conn.wants_frontend = True
+    conn.events_ready = True
+    return conn
+
+
+class _NeverDrains(RuntimeServer):
+    """Enqueue-path harness: records drops, never consumes the FIFO."""
+
+    def __init__(self) -> None:  # noqa: D107 — deliberately skips RuntimeServer.__init__
+        self._clients: dict[int, Any] = {}
+        self._event_sends: set[Any] = set()
+        self.dropped: list[str] = []
+
+    def _drop_client(  # type: ignore[override]
+        self, conn: Any, *, reason: str = "unspecified"
+    ) -> None:
+        self.dropped.append(reason)
+
+    async def _drain_event_queue(self, conn: Any) -> None:  # type: ignore[override]
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_viewer_survives_a_long_multi_call_dictation() -> None:
+    """A dictation must not overflow the FIFO and drop the viewer.
+
+    Compose frames carry a distinct ``tool_call_id`` and a growing
+    ``argument_bytes``, so before the fold NOTHING in the queue was compactible
+    during a tool-argument dictation: 300 frames across 3 calls dropped the
+    client after 65 with ``event queue overflow (64 frames)``. That matters
+    because the measured compose rate at three concurrent calls is 16.0
+    frames/s — the 64-frame bound is reached in ~4.0 s, BEFORE the 5.0 s
+    ``_TUI_SEND_TIMEOUT_S`` raised specifically to protect stalled TUI viewers.
+    The dropped viewer re-attaches and its seed re-mounts composing rows that
+    nothing adopts, which is the operator-reported "tool cards frozen at an
+    identical elapsed time" on calls that in fact ran.
+
+    Frame counts, not seconds: this asserts a structural property of the
+    queue, so it cannot flake under host contention.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for index in range(300):
+        server._enqueue_client_frame(conn, _compose_frame(f"call_{index % 3}", index * 10))
+
+    assert server.dropped == [], f"stalled viewer was dropped: {server.dropped}"
+
+    # Compaction runs only ON OVERFLOW, so between passes the queue legitimately
+    # refills with not-yet-folded frames. The invariant is therefore asserted
+    # where it is claimed — after a pass — rather than at an arbitrary depth.
+    server._compact_event_queue(cast(Any, conn))
+
+    # The fold's actual guarantee: at most one entry per in-flight call, each
+    # carrying that call's NEWEST byte count. Bounded by the number of calls in
+    # flight, never by the dictation's length.
+    queued = list(conn.event_queue._queue)
+    composes = [f for f in queued if (f.get("data") or {}).get("type") == "tool_call_compose"]
+    per_call: dict[str, list[int]] = {}
+    for frame in composes:
+        data = frame["data"]
+        per_call.setdefault(str(data["tool_call_id"]), []).append(int(data["argument_bytes"]))
+    for call_id, sizes in per_call.items():
+        assert len(sizes) == 1, f"{call_id} kept {len(sizes)} compose frames, expected 1"
+
+    # LOSSLESS in the only sense a snapshot can be: the retained frame is the
+    # newest the queue ever saw for that call, so the viewer's byte counter
+    # jumps forward rather than backward. Without this the test would pass
+    # against a fold that kept the OLDEST frame and discarded every update.
+    newest = {f"call_{call}": max(i * 10 for i in range(300) if i % 3 == call) for call in range(3)}
+    assert {k: v[0] for k, v in per_call.items()} == newest
+
+
+@pytest.mark.asyncio
+async def test_a_folded_compose_frame_never_overtakes_the_start_that_follows_it() -> None:
+    """Folding must not move a compose frame past its call's execution start.
+
+    The UI keys rows by ``tool_call_id`` and adopts a composing row when the
+    ``tool_execution_start`` arrives. If a later compose frame were folded onto
+    a slot AHEAD of that start, the viewer would apply "still composing" after
+    "now executing" and re-mount a composing row for a call already running —
+    reintroducing the stranded row this fold exists to remove. The fold
+    therefore stops for a call the moment any other frame for it goes by.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    start = {
+        "op": "event",
+        "data": {"type": "tool_execution_start", "tool_call_id": "c1", "tool_name": "bash"},
+    }
+    end = {
+        "op": "event",
+        "data": {"type": "tool_execution_end", "tool_call_id": "c1", "tool_name": "bash"},
+    }
+    # A frame for ANOTHER call sits between the two folded snapshots. That
+    # separation is what makes this test able to fail: with the two composes
+    # adjacent, replacing in place and deleting-then-appending produce the same
+    # order, so an append-based fold would pass unnoticed. Here it moves c1's
+    # row behind c2's and the assertion catches it.
+    other = _compose_frame("c2", 99)
+    for frame in (
+        _compose_frame("c1", 10),
+        other,
+        _compose_frame("c1", 20),
+        start,
+        _compose_frame("c1", 30),
+        end,
+    ):
+        server._enqueue_client_frame(conn, frame)
+
+    server._compact_event_queue(cast(Any, conn))
+
+    order = [
+        (f["data"]["type"], f["data"]["tool_call_id"], f["data"].get("argument_bytes"))
+        for f in conn.event_queue._queue
+    ]
+    # c1's two pre-start snapshots fold to the newest AND KEEP c1'S ORIGINAL
+    # SLOT, still ahead of c2. The trailing snapshot is kept separately behind
+    # the start rather than folded back in front of it.
+    assert order == [
+        ("tool_call_compose", "c1", 20),
+        ("tool_call_compose", "c2", 99),
+        ("tool_execution_start", "c1", None),
+        ("tool_call_compose", "c1", 30),
+        ("tool_execution_end", "c1", None),
+    ], order
+
+
+@pytest.mark.asyncio
+async def test_folding_does_not_carry_a_compose_slot_across_a_turn_boundary() -> None:
+    """Placeholder compose keys repeat per turn, so slots must not outlive one.
+
+    ``harness/loop.py`` latches an index-derived ``compose:{index}`` key when a
+    provider announces a call's name before its id, so the NEXT turn's first
+    call is ``compose:0`` again. Folding across the boundary would move that
+    frame back in front of the ``agent_end``/``agent_start`` between them.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for frame in (
+        _compose_frame("compose:0", 10),
+        {"op": "event", "data": {"type": "agent_end"}},
+        {"op": "event", "data": {"type": "agent_start"}},
+        _compose_frame("compose:0", 5),
+    ):
+        server._enqueue_client_frame(conn, frame)
+
+    server._compact_event_queue(cast(Any, conn))
+
+    assert [f["data"]["type"] for f in conn.event_queue._queue] == [
+        "tool_call_compose",
+        "agent_end",
+        "agent_start",
+        "tool_call_compose",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_compose_slot_does_not_survive_a_model_STEP_boundary() -> None:
+    """A recycled placeholder key must not fold backwards past a step's calls.
+
+    THE BOUNDARY THAT MATTERS IS THE STEP, NOT THE RUN. ``compose:{index}`` is
+    derived from ``tool_states``, which ``harness/loop.py`` scopes to a single
+    ``_model_turn`` — and ``_model_turn`` is called once per STEP from
+    ``run()``'s ``while has_more_tool_calls or pending:`` loop, while
+    ``agent_start``/``agent_end`` bracket the whole run. So ``compose:0``
+    recurs on every tool-calling step, and a reset keyed only on the run
+    boundary never fires between them (review R1).
+
+    Nor does the ``elif call_id`` abandon-branch save it: under the placeholder
+    regime the compose frame is keyed ``compose:0`` while the start and end
+    carry the provider's real id, so the pop misses and the slot stays live
+    straight through the execution.
+
+    This is the reviewer's reproduction: without the fix, step 2's snapshot
+    folds backwards past TWO execution starts and TWO ends, landing in front of
+    work that has already finished.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    def _exec(kind: str, call_id: str) -> dict[str, Any]:
+        return {"op": "event", "data": {"type": kind, "tool_call_id": call_id}}
+
+    for frame in (
+        {"op": "event", "data": {"type": "agent_start"}},
+        # --- step 1: dictate compose:0, then run it under its REAL id --------
+        {"op": "event", "data": {"type": "turn_start"}},
+        _compose_frame("compose:0", 10),
+        _compose_frame("compose:0", 20),
+        _compose_frame("compose:0", 30),
+        _exec("tool_execution_start", "real_0"),
+        _exec("tool_execution_end", "real_0"),
+        # --- step 2: the SAME placeholder key, a different call --------------
+        {"op": "event", "data": {"type": "turn_start"}},
+        _compose_frame("compose:0", 110),
+        _compose_frame("compose:0", 120),
+        _compose_frame("compose:0", 130),
+        _exec("tool_execution_start", "real_1"),
+        _exec("tool_execution_end", "real_1"),
+        {"op": "event", "data": {"type": "agent_end"}},
+    ):
+        server._enqueue_client_frame(conn, frame)
+
+    server._compact_event_queue(cast(Any, conn))
+
+    order = [(f["data"]["type"], f["data"].get("argument_bytes")) for f in conn.event_queue._queue]
+    # Each step keeps its OWN folded snapshot, behind its own boundary and
+    # ahead of its own execution. Step 1's snapshot is not overwritten by step
+    # 2's, and step 2's has not moved in front of step 1's start/end.
+    assert order == [
+        ("agent_start", None),
+        ("turn_start", None),
+        ("tool_call_compose", 30),
+        ("tool_execution_start", None),
+        ("tool_execution_end", None),
+        ("turn_start", None),
+        ("tool_call_compose", 130),
+        ("tool_execution_start", None),
+        ("tool_execution_end", None),
+        ("agent_end", None),
+    ], order
+
+
+@pytest.mark.asyncio
+async def test_a_compose_count_that_goes_backwards_starts_a_new_slot() -> None:
+    """A shrinking ``argument_bytes`` proves the key was reused, so do not fold.
+
+    ``argument_bytes`` is cumulative within one call, so it can only grow. A
+    DECREASE therefore cannot come from the call already holding the slot — it
+    is a different call that recycled the key, and folding the two together
+    would splice one call's dictation progress onto another's row.
+
+    This is the second, independent half of the step-boundary defence. The
+    boundary reset needs the boundary frame to be present in the SAME
+    compaction batch; this one needs no boundary frame at all, which covers a
+    queue holding only compose frames from either side of a step.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    # No boundary frame anywhere: only the byte count reveals the reuse.
+    for frame in (
+        _compose_frame("compose:0", 100),
+        _compose_frame("compose:0", 200),
+        _compose_frame("compose:0", 5),
+        _compose_frame("compose:0", 15),
+    ):
+        server._enqueue_client_frame(conn, frame)
+
+    server._compact_event_queue(cast(Any, conn))
+
+    # Two slots: the first call folded to its newest (200), then the reuse
+    # opened a fresh slot BEHIND it which folded to its own newest (15).
+    assert [f["data"]["argument_bytes"] for f in conn.event_queue._queue] == [200, 15]
+
+
+@pytest.mark.asyncio
+async def test_an_absent_or_malformed_byte_count_still_folds() -> None:
+    """The reuse check must not become a back door to the overflow drop.
+
+    Refusing to fold on every frame whose ``argument_bytes`` is missing or
+    non-integer would let a malformed producer reopen the very overflow this
+    method exists to close. An equal or absent count is what an un-throttled
+    repeat of the SAME call looks like, so folding is the safe default.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for _ in range(200):
+        server._enqueue_client_frame(
+            conn,
+            {
+                "op": "event",
+                "data": {
+                    "type": "tool_call_compose",
+                    "tool_call_id": "c1",
+                    "tool_name": "bash",
+                    # No ``argument_bytes`` at all.
+                },
+            },
+        )
+
+    assert server.dropped == [], f"malformed frames reopened the drop: {server.dropped}"
+    server._compact_event_queue(cast(Any, conn))
+    assert len(conn.event_queue._queue) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_byte_count_still_folds() -> None:
+    """Only a DECREASE proves reuse; an equal count is the same call repeating.
+
+    The reuse check must be strictly ``<``. At ``<=`` every repeat of an
+    unchanged count would open a fresh slot, so a producer emitting equal
+    counts fills the FIFO one frame at a time and the overflow drop this method
+    exists to close is reopened — the guard turning into the bug. Caught by
+    mutation: ``<`` → ``<=`` passed every other test in this block.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for _ in range(200):
+        server._enqueue_client_frame(conn, _compose_frame("c1", 500))
+
+    assert server.dropped == [], f"equal counts reopened the drop: {server.dropped}"
+    server._compact_event_queue(cast(Any, conn))
+    assert [f["data"]["argument_bytes"] for f in conn.event_queue._queue] == [500]
+
+
+@pytest.mark.asyncio
+async def test_the_compose_fold_never_emits_an_unreadable_frame() -> None:
+    """The fold REPLACES, so it cannot assemble an oversized frame.
+
+    ``_compact_event_queue``'s size refusal exists because merging
+    ``message_update`` deltas is the one operation that makes a frame bigger
+    than anything the relay guard was shown. A compose fold discards the older
+    snapshot instead of concatenating, so the output is always a frame that
+    already passed the guard individually — asserted here rather than assumed,
+    because a future fold that started merging would silently defeat that
+    refusal.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    # Near-limit but individually legal, the shape that killed a real pump.
+    for index in range(200):
+        server._enqueue_client_frame(
+            conn, _compose_frame(f"call_{index % 3}", index, intent="i" * 300_000)
+        )
+
+    assert server.dropped == []
+    for frame in conn.event_queue._queue:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"

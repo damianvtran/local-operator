@@ -312,6 +312,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "temp FILE -> runtime/<pid>.json",
     ),
+    # The viewer registry is the same staged-write shape as the session
+    # registry above, one directory over (run/viewers rather than run/mobile)
+    # and reaching sessions/ no more than that one does.
+    (
+        "local_operator/session/runtime/viewers.py::publish_viewer",
+        "os.replace",
+        "temp FILE -> run/viewers/<pid>.json",
+    ),
+    (
+        "local_operator/session/runtime/viewers.py::publish_viewer",
+        "os.unlink",
+        "temp FILE -> run/viewers/<pid>.json",
+    ),
     (
         "local_operator/session/runtime/inbox.py::_replace_remainder",
         "os.replace",
@@ -490,6 +503,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "own runtime/<pid>.json FILE",
     ),
     (
+        "local_operator/session/runtime/viewers.py::scan_viewers",
+        "<path>.unlink",
+        "stale or unparseable run/viewers/<pid>.json FILE",
+        2,
+    ),
+    (
+        "local_operator/session/runtime/viewers.py::unpublish_viewer",
+        "<path>.unlink",
+        "own run/viewers/<pid>.json FILE",
+    ),
+    (
         "local_operator/session/search_index.py::_save",
         "<path>.replace",
         "temp FILE -> search index FILE",
@@ -534,6 +558,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The install-provenance marker, written atomically after an upgrade. Both
+    # calls are confined to the temp file this function itself created with
+    # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename
+    # target is the single FILE ``<prefix>/.lop-source``. Neither name is ever
+    # derived from a session path, and the install prefix is not under the
+    # session store.
+    (
+        "local_operator/update.py::write_source_marker",
+        "<path>.replace",
+        "temp FILE -> .lop-source FILE in the install prefix",
+    ),
+    (
+        "local_operator/update.py::write_source_marker",
+        "<path>.unlink",
+        "cleanup of this function's own mkstemp temp FILE",
+    ),
     ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
@@ -872,6 +912,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
+        "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript

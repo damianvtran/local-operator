@@ -795,11 +795,55 @@ async def test_shrinking_below_the_body_floor_never_strands_a_capture(
 
         assert view._too_short, f"{size} was expected to be below the body floor"
         visible_exit = painted_row(app, view._detail)
-        assert not app._keymap_capture or "esc cancels" in visible_exit, (
-            f"capture disarmed the app with no PAINTED exit at {size}: {visible_exit!r}"
-        )
+        assert (
+            not app._keymap_capture or "esc cancels" in visible_exit
+        ), f"capture disarmed the app with no PAINTED exit at {size}: {visible_exit!r}"
         assert view._capture is None, f"a capture survived into too-short at {size}"
         assert not app._keymap_capture, f"the app flag survived into too-short at {size}"
         assert (
             app.check_action("interrupt", ()) is not False
         ), f"ctrl+c is disarmed with no way to say so at {size}"
+
+
+@pytest.mark.asyncio
+async def test_capture_repaints_selected_strip_without_flushing_the_list() -> None:
+    """#779's row cache must show every capture phase without global invalidation."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.pause()
+        view._scroll_to_selection(immediate=True)
+        await pilot.pause()
+        token = view._paint_token()
+
+        def painted_value() -> str:
+            # Read the compositor, not `_list_text`, which can rebuild model
+            # rows and conceal stale rasterized strips.
+            return next(
+                strip.text
+                for strip in app.screen._compositor.render_strips()
+                if "New session" in strip.text
+            )
+
+        assert "ctrl+n" in painted_value()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "press a key" in painted_value()
+        await pilot.press("f5")
+        await pilot.pause()
+        assert "f5 ?" in painted_value()
+        await pilot.press("f2")
+        await pilot.pause()
+        assert "f2 ?" in painted_value() and "f5" not in painted_value()
+        assert view._paint_token() == token, "capture flushed the entire list cache"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "ctrl+n" in painted_value() and "?" not in painted_value()
+        await pilot.press("enter", "f5", "enter")
+        await pilot.pause()
+        assert "f5" in painted_value() and "?" not in painted_value()
+        assert not app._keymap_capture
