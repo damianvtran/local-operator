@@ -1077,9 +1077,45 @@ def _late_id_tool_turn(count: int) -> list[Any]:
     return events
 
 
+def _never_id_tool_turn(count: int) -> list[Any]:
+    """The shape `clients.py` ACTUALLY produces on the OpenAI Responses API.
+
+    `:2568` yields the id and name in ONE delta with `call_id` defaulting to
+    the empty string, and the argument deltas at `:2578` carry no id at all —
+    so the real id never arrives. This is the only ordering a shipping provider
+    is known to emit, which makes it the reachable half of the defect: the loop
+    must settle the identity itself, or execution runs under a fresh uuid the
+    composing row has never seen.
+    """
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+
+    events: list[Any] = [StreamTextDelta(delta="working")]
+    events += [StreamToolCallDelta(index=i, id="", name="probe") for i in range(count)]
+    events += [
+        StreamToolCallDelta(index=i, id="", name="", argument_delta="{}") for i in range(count)
+    ]
+    events.append(StreamEndEvent(stop_reason="toolUse"))
+    return events
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected_ids"),
+    [
+        # The ordering this mechanism was first written for.
+        ("late_id", {"real_0", "real_1", "real_2"}),
+        # The ordering `clients.py` actually produces (Responses API): the id
+        # never arrives, so the loop settles one itself. The ids are minted, so
+        # the assertion is on their COUNT and on nothing being left composing.
+        ("never_id", None),
+    ],
+)
 @pytest.mark.asyncio
 async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
-    headless_tui_env: Path, workspace: Path
+    headless_tui_env: Path, workspace: Path, shape: str, expected_ids: set[str] | None
 ) -> None:
     """Three succeeded calls must not be painted as interrupted.
 
@@ -1134,7 +1170,8 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
 
             async def gen():
                 if is_tool_turn:
-                    for event in _late_id_tool_turn(3):
+                    turn = _late_id_tool_turn(3) if shape == "late_id" else _never_id_tool_turn(3)
+                    for event in turn:
                         yield event
                     return
                 if has_result:
@@ -1145,7 +1182,7 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
 
             return gen()
 
-    directory = headless_tui_env / "sessions" / "latejoin0001"
+    directory = headless_tui_env / "sessions" / f"join{shape[:8]}"
     directory.mkdir(parents=True)
     session = build_session(directory, _Stream(), tools=[probe], cwd=workspace)
     handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
@@ -1187,7 +1224,13 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
         # carry — and it must carry NOTHING that claims they are still being
         # composed. Before the fix this held three `compose:N` rows beside
         # these ends, and every one of them became a false `⊘ interrupted`.
-        assert ended == {"real_0", "real_1", "real_2"}, seed
+        if expected_ids is not None:
+            assert ended == expected_ids, seed
+        else:
+            # Minted ids: assert the shape rather than the values, and that
+            # none of them is the placeholder that would reach the provider.
+            assert len(ended) == 3, seed
+            assert not any(call_id.startswith("compose:") for call_id in ended), seed
         assert composing == [], (
             "the seed handed the joiner a composing row for a call that had "
             f"already finished; those rows are painted interrupted: {composing}"

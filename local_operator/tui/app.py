@@ -29304,6 +29304,19 @@ class OperatorApp(App[None]):
         # promotion frame reads as a brand-new call, so the screen carries two
         # rows for one call and the abandoned one is marked ``⊘ interrupted`` at
         # turn end — precisely the failure the compose key is latched to avoid.
+        # ``getattr`` with a default, NOT a plain attribute read, and that is
+        # load-bearing rather than defensive habit. ``EventController._on_event``
+        # dispatches on ``event.type`` alone and never re-validates to the
+        # declared class, so an event relayed from an owner whose build predates
+        # this field arrives here as a bare ``AgentEvent`` — which allows extra
+        # fields but declares none of them. A plain read raises
+        # ``AttributeError: 'AgentEvent' object has no attribute
+        # 'supersedes_tool_call_id'`` and takes the turn down.
+        #
+        # Reviewer round 1 (R5) suggested the plain read on the grounds that the
+        # field is always defaulted. That holds for the pydantic model but not
+        # for the object that actually reaches this method; the compat test
+        # below fails outright on the plain read. Pinned there deliberately.
         superseded = getattr(event, "supersedes_tool_call_id", None)
         if superseded:
             promoted = self._composing_cards.pop(str(superseded), None)

@@ -1428,30 +1428,41 @@ class AgentLoop:
                             # ONE frame that carried it to be the one lost,
                             # which would strand the row this exists to rescue.
                             #
+                            # This is load-bearing against the sibling compose
+                            # fold (PR #770), which keeps only the NEWEST frame
+                            # per ``tool_call_id``: a single announcement is
+                            # precisely what that fold would discard, so the
+                            # repeat is what lets the two changes coexist.
+                            #
                             # The immediate emission is also the ordering
                             # guarantee: the hand-off reaches the seed before
                             # the ``tool_execution_start`` that follows on the
                             # real id.
                             #
-                            # Only announced when a row was actually published
-                            # under the placeholder (``announced`` is still 0.0
-                            # before the first frame): with nothing on screen
-                            # and nothing in the seed there is no row to
-                            # supersede, so the key is corrected in place and
-                            # consumers are told nothing.
-                            if state["announced"] != 0.0:
-                                state["supersedes"] = state["key"]
+                            # No guard on ``announced`` here: the key is only
+                            # ever latched inside ``if state["name"]``, and the
+                            # block immediately below stamps ``announced`` on
+                            # that same first pass. So a placeholder that exists
+                            # at all has already been published, and a
+                            # "nothing announced yet" case cannot occur —
+                            # verified with a raising probe over the suite.
+                            state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            if state["supersedes"]:
-                                state["reported"] = state["bytes"]
-                                yield ToolCallComposeEvent(
-                                    tool_call_id=state["key"],
-                                    tool_name=state["name"],
-                                    argument_bytes=state["bytes"],
-                                    intent=state["intent"],
-                                    supersedes_tool_call_id=state["supersedes"],
-                                )
+                            state["reported"] = state["bytes"]
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["key"],
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                                intent=state["intent"],
+                                supersedes_tool_call_id=state["supersedes"],
+                            )
+                            # Stamp the throttle too: the promotion IS this
+                            # window's frame. Without it the block below fires
+                            # again in the same iteration and emits a second,
+                            # identical frame — harmless, but wasted at exactly
+                            # the moment the queue is under pressure.
+                            state["announced"] = time.monotonic()
                         now = time.monotonic()
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
@@ -1474,7 +1485,48 @@ class AgentLoop:
                     # display a size at all. It matters most on an aborted turn,
                     # where the frozen row is what the user is left reading.
                     for state in tool_states.values():
-                        if state["name"] and state["bytes"] != state["reported"]:
+                        if not state["name"]:
+                            continue
+                        if state["placeholder"] and not state["id"]:
+                            # The call's id NEVER arrived — the stream is over
+                            # and the row is still keyed by its placeholder.
+                            # This is the shape the OpenAI Responses API
+                            # actually produces: ``clients.py`` yields the id
+                            # and name in ONE delta with ``call_id`` defaulting
+                            # to the empty string, and the argument deltas that
+                            # follow carry no id at all. So the id does not
+                            # arrive LATE on that path, it never arrives, and
+                            # the late-arrival hand-off above cannot fire.
+                            #
+                            # Left alone, ``_assemble_tool_call`` mints a fresh
+                            # uuid for the ToolCall and execution proceeds under
+                            # an id the composing row has never seen — stranding
+                            # it exactly as a late id would.
+                            #
+                            # So mint the identity HERE, once, and announce it,
+                            # rather than letting the ToolCall mint a different
+                            # one silently. Same factory and same shape the
+                            # ToolCall would have used, deliberately: this id
+                            # goes back to the provider as Anthropic's
+                            # ``tool_use.id`` and Responses' ``call_id``, so it
+                            # must be an ordinary opaque token. Promoting the
+                            # PLACEHOLDER onto the wire instead would put
+                            # ``compose:{index}`` in that field — a value no
+                            # provider has agreed to accept, for no gain, since
+                            # nothing keys off the prefix.
+                            state["id"] = uuid.uuid4().hex[:12]
+                            # Unguarded for the same reason as the late-arrival
+                            # hand-off above: reaching here means a placeholder
+                            # was latched, which only happens on a pass that
+                            # also publishes the row.
+                            state["supersedes"] = state["key"]
+                            state["key"] = state["id"]
+                            state["placeholder"] = False
+                            # Force the announcement below: the identity change
+                            # must reach consumers even when the size has not
+                            # moved since the last frame.
+                            state["reported"] = -1
+                        if state["bytes"] != state["reported"]:
                             state["reported"] = state["bytes"]
                             yield ToolCallComposeEvent(
                                 tool_call_id=state["key"] or "compose:0",

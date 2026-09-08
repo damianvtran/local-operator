@@ -3321,3 +3321,39 @@ async def test_a_repeated_supersession_keeps_exactly_one_row_on_screen() -> None
         painted = [strip.text for strip in app.screen._compositor.render_strips()]
         assert len([row for row in painted if "composing" in row]) == 1
         assert [row for row in painted if "13.7 KB" in row]
+
+
+@pytest.mark.asyncio
+async def test_a_compose_frame_without_the_supersedes_field_mounts_one_card() -> None:
+    """BACKWARD COMPATIBILITY at the third consumer (review round 1, R3).
+
+    The seed fold and the mobile projection each pin the field-absent path; the
+    TUI did not. An older owner never sets the field, and its frames must mount
+    exactly one card and pop nothing — the assertion that would fail if the
+    plain attribute read here ever became something that assumed a value.
+
+    Built through ``AgentEvent.model_validate``, which is how
+    ``deserialize_event`` rehydrates a relayed frame, so the payload genuinely
+    lacks the key rather than carrying a null.
+    """
+    from local_operator.harness.types import AgentEvent
+
+    legacy = AgentEvent.model_validate(
+        {
+            "type": "tool_call_compose",
+            "tool_call_id": "c1",
+            "tool_name": "write",
+            "argument_bytes": 8,
+        }
+    )
+    assert "supersedes_tool_call_id" not in legacy.model_dump(mode="json")
+
+    session = SteerableSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app.post_message(ToolComposing(cast(Any, legacy)))
+        await pilot.pause()
+        assert set(app._composing_cards) == {"c1"}
+        painted = [strip.text for strip in app.screen._compositor.render_strips()]
+        assert len([row for row in painted if "composing" in row]) == 1
