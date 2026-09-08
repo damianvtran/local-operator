@@ -63,6 +63,17 @@ dependencies = [
     # The personal tunnel gateway verifies the edge's RSA proof locally;
     # declare this directly rather than relying on the MCP transitive copy.
     "pyjwt[crypto]>=2.10,<3",
+    # The encrypted secret store (`lop secret`) uses AES-256-GCM, HKDF and
+    # scrypt from here. It arrives anyway as a required transitive of
+    # pyjwt[crypto] above, but a direct import belongs in a direct dependency:
+    # if that extra were ever narrowed or replaced, the transitive copy would
+    # vanish and `lop secret` would fail at import time with no declaration
+    # pointing at the cause. The APIs used here (AESGCM, HKDF, scrypt,
+    # InvalidTag) have been stable for many majors, so the floor is not an API
+    # boundary: 42 (Jan 2024) is simply a recent, universally-available
+    # baseline that carries the OpenSSL 3.x security fixes and is far below
+    # what pyjwt[crypto] already resolves, so it constrains nobody's install.
+    "cryptography>=42",
     "websockets>=15.0.1",
     "apscheduler",
     "dill",
