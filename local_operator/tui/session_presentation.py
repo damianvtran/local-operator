@@ -814,12 +814,16 @@ def replay_tool_call(
     result = results.get(getattr(call, "id", "") or "")
     if result is None:
         # No result recorded: the session ended between the call and its
-        # answer. Showing it as complete would invent an outcome.
+        # answer. Showing it as complete would invent an outcome, and there is
+        # no measured interval to restore either — the distinction that governs
+        # the duration column is result-present vs result-absent, and this is
+        # the only arm on the absent side.
         card.restore(state="interrupted")
         return
     result_text = getattr(result, "text", "") or ""
     payload = getattr(result, "provider_payload", None) or {}
-    details = payload.get("details") if isinstance(payload, dict) else None
+    is_dict = isinstance(payload, dict)
+    details = payload.get("details") if is_dict else None
     # Validated, never trusted: the key is absent on every row written before
     # durations were persisted, and a transcript is an on-disk file another
     # process may have written. `parse_duration` degrades anything that is not
@@ -827,14 +831,23 @@ def replay_tool_call(
     # column a legacy row paints — the one honest answer when the interval is
     # unknown. Replay must not fail on a bad value, and must not invent a
     # ``0.0s`` that says the tool returned instantly.
-    duration_s = parse_duration(payload.get("duration_s")) if isinstance(payload, dict) else None
+    duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
     if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
         # A user-stopped bang command persists as an error result (the
         # model-facing shape), but the LIVE frame it came from was the dim
         # shut `interrupted ⊘` row. Replaying it through the error branch
         # would reopen the user's own Esc as a red failure (design round
         # 1, D1). The aborted prefix is execute_bash's stable contract.
-        card.restore(state="interrupted")
+        #
+        # The duration still comes back. Unlike the `result is None` arm
+        # above, this row HAS a recorded result and it carries the interval:
+        # `harness/loop.py` parks the synthetic aborted result with
+        # `duration_s=time.monotonic() - started_at`, and the live card's
+        # `mark_interrupted()` stamped the same elapsed time on screen. "How
+        # long did it run before I killed it" is the question this row exists
+        # to answer, and one Esc marks EVERY tool in flight — so blanking it
+        # opens the hole across a whole run of rows.
+        card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):
         card.restore(

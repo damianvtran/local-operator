@@ -1594,6 +1594,7 @@ def _durable_turn(
     payload: Any,
     is_error: bool = False,
     with_result: bool = True,
+    text: str | None = None,
 ) -> list[Any]:
     """An assistant call plus its persisted result, carrying ``payload`` verbatim.
 
@@ -1618,7 +1619,7 @@ def _durable_turn(
                 role="tool",
                 id=f"t-{call_id}",
                 tool_call_id=call_id,
-                text="boom" if is_error else "exit code: 0",
+                text=text if text is not None else ("boom" if is_error else "exit code: 0"),
                 is_error=is_error,
                 provider_payload=payload,
                 content=[],
@@ -1660,12 +1661,27 @@ async def test_a_restored_duration_uses_the_live_grammar_and_column() -> None:
     sub-second precision only below ten seconds, then whole seconds, then
     ``format_duration``. The column is width-reserved rather than measured, so
     a wide restored value is the case that could push its row over the
-    terminal; every one of these must still fit ``DURATION_COL``."""
-    for seconds, expected in ((2.4, "2.4s"), (36.4, "36s"), (3725.0, "1h2m")):
+    terminal — which is why the sample includes ``59m59s`` and ``23h59m``,
+    ``format_duration``'s widest strings. An earlier version of this test
+    sampled only values of four cells or fewer and so asserted a width bound
+    the genuinely worst case violates (review round 1, MINOR-2)."""
+    for seconds, expected in (
+        (2.4, "2.4s"),
+        (36.4, "36s"),
+        (3599.0, "59m59s"),
+        (3725.0, "1h2m"),
+        (86_399.0, "23h59m"),
+    ):
         cards = await _replayed_cards(_durable_turn("c1", payload={"duration_s": seconds}))
         rendered = cards[0]._build_row(100).plain
         assert expected in rendered, (seconds, rendered)
-        assert len(expected) <= DURATION_COL, expected
+        # DURATION_COL is the rjust MINIMUM, not a cap: `format_duration` is
+        # bounded at six cells and `rjust(5)` on a six-cell string is a no-op,
+        # so the real invariant is the formatter's documented bound plus the
+        # row fitting the terminal — not `<= DURATION_COL`, which `59m59s`
+        # and `23h59m` legitimately exceed by one.
+        assert DURATION_COL <= 6
+        assert len(expected) <= 6, expected
         # The row is built for a 100-cell terminal and must not exceed it.
         assert cell_len(rendered) <= 100, (seconds, rendered)
 
@@ -1709,3 +1725,27 @@ async def test_an_interrupted_call_never_invents_a_duration() -> None:
     assert cards[0]._state == "interrupted"
     assert cards[0]._duration is None
     assert "0.0s" not in cards[0]._build_row(100).plain
+
+
+@pytest.mark.asyncio
+async def test_a_user_aborted_call_restores_the_duration_it_ran_for() -> None:
+    """The other interrupted arm, and the opposite answer. A bang command the
+    user stopped DOES have a recorded result: the harness parks a synthetic
+    aborted result carrying the interval it ran for, and the live card stamped
+    that same elapsed time via ``mark_interrupted()``. Blanking it on replay
+    dropped a number the live frame showed, on the row where "how long did it
+    run before I killed it" is the whole question (review round 1, MAJOR-2).
+
+    The dim ``interrupted ⊘`` presentation is unchanged — a user's own Esc
+    must not reopen as a red error (design round 1, D1)."""
+    cards = await _replayed_cards(
+        _durable_turn(
+            "c1",
+            payload={"duration_s": 2.5},
+            is_error=True,
+            text="aborted (interrupted by user)",
+        )
+    )
+    assert cards[0]._state == "interrupted"
+    assert cards[0]._duration == pytest.approx(2.5)
+    assert "2.5s" in cards[0]._build_row(100).plain
