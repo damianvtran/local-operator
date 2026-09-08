@@ -272,7 +272,13 @@ Work keeps moving after you walk away.
   execution. A session that was asleep past a due time fires the wake late
   and reports how many occurrences it skipped, rather than replaying six
   hourly checks at once. `lop wake status` and `lop wake list` show what is
-  installed and what fires next.
+  installed and what fires next. Human-readable wake times use the machine's
+  local timezone, labelled explicitly, with a 12-hour AM/PM clock by default.
+  Other dates include the month/day (and year when different). Choose **Wake
+  time format** in `/settings` → Appearance, or run
+  `lop config edit display.time_format 24h` for a 24-hour clock (`12h` restores
+  the default). This changes display only; stored timestamps and JSON output
+  remain epoch milliseconds, and existing transcript confirmations are not rewritten.
 - **Background jobs that report back on their own.** `task` always runs in
   the background and `bash` can (`background=true`); a long command
   interrupted by a steer detaches instead of dying; and every settled job
@@ -442,6 +448,15 @@ with its title and age:
 | `/skills`, `/mcp` | List loaded skills · MCP servers |
 | `/theme`, `/rename` | Pick from 20+ built-in themes (arrows preview live) · rename the session |
 
+`/reload` and `/update` can replace the terminal while its detached session
+runtime keeps working. The new terminal reattaches to the same saved conversation,
+including streamed output and unanswered approval or ask prompts. The runtime
+adopts installed code only when all work is safely idle: active turns, tools,
+compaction, gates, loops, child agents, background jobs, and imminent wakes defer
+that refresh. Reloading an unchanged build does not restart the runtime. Local
+in-process work and terminal-owned `!` shell commands must finish first. A failed
+update leaves the current terminal and runtime running.
+
 ### Keys worth knowing
 
 - `$<skill>`: run a named skill on the rest of the line
@@ -590,15 +605,25 @@ project-supplied servers.
 
 ## ⚙️ Headless & Server Modes
 
-**One-shot execution** for scripts and automation:
+**Headless sessions** for scripts, saved teams and goal loops:
 
 ```bash
 lop exec "summarize the failures in ./test.log"
 lop exec "long migration" --background   # detach with a log file
 lop exec "audit deps" --json             # one JSON line per event
+lop exec "review the change" --team release --background
+lop exec --goal "Finish the checklist" --loop 3
+lop exec --status JOB_ID                 # durable outcome and session ID
+lop --resume SESSION_ID                  # live TUI attachment or cold resume
 ```
 
-Exit code 0 on success, so `lop exec` composes in a pipeline.
+Foreground exit code 0 means success, so `lop exec` composes in a pipeline.
+Background launch prints a readiness receipt; use `--status` for the eventual
+outcome. Saved teams, reusable profiles, goals and conversation names persist
+with the ordinary session. Non-TTY approvals still deny unless explicitly
+changed; `--control` opts into supervisor gates, not automatic approval.
+See [the full exec guide](./docs/EXEC.md) for option combinations, stdin,
+resume precedence, loop counting, approvals and lifecycle semantics.
 
 **Server mode** exposes the agent as a FastAPI service (used by the optional
 [desktop UI](https://github.com/damianvtran/local-operator-ui)):

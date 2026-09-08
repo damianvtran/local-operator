@@ -68,6 +68,7 @@ _AMBIENT_VARS = (
     "LOP_MOBILE_CHILD_RESUME",
     "LOP_MOBILE_CHILD_PROVIDER",
     "LOP_MOBILE_CHILD_MODEL",
+    "LOP_MODEL_SELECTION_OVERRIDE",
     "LOP_MOBILE_CHILD_CWD",
     "LOP_MOBILE_PASSWORD",
     # The calling cmux workspace/surface. A headless fork e2e test inherited

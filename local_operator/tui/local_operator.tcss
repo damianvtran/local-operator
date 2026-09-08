@@ -551,6 +551,34 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
  * Outranks the focus brightness: the mode is the louder fact, and a
  * focused shell-mode marker that went `fg` would look identical to a
  * focused prompt on a colour-capable terminal. */
+/* An ARMED inline credential capture recolors the marker AND swaps the glyph
+ * (`❯` → `⚿`; see `OperatorApp.on_credential_arm_changed`), on exactly the
+ * reasoning the bang-mode rule above states: the glyph is the cue that survives
+ * `NO_COLOR`, a monochrome terminal and red-green colour vision deficiency, and
+ * colour is the redundant one.
+ *
+ * The bar is HIGHER here than for bang-mode, which is why the state gets a mark
+ * at all. Bang-mode's worst misread runs a command the operator can see and
+ * undo; a misread arm puts a plaintext secret on screen and in scrollback,
+ * where no keystroke can recall it. Before this rule the composer was
+ * byte-identical armed and disarmed once the picker was dismissed, so the only
+ * feedback that arming had worked was the paste itself — by which point a
+ * misread has already leaked (design round 1, D2).
+ *
+ * `warning` amber: a third distinct hue from the resting `fg`/`dim` and
+ * bang-mode's `string` green, so the three composer modes are three marks
+ * rather than two-and-a-shade. Measured on this panel's `surface`: 8.64:1 dark
+ * and 5.04:1 light, both clear of AA for the one-cell glyph.
+ *
+ * Bang-mode OUTRANKS it — declared after, same specificity — for the same
+ * reason bang-mode outranks the focus brightness: the two modes are
+ * independently reachable and "Enter runs a command" is the louder claim about
+ * the key the operator is about to press. The armed glyph is restored on the
+ * way out of bang-mode; see `on_shell_mode_changed`. */
+#input-dock.-composer-credential #prompt-chevron {
+    color: $lo-warning;
+}
+
 #input-dock.-composer-shell #prompt-chevron {
     color: $lo-string;
 }
@@ -678,6 +706,28 @@ Editor .text-area--slash-argument {
  * into an alarm colour. */
 Editor .text-area--slash-unknown {
     color: $lo-dim;
+}
+
+/* The `/credential` token that has ARMED the next paste.
+ *
+ * `warning` amber and BOLD, matching the armed chevron, so the mode states
+ * itself at both ends of the composer in one colour — the same "one mode, one
+ * hue, said twice" the focus rule uses for `fg`.
+ *
+ * Deliberately NOT `slash-command`, which is what this token used to get on a
+ * leading arm and what it must not keep getting. That class means "a recognized
+ * command that will run", and an armed token is precisely the one that will
+ * NOT run: it is consumed by the capture. Painting the two states identically
+ * is the false-negative direction of D2 — the operator reads "recognized" and
+ * still cannot tell whether the next paste is captured or lands in plaintext.
+ *
+ * It is also the only run this file paints that is NOT a leading-command rule.
+ * A MID-LINE `/credential` — the headline of the gesture — got no ink at all
+ * under `_compute_slash_runs`'s leading-command parse, leaving the one form the
+ * feature is built around as the one form with zero visual state. */
+Editor .text-area--credential-armed {
+    color: $lo-warning;
+    text-style: bold;
 }
 
 /* ── startup toast ───────────────────────────────────────────────────────

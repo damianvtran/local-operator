@@ -100,17 +100,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--agent",
         "--agent-name",
         type=str,
-        help="Name of the agent to use for this session.  If not provided, the default"
-        " agent will be used which does not persist its session.",
+        help="Select a legacy named agent (creates it if missing). Without --train, "
+        "use a separate persisted session; exec --profile attaches a reusable role instead.",
         dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
         action="store_true",
-        help="Enable training mode for the operator.  The agent's conversation history will be"
-        " saved to the agent's directory after each completed task.  This allows the agent to"
-        " learn from its experiences and improve its performance over time.  Omit this flag to"
-        " have the agent not store the conversation history, thus resetting it after each session.",
+        help="Use the legacy agent history directory (or an autosave agent) instead "
+        "of a separate session. Ordinary sessions are also persisted and resumable; "
+        "--resume takes precedence over this directory selection.",
     )
 
     # Main parser
@@ -453,6 +452,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Reconcile advertised state against reality: drop tabs that no longer "
         "exist and republish a fresh heartbeat. Safe while sessions are live.",
     )
+    for action, blurb in (
+        ("tabs", "List durable ownership records and live tabs (read-only)"),
+        ("reconcile", "Alias for 'tabs': inspect ownership without closing anything"),
+    ):
+        inventory_browser = browser_subparsers.add_parser(action, help=blurb)
+        inventory_browser.add_argument(
+            "--json", action="store_true", help="machine-readable output"
+        )
+    cleanup_browser = browser_subparsers.add_parser(
+        "cleanup", help="Close one proven-terminal browser owner after revalidation"
+    )
+    cleanup_browser.add_argument("session_id")
+    cleanup_browser.add_argument("--generation", required=True)
+    cleanup_browser.add_argument("--yes", action="store_true", help="Approve this exact cleanup")
     for action in ("start", "stop", "restart"):
         browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
     pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
@@ -766,13 +779,45 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     exec_parser = subparsers.add_parser(
         "exec",
-        help="Execute a single command without starting interactive mode",
+        help="Execute a task or goal loop in a persisted session without starting the TUI",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  lop exec 'Review the change' --team release --background\n"
+            "  printf 'Inspect this report' | lop exec --profile reviewer\n"
+            "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n"
+            "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n"
+            "  lop exec --status JOB_ID\n\n"
+            "Resume restores the transcript, team, profile, goal and name first; explicit\n"
+            "startup flags override their own slots. Team and profile may coexist. A loop\n"
+            "runs after the optional initial prompt; --loop N counts continuations only.\n"
+            "Saved loop progress is visible on resume, but iterations never replay automatically.\n"
+            "A goal alone does not run a model. Prompts are literal, not slash commands.\n"
+            "--goal only SETS the objective; unlike the TUI's /goal it does not also\n"
+            "send that text as a message, because the prompt is exec's message channel.\n"
+            "--agent/--agent-id select legacy agent data and are mutually exclusive.\n"
+            "Default non-TTY approvals deny. --control may wait for a supervisor; --yolo\n"
+            "is an explicit override, never implied by --background or --team.\n"
+            "Foreground events/text use stdout; receipts use stderr. Detached runs log\n"
+            "both streams and print distinct job/session IDs. Use lop --resume SESSION_ID\n"
+            "to view a live run or resume a finished one; exec refuses a live owner."
+        ),
     )
     exec_parser.add_argument(
         "command",
         type=str,
-        help="The command to execute",
+        nargs="?",
+        default=None,
+        help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
+    )
+    from local_operator.exec_startup import add_startup_arguments
+
+    add_startup_arguments(exec_parser)
+    exec_parser.add_argument(
+        "--status",
+        metavar="JOB_ID",
+        help="Read a durable background-job status as JSON; does not start a session",
     )
     # --- Additive exec flags (rewrite) ------------------------------------
     exec_parser.add_argument(
@@ -796,12 +841,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--control",
         action="store_true",
         help=(
-            "Publish a session record and serve the control socket for this run, "
-            "so an external supervisor can steer, cancel and answer gates "
-            "mid-run. Prints the endpoint on stderr. Off by default. "
-            "Note: this routes tool approvals to the supervisor, so a run "
-            "WITHOUT --yolo parks on each gate until one answers (then denies). "
-            "An unattended run wants --control --yolo."
+            "Route approvals and questions to an attached supervisor (may wait). "
+            "Without this flag non-TTY approvals deny; discovery and live attachment "
+            "are available either way. --yolo remains an explicit approval override."
         ),
     )
 
@@ -1309,6 +1351,185 @@ def config_list_command() -> int:
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
+    if command in ("tabs", "reconcile", "cleanup"):
+        import asyncio
+        import json
+        import textwrap
+
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.browser_bridge import state as browser_state
+        from local_operator.browser_bridge.resources import (
+            cleanup_exact,
+            read_inventory,
+        )
+
+        sessions = config_dir() / "sessions"
+        if command == "cleanup":
+            if not args.yes:
+                print("No changes. Repeat with --yes to approve this exact session and generation.")
+                return 1
+            if Path(args.session_id).name != args.session_id or args.session_id in (".", ".."):
+                print("Invalid session id; no action taken.")
+                return 1
+            try:
+                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+            except Exception as exc:
+                # The bridge and lease errors already carry operator-grade
+                # sentences naming the command that fixes them; printing the
+                # class name instead threw that away and read as a truncated
+                # message. Keep the class name only for genuinely unexpected types.
+                detail = str(exc) or type(exc).__name__
+                print(f"Cleanup blocked: {detail} Nothing was closed.")
+                return 1
+            if result.state == "closed":
+                message = "Browser cleanup: closed. The tab was closed and its record settled."
+            elif result.state == "retained":
+                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+            elif result.state == "pending":
+                # The generation is deliberately NOT rotated by a failed attempt
+                # any more, so the value they already copied stays correct.
+                message = (
+                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
+                    "Retry the same command once the bridge answers; "
+                    "the generation you copied is still current."
+                )
+            else:
+                message = f"Browser cleanup: no action taken — {result.detail}."
+            print(textwrap.fill(message, width=78, subsequent_indent="  "))
+            return 0 if result.state in ("closed", "retained") else 1
+        rows = read_inventory(sessions)
+        # A command called `tabs` must reconcile with the browser and with
+        # `status`: reporting "no records" while the bridge drives seven tabs
+        # renders as its own opposite in EXACTLY the pool-exhausted state an
+        # operator reaches for it in, and `{"resources": []}` reads to any
+        # script as an empty browser. Unowned tabs are listed, never selectable.
+        live_tabs: list[dict[str, Any]] = []
+        current = browser_state.read()
+        # Resolve the port exactly as the sibling `status` does. `state.read()`
+        # returns None for a MISSING OR CORRUPT discovery file as much as for
+        # an absent daemon, so skipping the probe on None made a healthy bridge
+        # driving five tabs render as an empty browser — `status` found them at
+        # the default port in the same state, which is the divergence this
+        # command was added to remove.
+        probe = browser_install.health(current.port if current else browser_install.DEFAULT_PORT)
+        driven = (probe or {}).get("driven_tabs")
+        # Read-only and never fatal, but UNKNOWN IS NOT ZERO: a probe that did
+        # not answer means the live half is unknowable, and reporting that as
+        # "no tabs" tells the operator the opposite of the truth in exactly the
+        # wedged-bridge state that sent them here.
+        live_known = isinstance(driven, list)
+        if live_known:
+            live_tabs = [entry for entry in driven if isinstance(entry, dict)]
+        # Every durable record is redacted (no capability, no tab handle), so a
+        # record cannot be matched to a live URL here. The honest framing is a
+        # count of records against a count of live tabs, with the live ones
+        # listed as unattributed rather than falsely claimed by a session.
+        unowned = live_tabs
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "resources": rows,
+                        "live_tabs": [
+                            {"url": str(tab.get("url", "")), "title": str(tab.get("title", ""))}
+                            for tab in unowned
+                        ],
+                        # Null, not 0, when the bridge did not answer: a script
+                        # must not be able to read an unreachable bridge as an
+                        # empty browser. The key is `live_tabs` to match the
+                        # rendered heading — records are redacted, so a listed
+                        # tab can only be described as live, never proven
+                        # unowned.
+                        "live_tabs_known": live_known,
+                        "live_tab_count": len(live_tabs) if live_known else None,
+                        "mode": "read-only",
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if not rows and not live_tabs:
+            print(
+                "No browser tabs and no ownership records."
+                if live_known
+                else textwrap.fill(
+                    "No ownership records. The bridge did not answer, so open "
+                    "tabs are unknown — run 'lop browser status' to check the "
+                    "daemon.",
+                    width=78,
+                )
+            )
+            return 0
+        if rows:
+            # Pad the state so the third column starts at one offset: at real
+            # id and token widths an unpadded row loses its columns entirely,
+            # and the generation is moved to its own indented line so an
+            # 80-column terminal cannot wrap it mid-token — a wrapped token's
+            # continuation sits in column 1, looks like a new record, and is
+            # unsafe to copy, which is exactly what cleanup asks you to do.
+            width = max(len(str(row.get("state", ""))) for row in rows)
+            for row in rows:
+                mark = "  <- cleanup candidate" if row.get("cleanup_candidate") else ""
+                # rstrip so an unmarked row carries no trailing padding.
+                print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
+                print(f"  generation={row.get('generation', '')}")
+                # Wrapped on the same discipline as the reason below it: a
+                # retention reason is free text (it can quote a whole approval
+                # URL), so an unwrapped line here ran to 141 columns beside
+                # neighbours that wrap at 76.
+                for line in textwrap.wrap(
+                    f"terminal={row.get('terminal') or 'not established'}; "
+                    f"retention={row.get('retention') or 'none recorded'}",
+                    width=76,
+                    initial_indent="  ",
+                    subsequent_indent="    ",
+                    break_long_words=False,
+                ):
+                    print(line)
+                if not row.get("cleanup_candidate") and row.get("blocked_reason"):
+                    # Wrapped: the reasons name a recovery command, and a line
+                    # running past the terminal width is where that command
+                    # would be broken across a wrap and mis-copied.
+                    for line in textwrap.wrap(
+                        f"not cleanable: {row['blocked_reason']}",
+                        width=76,
+                        initial_indent="  ",
+                        subsequent_indent="    ",
+                        break_long_words=False,
+                    ):
+                        print(line)
+        if unowned:
+            if not rows:
+                print(
+                    textwrap.fill(
+                        f"No durable ownership records. {len(unowned)} tab(s) are open with "
+                        "no proven owner — listed below; Local Operator will not close them.",
+                        width=78,
+                    )
+                )
+            print(f"\nlive tabs ({len(unowned)}, not selectable for cleanup):")
+            for tab in unowned:
+                print(f"  - {tab.get('url', '')}")
+            print(
+                "  Handles are redacted, so these cannot be attributed to a record above."
+                "\n  Close an unwanted tab by hand; provenance is unproven."
+            )
+        elif not live_known and rows:
+            # The records rendered above are only half the answer, and silence
+            # here would read as "the browser is empty" beside them.
+            print()
+            print(
+                textwrap.fill(
+                    "Live tabs: unknown — the bridge did not answer, so tabs open "
+                    "outside these records could not be listed. Run 'lop browser "
+                    "status' to check the daemon.",
+                    width=78,
+                )
+            )
+        print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
+        if any(row.get("cleanup_candidate") for row in rows):
+            print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
+        return 0
     if command == "serve":
         from local_operator.browser_bridge.daemon import main as serve_main
 
@@ -2279,7 +2500,12 @@ def _wake_create(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    print(f"{schedule.id}  {_format_due((due_at - now_ms) / 1000.0)}  {schedule.message}")
+    from local_operator.wakes.display import format_wake_time
+
+    print(
+        f"{schedule.id}  {format_wake_time(due_at)} "
+        f"({_format_due((due_at - now_ms) / 1000.0)})  {schedule.message}"
+    )
     if installed_reason:
         print(f"supervisor: {installed_reason}")
     return 0
@@ -2378,9 +2604,10 @@ def wake_command(args: argparse.Namespace) -> int:
             print("no scheduled wakes")
             return 0
         from local_operator.harness.wake import format_duration
+        from local_operator.wakes.display import format_wake_time
 
         for row in rows:
-            when = _format_due(row["due_in_s"])
+            when = f'{format_wake_time(row["next_due_at"])} ({_format_due(row["due_in_s"])})'
             mark = " (dormant — session stopped)" if row["dormant"] else ""
             name = row["session_id"]
             # `every …` reuses the same renderer the tool listing and the wake
@@ -4259,11 +4486,56 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-            from local_operator.exec_mode import ExecArgs, run_exec
+            from local_operator.exec_mode import ExecArgs, job_status, run_exec
 
+            if args.status:
+                import json
+
+                from local_operator.exec_startup import STARTUP_FIELDS
+
+                run_options = (
+                    *STARTUP_FIELDS,
+                    "background",
+                    "control",
+                    "resume",
+                    "agent_name",
+                    "agent_id",
+                    "yolo",
+                    "train",
+                )
+                if args.command is not None or any(getattr(args, key, None) for key in run_options):
+                    print(
+                        "--status cannot be combined with a prompt or run options", file=sys.stderr
+                    )
+                    return 1
+                state = job_status(args.status)
+                if not state:
+                    # Every other refusal in this feature names a recovery
+                    # command; this one had none to name (there is no `lop
+                    # exec --list`), so it names where the answer actually
+                    # lives. Also carries the `exec failed: ` prefix its
+                    # siblings all use, which it was alone in omitting.
+                    from local_operator.exec_mode import JOBS_FILE, logs_dir
+
+                    print(
+                        f"exec failed: No exec job {args.status!r}; job IDs are printed "
+                        f"by --background and recorded in {logs_dir() / JOBS_FILE}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print(json.dumps(state, ensure_ascii=False))
+                return 0
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
+                team=args.team,
+                profile=args.profile,
+                goal=args.goal,
+                clear_goal=args.clear_goal,
+                loop=args.loop,
+                loop_goal=args.loop_goal,
+                name=args.name,
+                effort=args.effort,
                 agent_name=args.agent_name,
                 agent_id=getattr(args, "agent_id", None),
                 yolo=args.yolo,
@@ -4459,6 +4731,8 @@ def main() -> int:
             tui_config = config_manager.get_config_value("tui", None)
             theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
 
+            viewer_started = False
+
             async def viewer_factory(resume_id: "str | None"):
                 """Build the TUI's session facade: a VIEWER, never an owner.
 
@@ -4483,15 +4757,43 @@ def main() -> int:
                 runtime materialises the directory for it on the first real
                 write — an engaged-but-unused session leaves nothing behind.
                 """
+                nonlocal viewer_started
                 import uuid as _uuid
 
+                from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_owner_record
                 from local_operator.session.remote import RemoteSession
+                from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
                 # Same expression session_factory uses for a new session's
                 # directory name, so ids minted by either path are one shape.
                 session_id = resume_id or _uuid.uuid4().hex[:12]
+                # The CLI flags belong to startup, not every /new or picker
+                # resume in this viewer. Refresh the file only at this boundary.
+                birth_args = argparse.Namespace(**vars(args))
+                birth_args.resume = resume_id
+                if viewer_started:
+                    birth_args.hosting = None
+                    birth_args.model = None
+                viewer_started = True
+                initial_model = None
+                birth_agent = current_agent
+
+                def resolve_birth():
+                    # Both the config and saved selection can require disk I/O.
+                    # The captured arguments above fix WHICH conversation this
+                    # read belongs to before yielding to the worker.
+                    return resolve_hosting_model(
+                        birth_agent, birth_args, ConfigManager(config_directory)
+                    )
+
+                try:
+                    provider, model_id = await asyncio.to_thread(resolve_birth)
+                    initial_model = ModelSpec(provider=provider, model_id=model_id)
+                except ValueError:
+                    # Setup mode must still open without a configured model.
+                    pass
 
                 async def take_over():
                     # A viewer must never win the transcript lease — the
@@ -4524,12 +4826,22 @@ def main() -> int:
                 degraded_reason = ""
                 if record is not None:
                     try:
-                        return await RemoteSession.connect(
+                        attached = await RemoteSession.connect(
                             record,
                             session_id,
                             config_dir=config_directory,
                             takeover_factory=take_over,
                         )
+                        if initial_model is not None and (birth_args.hosting or birth_args.model):
+                            # A live resume needs the same deliberate override
+                            # as a cold one; send it to the existing owner,
+                            # never replace its journal from the viewer.
+                            receipt = await attached.route_shared_slash(
+                                "model", f"{initial_model.provider}/{initial_model.model_id}"
+                            )
+                            if isinstance(receipt, dict) and receipt.get("style") == "error":
+                                attached.degraded_reason = str(receipt.get("text") or "")
+                        return attached
                     except (ConnectionError, OSError, TimeoutError) as error:
                         # The runtime died between the scan and the dial, or is
                         # too old to attach to. Cold is the honest fallback:
@@ -4560,6 +4872,14 @@ def main() -> int:
                     config_dir=config_directory,
                     cwd=os.getcwd(),
                     takeover_factory=take_over,
+                    initial_model=initial_model,
+                    # Only a RESOLVED spec can be a deliberate override. Setup
+                    # mode leaves `initial_model` None when the machine has no
+                    # usable configuration yet, and claiming an override there
+                    # would assert an intent with nothing to apply.
+                    model_selection_override=(
+                        initial_model is not None and bool(birth_args.hosting or birth_args.model)
+                    ),
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason

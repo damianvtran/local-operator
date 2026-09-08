@@ -11,7 +11,6 @@ will wake at 09:00 is to catch the delivery line as it scrolls past.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from rich.style import Style
@@ -21,7 +20,7 @@ from textual.widgets import Static
 
 from local_operator.harness.wake import format_duration
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.widgets.tool_card import truncate_cells
+from local_operator.wakes.display import format_wake_time
 
 #: The most wake rows the band will spend. ``MAX_WAKE_SCHEDULES`` is 16, far
 #: more than the band can afford; the cap plus an overflow marker keeps a
@@ -56,11 +55,11 @@ class WakePanel(Container):
     def __init__(self) -> None:
         super().__init__(id="wake-panel", classes="band-slot")
         self._body = Static(classes="band-body", id="wake-body")
-        #: What is painted: the per-schedule fingerprint AND the row budget it
+        #: What is painted: the per-schedule fingerprint AND the row/width budgets it
         #: was rendered against, so the 1 Hz poll repaints only when either
         #: moved (``TodoPanel``'s discipline — same contents, different space
         #: is a different paint).
-        self._shown: tuple[tuple[tuple[str, ...], ...], int] | None = None
+        self._shown: tuple[tuple[tuple[str, ...], ...], int, int] | None = None
         # Hidden until the first schedule exists: an empty panel is not content.
         self.display = False
 
@@ -82,9 +81,9 @@ class WakePanel(Container):
             schedules = list(scheduler.schedules) if scheduler is not None else []
             fingerprint = tuple(self._fingerprint(schedule) for schedule in schedules)
             budget = self._body_rows()
-            state = (fingerprint, budget)
+            state = (fingerprint, budget, self._row_cells())
             if state == self._shown:
-                return  # equality guard — identical list and budget = no work
+                return  # equality guard — identical list and budgets = no work
             self._shown = state
             if not fingerprint:
                 self.display = False
@@ -102,8 +101,7 @@ class WakePanel(Container):
         clock must not count as a change, or the once-a-second poll would
         repaint a panel whose visible text did not move.
         """
-        due = datetime.fromtimestamp(schedule.next_due_at / 1000).astimezone()
-        due_label = due.strftime("%H:%M" if due.date() == datetime.now().date() else "%b %d %H:%M")
+        due_label = format_wake_time(schedule.next_due_at)
         every = f"every {format_duration(schedule.every_ms)}" if schedule.every_ms else "once"
         message = " ".join(str(schedule.message).split())
         return (str(schedule.id), due_label, every, message)
@@ -141,14 +139,17 @@ class WakePanel(Container):
             row.append(wake_id, style=muted)
             row.append(f" {due_label} · {every}", style=dim)
             if message:
-                snippet = truncate_cells(message, max(cells - cell_len_of(row) - 3, 0))
-                if snippet:
-                    row.append(f" — {snippet}", style=dim)
+                row.append(f" — {message}", style=dim)
             lines.append(row)
         if marker:
             overflow = Text(no_wrap=True, overflow="ellipsis")
             overflow.append(f"… {len(rows) - len(visible)} more wakes", style=dim)
             lines.append(overflow)
+        # The band is content-sized: Rich overflow alone cannot constrain its
+        # natural width. Clamp every row, including a long id/date/recurrence,
+        # against the screen just as TodoPanel does, before it is measured.
+        for line in lines:
+            line.truncate(cells, overflow="ellipsis")
         return Text("\n").join(lines)
 
     # -- geometry (the TodoPanel budget discipline) ----------------------------
@@ -213,16 +214,14 @@ class WakePanel(Container):
         return sum(slot_rows(slot) for slot in parent.children if slot is not self and slot.display)
 
     def _row_cells(self) -> int:
-        """Cells one row may occupy, or a safe default before layout."""
+        """Screen cells minus the body rail, never the content-sized band width.
+
+        Longer local clock labels can otherwise grow the band beyond a narrow
+        terminal. Include this width in the paint fingerprint so a resize also
+        recomputes truncation without waiting for the schedule to change.
+        """
         try:
-            width = self.size.width
+            width = self.screen.size.width
         except Exception:
             width = 0
-        return max(width - 2, 24) if width else 80
-
-
-def cell_len_of(text: Text) -> int:
-    """Display cells a ``Text`` occupies (no style), for snippet budgeting."""
-    from local_operator.tui.widgets.transcript import cell_len
-
-    return cell_len(text.plain)
+        return max(width - 2, 1) if width else 80

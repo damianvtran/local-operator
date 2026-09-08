@@ -634,7 +634,11 @@ async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, mon
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     assert viewer.frontend_state.effective_model is not None
-    assert viewer.frontend_state.effective_model.model_id == ""
+    from local_operator.model.defaults import default_model_for
+
+    # The cold viewer now samples the same concrete default as its owner;
+    # first engagement must not defer this choice to a later config snapshot.
+    assert viewer.frontend_state.effective_model.model_id == default_model_for("anthropic")
 
     async def factory():
         return viewer

@@ -128,6 +128,14 @@ class SessionInteraction:
     aside_open: bool = False
     aside_generation: int = 0
     preparations: int = 0
+    # Reading a saved viewport never grants authority to submit. The bind task
+    # belongs to this source, not to whichever navigation happens to be current.
+    display_only: bool = False
+    command_frame_pending: bool = False
+    connection_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    connection_error: str = ""
+    scroll_revision: int = 0
+    preview_scroll_revision: int = 0
     # A gate draft can contain a secret. It stays only in this live context,
     # never in the general draft spill or diagnostic repr.
     gate_draft: tuple[tuple[Any, ...], Any] | None = field(default=None, repr=False)
@@ -155,6 +163,7 @@ class SessionInteraction:
         """
         return bool(
             self.active_workers
+            or (self.connection_task is not None and not self.connection_task.done())
             or self.loop.running
             or self.shell.worker is not None
             or self.compaction.held_prompt

@@ -187,6 +187,10 @@ class WarmErrand:
     """
 
     command_id: str = ""
+    # Memory-only birth sample; meaningful only if this engagement has to
+    # create an owner. An already-running owner retains its own selection.
+    initial_model: Any = None
+    model_selection_override: bool = False
 
 
 Errand = Union[PromptErrand, SteerErrand, PeerMessageErrand, WakeErrand, WarmErrand]
@@ -235,7 +239,12 @@ def _lease_holder(config_dir: Path, session_id: str) -> int | None:
 
 
 def _spawn_runtime(
-    session_id: str, cwd: str, *, defer_materialise: bool
+    session_id: str,
+    cwd: str,
+    *,
+    defer_materialise: bool,
+    initial_model: Any = None,
+    model_selection_override: bool = False,
 ) -> "subprocess.Popen[bytes]":
     """Start one detached runtime candidate for ``session_id``.
 
@@ -261,13 +270,26 @@ def _spawn_runtime(
 
     Only routing data enters the environment — prompt text, images and command
     identity travel over the authenticated loopback socket, never through
-    ``ps``-readable state. These are the two variables ``process.py`` already
-    reads, plus the deferred-materialisation flag; the spawn stays bare by
-    design (design §11.3 C1).
+    ``ps``-readable state. Alongside identity and deferred-materialisation,
+    the optional birth model is routing data: it seeds only a new owner,
+    never an already-running session or a saved selection on resume.
     """
     env = dict(os.environ)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
+    # A viewer's birth sample seeds only a new conversation. It is NOT a
+    # resume override, and inherited spawn flags must not leak into siblings.
+    for key in (
+        "LOP_MOBILE_CHILD_PROVIDER",
+        "LOP_MOBILE_CHILD_MODEL",
+        "LOP_MODEL_SELECTION_OVERRIDE",
+    ):
+        env.pop(key, None)
+    if initial_model is not None:
+        env["LOP_MOBILE_CHILD_PROVIDER"] = initial_model.provider
+        env["LOP_MOBILE_CHILD_MODEL"] = initial_model.model_id
+    if model_selection_override:
+        env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:
         env["LOP_RUNTIME_DEFER_MATERIALISE"] = "1"
     else:
@@ -582,7 +604,14 @@ async def engage_runtime(
             elif not spawned:
                 logger.debug("engage: spawning a runtime for %s", session_id)
                 candidate = await asyncio.to_thread(
-                    _spawn_runtime, session_id, cwd, defer_materialise=defer
+                    _spawn_runtime,
+                    session_id,
+                    cwd,
+                    defer_materialise=defer,
+                    initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
+                    model_selection_override=(
+                        work.model_selection_override if isinstance(work, WarmErrand) else False
+                    ),
                 )
                 capture = getattr(candidate, "lop_capture_path", None)
                 spawned = True
@@ -623,7 +652,14 @@ async def engage_runtime(
                     spawn_reason or "no output captured",
                 )
                 candidate = await asyncio.to_thread(
-                    _spawn_runtime, session_id, cwd, defer_materialise=defer
+                    _spawn_runtime,
+                    session_id,
+                    cwd,
+                    defer_materialise=defer,
+                    initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
+                    model_selection_override=(
+                        work.model_selection_override if isinstance(work, WarmErrand) else False
+                    ),
                 )
                 capture = getattr(candidate, "lop_capture_path", None)
                 spawns += 1

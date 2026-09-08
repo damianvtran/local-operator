@@ -290,34 +290,12 @@ async def entities(
                         resolve_org(name, teams=registry, agents=remote.agent_registry)
                     )
             else:
-                from local_operator.agent_profiles import (
-                    is_role,
-                    is_specialist,
-                    list_seeds,
-                    resolve_profile_or_specialist,
+                from local_operator.server.utils.desktop_profiles import (
+                    profile_catalogue,
+                    profile_detail,
                 )
 
-                names = {
-                    item.name
-                    for item in registry.list_agents()
-                    if is_role(item) or is_specialist(item)
-                } | set(list_seeds())
-                for candidate in sorted(names):
-                    kind, profile, instructions, resolved_name = resolve_profile_or_specialist(
-                        candidate, registry=registry
-                    )
-                    rows.append(
-                        {
-                            "value": candidate,
-                            "name": resolved_name,
-                            "kind": kind,
-                            "description": profile.description if profile else "",
-                            "profile": (
-                                dataclasses.asdict(profile)
-                                if name == candidate and profile
-                                else None
-                            ),
-                            "instructions": instructions if name == candidate else None,
-                        }
-                    )
+                rows = [dict(item, value=item["name"]) for item in profile_catalogue(registry)]
+                if name:
+                    current = profile_detail(registry, name)
         return reply({"command": spec.name, "entities": rows, "current": current})

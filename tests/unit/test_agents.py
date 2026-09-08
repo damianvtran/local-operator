@@ -2263,7 +2263,484 @@ def test_migrate_agents_dir_error_handling(temp_agents_dir: Path, monkeypatch):
     # The nested directory should still exist since migration failed
     assert (nested_dir / test_agent_id).exists()
 
-    # Target directory should be created but empty
+    # The half-written target is now rolled back rather than left behind. It
+    # previously survived as an empty directory, which the ``target_dir.exists()``
+    # skip then treated as "already migrated" on every later start, stranding
+    # the agent in the nested dir forever while the registry reported it absent.
     target_dir = temp_agents_dir / "agents" / test_agent_id
-    assert target_dir.exists()
-    assert not (target_dir / "agent.yml").exists()
+    assert not target_dir.exists()
+
+
+def _valid_agent_yaml(agent_id: str, name: str) -> str:
+    """Minimal agent.yml that ``AgentData`` accepts, for filesystem fixtures."""
+    return yaml.safe_dump(
+        {
+            "id": agent_id,
+            "name": name,
+            "created_date": datetime.now(timezone.utc).isoformat(),
+            "version": "1.0.0",
+        }
+    )
+
+
+def test_empty_legacy_nested_dir_does_not_break_strict_reads(temp_agents_dir: Path):
+    """An empty ``agents/agents/`` must not brick profile launch or team attach.
+
+    The operator-facing regression: the old migration left this directory
+    behind forever, the metadata scan counted it as an unreadable agent, and
+    ``require_complete_metadata`` therefore raised on every profile launch and
+    ``/team`` attach with advice that named nothing repairable.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    registry.create_agent(
+        AgentEditFields(
+            name="Real Agent",
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            description=None,
+            tags=None,
+            categories=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    # Scan directly: the leftover must not clear completeness even before the
+    # migration has had a chance to remove it.
+    registry._refresh_agents_metadata()
+    registry.require_complete_metadata()
+    assert len(registry.list_agents()) == 1
+
+    # And a fresh registry heals the machine, because __init__ migrates.
+    healed = AgentRegistry(temp_agents_dir)
+    healed.require_complete_metadata()
+    assert not nested_dir.exists()
+
+
+def test_non_agent_directories_are_tolerated(temp_agents_dir: Path):
+    """A stray directory is not an agent, so it is not a failed agent read."""
+    registry = AgentRegistry(temp_agents_dir)
+    agent_dir = temp_agents_dir / "agents" / "good-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agent.yml").write_text(_valid_agent_yaml("good-agent", "Good"))
+
+    (temp_agents_dir / "agents" / ".DS_Store").mkdir()
+    (temp_agents_dir / "agents" / "tmp-scratch").mkdir()
+    (temp_agents_dir / "agents" / "notes.txt").write_text("not a directory")
+
+    registry._refresh_agents_metadata()
+    registry.require_complete_metadata()
+    assert "good-agent" in {agent.id for agent in registry.list_agents()}
+
+
+def test_malformed_agent_yml_still_fails_strict_reads(temp_agents_dir: Path):
+    """The safety check must survive the tolerance added above.
+
+    A directory that HAS an ``agent.yml`` which cannot be parsed is a genuine
+    unreadable definition. Skipping it would let profile resolution fall
+    through to the packaged role of the same name, so it must still raise.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    broken_dir = temp_agents_dir / "agents" / "broken-agent"
+    broken_dir.mkdir(parents=True, exist_ok=True)
+    (broken_dir / "agent.yml").write_text("name: [unclosed\n:::not yaml")
+
+    registry._refresh_agents_metadata()
+    assert registry._metadata_complete is False
+    with pytest.raises(ProfileRegistryUnavailable) as excinfo:
+        registry.require_complete_metadata()
+
+    # The count is actionable; the path must NOT cross the transport boundary.
+    assert "1 agent definition could not be read" in str(excinfo.value)
+    assert str(broken_dir) not in str(excinfo.value)
+    assert registry._incomplete_agent_dirs == [broken_dir]
+
+
+def test_agent_yml_failing_validation_still_fails_strict_reads(temp_agents_dir: Path):
+    """Parseable YAML that is not a valid ``AgentData`` is also incomplete."""
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    invalid_dir = temp_agents_dir / "agents" / "invalid-agent"
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    (invalid_dir / "agent.yml").write_text("id: invalid-agent\nname: Missing Fields\n")
+
+    registry._refresh_agents_metadata()
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+
+def test_migrate_agents_dir_removes_drained_nested_dir(temp_agents_dir: Path):
+    """Once drained, the legacy nested directory itself is removed."""
+    registry = AgentRegistry(temp_agents_dir)
+
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    agent_dir = nested_dir / "migrated-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agent.yml").write_text(_valid_agent_yaml("migrated-agent", "Moved"))
+    (agent_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+
+    registry.migrate_agents_dir()
+
+    target_dir = temp_agents_dir / "agents" / "migrated-agent"
+    assert (target_dir / "agent.yml").exists()
+    assert (target_dir / "conversation.jsonl").read_text() == '{"role": "user"}\n'
+    assert not nested_dir.exists()
+
+
+def test_migrate_agents_dir_keeps_nested_dir_when_child_fails(temp_agents_dir: Path, monkeypatch):
+    """A child that failed to migrate keeps its data AND keeps the directory.
+
+    Removal is ``rmdir``-style precisely so a real migration failure stays
+    visible instead of being silently deleted with the agent's data.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    agent_dir = nested_dir / "stuck-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agent.yml").write_text("name: Stuck Agent")
+
+    def mock_copy2_error(src, dst):
+        raise IOError("Simulated copy error")
+
+    monkeypatch.setattr(shutil, "copy2", mock_copy2_error)
+
+    registry.migrate_agents_dir()
+
+    assert nested_dir.exists()
+    assert (agent_dir / "agent.yml").read_text() == "name: Stuck Agent"
+
+
+def test_migrate_agents_dir_keeps_nested_dir_when_target_exists(temp_agents_dir: Path):
+    """A child skipped because its target exists also keeps the nested dir."""
+    registry = AgentRegistry(temp_agents_dir)
+
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    agent_dir = nested_dir / "dup-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agent.yml").write_text("name: Nested Agent")
+
+    target_dir = temp_agents_dir / "agents" / "dup-agent"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "agent.yml").write_text("name: Existing Agent")
+
+    registry.migrate_agents_dir()
+
+    assert nested_dir.exists()
+    assert (agent_dir / "agent.yml").read_text() == "name: Nested Agent"
+    assert (target_dir / "agent.yml").read_text() == "name: Existing Agent"
+
+
+def _seed_valid_agent(agents_root: Path, agent_id: str = "good-agent") -> Path:
+    """A healthy agent beside the broken one, so a raise cannot be vacuous."""
+    agent_dir = agents_root / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "agent.yml").write_text(_valid_agent_yaml(agent_id, "Good"))
+    return agent_dir
+
+
+def test_agent_yml_dangling_symlink_still_fails_strict_reads(temp_agents_dir: Path):
+    """A dangling ``agent.yml`` symlink is a broken agent, not a stray directory.
+
+    ``Path.exists()`` follows symlinks, so the target failing to resolve made
+    this look like "no agent.yml here" and took the tolerant skip branch. The
+    strict path then reported a clean registry and ``resolve_profile`` fell
+    through to the packaged role of the same name -- the exact silent
+    substitution the completeness rule exists to prevent.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    broken_dir = agents_root / "broken-agent"
+    broken_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink(agents_root / "nowhere.yml", broken_dir / "agent.yml")
+
+    registry._refresh_agents_metadata()
+    assert registry._metadata_complete is False
+    assert registry._incomplete_agent_dirs == [broken_dir]
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+
+def test_agent_yml_symlink_loop_still_fails_strict_reads(temp_agents_dir: Path):
+    """A self-referential ``agent.yml`` symlink is unreadable, not absent."""
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    broken_dir = agents_root / "looped-agent"
+    broken_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink(broken_dir / "agent.yml", broken_dir / "agent.yml")
+
+    registry._refresh_agents_metadata()
+    assert registry._incomplete_agent_dirs == [broken_dir]
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+
+def test_missing_agent_yml_with_data_files_still_fails_strict_reads(temp_agents_dir: Path):
+    """A deleted ``agent.yml`` beside surviving history is a BROKEN agent.
+
+    The distinction the rule turns on: an empty directory is not an agent, but
+    a directory still holding ``conversation.jsonl`` plainly was one, so its
+    missing definition is a failed read and must keep raising.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    broken_dir = agents_root / "gutted-agent"
+    broken_dir.mkdir(parents=True, exist_ok=True)
+    (broken_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+    (broken_dir / "execution_history.jsonl").write_text("")
+
+    registry._refresh_agents_metadata()
+    assert registry._incomplete_agent_dirs == [broken_dir]
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+
+def test_torn_migration_target_still_fails_strict_reads(temp_agents_dir: Path):
+    """The shape a half-finished ``migrate_agents_dir`` leaves behind.
+
+    Reachable with no symlinks at all: a copy that dies before ``agent.yml``
+    leaves a target holding history and no definition. Reported complete, that
+    is a durable silent substitution on every later start.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    torn_dir = agents_root / "torn-agent"
+    torn_dir.mkdir(parents=True, exist_ok=True)
+    (torn_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+
+    registry._refresh_agents_metadata()
+    assert registry._incomplete_agent_dirs == [torn_dir]
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+
+def test_unreadable_agent_dir_still_fails_strict_reads(temp_agents_dir: Path):
+    """An agent directory we cannot stat into must not read as "not an agent".
+
+    ``os.path.lexists`` answers False on ``EACCES`` just as ``exists`` does, so
+    the predicate treats any non-``ENOENT`` error as "cannot prove absence" and
+    keeps the directory in the strict bucket.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    locked_dir = agents_root / "locked-agent"
+    locked_dir.mkdir(parents=True, exist_ok=True)
+    (locked_dir / "agent.yml").write_text(_valid_agent_yaml("locked-agent", "Locked"))
+    os.chmod(locked_dir, 0o000)
+    try:
+        registry._refresh_agents_metadata()
+        assert registry._incomplete_agent_dirs == [locked_dir]
+        with pytest.raises(ProfileRegistryUnavailable):
+            registry.require_complete_metadata()
+    finally:
+        # Restore access so tmp_path teardown can remove the tree.
+        os.chmod(locked_dir, 0o755)
+
+
+def test_vanished_agents_dir_fails_strict_reads(temp_agents_dir: Path):
+    """A registry whose directory disappeared is unreadable, not empty.
+
+    Zero-because-vanished and zero-because-empty are indistinguishable to the
+    strict path, and treating the first as success resolves every role to a
+    packaged seed with no warning.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    registry = AgentRegistry(temp_agents_dir)
+    _seed_valid_agent(temp_agents_dir / "agents")
+    registry._refresh_agents_metadata()
+    registry.require_complete_metadata()
+
+    shutil.rmtree(temp_agents_dir / "agents")
+    registry._refresh_agents_metadata()
+
+    with pytest.raises(ProfileRegistryUnavailable):
+        registry.require_complete_metadata()
+
+    # The tolerant readers keep their long-standing "no agents" answer.
+    assert registry.list_agents() == []
+
+
+def test_torn_migration_rolls_back_and_next_start_recovers(temp_agents_dir: Path, monkeypatch):
+    """A failed copy must not strand the agent in the nested directory.
+
+    Without the rollback the half-written target satisfies the
+    ``target_dir.exists()`` skip on every later start, so the definition stays
+    in ``agents/agents/`` forever while the registry reports it absent.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+
+    nested_dir = agents_root / "agents"
+    source_dir = nested_dir / "torn-agent"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "agent.yml").write_text(_valid_agent_yaml("torn-agent", "Torn"))
+    (source_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+
+    real_copy2 = shutil.copy2
+
+    def copy2_failing_on_agent_yml(src, dst):
+        if Path(src).name == "agent.yml":
+            raise OSError(28, "No space left on device")
+        return real_copy2(src, dst)
+
+    monkeypatch.setattr(shutil, "copy2", copy2_failing_on_agent_yml)
+    registry.migrate_agents_dir()
+    monkeypatch.undo()
+
+    # Rolled back: no definition-less target, and the source is untouched.
+    assert not (agents_root / "torn-agent").exists()
+    assert (source_dir / "agent.yml").exists()
+    assert (source_dir / "conversation.jsonl").exists()
+
+    # The next start completes the migration instead of skipping it forever.
+    recovered = AgentRegistry(temp_agents_dir)
+    recovered.require_complete_metadata()
+    assert "torn-agent" in {agent.id for agent in recovered.list_agents()}
+    assert (agents_root / "torn-agent" / "conversation.jsonl").exists()
+    assert not nested_dir.exists()
+
+
+def test_migrate_agents_dir_copies_agent_yml_last(temp_agents_dir: Path, monkeypatch):
+    """Ordering is load-bearing, so it is asserted rather than assumed.
+
+    ``agent.yml`` last means an interrupted copy can never leave a target that
+    looks like a healthy agent while its history is missing.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+
+    nested_dir = temp_agents_dir / "agents" / "agents"
+    source_dir = nested_dir / "ordered-agent"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "agent.yml").write_text(_valid_agent_yaml("ordered-agent", "Ordered"))
+    (source_dir / "conversation.jsonl").write_text("")
+    (source_dir / "learnings.jsonl").write_text("")
+
+    copied: list[str] = []
+    real_copy2 = shutil.copy2
+
+    def recording_copy2(src, dst):
+        copied.append(Path(src).name)
+        return real_copy2(src, dst)
+
+    monkeypatch.setattr(shutil, "copy2", recording_copy2)
+    registry.migrate_agents_dir()
+
+    assert copied[-1] == "agent.yml"
+    assert set(copied) == {"agent.yml", "conversation.jsonl", "learnings.jsonl"}
+
+
+def test_preexisting_target_is_never_removed_by_rollback(temp_agents_dir: Path, monkeypatch):
+    """The rollback must only ever delete a directory this attempt created.
+
+    Data safety is the whole reason the nested dir uses ``rmdir``; the rollback
+    would undo that guarantee if it could reach an operator's real agent.
+    """
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+
+    nested_dir = agents_root / "agents"
+    source_dir = nested_dir / "dup-agent"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "agent.yml").write_text(_valid_agent_yaml("dup-agent", "Nested"))
+
+    target_dir = agents_root / "dup-agent"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "agent.yml").write_text(_valid_agent_yaml("dup-agent", "Existing"))
+    (target_dir / "conversation.jsonl").write_text('{"role": "user"}\n')
+
+    def always_failing_copy2(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copy2", always_failing_copy2)
+    registry.migrate_agents_dir()
+
+    # Both copies of the data survive: the pre-existing target took the skip
+    # branch, so the rollback never applies to it.
+    assert (target_dir / "conversation.jsonl").exists()
+    assert "Existing" in (target_dir / "agent.yml").read_text()
+    assert (source_dir / "agent.yml").read_text().count("Nested") == 1
+    assert nested_dir.exists()
+
+
+def test_profile_registry_unavailable_count_survives_attach_transport():
+    """major-1: the count must reach the attach client, which rebuilds wording.
+
+    ``/team`` attach renders from the reconstructed error, so a count that
+    stops at the transport leaves that surface showing the unactionable
+    sentence this detail was added to replace.
+    """
+    from local_operator.session.errors import (
+        ProfileRegistryUnavailable,
+        admission_error,
+    )
+
+    exc = ProfileRegistryUnavailable(count=3)
+    assert exc.count == 3
+
+    # The frame the runtime server puts on the wire, JSON round-tripped.
+    frame = json.loads(json.dumps({"error_code": exc.code, "error_count": exc.count}))
+    known = admission_error(str(frame.get("error_code", "")), frame.get("error_count"))
+
+    assert isinstance(known, ProfileRegistryUnavailable)
+    assert "3 agent definitions could not be read" in str(known)
+    assert "1 agent definition could not be read" in str(
+        admission_error(ProfileRegistryUnavailable.code, 1)
+    )
+
+
+def test_admission_error_rejects_untrusted_count_values():
+    """Only a plain non-negative int renders; the far side is untrusted input.
+
+    An older runtime sends no count at all and must degrade to the countless
+    wording rather than raising, so the parameter stays optional.
+    """
+    from local_operator.session.errors import (
+        ProfileRegistryUnavailable,
+        admission_error,
+    )
+
+    countless = str(ProfileRegistryUnavailable())
+    for bad in ["7; rm -rf /", {"a": 1}, [1], True, -4, 3.9, "3", None]:
+        rebuilt = admission_error(ProfileRegistryUnavailable.code, bad)  # type: ignore[arg-type]
+        assert str(rebuilt) == countless
+
+    # And no path-like token ever rides along with a well-formed count.
+    populated = str(admission_error(ProfileRegistryUnavailable.code, 2))
+    for token in ("/Users", "/private", "/tmp", ".yml"):
+        assert token not in populated

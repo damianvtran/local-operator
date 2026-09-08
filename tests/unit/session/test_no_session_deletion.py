@@ -115,6 +115,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
+    # The browser resource sidecar. Both paths are the FILE
+    # `<session_dir>/.browser-resource.json` and a `mkstemp` sibling of it, so
+    # neither call can name the directory itself: `os.replace` over a regular
+    # file never removes or renames its parent, and the unlink targets only the
+    # temporary file this same call created. The session directory is written
+    # INTO here, never removed — the module holds no directory-removal call at
+    # all, which is what this invariant is protecting.
+    (
+        "local_operator/browser_bridge/resources.py::BrowserResource._save",
+        "os.replace",
+        "Atomic write of the .browser-resource.json FILE; the parent directory is never named",
+    ),
+    (
+        "local_operator/browser_bridge/resources.py::BrowserResource._save",
+        "os.unlink",
+        "Removes only this call's own mkstemp sidecar temp file after a failed replace",
+    ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.replace",
@@ -174,7 +191,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
         "shutil.rmtree",
-        "legacy agents/ layout",
+        "Two calls, both confined to agents/: (1) the drained source under the "
+        "legacy agents/agents/ layout, removed only after every file was copied "
+        "out; (2) rollback of a target this same attempt created, guarded by "
+        "created_target so a pre-existing agent directory is never reachable -- "
+        "mkdir() without exist_ok is what proves ownership. Without the rollback "
+        "a torn copy strands the agent behind the target_dir.exists() skip",
+        2,
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
+        "<path>.rmdir",
+        "The drained legacy agents/agents/ directory itself, and only when the "
+        "filesystem confirms it is empty -- rmdir refuses a non-empty directory, "
+        "so no agent data (and nothing under sessions/, which is a sibling of "
+        "agents/ and never reachable from this fixed path) can be removed",
     ),
     (
         "local_operator/agents.py::AgentRegistry.export_agent_archive",
@@ -232,6 +263,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "mkdtemp upload dir",
         2,
+    ),
+    (
+        "local_operator/session/creation.py::ensure_session_created_at",
+        "os.unlink",
+        "Only the fresh NamedTemporaryFile path owned by this call; never a journal or directory",
     ),
     # -- file-level atomic writes: temp FILE -> its final FILE name ---------
     # These write a file that may live INSIDE a session directory (transcript,

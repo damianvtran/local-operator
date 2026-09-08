@@ -55,6 +55,7 @@ from local_operator.mobile.types import (
     SessionRecord,
     SubagentRow,
 )
+from local_operator.session.creation import session_category, session_created_at
 from local_operator.session.runtime import registry
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class SessionTable:
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._attention_states: dict[str, dict[str, Any]] = {}
+        self._creation_dates: dict[str, float] = {}
 
     def invalidate_summaries_cache(self) -> None:
         """Drop both summaries caches so the next read rescans.
@@ -263,9 +265,28 @@ class SessionTable:
         if task is not None and not task.done():
             return await task
 
+        # Active conversations may fall outside the bounded history listing.
+        # Resolve their immutable dates in the same worker, never from the
+        # heartbeat or by adding filesystem work to the in-memory merge path.
+        live_ids = {entry.record.session_id for entry in self.entries.values() if not entry.ended}
+
+        def load() -> tuple[dict[str, Any], dict[str, float]]:
+            directory = config_dir()
+            # /resume intentionally pays no creation-metadata reads. Only the
+            # two stable-order surfaces enrich its cheap rows with birth dates.
+            rows = {
+                row.id: row._replace(created_at=session_created_at(directory / "sessions" / row.id))
+                for row in recent_session_rows(directory, 100)
+            }
+            dates = {}
+            for session_id in live_ids - rows.keys():
+                if session_id not in ("", ".", "..") and Path(session_id).name == session_id:
+                    dates[session_id] = session_created_at(directory / "sessions" / session_id)
+            return rows, dates
+
         async def _load() -> dict[str, Any]:
-            rows = await asyncio.to_thread(recent_session_rows, config_dir(), 100)
-            return {row.id: row for row in rows}
+            rows, self._creation_dates = await asyncio.to_thread(load)
+            return rows
 
         task = asyncio.ensure_future(_load())
         self._durable_rows_task = task
@@ -369,33 +390,30 @@ class SessionTable:
                         if todo.status in ("pending", "blocked")
                     ),
                     "mtime": row.mtime if row else entry.record.started_at if entry else 0,
-                    # Unread verdict (see :mod:`.seen`): activity newer than the
-                    # phone's last view. The activity clock is the transcript
-                    # mtime for durable rows — already statted by the listing
-                    # scan, no extra syscall — and the record heartbeat for
-                    # live rows. First observation records a baseline so an
-                    # upgrade never lights up the whole store.
+                    "created_at": (
+                        row.created_at if row else self._creation_dates.get(session_id, 0.0)
+                    ),
+                    "completion_kind": self._attention_states.get(f"session/{session_id}", {}).get(
+                        "kind"
+                    )
+                    or "",
+                    # Shared completion receipts, not transcript activity or
+                    # heartbeat freshness, decide whether an outcome is unread.
                     "unseen": self._is_unseen(session_id, row, entry),
                 }
             )
         out.sort(
             key=lambda summary: (
                 summary["section"] != "active",
-                not summary["needs_attention"],
-                # ONE ladder serves the sort and the render: NEEDS DECISION >
-                # WORKING > UNREAD > IDLE (see the client's SessionCard, which
-                # states the same order). Unread outranks recency — burying the
-                # mark under plain mtime order is what made it decorative — but
-                # sits BELOW streaming, because the client renders "new" only
-                # for COMPLETED unviewed activity and suppresses it on an
-                # in-flight row. Ranking unseen above streaming here hoisted a
-                # streaming+unseen row over newer rows while it rendered no
-                # mark to explain the position: a sort the surface contradicts.
-                # And below needs_attention, because a pending ask blocks a
-                # turn outright while unread only means unlooked-at.
-                not summary["streaming"],
-                not summary["unseen"],
-                -summary["mtime"],
+                session_category(
+                    pending=summary["needs_attention"],
+                    busy=summary["streaming"],
+                    unseen=summary["unseen"],
+                    kind=summary["completion_kind"],
+                    live=summary["section"] == "active",
+                ),
+                # Token/heartbeat refreshes must not move a finger's target.
+                -summary["created_at"],
                 summary["session_id"],
             )
         )
@@ -1721,6 +1739,12 @@ class MobileDaemon:
         else:
             env.pop("LOP_MOBILE_CHILD_MODEL", None)
         env["LOP_MOBILE_CHILD_RESUME"] = session_id
+        # Unlike a viewer's synthesized birth seed these optional fields came
+        # from the Start request itself, so they are deliberate overrides.
+        if provider or model_id:
+            env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
+        else:
+            env.pop("LOP_MODEL_SELECTION_OVERRIDE", None)
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)

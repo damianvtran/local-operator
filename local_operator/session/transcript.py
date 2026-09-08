@@ -43,7 +43,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -52,6 +52,13 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.session.attachments import AttachmentStore
+from local_operator.session.creation import (
+    ensure_session_created_at,
+    session_created_at,
+)
+
+if TYPE_CHECKING:
+    from local_operator.session.history_window import _DisplayWindowCache
 
 logger = logging.getLogger(__name__)
 
@@ -513,15 +520,22 @@ class Transcript:
         # The flag is NOT sticky: the first real append materialises the
         # directory through that same self-healing path, after which this
         # object behaves identically to an eagerly-materialised one.
+        self.path = self.directory / TRANSCRIPT_FILENAME
+        # Claims can precreate the directory; the journal distinguishes a legacy
+        # conversation from new work. Keep birth in memory across directory loss.
+        self._created_at = session_created_at(self.directory) if self.path.exists() else None
         if not defer_materialise:
             self.directory.mkdir(parents=True, exist_ok=True)
-        self.path = self.directory / TRANSCRIPT_FILENAME
+            self._created_at = ensure_session_created_at(
+                self.directory, self._created_at if self._created_at is not None else time.time()
+            )
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
         # Paging tokens survive appends, but not a replay-changing mutation or
         # a new owner. The signing key never leaves this resident transcript.
         self._history_generation = 0
         self._history_page_key = os.urandom(32)
+        self._display_window_cache: _DisplayWindowCache | None = None
         # Derived indexes only describe durable rows. They are updated after
         # fsync, rebuilt after a file fold, and never published from a worker.
         self._entry_ids: set[str] = set()
@@ -780,6 +794,10 @@ class Transcript:
         removes its partial journal so a restart cannot admit rejected rows.
         """
         rebuild = not self.path.exists()
+        if self._created_at is None and not rebuild:
+            # Another owner may have materialized a speculative transcript
+            # before our first append. Adopt its birth for later self-healing.
+            self._created_at = session_created_at(self.directory)
         if not rebuild:
             try:
                 previous_size = self.path.stat().st_size
@@ -802,6 +820,9 @@ class Transcript:
                     raise
         if rebuild:
             self.directory.mkdir(parents=True, exist_ok=True)
+            self._created_at = ensure_session_created_at(
+                self.directory, self._created_at if self._created_at is not None else time.time()
+            )
             try:
                 with self.path.open("w", encoding="utf-8") as handle:
                     for row in (*self._entries, *entries):
@@ -818,6 +839,7 @@ class Transcript:
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
             self._history_generation += 1
+            self._display_window_cache = None
         self._entry_ids.add(entry.id)
         self._latest_by_type[entry.type] = entry
         if entry.type == ENTRY_CUSTOM:
@@ -1164,6 +1186,7 @@ class Transcript:
                         break
             self._entries = folded
             self._history_generation += 1
+            self._display_window_cache = None
             self._entry_ids.clear()
             self._latest_by_type.clear()
             self._latest_custom_entries.clear()

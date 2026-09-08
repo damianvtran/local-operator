@@ -438,6 +438,49 @@ def test_coerce_compaction_passthrough_none_and_typed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.harness.types import Message
+    from local_operator.session import transcript as transcript_module
+    from local_operator.session.creation import session_created_at
+
+    loop_thread = threading.get_ident()
+    calls = []
+    publish = transcript_module.ensure_session_created_at
+
+    def checked_publish(directory, proposed):
+        calls.append(threading.get_ident())
+        return publish(directory, proposed)
+
+    monkeypatch.setattr(transcript_module, "ensure_session_created_at", checked_publish)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        transcript = session._transcript
+        before = session_created_at(transcript.directory)
+        assert before > 0
+        assert calls and all(thread != loop_thread for thread in calls)
+        await transcript.append_message(Message.user("first visible activity"))
+        # The same helper feeds empty-live rows and durable catalog rows. No
+        # platform-specific birthtime/zero -> now jump on first activity.
+        assert session_created_at(transcript.directory) == before
+        assert all(thread != loop_thread for thread in calls)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_dict_compaction_config_flows_through_prompt(
     tmp_config_dir: Path,
 ) -> None:

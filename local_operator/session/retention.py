@@ -91,6 +91,9 @@ _SIDECAR_NAMES = frozenset(
         "title-scan.json",
         "subagent-roster.v1.json",
         "origin-verdicts.json",
+        # Birth metadata is bookkeeping, not user content: stamping a legacy
+        # conversation must not push it across the cleanup size budget.
+        "created_at.json",
     }
 )
 

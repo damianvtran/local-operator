@@ -511,25 +511,45 @@ jobs:
           #
           # MODEL CHOICE: these live-LLM jobs assert that a small, cheap model
           # can still drive the agent end to end, so the model has to emit real
-          # structured tool calls rather than describe them. The previous pick
-          # (deepseek/deepseek-v4-flash-0731) regressed into printing literal
-          # `<|DSML|>tool_calls` markup as assistant TEXT, so no tool ever ran
-          # and test.txt was never written: measured 0/5 locally against this
-          # exact prompt, and it failed three consecutive CI runs on unrelated
-          # PRs while main (which had run earlier) stayed green.
+          # structured tool calls rather than describe them.
           #
-          # qwen/qwen3.7-flash measured 10/10 on the same harness and also
-          # passes the `exec --json` streaming contract. It is cheaper on input
-          # than the model it replaces ($0.03 vs $0.045 per Mtok).
+          # SERVING CAPACITY IS PART OF THE CHOICE, not just price and
+          # tool-calling. The previous pick (qwen/qwen3.7-flash) tool-called
+          # perfectly and still made this job intermittently red: OpenRouter
+          # lists exactly ONE endpoint for it (Alibaba), so when that single
+          # upstream saturates the job dies with
+          #   HTTP 429 ... Alibaba returned error: qwen/qwen3.7-flash is
+          #   temporarily rate-limited upstream
+          # and test.txt is never written. Observed on runs 34188298919 and
+          # 34184908064 (cli-sanity, main) and 34189747430 attempt 1
+          # (server-sanity, /v1/chat 500s), all of which passed on retry --
+          # which is the signature of upstream capacity, not of a defect in the
+          # PR under test. Retrying is not the fix; a model whose serving is not
+          # one shared bottleneck is.
           #
-          # If this starts failing, FIRST check whether the model is emitting
-          # tool-call markup as text -- that is a model regression, not a bug in
-          # the harness. Re-measure candidates before swapping; a model that
-          # cannot tool-call makes these jobs permanently red and teaches
-          # everyone to ignore them. Any replacement must support `tools` and
-          # be verified against both the --yolo write task and the --json
-          # streaming contract.
-          local-operator --hosting openrouter --model qwen/qwen3.7-flash exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
+          # openai/gpt-oss-20b is served by 14 providers on OpenRouter (9 of
+          # them tool-capable: CoreWeave, DeepInfra, Fireworks, Groq, Parasail,
+          # Darkbloom, ...), so a saturated provider degrades to another one
+          # instead of 429ing the run. Measured locally against these exact
+          # commands: 10/10 on the --yolo write task, 5/5 on the --json
+          # streaming contract, p50 4.0s (vs 7.8s for qwen), and ~$0.00034 per
+          # run at 11.1k prompt / 67 completion tokens -- cheaper per run than
+          # the model it replaces (~$0.00046) at the same $0.030/$0.130 per
+          # Mtok. Rejected: google/gemini-2.5-flash-lite (2/10 -- mid-stream
+          # finish_reason 'error'), amazon/nova-micro-v1 and openai/gpt-5-nano
+          # (both clean but fewer providers and dearer per run).
+          #
+          # If this starts failing, FIRST separate the two failure modes: a
+          # 429/5xx naming one upstream provider is capacity (re-check how many
+          # endpoints OpenRouter still lists for this model), while tool-call
+          # markup appearing as assistant TEXT is a model regression -- the
+          # shape that made deepseek/deepseek-v4-flash-0731 write nothing at
+          # 0/5. Re-measure candidates before swapping; a model that cannot
+          # tool-call makes these jobs permanently red and teaches everyone to
+          # ignore them. Any replacement must support `tools`, be served by
+          # more than one provider, and be verified against both the --yolo
+          # write task and the --json streaming contract.
+          local-operator --hosting openrouter --model openai/gpt-oss-20b exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
 
           # Check if file exists and contains correct text
           if [ ! -f test.txt ]; then
@@ -555,7 +575,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          local-operator --hosting openrouter --model qwen/qwen3.7-flash \
+          local-operator --hosting openrouter --model openai/gpt-oss-20b \
             --yolo exec --json "create a file called contract.txt containing ok" \
             > run.jsonl 2> run.err || exit 1
           python scripts/check_streaming_contract.py run.jsonl || {
@@ -569,7 +589,7 @@ jobs:
         run: |
           set +e
           env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
-            --model qwen/qwen3.7-flash exec --json "hi" > err_out.jsonl 2> err_err.txt
+            --model openai/gpt-oss-20b exec --json "hi" > err_out.jsonl 2> err_err.txt
           set -e
           if [ -s err_out.jsonl ]; then
             # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
@@ -749,7 +769,7 @@ jobs:
             -d '{
               "prompt": "create a file called test.txt with the text '\''hello world'\'' in it",
               "hosting": "openrouter",
-              "model": "qwen/qwen3.7-flash",
+              "model": "openai/gpt-oss-20b",
               "context": [],
               "options": {
                 "temperature": 0.7,

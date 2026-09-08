@@ -1729,7 +1729,27 @@ class RuntimeServer:
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
-            await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
+            from local_operator.session.errors import (
+                AttachmentUnavailable,
+                ProfileRegistryUnavailable,
+            )
+
+            frame = {"op": "error", "req": req, "message": str(exc)[:400]}
+            if isinstance(exc, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+                # Category, not arbitrary prose, certifies this as a repairable
+                # admission rejection to older/newer attach clients alike.
+                frame["error_code"] = exc.code
+            if isinstance(exc, ProfileRegistryUnavailable) and exc.count is not None:
+                # The count rides as its own INTEGER field so the attach client
+                # can rebuild the actionable wording locally. Without it the
+                # client reconstructs from the bare code and renders the
+                # countless sentence, which is the unactionable message this
+                # detail exists to replace -- and ``/team`` attach is one of
+                # the two surfaces that motivated it. An integer carries no
+                # path, host or identity, so it does not widen what
+                # ``session/errors.py`` admits across this boundary.
+                frame["error_count"] = exc.count
+            await self._send_to(conn, frame)
             await self._push()
 
     def _other_observers(self, leaving: _ClientConn) -> int:
@@ -2680,12 +2700,21 @@ class RuntimeServer:
         Full-TUI attach clients are skipped (see ``_projection_recipients``).
         Phone daemon frames stay byte-identical.
         """
+        recipients = self._projection_recipients()
+        if not recipients:
+            # Detached owners and full-TUI-only viewers have nobody consuming
+            # repaints. Avoid building a large payload at every coalesced tick;
+            # welcome frames and all subscribed update cadences are unchanged.
+            #
+            # The warning latch still has to be released: no frame was emitted,
+            # so nothing degraded, and leaving it set would swallow the log line
+            # for the NEXT genuine degradation after a quiet period — exactly
+            # what the once-per-episode latch exists to preserve.
+            self._frame_cap_warned = False
+            return
         ordinary = self._projection_payload()
         await asyncio.gather(
-            *(
-                self._send_to(conn, self._projection_frame(conn, ordinary))
-                for conn in self._projection_recipients()
-            )
+            *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )
 
     def _projection_payload(self) -> dict[str, Any]:

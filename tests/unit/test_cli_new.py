@@ -819,6 +819,105 @@ def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
     assert "Stack Trace" in err
 
 
+def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard the real nested viewer factory, not a free-standing helper."""
+    import threading
+
+    from local_operator import session_factory as factory_module
+
+    seen: dict[str, Any] = {"active": False, "config_threads": [], "model_threads": []}
+    original_resolve = factory_module.resolve_hosting_model
+
+    def config_manager(*args, **kwargs):
+        if seen["active"]:
+            seen["config_threads"].append(threading.get_ident())
+        return _fake_config_manager(*args, **kwargs)
+
+    def resolve_model(*args, **kwargs):
+        if seen["active"]:
+            seen["model_threads"].append(threading.get_ident())
+        return original_resolve(*args, **kwargs)
+
+    async def fake_cold(*args, **kwargs):
+        return object()
+
+    async def run_tui(session_factory, session_registry=None, **kwargs):
+        seen["loop_thread"] = threading.get_ident()
+        seen["active"] = True
+        try:
+            await session_factory()
+        finally:
+            seen["active"] = False
+        return 0
+
+    fake_tui = _fake_tui_module()
+    setattr(fake_tui, "run_tui", run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(factory_module, "resolve_hosting_model", resolve_model)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    with patch("sys.argv", ["program", "--hosting", "test", "--model", "captured-a"]):
+        assert main() == 0
+    for key in ("config_threads", "model_threads"):
+        assert seen[key], key
+        assert all(thread != seen["loop_thread"] for thread in seen[key]), key
+
+
+def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`lop --model <id>` on an unconfigured machine (review round 2, F3).
+
+    The birth resolution raises, so setup mode reaches the viewer with no
+    resolved spec. Claiming an override there left a pending intent nothing
+    could satisfy, which refused every later call including the `/model` the
+    refusal invited. Asserted on what `main()` really passes to `cold`.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_cold(*args, **kwargs):
+        seen["initial_model"] = kwargs.get("initial_model")
+        seen["override"] = kwargs.get("model_selection_override")
+        return object()
+
+    async def run_tui(session_factory, session_registry=None, **kwargs):
+        await session_factory()
+        return 0
+
+    def unconfigured(*args, **kwargs):
+        # The real error the factory raises, not a bare ValueError: only these
+        # subclasses route into setup mode, so a stand-in would exercise the
+        # fail-fast branch instead of the path under test.
+        from local_operator.session_factory import HostingNotConfiguredError
+
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    fake_tui = _fake_tui_module()
+    setattr(fake_tui, "run_tui", run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", unconfigured)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    with patch("sys.argv", ["program", "--model", "some-model"]):
+        assert main() == 0
+    assert seen["initial_model"] is None
+    assert (
+        seen["override"] is False
+    ), "an unresolved model must not be claimed as a deliberate override"
+
+
 def test_main_interactive_tty_uses_tui(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1447,6 +1546,16 @@ def test_golden_legacy_parser_surface() -> None:
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     current = _inventory(build_cli_parser())
 
+    # The ONE deliberate relaxation of the legacy surface, recorded here rather
+    # than edited into the golden data so the reason is visible to a reviewer.
+    # `exec` grew loop-only and piped-stdin forms (`--loop`, `--loop-goal`, `-`,
+    # omitted-with-a-pipe), and argparse cannot express "required unless one of
+    # those" — so the positional is `nargs="?"` and `run_exec` enforces the real
+    # rule, naming the ways to supply a prompt. Relaxing required->optional is
+    # backward compatible: every legacy invocation that passed a prompt still
+    # parses identically. Nothing else may change shape.
+    RELAXED_TO_OPTIONAL = {("exec", "POS:command"): {"required": False, "nargs": "?"}}
+
     problems: list[str] = []
     for command, options in golden.items():
         if command not in current:
@@ -1470,7 +1579,10 @@ def test_golden_legacy_parser_surface() -> None:
                 if removed:
                     problems.append(f"{command}: {key} lost choices: {sorted(removed)}")
                 continue
+            allowed = RELAXED_TO_OPTIONAL.get((command, key), {})
             for field in ("dest", "default", "required", "nargs"):
+                if field in allowed and now[field] == allowed[field]:
+                    continue
                 if now[field] != spec[field]:
                     problems.append(
                         f"{command}: {key} {field} changed: " f"{spec[field]!r} -> {now[field]!r}"
@@ -1535,12 +1647,17 @@ def test_resume_survives_in_front_of_the_subcommand() -> None:
 
     # And the bare form still means "the most recent". It has to come last: with
     # `nargs="?"` a following word IS the id, so `--resume hi` names a session
-    # called `hi` and leaves exec without a prompt. That exits 2 with a usage
-    # message rather than doing something surprising, which is the acceptable end
-    # of an ambiguity argparse cannot resolve for us.
+    # called `hi` and leaves exec without a prompt.
     assert parser.parse_args(["exec", "hi", "--resume"]).resume == cli.RESUME_LATEST
-    with pytest.raises(SystemExit):
-        parser.parse_args(["exec", "--resume", "hi"])
+
+    # That case USED to exit 2, because `command` was a required positional.
+    # `exec` now supports loop-only and piped-stdin runs, so the positional is
+    # optional and argparse can no longer reject it at parse time. The ambiguity
+    # is unchanged and still resolved the same way (`hi` is the session id, not
+    # the prompt); only the layer that reports it moved, to `run_exec`, which
+    # names how to supply a prompt instead of printing a bare usage block.
+    ambiguous = parser.parse_args(["exec", "--resume", "hi"])
+    assert ambiguous.resume == "hi" and ambiguous.command is None
 
 
 def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
@@ -1554,8 +1671,9 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
     from local_operator.exec_worker import build_parser
 
     argv = build_worker_argv("hi", ExecArgs(resume="sess-abc123"))
-    assert "--resume" in argv
-    assert argv[argv.index("--resume") + 1] == "sess-abc123"
+    # `--resume=<id>` as one item: every value-carrying option uses the `=`
+    # form so a value beginning with `-` cannot be read as the next option.
+    assert "--resume=sess-abc123" in argv
 
     # And the worker on the other side accepts what was serialized — parsed from
     # the real argv minus the `python [flags] -m <module>` prefix, so the test
@@ -1566,7 +1684,7 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
     assert build_parser().parse_args(argv[argv.index("-m") + 2 :]).resume == "sess-abc123"
 
     # Nothing is emitted when nothing was asked for.
-    assert "--resume" not in build_worker_argv("hi", ExecArgs())
+    assert not any(a.startswith("--resume") for a in build_worker_argv("hi", ExecArgs()))
 
 
 def test_a_bare_resume_classifies_sessions_before_resolving_latest(tmp_path, monkeypatch) -> None:

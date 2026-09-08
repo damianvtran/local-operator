@@ -267,7 +267,7 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not self.entries:
             return 0
-        tiers = {0 if entry.rank[0] <= 2 else 1 for entry in self.entries}
+        tiers = {0 if entry.active else 1 for entry in self.entries}
         # Per section: its heading and the blank beneath it, plus a blank
         # above every heading after the first. The outer "Sessions" title is
         # not counted — it is not drawn at all once any header is (`render`).
@@ -298,15 +298,19 @@ class SessionSidebar(Widget, can_focus=True):
         presentational is also what makes keyboard traversal cross a boundary
         as an ordinary step, with no stall and no skip.
 
-        The boundary is ``CatalogEntry.rank``'s existing tier — 0-2 (pending,
-        unseen, live) is active, 3 is previous — which is the same partition
-        the mobile relay draws, so the two surfaces agree without a new field.
-        An empty section contributes no header.
+        The boundary is ``CatalogEntry.active``, i.e. the tier
+        ``session_category`` assigns — 0 pending, 1 unseen-complete, 2 error,
+        3 interrupted, 4 busy and 5 live are active; 6 previous is not — which
+        is the same partition the mobile relay draws, so the two surfaces agree
+        without a new field. Ordering carries one further key than the tier (an
+        armed wake floats within PREVIOUS, where every row is cold), but it never
+        crosses this boundary and never applies above it. An empty section
+        contributes no header.
         """
         rows: list[tuple[str, CatalogEntry | None]] = []
         section: str | None = None
         for entry in self.visible_entries:
-            current = "active" if entry.rank[0] <= 2 else "previous"
+            current = "active" if entry.active else "previous"
             if current != section:
                 # A blank ABOVE every heading but the first, and one BELOW
                 # every heading. The ask was "an active sessions header and

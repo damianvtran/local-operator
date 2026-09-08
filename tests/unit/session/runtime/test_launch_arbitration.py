@@ -81,7 +81,15 @@ class FakeRuntimeFleet:
 
     # -- the spawn contract -------------------------------------------------
 
-    def spawn(self, session_id: str, cwd: str, *, defer_materialise: bool) -> None:
+    def spawn(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        defer_materialise: bool,
+        initial_model=None,
+        model_selection_override=False,
+    ) -> None:
         self.spawns += 1
         self.deferred.append(defer_materialise)
         directory = self.config_dir / "sessions" / session_id
@@ -183,7 +191,14 @@ def fleet(tmp_path: Path, monkeypatch):  # noqa: ANN201
     (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
     instance = FakeRuntimeFleet(tmp_path)
 
-    def _spawn(session_id: str, cwd: str, *, defer_materialise: bool) -> None:
+    def _spawn(
+        session_id: str,
+        cwd: str,
+        *,
+        defer_materialise: bool,
+        initial_model=None,
+        model_selection_override=False,
+    ) -> None:
         instance.spawn(session_id, cwd, defer_materialise=defer_materialise)
 
     monkeypatch.setattr("local_operator.session.runtime.launch._spawn_runtime", _spawn)
@@ -263,7 +278,7 @@ async def test_engaging_during_construction_waits_instead_of_spawning(
     instance.loop = asyncio.get_running_loop()
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: instance.spawn(
+        lambda session_id, cwd, *, defer_materialise, **seed: instance.spawn(
             session_id, cwd, defer_materialise=defer_materialise
         ),
     )
@@ -312,8 +327,10 @@ async def test_warm_errand_defers_materialisation_and_others_do_not(
     import local_operator.session.runtime.launch as launch_module
 
     original = launch_module._spawn_runtime
-    launch_module._spawn_runtime = lambda session_id, cwd, *, defer_materialise: other.spawn(
-        session_id, cwd, defer_materialise=defer_materialise
+    launch_module._spawn_runtime = (
+        lambda session_id, cwd, *, defer_materialise, **seed: other.spawn(
+            session_id, cwd, defer_materialise=defer_materialise
+        )
     )
     try:
         await engage_runtime(
@@ -366,7 +383,7 @@ async def test_engage_times_out_rather_than_spinning_forever(tmp_path: Path, mon
     (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: None,  # a spawn that never starts
+        lambda session_id, cwd, *, defer_materialise, **seed: None,  # a spawn that never starts
     )
     with pytest.raises(TimeoutError):
         await engage_runtime(
@@ -410,7 +427,12 @@ async def test_a_candidate_that_dies_during_construction_is_respawned(
             return self.returncode
 
     def dies_during_construction(
-        session_id: str, cwd: str, *, defer_materialise: bool
+        session_id: str,
+        cwd: str,
+        *,
+        defer_materialise: bool,
+        initial_model=None,
+        model_selection_override=False,
     ) -> _DeadPopen:
         """Take the lease, then vanish — publishing no record."""
         from local_operator.session_lease import acquire_session_lease
@@ -461,7 +483,14 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
         def poll(self) -> int:
             return self.returncode
 
-    def dies_with_a_reason(session_id: str, cwd: str, *, defer_materialise: bool) -> _DeadPopen:
+    def dies_with_a_reason(
+        session_id: str,
+        cwd: str,
+        *,
+        defer_materialise: bool,
+        initial_model=None,
+        model_selection_override=False,
+    ) -> _DeadPopen:
         from local_operator.session_lease import acquire_session_lease
 
         acquire_session_lease(tmp_path / "sessions" / session_id).release()
@@ -754,7 +783,7 @@ async def test_engage_polls_densely_while_its_own_candidate_constructs(
 
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: _LiveCandidate(),
+        lambda session_id, cwd, *, defer_materialise, **seed: _LiveCandidate(),
     )
 
     slept: list[float] = []
@@ -802,7 +831,7 @@ async def test_engage_uses_the_coarse_grid_when_nothing_is_constructing(
     # so the loop can observe no construction in flight.
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: None,
+        lambda session_id, cwd, *, defer_materialise, **seed: None,
     )
 
     slept: list[float] = []
@@ -848,7 +877,7 @@ async def test_a_dense_window_does_not_outlive_its_welcome(tmp_path: Path, monke
 
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: _WedgedCandidate(),
+        lambda session_id, cwd, *, defer_materialise, **seed: _WedgedCandidate(),
     )
 
     slept: list[float] = []
@@ -932,7 +961,9 @@ async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
     # retrying the dial. A spawn here would be a separate (arbitration) bug.
     monkeypatch.setattr(
         "local_operator.session.runtime.launch._spawn_runtime",
-        lambda session_id, cwd, *, defer_materialise: pytest.fail("spawned despite a live record"),
+        lambda session_id, cwd, *, defer_materialise, **seed: pytest.fail(
+            "spawned despite a live record"
+        ),
     )
 
     slept: list[float] = []

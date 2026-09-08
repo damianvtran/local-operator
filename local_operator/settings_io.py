@@ -264,22 +264,14 @@ class Section:
 # retired keys are last.
 
 SECTIONS: tuple[Section, ...] = (
-    # LIVE with a rule, not unconditionally: ``Session._apply_config_change``
-    # switches a running session onto the new pair iff its model CAME from
-    # config (not an agent profile, not ``--hosting``/``--model``) and no
-    # explicit ``/model`` choice has been made since boot. A session the user
-    # pointed somewhere deliberately keeps its choice and prints a keep
-    # notice — ``/model saved`` re-adopts the default on demand. Children
-    # (subagents) never follow; their spec was picked at spawn. Before this
-    # the section was NEW_LAUNCH and the operator's report was exactly the
-    # painted lie: `/model default` in one pane told every other pane
-    # "model_name needs a relaunch" while "all my agents" was the intent.
+    # Defaults are sampled at conversation birth. The watcher still announces
+    # edits, but only an explicit local /model action may select for an owner.
     Section(
         "model",
         "Model",
-        Scope.LIVE,
-        "The provider and model sessions run on. Sessions that chose a model "
-        "with /model keep it (/model saved adopts the default).",
+        Scope.NEW_SESSIONS,
+        "Provider and model for new conversations. Existing sessions keep their model; "
+        "/model saved adopts the default here.",
     ),
     # Split out of ``model`` (review round 1, M3). The design left this key in
     # ``model`` and proposed documenting the discrepancy, which was defensible
@@ -289,9 +281,8 @@ SECTIONS: tuple[Section, ...] = (
     # ``configure._openai_api_mode`` reads the rebound mapping when it builds
     # the next client. Scope is uniform within a section by construction, so
     # saying something true here means a section of its own, exactly as ``fork``
-    # and ``web_tools`` are. ``model`` has since gone LIVE too, but by a
-    # DIFFERENT mechanism (a guarded model switch rather than a mapping
-    # rebind), so the two stay separate sections with separate descriptions.
+    # and ``web_tools`` are. Transport policy stays live while the model
+    # identity belongs to its conversation, so these must remain separate.
     Section(
         "providers",
         # Titled for the WIRE FORMAT, not the word "provider" (design review
@@ -535,7 +526,7 @@ SETTINGS: tuple[Setting, ...] = (
         # key path (the thing a user maps a row to the file by) and then the
         # sentence itself is clipped mid-clause with no ellipsis (design round
         # 1, D2). Measure any edit to these four before landing it.
-        help="Provider sessions run on unless chosen with /model. Also /model default.",
+        help="Provider for new conversations. /model saved adopts it here.",
         empty_unsets=True,
     ),
     Setting(
@@ -546,7 +537,7 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="",
         # 72 cells — see the note on `hosting` above.
-        help="Model id sessions run on unless chosen with /model. Also /model default.",
+        help="Model for new conversations. /model saved adopts it here.",
         empty_unsets=True,
     ),
     # -- providers ----------------------------------------------------------
@@ -860,6 +851,19 @@ SETTINGS: tuple[Setting, ...] = (
         # something untrue about its own effect" class (#431). The detail line
         # now reads `inert: Desktop notifications is off` through the mechanism
         # four `session.cleanup.*` rows already use (design round 1, D4).
+    ),
+    Setting(
+        key="display.time_format",
+        path=("display.time_format",),
+        section="appearance",
+        label="Wake time format",
+        kind=Kind.ENUM,
+        default="12h",
+        help="Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock.",
+        choices=(
+            Choice("12h", "12-hour", "7:52 PM PDT"),
+            Choice("24h", "24-hour", "19:52 PDT"),
+        ),
     ),
     Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`

@@ -119,6 +119,7 @@ class TestTheCloneItself:
             ATTACHMENT_SIDECAR_NAME,
             TITLE_SIDECAR_NAME,
             FORK_BOUNDARY_NAME,  # written by the fork, not inherited
+            "created_at.json",  # own birth, never the parent's inherited journal date
             "origin.json",  # written by the fork itself, not copied
         }
 

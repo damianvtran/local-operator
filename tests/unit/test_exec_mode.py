@@ -280,7 +280,12 @@ def test_build_worker_argv_roundtrip() -> None:
     # without it a background exec started inside a checkout of this project
     # runs that checkout (see local_operator.interpreter).
     assert argv[:4] == [sys.executable, "-P", "-m", "local_operator.exec_worker"]
-    assert argv[4:6] == ["--prompt", "do it"]
+    # `--opt=value`, never two argv items: a value that begins with `-` (a name
+    # like `-nightly`, a goal phrased `-- verify everything`) would otherwise
+    # read as the next OPTION and kill the worker at parse_args, before
+    # `--job-id` is honoured — so no terminal ledger row, and reconciliation
+    # mislabels a run that never started as `interrupted`.
+    assert argv[4] == "--prompt=do it"
     # Every set flag serializes; parse it back through the worker parser.
     parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.prompt == "do it"
@@ -341,44 +346,34 @@ def test_build_worker_argv_threads_control_to_the_worker() -> None:
 # --- exec_mode foreground -------------------------------------------------------
 
 
-def test_run_exec_starts_no_control_surface_by_default(fake_factory, monkeypatch, capsys) -> None:
-    """The default exec run stays invisible: no record, no socket, no line.
-
-    Opt-in is the whole design (`lop sessions` filters on nothing, so every
-    scripted run would otherwise become a `lop send` target), and this is the
-    pin on it.
-    """
-    started: list[bool] = []
-    monkeypatch.setattr(
-        "local_operator.session.runtime.exec_control.start_exec_control",
-        lambda *a, **k: started.append(True),
-    )
+def test_run_exec_publishes_without_replacing_default_gates(fake_factory, capsys) -> None:
+    """Discovery is universal; installing supervisor gates remains opt-in."""
     session = FakeSession([_success_script()])
+    original = object()
+    session.set_approval_handler(original)
     fake_factory(session)
     assert exec_mode.run_exec("say hello", ExecArgs()) == 0
-    assert started == []
-    assert "lop exec control" not in capsys.readouterr().err
+    assert session.approval_handler is original
+    # `session:`, not `control:` — discovery is published for every run now, so
+    # the noun has to report the MODE. Printing the name of the flag the user
+    # did not pass told them the supervised gate was installed; it is not.
+    assert "lop exec session" in capsys.readouterr().err
 
 
 def test_run_exec_control_prints_the_endpoint_on_stderr(fake_factory, monkeypatch, capsys) -> None:
     """stdout is the payload stream; chrome that lands in it corrupts the only
     output the run has."""
 
-    class _Control:
-        endpoint_line = "lop exec control: session_id=x pid=1 port=2 record=/r"
-
-        async def aclose(self) -> None:
-            closed.append(True)
+    from local_operator.session.runtime.exec_control import ExecControl
 
     closed: list[bool] = []
+    original_close = ExecControl.aclose
 
-    async def fake_start(session, *, enabled, cwd, yolo=False):  # noqa: ANN001
-        assert enabled is True
-        return _Control()
+    async def close(control):
+        closed.append(True)
+        await original_close(control)
 
-    monkeypatch.setattr(
-        "local_operator.session.runtime.exec_control.maybe_start_exec_control", fake_start
-    )
+    monkeypatch.setattr(ExecControl, "aclose", close)
     session = FakeSession([_success_script()])
     fake_factory(session)
     assert exec_mode.run_exec("say hello", ExecArgs(control=True)) == 0
@@ -397,18 +392,15 @@ def test_run_exec_control_closes_before_the_session_is_disposed(fake_factory, mo
     """
     order: list[str] = []
 
-    class _Control:
-        endpoint_line = "endpoint"
+    from local_operator.session.runtime.exec_control import ExecControl
 
-        async def aclose(self) -> None:
-            order.append("control-closed")
+    original_close = ExecControl.aclose
 
-    async def fake_start(session, *, enabled, cwd, yolo=False):  # noqa: ANN001
-        return _Control()
+    async def close(control):
+        order.append("control-closed")
+        await original_close(control)
 
-    monkeypatch.setattr(
-        "local_operator.session.runtime.exec_control.maybe_start_exec_control", fake_start
-    )
+    monkeypatch.setattr(ExecControl, "aclose", close)
     session = FakeSession([_success_script()])
     original_dispose = session.dispose
 
@@ -511,6 +503,9 @@ def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     fake_factory(RaisingSession([]))
     code = exec_mode.run_exec("explode", ExecArgs())
     assert code == 1
+    # A RAISING turn emits no error event, so the renderer has nothing to
+    # print: the owner queue's recorded reason is the only diagnosis, and it
+    # must reach stderr rather than being swallowed into a log.
     assert "turn blew up" in capsys.readouterr().err
 
 
@@ -748,6 +743,7 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec(
         "write a long report about penguins",
@@ -777,14 +773,15 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # index error rather than naming the cause. Deriving it means another
     # interpreter flag later cannot silently reintroduce that.
     assert argv[1] == SAFE_PATH_FLAG
-    assert argv[argv.index("-m") :][:4] == [
+    assert argv[argv.index("-m") :][:3] == [
         "-m",
         "local_operator.exec_worker",
-        "--prompt",
-        "write a long report about penguins",
+        "--prompt=write a long report about penguins",
     ]
     assert "--json" in argv and "--yolo" in argv
-    assert "--job-id" in argv  # CL-09 terminal-record wiring
+    # `--job-id=<id>`, one item: see build_worker_argv on why every
+    # value-carrying option uses the `=` form.
+    assert any(a.startswith("--job-id=") for a in argv)  # CL-09 terminal-record wiring
     if sys.platform != "win32":
         assert kwargs.get("start_new_session") is True
 
@@ -792,7 +789,7 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # STDERR: --json and --background are independent flags, so these two
     # notices must not precede the event stream on stdout.
     out = capsys.readouterr().err
-    assert "Started background job" in out
+    assert "Background job" in out
     log_line = next(line for line in out.splitlines() if line.startswith("Log: "))
     log_path = Path(log_line.removeprefix("Log: "))
     assert log_path == logs_dir / log_path.name
@@ -836,6 +833,7 @@ def test_spawn_background_unconfigured_hosting_returns_one(
     )
     popen_mock = MagicMock()
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec("do a thing", ExecArgs(background=True))
 
@@ -864,6 +862,7 @@ def test_logs_dir_and_log_file_permissions(monkeypatch, tmp_path: Path) -> None:
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 1
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("perm task", ExecArgs(background=True)) == 0
     assert (logs_dir.stat().st_mode & 0o777) == 0o700
@@ -885,6 +884,7 @@ def test_background_preflight_blocks_spawn(
     monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", broken)
     popen_mock = MagicMock()
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     code = exec_mode.run_exec("doomed", ExecArgs(background=True))
     assert code != 0
@@ -987,9 +987,10 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         "import asyncio\n"
         "import local_operator.exec_worker as ew\n"
         "from local_operator.exec_worker import EXIT_INTERRUPTED\n"
-        "class Slow:\n"
+        "from tests.unit.test_exec_mode import FakeSession\n"
+        "class Slow(FakeSession):\n"
         "    def __init__(self):\n"
-        "        self.disposed = False\n"
+        "        super().__init__([])\n"
         "        self._abort = asyncio.Event()\n"
         "    def subscribe(self, handler):\n"
         "        return lambda: None\n"
@@ -1011,7 +1012,9 @@ def test_exec_worker_sigterm_yields_130(tmp_path: Path) -> None:
         "import sys\n"
         "sys.exit(code)\n"
     )
-    env = dict(_os.environ)
+    env = {key: value for key, value in _os.environ.items() if not key.startswith("CMUX_")}
+    env["HOME"] = str(tmp_path / "home")
+    env["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path / "config")
     env["PYTHONPATH"] = str(repo_root) + _os.pathsep + env.get("PYTHONPATH", "")
     proc = sp.Popen(
         [sys.executable, "-c", script],
@@ -1231,6 +1234,7 @@ def test_background_logs_and_ledger_follow_the_config_dir_override(
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 5150
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("isolated background task", ExecArgs(background=True)) == 0
 

@@ -110,6 +110,8 @@ def resolve_model_configuration(
     request_hosting: Optional[str] = None,
     request_model: Optional[str] = None,
     current_agent: Optional[AgentData] = None,
+    persist_conversation: bool = False,
+    model_selection_override: bool = True,
 ) -> tuple[ModelConfiguration, str, str]:
     """Resolve hosting/model and build the ``ModelConfiguration``.
 
@@ -121,9 +123,25 @@ def resolve_model_configuration(
         ValueError: when hosting/model config is missing or the provider is
             unknown.
     """
-    hosting, model_name = resolve_hosting_model(
-        config_manager, request_hosting, request_model, current_agent
-    )
+    if persist_conversation:
+        from local_operator.session_factory import (
+            resolve_hosting_model as resolve_session_model,
+        )
+
+        hosting, model_name = resolve_session_model(
+            current_agent,
+            argparse.Namespace(
+                hosting=request_hosting,
+                model=request_model,
+                train=True,
+                model_selection_override=model_selection_override,
+            ),
+            config_manager,
+        )
+    else:
+        hosting, model_name = resolve_hosting_model(
+            config_manager, request_hosting, request_model, current_agent
+        )
 
     chat_args: dict[str, Any] = {}
     if current_agent is not None:
@@ -193,6 +211,7 @@ async def initialize_operator(
     auto_save_conversation: bool = False,
     job_id: Optional[str] = None,
     verbosity_level: VerbosityLevel = VerbosityLevel.VERBOSE,
+    model_selection_override: bool | None = None,
 ) -> "SessionProtocol":
     """Build a fully wired harness session for a server or scheduled run.
 
@@ -213,6 +232,11 @@ async def initialize_operator(
     """
     from local_operator import session_factory
 
+    explicit = (
+        bool(request_hosting or request_model)
+        if model_selection_override is None
+        else model_selection_override
+    )
     _, hosting, model_name = resolve_model_configuration(
         config_manager,
         credential_manager,
@@ -220,6 +244,8 @@ async def initialize_operator(
         request_hosting=request_hosting,
         request_model=request_model,
         current_agent=current_agent,
+        persist_conversation=persist_conversation,
+        model_selection_override=explicit,
     )
     logger.debug(
         f"Initializing session (Type: {operator_type.name}) with Hosting: {hosting}, "
@@ -232,6 +258,9 @@ async def initialize_operator(
         current_agent=current_agent,
         persist_conversation=persist_conversation,
     )
+    # This pair may be a synthesized default; only the original caller's
+    # intent can supersede the saved selection on a persisted conversation.
+    session_args.model_selection_override = explicit
     session = await session_factory.create_session(
         session_args,
         config_manager,

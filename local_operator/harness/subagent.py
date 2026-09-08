@@ -763,6 +763,7 @@ def _make_runner(
             # records outlive them so a child stays resumable, and without
             # this the roster (``hub op='list'``) could not say whether a
             # swept child finished or crashed.
+            await _finish_child_browser(child, comms, job_id, "completed")
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -786,6 +787,9 @@ def _make_runner(
             # the record's ``paused`` flag alone precisely so the roster can
             # still tell the two apart.
             with contextlib.suppress(BaseException):
+                await _settle_child_cleanup(
+                    asyncio.create_task(_finish_child_browser(child, comms, job_id, "cancelled"))
+                )
                 await _publish_terminal_outcome(
                     comms,
                     emit,
@@ -800,6 +804,7 @@ def _make_runner(
             # is what the roster shows for a failed child once the row is
             # swept, which is the state an operator is most likely to be
             # looking at when they ask what went wrong.
+            await _finish_child_browser(child, comms, job_id, "failed")
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -934,6 +939,44 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
             break
         cut = index
     return messages[:cut]
+
+
+async def _finish_child_browser(
+    child: "Session | None", comms: Any, job_id: str, outcome: str
+) -> None:
+    """Resource settlement precedes authoritative outcome publication.
+
+    Pausing cancels the runner too, but is not task completion. Preserve that
+    explicit lifecycle hold through dispose rather than classifying cancellation
+    (or a dead process) as authority to close a suspended interaction.
+    """
+    if child is None:
+        return
+    record = comms._record(job_id) if comms is not None else None
+    resource = getattr(getattr(child, "_browser", None), "resource", None)
+    if record is not None and record.paused and resource is not None:
+        if resource.generation or resource.path.exists():
+            try:
+                resource.initialize()
+                resource.record["retention"] = "paused scope"
+                resource.remember(child._browser.surface_id, state="retained")
+            except (RuntimeError, OSError, ValueError):
+                logger.warning("paused browser ownership changed; retained successor untouched")
+        return
+    if resource is None or not callable(getattr(child, "finish_browser_scope", None)):
+        # A host that built a BrowserSurface without a resource has no durable
+        # ownership to settle. Reading the generation anyway raised straight
+        # through the completed/failed paths, replacing the child's real outcome.
+        return
+    result = await child.finish_browser_scope(
+        scope_id=child.session_id,
+        # Off the resource the branch has already proven non-None, not the
+        # Session property, so this cannot fault on an unwired host.
+        generation=resource.execution_generation,
+        outcome=outcome,
+    )
+    if result.state not in ("closed", "retained"):
+        logger.warning("child browser cleanup %s: %s", result.state, result.detail)
 
 
 async def _dispose_child(child: "Session") -> None:
@@ -1567,7 +1610,9 @@ async def _construct_child_session(
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
     mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
-    transcript = Transcript(session_dir)
+    # Birth metadata must be durable before publication, without its fsync
+    # blocking the parent or other children sharing this event loop.
+    transcript = await asyncio.to_thread(Transcript, session_dir)
     # The operator's standing instructions are machine-wide, so a delegated
     # slice inherits them for the same reason it inherits the goal: the parent
     # authoring a task prompt is not a reliable channel for a preference the

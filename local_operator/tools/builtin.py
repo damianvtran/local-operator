@@ -4827,10 +4827,12 @@ class WakeParams(BaseModel):
 
 
 def _wake_due_label(schedule: WakeSchedule) -> str:
-    due = datetime.fromtimestamp(schedule.next_due_at / 1000, tz=UTC)
+    from local_operator.wakes.display import format_wake_time
+
+    due = format_wake_time(schedule.next_due_at)
     every = f" every {format_duration(schedule.every_ms)}" if schedule.every_ms else ""
     fired = f" (fired {schedule.fired_count}x)" if schedule.fired_count else ""
-    return f"next at {due.isoformat()}{every}{fired}"
+    return f"next at {due}{every}{fired}"
 
 
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
@@ -4865,11 +4867,13 @@ async def _wake_create(
     schedule = outcome["schedule"]
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
     await scheduler.update(updated)
-    due = datetime.fromtimestamp(schedule.next_due_at / 1000, tz=UTC)
+    from local_operator.wakes.display import format_wake_time
+
+    due = format_wake_time(schedule.next_due_at)
     return _text(
         tool_call_id,
         "wake",
-        f"Scheduled wake '{schedule.id}' at {due.isoformat()}: \"{schedule.message}\"",
+        f"Scheduled wake '{schedule.id}' at {due}: \"{schedule.message}\"",
     )
 
 
@@ -5491,6 +5495,9 @@ BROWSER_ACTIONS = (
     "request_access",
     "await_access",
     "cancel_access",
+    "recover",
+    "retain",
+    "release",
 )
 
 #: ``retitle`` is a wire METHOD but deliberately NOT an action: the SESSION
@@ -5601,7 +5608,9 @@ class BrowserParams(BaseModel):
         "sessions' included) | request_access (raise the site-approval prompt "
         "for a not-yet-allowed origin; returns pending/allowed/denied immediately) "
         "| await_access (wait for the user's decision on that prompt) | "
-        "cancel_access (cancel YOUR pending exact-origin request) | close (end "
+        "cancel_access (cancel YOUR pending exact-origin request) | "
+        "recover (recover YOUR tab after an interrupted action) | "
+        "retain (hold it, reason in text) | release (end that hold) | close (end "
         "YOUR tab when done with it)."
     )
     url: str = Field(
@@ -5617,7 +5626,7 @@ class BrowserParams(BaseModel):
         "scopes the text for 'read' (default: body); for 'scroll', the element "
         "to bring into view.",
     )
-    text: str = Field(default="", description="Text to enter for 'type'.")
+    text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
     # scroll params. All optional: with none set, 'scroll' pages one viewport
     # down. Precedence is selector > x/y > direction > default (mirrors
     # extension/src/commands/scroll.ts).
@@ -6795,12 +6804,39 @@ def _browser_cwd_label(cwd: str) -> str:
     return "" if path.name in ("", path.anchor) else path.name
 
 
-def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> dict[str, str]:
+def _browser_ownership_text(state: str, has_surface: bool) -> str:
+    """Protocol state -> what the agent should do next.
+
+    ``allocating``/``unresolved`` are wire vocabulary: returned verbatim they
+    read as a success while no tab exists, which sent an agent round a loop of
+    three non-error answers and no tab. Say what is true and what to do.
+    """
+    if state in ("owned", "cleanup_pending") and has_surface:
+        return f"Browser ownership recovered ({state}); your tab is available again."
+    if state == "retained":
+        return "Browser tab retained; it stays open past this turn until you 'release' it."
+    if state == "released":
+        return "Browser retention cleared; the tab closes at the end of this scope."
+    if state == "closed":
+        return "Browser ownership settled; no tab is open. Use 'open' to start one."
+    if state == "allocating":
+        return (
+            "Nothing to recover: an allocation was started but no tab exists. If 'open' "
+            "reported the 8-tab limit, none can be allocated until a tab is released."
+        )
+    return "Nothing to recover: this session has no browser tab. Use 'open' to start one."
+
+
+def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> dict[str, Any]:
     """Trusted wire metadata; model/browser arguments cannot override it."""
-    return {
+    identity = {
         "requester": _browser_requester(context, tool_call_id),
         "session_label": _browser_session_label(context),
     }
+    resource = getattr(getattr(context, "browser", None), "resource", None)
+    if resource is not None and resource.generation:
+        identity.update(resource.params())
+    return identity
 
 
 async def _bridge_call(
@@ -6829,6 +6865,10 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        # A failed new allocation may also fail rollback. Keep its private
+        # capability on the host, not in model-visible diagnostics.
+        if exc.data.get("cleanup_pending") and isinstance(exc.data.get("tab"), str):
+            problem.details["cleanup_surface"] = exc.data["tab"]
         return None, problem
     except BridgeUnreachable as exc:
         return None, _error(tool_call_id, "browser", str(exc))
@@ -6870,6 +6910,9 @@ async def _bridge_open(
             {"url": raw_url.strip(), **_browser_identity_params(context, tool_call_id)},
         )
     if problem is not None:
+        pending = (problem.details or {}).pop("cleanup_surface", "")
+        if isinstance(pending, str) and re.fullmatch(r"bridge:\d+:[A-Za-z0-9_-]+", pending):
+            state.surface_id = pending
         return problem
     assert result is not None
     surface = str(result.get("tab", ""))
@@ -7408,13 +7451,15 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
     if not surface:
         return ""
     if surface.startswith("bridge:"):
+        resource = getattr(state, "resource", None)
+        identity = resource.params() if resource is not None and resource.generation else {}
         _result, problem = await _bridge_call(
-            "teardown", "close", {"tab": surface}, surface=surface
+            "teardown", "close", {"tab": surface, **identity}, surface=surface
         )
-        state.surface_id = ""
-        if problem is None:
+        if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
+            state.surface_id = ""
             return ""
-        return "browser extension could not close the tab"
+        return "browser extension could not close the tab; ownership retained for retry"
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
@@ -7426,16 +7471,146 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
     surface = state.surface_id
     problem = await close_browser_surface(state)
     if problem:
-        return _text(
+        disposition = "ownership retained" if state.surface_id else "dropped the handle"
+        return _error(
             tool_call_id,
             "browser",
-            f"Browser surface {surface} could not be closed ({problem}); dropped the handle.",
+            f"Browser surface {surface} could not be closed ({problem}); {disposition}.",
         )
     return _text(tool_call_id, "browser", f"Closed browser surface {surface}.")
 
 
 @_guard("browser")
 async def execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Serialize and persist browser side effects at the host-owned boundary."""
+    state = _browser_state(context)
+    resource = getattr(state, "resource", None)
+    if resource is None or state.surface_id.startswith("surface:"):
+        return await _execute_browser(tool_call_id, args, signal, on_update, context)
+    if not resource.generation and not await bridge_browser_reachable():
+        return await _execute_browser(tool_call_id, args, signal, on_update, context)
+    try:
+        validated = BrowserParams(**args)
+    except ValidationError as exc:
+        return _error(tool_call_id, "browser", str(exc))
+    action = validated.action.strip().lower()
+    if action not in BROWSER_ACTIONS:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
+        )
+    invalid = _validate_browser_args(action, validated)
+    if invalid:
+        return _error(tool_call_id, "browser", invalid)
+    from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
+    from local_operator.browser_bridge.resources import BrowserOwnershipError
+
+    async with resource.lock:
+        try:
+            resource.initialize()
+            if not resource.recovered:
+                await resource.recover()
+                state.surface_id = str(resource.record.get("surface_id", ""))
+        except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
+            return _error(tool_call_id, "browser", str(exc))
+        action = str(args.get("action", "")).strip().lower()
+        try:
+            if action == "recover":
+                result = await resource.recover()
+                state.surface_id = str(result.get("tab", ""))
+                return _text(
+                    tool_call_id,
+                    "browser",
+                    _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
+                )
+            if action in ("retain", "release"):
+                from local_operator.browser_bridge.backend import BridgeClient
+
+                reason = str(args.get("text", "")).strip()
+                if action == "retain" and not reason:
+                    # Caught HERE because `text` defaults to "", so omitting it
+                    # is a well-formed call a model will make; the extension's
+                    # refusal would otherwise arrive as a raw traceback in the
+                    # context of the one action that protects a pending login.
+                    return _error(
+                        tool_call_id,
+                        "browser",
+                        "'retain' needs a reason: pass text='pending login' (or similar) "
+                        "describing why this tab must stay open past your turn.",
+                    )
+                result = await BridgeClient().call(
+                    f"owner_{action}", {**resource.params(), "reason": reason}
+                )
+                resource.record["retention"] = reason if action == "retain" else ""
+                if action == "release" and resource.record.get("terminal"):
+                    result = await BridgeClient().call(
+                        "owner_finish",
+                        {**resource.params(), "outcome": resource.record["terminal"]},
+                    )
+                    if result.get("state") == "closed":
+                        state.surface_id = ""
+                resource.record["surface_id"] = state.surface_id
+                resource.record["state"] = str(result.get("state", "unresolved"))
+                resource.assert_current()
+                resource._save()
+                return _text(
+                    tool_call_id,
+                    "browser",
+                    _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
+                )
+        except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
+            # Same containment the initialize/recover block above already has:
+            # an expected ownership or bridge refusal is a sentence, never a
+            # stack trace spent in the model's context.
+            return _error(tool_call_id, "browser", str(exc))
+        if resource.record.get("terminal"):
+            return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
+        if action == "open" and not state.surface_id:
+            resource.allocate()
+        failed_close = False
+        try:
+            result = await _execute_browser(tool_call_id, args, signal, on_update, context)
+            failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if action in ("request_access", "await_access", "cancel_access"):
+                access_state = (result.details or {}).get("state")
+                if access_state == "pending":
+                    resource.record["retention"] = "pending site approval"
+                elif access_state and resource.record.get("retention") == "pending site approval":
+                    from local_operator.browser_bridge.backend import BridgeClient
+
+                    await BridgeClient().call("owner_release", resource.params())
+                    resource.record["retention"] = ""
+            return result
+        finally:
+            # Lost responses retain the allocation intent. A retry/recover asks
+            # the extension for that exact allocation instead of opening twice.
+            #
+            # Swallowing is load-bearing, not defensive habit: a raising
+            # `finally:` DISCARDS the value the `try:` already produced, so an
+            # ownership advance racing a successful open would replace a real
+            # ToolResult (naming a tab that exists) with a traceback telling the
+            # model the action failed. Persistence is best-effort here; the next
+            # command's own `assert_current` is what refuses a stale owner.
+            pending = resource.record.get("state") == "allocating" and not state.surface_id
+            try:
+                resource.remember(
+                    state.surface_id,
+                    state="cleanup_pending" if failed_close else "allocating" if pending else None,
+                )
+            except (BrowserOwnershipError, OSError, ValueError):
+                logger.warning("browser ownership record not updated", exc_info=True)
+            if pending:
+                resource.recovered = False
+
+
+async def _execute_browser(
     tool_call_id: str,
     args: dict[str, Any],
     signal: AbortSignal | None = None,
@@ -7786,6 +7961,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "'tabs' lists every extension-driven tab including other sessions' "
             "(handles are redacted: the listing is awareness-only and cannot "
             "drive or close anything), and 'close' ends only your own tab. "
+            "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
+            "your turn with 'retain' (reason in text) and end that hold with 'release'. "
             "'scroll', 'logs' and "
             "'tabs' need the extension backend (cmux says so). On the extension, "
             "'open'/'goto' to a site the user has not approved fails with "

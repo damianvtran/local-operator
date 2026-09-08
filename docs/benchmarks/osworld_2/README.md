@@ -399,12 +399,44 @@ on; upstream still combines it with the task's proxy hint. Explicit `false`
 sets the switch off regardless of that hint, and post-policy requirements no
 longer demand `OSWORLD_PROXY_CREDENTIALS` or `OSWORLD_PROXY_ENDPOINT`.
 
-**Enabled setup remains incomplete.** The legacy credential/endpoint declarations
-are retained for omission and enabled proxy tasks for compatibility, but are
-insufficient: upstream expects an actual `ProxyPool`; the adapter does not wire
-those `OSWORLD_PROXY_*` inputs into one. Setting `true` or supplying those inputs
-is not proof of a working proxy. A real enabled setup needs a separately reviewed
-follow-up; this change builds no proxy bridge and fabricates no credentials.
+**Enabled setup now works, through `PROXY_CONFIG_FILE`.** This was the
+"separately reviewed follow-up" this section previously called for.
+
+Upstream builds its pool at *module import*: `desktop_env/controllers/setup.py`
+calls `init_proxy_pool(PROXY_CONFIG_FILE)` at the top level, reading that name
+via `os.getenv` with a default of the **CWD-relative**
+`evaluation_examples/settings/proxy/dataimpulse.json`. The adapter worker is
+spawned `-I` from an arbitrary CWD, so that default never resolved, and
+`load_proxies_from_file` swallows the error into a log line — leaving an empty
+pool that only failed later, at `reset_start`, with the VM already billed. Two
+of the ten frozen pilot tasks died that way on every model tried.
+
+Pass an absolute path to an upstream proxy-pool JSON file:
+
+```sh
+--infra PROXY_CONFIG_FILE=/abs/path/to/proxies.json
+```
+
+The file is a JSON list of objects with at least `host` and `port`
+(`username`, `password`, `protocol` optional), exactly as
+`ProxyPool.load_proxies_from_file` parses it. It is validated **before
+allocation** — absolute, a regular file, readable, size-bounded, and shaped the
+way upstream actually accepts — so a bad path is a free refusal naming both
+ways out rather than a paid crash. Because upstream re-reads the path at import,
+validation cannot guarantee the bytes it will load; a file edited in between can
+still yield a degraded pool.
+
+`PROXY_CONFIG_FILE` is **required** for a task whose descriptor sets
+`proxy = True` unless `OSWORLD_ENABLE_PROXY=false` selects system-disabled mode.
+The requirement is enforced in `reset_start` rather than `prepare` because
+`PrepareParams` carries no `task_id`: at `prepare` the task's proxy hint is
+structurally unknowable, so a check there would pass every task it was meant to
+protect.
+
+`OSWORLD_PROXY_CREDENTIALS` is **no longer declared** — nothing in the package
+ever consumed it, and demanding a secret the apparatus cannot use trains an
+operator to fabricate one. `OSWORLD_PROXY_ENDPOINT` remains declared but
+optional, so existing invocations are accepted unchanged.
 
 The requested switch is sealed as `osworld_enable_proxy_override` via the same
 manifest disclosure table as the compute overrides. An older adapter that does
@@ -537,6 +569,48 @@ The pieces, and what each guarantees:
   pinned `local-operator`, and — for paid runs — the `osworld` extra
   (upstream `desktop_env` and its ~380-package dependency tree; the committed
   lock resolves 424 packages in total).
+
+  Three construction details are load-bearing and cost about twenty minutes
+  to rediscover, because each fails *after* the previous gate passes:
+
+  - **`uv venv` cannot build this venv, at any flag combination.** It always
+    writes `bin/python3.12` as a symlink to `bin/python` (and that to the
+    managed toolchain), so discovery rejects the launch path with
+    `AdapterDiscoveryError: adapter launch path has a symlink or lexical
+    alias` before any spend. `--link-mode copy` does not change it (that
+    governs the *package* store, not the interpreter shims), nor do
+    `--managed-python`, `--relocatable`, or the now-undocumented
+    `--python-preference only-managed` — which is still parsed and honoured
+    despite being absent from `uv venv --help` since `--managed-python`
+    superseded it. Use `<base-python> -m venv --copies --without-pip <venv>`.
+  - **`venv --copies` copies the interpreter but not its runtime library.**
+    On the uv-managed macOS toolchain the copied binary resolves
+    `libpython3.12.dylib` through `@rpath` relative to the venv, so it dies at
+    startup with `dyld: Library not loaded: @rpath/libpython3.12.dylib`.
+    Copy `<toolchain>/lib/libpython3.12.dylib` into `<venv>/lib/` after
+    creating the venv. A venv whose interpreter cannot start is
+    indistinguishable, from the batch log, from a harness bug.
+
+  - **The adapter must be installed as a wheel, never `-e`.** An editable
+    install *does* write a `RECORD` — and `distribution_digest` hashes it
+    happily — but that RECORD covers only the `.pth` shim and the metadata
+    directory: it has **no rows under the package source**. So
+    `_resolve_module_artifact` finds no artifact for the entry module and
+    `discovery.py` raises `adapter entry module is not uniquely
+    RECORD-covered`. The error names RECORD coverage, not the editable install,
+    so read it as "the entry module's source is not listed", which is also what
+    it means in the rarer case of a genuinely malformed wheel. Build with
+    `uv build --wheel` and install the artifact.
+
+  `local-operator` itself may be editable without breaking discovery — only
+  the adapter distribution is resolved this way — but installing it as a
+  wheel too keeps one interpreter's provenance uniform, and a wheel is what
+  the committed lock describes. Note that the harness version in evidence is
+  *not* affected either way: `_harness_version` (`scripts/run_episode.py`)
+  deliberately prefers the checkout's `pyproject.toml` over
+  `importlib.metadata` precisely because install metadata goes stale on a
+  development checkout, and it reports the running tree's version under both
+  install modes.
 - **Exact-distribution discovery.** Before launch, `worker_argv` re-resolves
   both spawn boundaries symlink-free, verifies the release manifest, and
   re-hashes the workspace. At load, `distribution_digest` hashes every RECORD

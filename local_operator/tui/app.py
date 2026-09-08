@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -211,6 +211,7 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
+    CredentialArmChanged,
     Editor,
     EditorCopied,
     EditorCopyStale,
@@ -223,13 +224,16 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     Marked,
     ModelQueryOpened,
+    PastedCredential,
     RecallState,
     RefreshArgumentChoices,
     ShellModeChanged,
     SkillQueryOpened,
     StopRequested,
+    credential_payloads,
     expand_pastes,
     resolve_markers,
+    substitute_credentials,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -323,6 +327,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
         SessionDiagnostics,
         SessionScreen,
     )
+    from local_operator.variables import CredentialStoreFailure
 
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
@@ -1004,47 +1009,26 @@ TERMINAL_GATE_TIMEOUT_S = 30.0
 #:
 #: 80 measured against the alternatives on a real 716-message session, driving
 #: the real app: 40 msgs → 98.7 ms, 80 → 139 ms, 160 → 251 ms, 716 (all) →
-#: 1022 ms. 80 is a 7.3x win that still fills a 40-row terminal about twice
-#: over, so the reader lands on a screen with scrollback above it rather than
-#: on a viewport that is exactly as tall as its content — which would read as
-#: "my history is gone" and is the specific failure this bound must not cause.
+#: 1022 ms. That is a cheap seed, not a geometry guarantee: compact tools or
+#: hidden events can still leave it underfilled. The post-projection fill
+#: measures actual laid-out rows and reserves a viewport above the reader.
 RESUME_RENDER_MESSAGES = 80
 
-#: Messages mounted per backward page once the reader reaches the top. Smaller
-#: than the initial bound because a page is paid DURING an interaction: it must
-#: land within one frame, where the initial render is paid once behind a splash
-#: the user is already waiting on.
-RESUME_PAGE_MESSAGES = 60
+#: Raw messages per yielded render slice. A request fills a rendered viewport
+#: buffer across as many slices as needed; it is not one tiny RPC per notch.
+#: Construction is paid during interaction, so use smaller slices than the
+#: first paint and yield layout/input between them rather than one long mount.
+RESUME_PAGE_MESSAGES = 24
 
 #: Rows from the top of the transcript at which the next older page is mounted.
 #: Not zero: mounting only at the exact top means the reader hits a hard stop,
 #: sees nothing arrive for a frame, and concludes the conversation starts there.
 RESUME_PAGE_TRIGGER_ROWS = 4
 
-#: How many older pages the initial resume may mount to make the first frame
-#: SCROLLABLE. A hard cap, not a target: the fill loop below stops the moment
-#: the content exceeds the viewport, and this only bounds the pathological
-#: case (a history of rows that each render to nothing measurable) so it
-#: cannot spin. Three pages is 180 messages on top of the initial bound, which
-#: is still inside the render budget's measured envelope.
-#:
-#: The cap is genuinely reachable, which it was not when it was first written:
-#: the fill chained its re-measure to the next refresh while the paging gate
-#: was released a settle later, so attempt 1 always stood down and the
-#: effective cap was ONE. Measured after the chaining fix, a 401-message
-#: agentic history reaches attempt 2 at 120x300 and mounts two pages. Anything
-#: taller than roughly 600 rows still exhausts the cap and lands in
-#: :data:`RESUME_UNREACHABLE_NOTICE`, which is why that notice is a control
-#: rather than a dead end.
-RESUME_FILL_MAX_PAGES = 3
-
-#: Rows of content beyond the viewport the initial fill aims for. A frame that
-#: is scrollable by one row technically has a scrollbar, but the reader has
-#: nothing to travel through and the page-back trigger
-#: (:data:`RESUME_PAGE_TRIGGER_ROWS`) sits at row 4 — so the fill would leave a
-#: transcript whose trigger is unreachable in practice. One trigger zone plus a
-#: margin is the smallest overshoot that makes "scroll up" a real gesture.
-RESUME_FILL_SLACK_ROWS = RESUME_PAGE_TRIGGER_ROWS + 4
+#: Fairness boundary for progressive rendered fill, not a lifetime cutoff.
+#: Hidden-only pages still advance through yielded bursts until real content
+#: fills the reserve, the cursor stops advancing, or the reader takes over.
+RESUME_FILL_MAX_PAGES = 16
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
@@ -1071,6 +1055,28 @@ RESUME_START_NOTICE = "start of conversation"
 #: a control (:class:`OlderHistoryNotice`), so it does not have to recite a
 #: keyboard chord the product documents nowhere else.
 RESUME_UNREACHABLE_NOTICE = "older messages above — select to load"
+
+
+@dataclass(frozen=True)
+class _PagingLease:
+    """Ownership of ONE backward-paging transaction, request through settle.
+
+    The gate used to be an app-global boolean, which cannot answer "whose
+    fetch is this?" once a reader leaves a conversation and comes back to its
+    CACHED presentation: re-entry reset the flag, a second fetch started for
+    the same source, and the first fetch's completion then cleared the newer
+    transaction's gate and reported `history changed while paging` to the user
+    (review round 1, F1).
+
+    So ownership is a per-source object identity that survives presentation
+    changes. It deliberately does NOT carry the view or the navigation
+    generation: those fence PUBLICATION (may this completion touch the screen)
+    and are checked separately. Ownership answers a different question — may
+    this completion open the gate — and the honest answer is "only if the gate
+    is still the one it took", which is object identity and nothing else.
+    """
+
+    source_token: str
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -1387,6 +1393,77 @@ PROMPT_CHEVRON = "❯"
 #: mode; using it as the marker would make the frame look like the bang
 #: was inserted into the buffer (it is consumed, not typed).
 SHELL_CHEVRON = "$"
+
+#: The composer's prompt marker while an inline credential capture is ARMED.
+#: One cell, so it fits the same 2-cell box and shifts nothing.
+#:
+#: The MASK CHARACTER, which this app already uses to stand in for one hidden
+#: character of a secret (``key_prompt.MASK_CHAR``). Reusing it is what makes
+#: the mark legible without a legend: the marker says "what you type or paste
+#: here is masked", which is exactly the state. A key glyph (``⚿``) was the
+#: first choice and was rejected on rendered evidence — it is tofu in the
+#: terminal font stack, and a mode marker that renders as a replacement box is
+#: worse than no marker at all.
+#:
+#: Shape AND colour, the same pairing bang-mode uses and for the same #385
+#: reason: hue alone is invisible under ``NO_COLOR``, on a monochrome terminal
+#: and to a colourblind reader. The bar is higher here than for bang-mode —
+#: this mode changes what a PASTE means, and a misread puts a plaintext secret
+#: in scrollback that no keystroke can recall (design round 1, D2).
+CREDENTIAL_CHEVRON = "•"
+
+#: Class the input dock carries while a capture is armed. Reads as the
+#: ``warning`` amber, one step off both the resting chevron and bang-mode's
+#: green, so three composer modes are three distinct marks.
+COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
+
+#: The composer's placeholder while armed, in the same voice and shape as
+#: :data:`~local_operator.tui.widgets.editor.SHELL_PLACEHOLDER`.
+#:
+#: IT DOES NOT RENDER, and cannot: ``Editor`` paints a placeholder only on an
+#: EMPTY buffer, while arming requires the ``/credential`` token to be IN the
+#: buffer — mutually exclusive conditions. Bang-mode's placeholder works
+#: because ``!`` is consumed out of the buffer; ``/credential`` is not, and
+#: every armed intermediate state (``/cred``, ``/credential``) is non-empty
+#: (design round 2, D8; QA round 2 measured the same).
+#:
+#: Kept, rather than deleted, because the armed STATE is what it belongs to and
+#: the swap is what keeps that state consistent with bang-mode's — including
+#: restoring whatever placeholder it replaced, which is load-bearing for the
+#: aside (see ``on_credential_arm_changed``). It would begin rendering the day
+#: an arming form leaves the buffer empty, and until then it is a state field,
+#: NOT a signalling channel.
+#:
+#: So the armed state has TWO channels an operator can actually see, not the
+#: three an earlier remediation claimed: the ``⚿`` chevron (colour-independent)
+#: and the amber ink on the token itself, plus the picker's own notice row
+#: while its list is open. Anything counting channels here must count what
+#: PAINTS — the attribute being set correctly is not the same claim.
+CREDENTIAL_PLACEHOLDER = "Paste the secret… — it is captured, not shown"
+
+#: Shown where ``/credential``'s argument rows would be while a capture is
+#: armed. The rows are suppressed there (see ``_credential_choices``), and a
+#: list that simply vanished would read as the gesture having been dropped —
+#: so the row says what the composer is waiting for instead.
+CREDENTIAL_ARMED_NOTICE = "armed — paste the secret; it is captured, never shown"
+
+#: Shown where those same rows would be once a capture has LANDED and the
+#: buffer still cites it (design round 3, D9). The armed notice cannot be
+#: reused: it says "paste the secret", and by this point the operator already
+#: did — a row promising the next paste is captured, next to a chip saying one
+#: already was, is the stale-hint defect D7 removed one state earlier.
+#:
+#: It names the reason the rows are gone rather than merely stating a fact, so
+#: the operator can act on it: the destructive verbs are still reachable in the
+#: same keystrokes they always were, by typing the flag.
+#:
+#: LENGTH IS A CONSTRAINT, not a preference. The picker's notice row ellipsizes
+#: at the panel width, and the measured budget at a 120-column terminal is ~82
+#: cells — a longer line drops its own TAIL, which is exactly the half that says
+#: how to reach the verbs, leaving a row that states a restriction and hides the
+#: way out of it. Kept comfortably inside that budget, and pinned by the test
+#: that asserts the whole string paints rather than a prefix of it.
+CREDENTIAL_HELD_NOTICE = "a credential is in this draft — type --forget-all to forget"
 
 #: How long after a terminal resize the floating overlay cards re-measure
 #: themselves. They are hosted in `width: auto` containers, so Textual sends
@@ -2577,7 +2654,12 @@ class OperatorApp(App[None]):
         #: the entire deferred head (522 messages on a 600-message probe), the
         #: unbounded render cost this bound exists to remove. Cleared by the
         #: settle callback `insert_blocks` schedules, never synchronously.
-        self._resume_paging = False
+        #:
+        #: Keyed by SOURCE TOKEN rather than held as one app-global flag, so an
+        #: outstanding transaction survives switching away and back to a cached
+        #: presentation: `_resume_paging` reads the current source's entry, and
+        #: only the transaction holding an entry may remove it (F1).
+        self._paging_leases: dict[str, _PagingLease] = {}
         #: Whether the INITIAL fill still has an attempt to make. Distinct from
         #: `_resume_paging`, which is a mutex over the mount seam: this asks
         #: "is the geometry on screen still provisional?", and it stays set
@@ -2589,28 +2671,16 @@ class OperatorApp(App[None]):
         #: painted frames — `scroll up` -> `select` -> `scroll up` — which
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
+        self._resume_fill_serial = 0
         #: SINGLE-FLIGHT guard for the deferred page check: while set, a check
         #: is already scheduled and `_transcript_scrolled` must not queue a
         #: second. See that method for why unbounded requeues were a cascade.
         self._resume_check_pending = False
-        #: EDGE-TRIGGERED top-zone latch, the second half of the page-per-
-        #: arrival contract (the first half is `_resume_paging`'s one page
-        #: per GESTURE). ``True`` means armed: the next at-rest moment inside
-        #: the trigger rows mounts exactly ONE page, and the latch stays
-        #: consumed until a scroll GESTURE arrives after that page has landed
-        #: (`_transcript_scrolled` is the only re-arm). Without it the check
-        #: was LEVEL-triggered: after a page prepended, the anchor restore
-        #: parked the reader back inside the trigger rows, the gate opened,
-        #: and the next watch firing — a settle frame, or one more wheel
-        #: notch of a gesture that was still running — mounted another page,
-        #: and another: the reported "it loads chunks one after another
-        #: without me scrolling up again". A GESTURE as the re-arm is what
-        #: closes the hole an offset-based rule cannot: the prepend itself
-        #: displaces the reader out of the zone with no gesture involved, and
-        #: every input path (wheel, key, scrollbar, arrow affordance)
-        #: announces itself through ``note_user_scroll`` before it moves
-        #: anything — the one signal the mount can never synthesize.
-        self._resume_in_zone = True
+        #: One coalesced upward-input demand, including input arriving while a
+        #: page is in flight. Offset observations never arm it. After a page
+        #: settles it is checked once against the new viewport, so resting at
+        #: the top cannot automatically drain history.
+        self._resume_in_zone = False
         #: What the CURRENT turn has already been billed for, per model call, by
         #: `on_context_usage_reported`. `on_turn_ended` prices the same turn as a
         #: whole and is the authoritative figure, so it adds only the difference
@@ -3357,6 +3427,10 @@ class OperatorApp(App[None]):
         self._interaction.draft.approve_all = value
 
     async def _on_message(self, message: TextualMessage) -> None:
+        # The owner keeps publishing while this viewer exits. Already queued
+        # messages outlive subscription disposal and must not paint a pruned DOM.
+        if self._restart_plan is not None and isinstance(message, SessionEvent):
+            return
         if isinstance(message, SessionEvent) and message.origin is not None:
             source = self._event_sources.get(message.origin)
             if source is not None:
@@ -3367,7 +3441,7 @@ class OperatorApp(App[None]):
                 ):
                     return
                 source.presentation_revision += 1
-                if not self._is_current(source):
+                if not self._is_current(source) or source.display_only:
                     self._reduce_hidden_session_event(source, message)
                     return
         if (
@@ -3680,7 +3754,9 @@ class OperatorApp(App[None]):
         self._welcome = presentation.welcome
         self._welcome_visible = None
         # Gesture tasks belong to the abandoned viewport, not its history.
-        self._resume_paging = False
+        # The paging LEASE is deliberately not touched: it belongs to the
+        # source, not to the presentation, and clearing it here is what let a
+        # revisit start a second fetch that the first one then retired (F1).
         self._resume_fill_active = False
         self._resume_check_pending = False
         self._resume_in_zone = False
@@ -3704,14 +3780,23 @@ class OperatorApp(App[None]):
             source.preparations += 1
             return source
         directory = config_dir()
-        record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
 
         async def no_takeover() -> Any:
             # Match the CLI viewer policy: discovery/preparation must never
             # turn this TUI into an owner or recursively create a cold facade.
             raise RuntimeError("a sidebar viewer never takes over a session")
 
-        if record is not None and owner is not None:
+        if not speculative:
+            remote = await RemoteSession.saved_preview(
+                session_id,
+                config_dir=directory,
+                cwd=str(getattr(self._session, "cwd", "")),
+                takeover_factory=no_takeover,
+            )
+        else:
+            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
+            if record is None or owner is None:
+                raise RuntimeError("The prepared owner is no longer active")
             remote = await RemoteSession.connect(
                 record,
                 session_id,
@@ -3719,18 +3804,13 @@ class OperatorApp(App[None]):
                 takeover_factory=no_takeover,
                 display_window=True,
             )
-        else:
-            if speculative:
-                raise RuntimeError("The prepared owner is no longer active")
-            if self._resume_factory is None:
-                raise RuntimeError("This launcher cannot reopen an inactive conversation")
-            remote = await self._resume_factory(session_id)
         if not isinstance(remote, RemoteSession):
             raise RuntimeError("Sidebar navigation requires an owner-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
             source = SessionInteraction(remote)
+            source.display_only = remote.is_cold
             source.draft = await self._sidebar_drafts.get(session_id)
             if source.draft.approve_all is None:
                 source.draft.approve_all = self._approvals_default_auto
@@ -3763,16 +3843,16 @@ class OperatorApp(App[None]):
             self._sidebar_prior_workers.discard(worker)
 
     async def _prepare_sidebar_session(
-        self, session_id: str, *, speculative: bool = False
+        self, session_id: str, *, speculative: bool = False, refresh: bool = False
     ) -> tuple[SessionInteraction, SessionPresentation]:
         from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_catalog import session_directory_name
 
         if not session_directory_name(session_id):
             raise ValueError("The conversation identifier is not valid")
-        if self._session is not None and self._session.session_id == session_id:
+        if not refresh and self._session is not None and self._session.session_id == session_id:
             return self._interaction, self._capture_sidebar_presentation()
-        if not speculative:
+        if not speculative and not refresh:
             await self._drain_sidebar_prior_transitions()
         source = await self._lease_sidebar_source(session_id, speculative=speculative)
         replay: PreparedReplay | None = None
@@ -3781,41 +3861,30 @@ class OperatorApp(App[None]):
             session = source.session
             if not isinstance(session, RemoteSession):
                 raise RuntimeError("Sidebar navigation requires an owner-backed session")
-            if session.is_cold:
-                if speculative:
-                    raise RuntimeError("The prepared owner is no longer ready")
-                # NO outer wall clock. The removed `wait_for(..., 15)` was not
-                # redundant with anything — it was DESTRUCTIVE: it replaced
-                # `_ensure_bound`'s `ConnectionError`, which carries a sentence
-                # worth showing, with a bare `TimeoutError` whose `str()` is the
-                # empty string, so the sidebar's "Could not open conversation:
-                # {error}" rendered with nothing after the colon. It was also
-                # the last bare wall clock left on this seam, which is the shape
-                # this change exists to replace (review round 2, MINOR-1).
-                #
-                # BUT it was the only thing bounding this call at 15 s, so be
-                # precise about what does bound it now (review round 3, M3-2).
-                # `_FOREGROUND_BIND_BUDGET_S` (15 s) covers only the retry/sync
-                # half: that deadline is computed AFTER `engage_runtime` has
-                # returned, and the foreground engage passes no `deadline_s`, so
-                # it takes `DEFAULT_DEADLINE_S` (30 s) first. Worst case here is
-                # therefore ~45 s, not 15 s — measured 30.00 s in the engage
-                # alone against a stalling owner. That is a deliberate trade,
-                # not an oversight: capping the foreground engage would halve
-                # the spawn/discovery window on a cold start, which is the path
-                # this change exists to make more reliable, and the wait is
-                # cancellable and reports progress rather than being silent.
-                # Do not re-add an outer `wait_for` to "restore" the 15 s; bound
-                # the engage itself if that worst case ever needs shortening.
-                await session._ensure_bound()
-            if session.is_cold:
-                raise RuntimeError("The conversation has not finished connecting")
-            await session.ensure_display_current()
-            gate = session.frontend_state.pending_gate
+            # Canonical synchronization belongs to the source connection task,
+            # never to a click waiting for its first useful viewport.
+            if speculative and session.is_cold:
+                raise RuntimeError("The prepared owner is no longer ready")
+            if speculative or refresh:
+                await session.ensure_display_current()
+            if not refresh:
+                # A successful hidden bind is not a committed canonical view:
+                # its saved anchor and live projection still need reconciliation
+                # on return. Only that source's canonical commit clears this.
+                source.display_only = (
+                    source.display_only or session.is_cold or not session.display_history_current
+                )
+            gate = (
+                None if source.display_only and not refresh else session.frontend_state.pending_gate
+            )
             if gate is not None and gate.kind not in {"ask", "approval"}:
                 raise RuntimeError("This viewer does not support the conversation's pending input")
             cached = self._sidebar_presentations.get(session_id)
-            if cached is not None and self._sidebar_presentation_current(cached, source, gate):
+            if (
+                not refresh
+                and cached is not None
+                and self._sidebar_presentation_current(cached, source, gate)
+            ):
                 # Reinsert so dict order is recency: eviction pops the OLDEST
                 # key, and a hit must count as a use or a hot pair of sessions
                 # would evict each other the moment a third is visited.
@@ -3832,8 +3901,12 @@ class OperatorApp(App[None]):
             replay = PreparedReplay()
             welcome: WelcomeView | None = None
             revision = source.presentation_revision
-            if not source.draft.following_tail and source.draft.scroll_anchor_id:
-                if not await session.ensure_display_anchor(source.draft.scroll_anchor_id):
+            if refresh and not source.draft.following_tail and source.draft.scroll_anchor_id:
+                scroll_revision = source.scroll_revision
+                if (
+                    not await session.ensure_display_anchor(source.draft.scroll_anchor_id)
+                    and scroll_revision == source.scroll_revision
+                ):
                     # A canonical compaction can remove an old anchor. The owner
                     # explicitly reset that seek; never pretend another row is it.
                     source.draft.following_tail = True
@@ -3846,6 +3919,17 @@ class OperatorApp(App[None]):
                 bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
             )
+            preview_unavailable = (
+                not replay.blocks
+                and source.display_only
+                and getattr(session, "saved_preview_partial", False)
+            )
+            if preview_unavailable:
+                replay.blocks.append(
+                    NoticeBlock(
+                        "Saved preview unavailable. Connect to load the conversation.", "note"
+                    )
+                )
             self._mark_pending_tool_rows(replay.blocks, session)
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
@@ -3866,7 +3950,7 @@ class OperatorApp(App[None]):
             # tests of "is this conversation empty" on the two halves of one
             # switch would eventually disagree, and the visible failure is a
             # target that arrives with no empty state and no way to grow one.
-            if not conversation_started(replay.blocks):
+            if not preview_unavailable and not conversation_started(replay.blocks):
                 welcome = WelcomeView(
                     lambda: session_welcome_info(
                         session,
@@ -3882,12 +3966,20 @@ class OperatorApp(App[None]):
                 for block in replay.blocks:
                     replay.view.append_block(block)
             replay.view.follow_tail()
-            # Preparation waits for layout, not for a guessed sleep. The commit
-            # can then reveal already measured rows without replaying history.
-            laid_out = asyncio.Event()
-            self.call_after_refresh(laid_out.set)
-            await laid_out.wait()
-            if not source.draft.following_tail and source.draft.scroll_anchor_id:
+            # Retained/canonical views benefit from a measured parked layout.
+            # A first saved view has no existing geometry to preserve: painting
+            # it offscreen first adds a whole extra layout/frame before useful
+            # content appears. Reveal those real rows immediately; the commit's
+            # compositor-map gate still waits for their actual visible paint.
+            if not source.display_only or refresh:
+                laid_out = asyncio.Event()
+                self.call_after_refresh(laid_out.set)
+                await laid_out.wait()
+            if (
+                (not source.display_only or refresh)
+                and not source.draft.following_tail
+                and source.draft.scroll_anchor_id
+            ):
                 replay.view.restore_navigation_anchor(
                     source.draft.scroll_anchor_id,
                     source.draft.scroll_anchor_part,
@@ -3907,7 +3999,10 @@ class OperatorApp(App[None]):
             )
         except BaseException:
             if replay is not None and replay.view.parent is not None:
-                await replay.view.remove()
+                # AwaitRemove joins Textual's own message-pump tasks. A
+                # second navigation/shutdown cancellation must not travel
+                # through that gather and cancel the widget pumps themselves.
+                await asyncio.shield(replay.view.remove())
             raise
         finally:
             source.preparations -= 1
@@ -3997,10 +4092,12 @@ class OperatorApp(App[None]):
             )
 
     def _sidebar_gate_surface_ready(self, source: SessionInteraction) -> bool:
-        if (
-            not self._is_current(source)
-            or getattr(source.session, "is_cold", False)
-            or not getattr(source.session, "display_history_current", True)
+        if not self._is_current(source) or (
+            not source.display_only
+            and (
+                getattr(source.session, "is_cold", False)
+                or not getattr(source.session, "display_history_current", True)
+            )
         ):
             return False
         view = self._transcript_view()
@@ -4069,6 +4166,8 @@ class OperatorApp(App[None]):
         # the entire state (jobs, usage, trajectories) on every display, which
         # profiling measured as the largest single cost of the cold frame. A
         # reduced facade without the narrow accessor still falls back below.
+        if source.display_only:
+            return self._ask_screen is None and self._approval is None
         session = source.session
         gate = getattr(session, "pending_gate", None)
         if gate is None and not hasattr(session, "pending_gate"):
@@ -4171,7 +4270,7 @@ class OperatorApp(App[None]):
         if isinstance(current, RemoteSession):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
-            else:
+            elif not self._interaction.display_only:
                 current.resume_viewer_gates()
         if session_id:
             self._begin_sidebar_transition()
@@ -4421,7 +4520,7 @@ class OperatorApp(App[None]):
         ):
             return
         if presentation.replay.view.is_mounted:
-            await presentation.replay.view.remove()
+            await asyncio.shield(presentation.replay.view.remove())
         await self._release_sidebar_source(source)
 
     def _park_sidebar_aside(self, source: SessionInteraction) -> None:
@@ -4475,11 +4574,11 @@ class OperatorApp(App[None]):
         session = source.session
         if session is None or session.session_id != session_id:
             raise RuntimeError("The prepared conversation identity changed")
-        if source is self._interaction:
+        if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
-        if not isinstance(session, RemoteSession) or session.is_cold:
-            raise RuntimeError("The conversation is not ready for input")
-        if (
+        if not isinstance(session, RemoteSession):
+            raise RuntimeError("The conversation is not owner-backed")
+        if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
         ):
@@ -4487,12 +4586,15 @@ class OperatorApp(App[None]):
 
             raise PreparationInvalidated("canonical replay changed during preparation")
         outgoing = self._interaction
+        refreshing = outgoing is source
+        focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not isinstance(previous, RemoteSession):
             raise RuntimeError("Sidebar navigation requires an owner-backed current session")
-        self._close_subagent_view()
-        self._close_org_chart_view()
-        self._close_settings_view()
+        if not refreshing:
+            self._close_subagent_view()
+            self._close_org_chart_view()
+            self._close_settings_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
             # The outgoing draft was frozen at ``pending``; the editor holds
@@ -4512,27 +4614,16 @@ class OperatorApp(App[None]):
             outgoing.draft.history_stash = recall.stash
             outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
         self._sidebar_transition_from = None
-        old_view = self._transcript_view()
-        outgoing.draft.following_tail = old_view.is_following_tail
-        if not outgoing.draft.following_tail:
-            top = old_view.content_region.y
-            anchor = next(
-                (
-                    block
-                    for block in old_view.blocks()
-                    if block.navigation_anchor_id and block.display and block.region.bottom > top
-                ),
-                None,
-            )
-            if anchor is not None:
-                outgoing.draft.scroll_anchor_id = anchor.navigation_anchor_id
-                outgoing.draft.scroll_anchor_part = anchor.navigation_anchor_part
-                outgoing.draft.scroll_offset = top - anchor.region.y
+        if (not refreshing or source.scroll_revision != source.preview_scroll_revision) and (
+            not outgoing.display_only
+            or outgoing.scroll_revision != outgoing.preview_scroll_revision
+        ):
+            self._capture_sidebar_scroll(outgoing)
         outgoing_presentation = None
         if previous is not None:
             self._sidebar_sources[previous.session_id] = outgoing
             outgoing_presentation = self._capture_sidebar_presentation()
-            if self._admit_sidebar_presentation(
+            if outgoing is not source and self._admit_sidebar_presentation(
                 previous.session_id, outgoing, outgoing_presentation
             ):
                 self._sidebar_presentations[previous.session_id] = outgoing_presentation
@@ -4670,11 +4761,17 @@ class OperatorApp(App[None]):
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
-            self._submit_boot_prompt(session)
-            session.resume_viewer_gates()
+            if not source.display_only:
+                self._submit_boot_prompt(session)
+                session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
-            if source.draft.focus_id == "@transcript":
+            if refreshing and focused_before_refresh is not None:
+                if focused_before_refresh is old_view:
+                    incoming.replay.view.focus()
+                elif focused_before_refresh.is_mounted:
+                    focused_before_refresh.focus()
+            elif source.draft.focus_id == "@transcript":
                 incoming.replay.view.focus()
             else:
                 editor.focus()
@@ -4703,15 +4800,187 @@ class OperatorApp(App[None]):
             self.run_worker(
                 self._release_sidebar_preparation((self._sidebar_sources[evicted_id], evicted))
             )
-        if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+        if not refreshing and self.query_one("#session-workspace").has_class("sidebar-overlay"):
             # A drawer cannot count as a correct visible conversation while it
             # covers the response. Pinned wide sidebars stay open.
             self._set_sidebar_open(False)
-        return self._await_sidebar_frame(source, generation)
+        self._start_resume_fill()
+        self._show_sidebar_connection(source)
+        if not source.draft.following_tail and source.draft.scroll_anchor_id:
+            scroll_revision = source.scroll_revision
+            view = incoming.replay.view
+
+            def restore_revealed_anchor() -> None:
+                if (
+                    not self._is_current(source)
+                    or generation != self._sidebar_navigation.generation
+                    or self._transcript_view() is not view
+                ):
+                    return
+                if source.scroll_revision != scroll_revision:
+                    self._capture_sidebar_scroll(source)
+                    return
+                # Offscreen measurement is not final visible geometry for a
+                # wrapped viewport. Re-anchor after reveal, and let the normal
+                # painted-map gate verify the resulting frame, not a timer.
+                view.restore_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
+
+            self.call_after_refresh(restore_revealed_anchor)
+        ready = self._await_sidebar_frame(source, generation)
+        if source.display_only:
+            source.preview_scroll_revision = source.scroll_revision
+
+            # Even background socket work can receive a large synchronous
+            # projection in this same event loop. Start it AFTER the measured
+            # useful frame, not just after swapping the presentation fields.
+            def connect_after_paint(frame: asyncio.Future[None]) -> None:
+                if not frame.cancelled() and not source.retired:
+                    self._start_sidebar_connection(source)
+
+            ready.add_done_callback(connect_after_paint)
+        return ready
+
+    def _capture_sidebar_scroll(self, source: SessionInteraction) -> None:
+        old_view = self._transcript_view()
+        source.draft.following_tail = old_view.is_following_tail
+        if not source.draft.following_tail:
+            top = old_view.content_region.y
+            anchor = next(
+                (
+                    block
+                    for block in old_view.blocks()
+                    if block.navigation_anchor_id and block.display and block.region.bottom > top
+                ),
+                None,
+            )
+            if anchor is not None:
+                source.draft.scroll_anchor_id = anchor.navigation_anchor_id
+                source.draft.scroll_anchor_part = anchor.navigation_anchor_part
+                source.draft.scroll_offset = top - anchor.region.y
+
+    def _show_sidebar_connection(self, source: SessionInteraction) -> None:
+        if not self._is_current(source):
+            return
+        status = ""
+        if source.display_only:
+            saved = (
+                "Saved excerpt"
+                if getattr(source.session, "saved_preview_partial", False)
+                else "Saved"
+            )
+            status = (
+                f"{saved} · Connection unavailable · Reselect to retry"
+                if source.connection_error
+                else f"{saved} · Connecting…"
+            )
+        if self._status is not None:
+            self._status.update(connection=status)
+        editor = self._editor()
+        if editor.read_only:
+            editor.placeholder = READ_ONLY_PLACEHOLDER
+        elif self._aside_is_open():
+            editor.placeholder = ASIDE_PLACEHOLDER
+        elif editor.shell_mode:
+            editor.placeholder = SHELL_PLACEHOLDER
+        else:
+            editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
+
+    def _start_sidebar_connection(self, source: SessionInteraction) -> None:
+        if source.connection_task is not None and not source.connection_task.done():
+            return
+        source.connection_error = ""
+        source.connection_task = asyncio.create_task(self._connect_sidebar_source(source))
+
+        def settled(task: asyncio.Task[None]) -> None:
+            if task.cancelled():
+                return
+            if task.exception() is not None:
+                logger.error("sidebar connection cleanup failed", exc_info=task.exception())
+            # An evicted hidden source can have been held solely by this task.
+            # Recheck after it settles, when retained_for_local_work no longer
+            # counts the connection; otherwise that viewer never gets released.
+            if self.is_running and not source.retired and not self._is_current(source):
+                self.run_worker(self._release_sidebar_source(source))
+
+        source.connection_task.add_done_callback(settled)
+
+    async def _connect_sidebar_source(self, source: SessionInteraction) -> None:
+        """Reconcile a saved view without holding the navigation coordinator.
+
+        A source owns its socket task. Hidden completion must not select itself,
+        and a cancellation-resistant attach cannot hold the latest-wins lock.
+        Reuse prepared widgets and the final generation fence for canonical
+        replacement, rather than inventing a second replay/event reducer.
+        """
+        from local_operator.session.remote import RemoteSession
+        from local_operator.tui.session_navigation import PreparationInvalidated
+
+        prepared = None
+        retry = False
+        cancelled = False
+        try:
+            session = source.session
+            if not isinstance(session, RemoteSession):
+                return
+            await session._ensure_bound()
+            await session.ensure_display_current()
+            if source.retired or not self._is_current(source):
+                return
+            if self._sidebar_navigation.requested_id:
+                navigation = self._sidebar_navigation._task
+                if navigation is not None:
+                    await asyncio.shield(navigation)
+            if source.retired or not self._is_current(source):
+                return
+            generation = self._sidebar_navigation.generation
+            if source.scroll_revision != source.preview_scroll_revision:
+                self._capture_sidebar_scroll(source)
+            scroll_revision = source.scroll_revision
+            prepared = await self._prepare_sidebar_session(session.session_id, refresh=True)
+            if source.scroll_revision != scroll_revision:
+                retry = True
+                return
+            if (
+                source.retired
+                or not self._is_current(source)
+                or generation != self._sidebar_navigation.generation
+                or self._sidebar_navigation.requested_id
+            ):
+                return
+            source.display_only = False
+            source.command_frame_pending = True
+            ready = self._commit_sidebar_session(session.session_id, prepared, generation)
+            prepared = None
+            if ready is not None:
+                await ready
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except PreparationInvalidated:
+            source.display_only = True
+            retry = True
+        except Exception as error:
+            source.display_only = True
+            source.connection_error = str(error) or "Connection unavailable"
+        finally:
+            if prepared is not None:
+                await self._release_sidebar_preparation(prepared)
+            source.command_frame_pending = False
+            if not source.retired and not cancelled:
+                self._show_sidebar_connection(source)
+                if retry and self._is_current(source):
+                    asyncio.get_running_loop().call_soon(self._start_sidebar_connection, source)
 
     def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
         message.stop()
         if self._session is not None and self._session.session_id == message.session_id:
+            if self._interaction.display_only:
+                self._start_sidebar_connection(self._interaction)
+                self._show_sidebar_connection(self._interaction)
             if self._sidebar_navigation.requested_id:
                 self._sidebar_navigation.cancel()
             # Selecting the attached session is a no-op navigation, so nothing
@@ -5621,6 +5890,8 @@ class OperatorApp(App[None]):
         self.call_later(self._apply_pending_frontend_state, generation)
 
     def _apply_pending_frontend_state(self, generation: int) -> None:
+        if self._restart_plan is not None:
+            return
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
@@ -5634,6 +5905,8 @@ class OperatorApp(App[None]):
         # back (review round 2, F6). An update arrives only after adoption has
         # finished, so by then a spec with the dial off means someone turned
         # it off — the user, or `Session._on_fast_refused`.
+        if self._interaction.display_only:
+            return
         self._reconcile_fast_choice(state)
         self._apply_frontend_state(state)
 
@@ -6244,7 +6517,13 @@ class OperatorApp(App[None]):
         would tell the naming errand this conversation is already named and
         retire the one call that could give it a real one.
         """
-        if self._status is None or session.conversation_name or self._provisional_name:
+        if self._status is None or session.conversation_name:
+            return
+        if self._provisional_name:
+            # The source retains its provisional name across a park, while the
+            # shared footer was cleared for the other conversation. Restore the
+            # retained identity without running another naming operation.
+            self._status.update(conversation_name=self._provisional_name)
             return
         opener = getattr(session, "history_opener_text", None)
         if isinstance(opener, str):
@@ -6476,13 +6755,15 @@ class OperatorApp(App[None]):
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
-        self._resume_paging = False
+        # This source's history is being rebuilt from scratch, so any page it
+        # still owes is about a transcript that no longer exists.
+        self._paging_leases.pop(self._interaction.token, None)
         # A check queued for the OLD conversation must not fire against the
         # new one; a fresh head has no gesture in flight worth answering.
         self._resume_check_pending = False
         # Re-armed with the rest of the resume state: a new conversation's
         # first arrival at the top owes a page (see `_resume_in_zone`).
-        self._resume_in_zone = True
+        self._resume_in_zone = False
         self._project_settled_rows(history, bound=RESUME_RENDER_MESSAGES)
         # A message budget is a PROXY for height, and a poor one. Whether the
         # first frame can be scrolled is a question about ROWS, and only the
@@ -6493,204 +6774,124 @@ class OperatorApp(App[None]):
         # the frames between this mount and that callback are the earliest
         # ones a reader sees, and they are exactly as provisional as the ones
         # between attempts.
-        self._resume_fill_active = True
-        self._transcript_view().call_after_refresh(self._fill_resume_until_scrollable)
+        self._start_resume_fill()
 
-    def _fill_resume_until_scrollable(self, _attempt: int = 0) -> None:
-        """Run one fill attempt, and never leave the fill flagged active if it raises.
+    def _start_resume_fill(self, *, target: float | None = None) -> None:
+        """Top up a newly revealed projection, not every subsequent resize.
 
-        ``_resume_fill_active`` SUPPRESSES the pessimistic "not reachable by
-        scrolling" copy while the geometry is still provisional (R6), so a flag
-        stuck ``True`` is not inert — it permanently silences the correction
-        and leaves the notice promising a gesture the frame cannot perform,
-        which is the defect this whole feature exists to remove. The attempt
-        body clears the flag at each of its terminal exits, but those are
-        statement sites: a raise between the ``True`` in ``_render_resume`` and
-        any of them skips every one (measured: ``fill_active`` stayed ``True``
-        across a subsequent resize, with the copy frozen).
-
-        Only the ABNORMAL path is cleared here. A `finally` would be wrong:
-        the two continuation branches return with the flag deliberately still
-        ``True`` because the fill is genuinely still running, and clearing it
-        there would hand the reader the pessimistic copy mid-fill.
-
-        ``_resume_paging``, the flag this one is contrasted with in the body's
-        own commentary, is protected the same way by the ``finally`` in
-        :meth:`_fetch_older_display_page`; the two siblings must not disagree
-        about who guarantees their invariant (review round 3, R10).
+        Raw-event tail bounds are deliberately cheap first paint, not geometry:
+        hidden events and compact tool rows can leave no upward scroll range.
+        The callback belongs to this exact presentation; a switch away/back
+        or canonical replacement must not revive a stale fill.
         """
+        view = self._transcript_view()
+        source = self._interaction
+        generation = self._sidebar_navigation.generation
+        self._resume_fill_active = True
+        self._resume_fill_serial += 1
+        serial = self._resume_fill_serial
+
+        def start() -> None:
+            if (
+                not self._is_current(source)
+                or self._transcript is not view
+                or self._resume_fill_serial != serial
+            ):
+                return
+            if self._sidebar_navigation.generation != generation:
+                self._resume_fill_active = False
+                self._reconcile_head_notice()
+                return
+            if self._resume_fill_active:
+                self._fill_resume_until_scrollable(target=target)
+
+        view.call_after_refresh(start)
+
+    def _fill_resume_until_scrollable(
+        self, _attempt: int = 0, *, target: float | None = None
+    ) -> None:
+        """Measure settled rows, clearing provisional state on abnormal exits."""
+        if _attempt == 0:
+            # A new input buffer supersedes an older queued initial fill even
+            # when both belong to the same source/view/navigation generation.
+            self._resume_fill_serial += 1
+            self._resume_fill_active = True
+        elif not self._resume_fill_active:
+            return  # Real input superseded the initial presentation fill.
         try:
-            self._fill_resume_attempt(_attempt)
+            self._fill_resume_attempt(_attempt, target=target)
         except BaseException:
             self._resume_fill_active = False
             raise
 
-    def _fill_resume_attempt(self, _attempt: int) -> None:
-        """Mount older pages until the first resume frame is actually scrollable.
+    def _fill_resume_attempt(self, _attempt: int, *, target: float | None = None) -> None:
+        """Reserve one real viewport above the reader, progressively and bounded.
 
-        The render bound is counted in MESSAGES, but "can the reader scroll up
-        to reach the rest" is decided in ROWS: 80 one-line messages in a 60-row
-        terminal still fit inside the viewport, and a transcript whose content
-        fits has no scrollbar and no offset to travel. ``_check_resume_page``
-        only ever fires on a scroll INTO the trigger zone, so on such a frame
-        the deferred head and the server's ``history_before_token`` pages are
-        unreachable forever while the head notice tells the reader to scroll up
-        for them.
-
-        So the geometry is measured after the mount settles, and while the
-        content does not exceed the viewport AND more history exists, the next
-        older page is mounted. Recursive-by-SETTLE rather than a loop: each
-        page's blocks only author their real heights on a later layout pass
-        (``_set_authored_height``), so measuring again in the same frame would
-        read the extent this mount has not finished growing.
-
-        The continuation is chained to the mount's own settle seam, never to
-        ``call_after_refresh``. The paging gate is released from the settle
-        callback ``insert_blocks`` schedules, which is strictly LATER than the
-        next refresh, so a refresh-chained re-measure arrived while the gate
-        was still held, took the stand-down return below, and nothing ever
-        rescheduled it: :data:`RESUME_FILL_MAX_PAGES` was unreachable and the
-        effective cap was ONE page. On a viewport tall enough to need two, the
-        resume stayed unscrollable with its head unreachable — the exact defect
-        this method exists to remove (measured at 120x300: `max_scroll_y=0`,
-        no scrollbar, 261 messages pending, and the head notice still telling
-        the reader to scroll up for them).
-
-        NOT A GESTURE. This runs outside the page-back latch entirely: it must
-        neither arm ``_resume_in_zone`` (which would hand a free page to the
-        reader's first real scroll) nor consume it (which would swallow that
-        scroll's legitimate page). It cooperates with ``_resume_paging`` only
-        as a mutex — if a genuine gesture is mid-mount, this stands down and
-        lets the gesture own the frame, because a reader who is already
-        scrolling does not need the fill.
-
-        That neutrality is ENFORCED here, not merely intended. The fill does
-        not touch the latch itself, but its mount lands the reader at y=0 and
-        the settle that follows drives the same page-back hook a reader's
-        scroll does; the latch was spent that way, and because the hook re-arms
-        only on a discrete act or outside the trigger zone, a wheel reader
-        clamped at the top could never earn another page (measured: 60 notches
-        at y=0 mounted nothing). The offset leak behind it is fixed at source
-        in ``TranscriptView.insert_blocks``'s restore, but this method saves
-        and restores the latch around its own mount regardless — the
-        guarantee is this method's to keep, and it should not silently depend
-        on another widget's scroll bookkeeping staying correct.
-
-        ``RESUME_FILL_MAX_PAGES`` bounds it hard. The loop's own exit condition
-        is the geometry, which terminates on any real history; the cap is for
-        the case where it cannot — a head of rows that measure to zero height
-        would otherwise mount the entire conversation one page at a time,
-        which is the unbounded render cost the budget exists to remove.
+        At the tail this means at least two viewports of rendered content; at
+        a restored reading anchor it means one viewport above that anchor.
+        Each page yields through its own layout/anchor-settled callback before
+        measuring again. Hidden rows do not count toward the geometry target:
+        burst boundaries yield again rather than declaring an underfilled view
+        finished. Only exhaustion, non-advancing cursors or user input stop it.
         """
-        # EVERY exit below is terminal for the fill, so each clears the
-        # provisional-geometry flag before reconciling: the notice is entitled
-        # to state the pessimistic case once the fill has actually given up,
-        # and only then (R6).
-        if _attempt >= RESUME_FILL_MAX_PAGES:
-            self._resume_fill_active = False
-            self._reconcile_head_notice()
-            return
         view = self._transcript_view()
-        if view.parent is None:
-            self._resume_fill_active = False
-            return
-        # A real gesture owns the mount seam right now. Stand down: the reader
-        # is scrolling, which is the condition this fill exists to make
-        # possible. Reconcile on the way out — EVERY exit from this method
-        # leaves a frame the reader looks at, and one that skipped the
-        # reconcile is how the head notice came to promise history the frame
-        # could not reach.
-        if self._resume_paging:
-            self._resume_fill_active = False
-            self._reconcile_head_notice()
-            return
-        # Content already exceeds the viewport by enough for the trigger zone
-        # to be reachable — the frame is scrollable and the fill is done.
         viewport = view.container_size.height or view.size.height
-        if not viewport:
-            self._resume_fill_active = False
-            return
-        if view.virtual_size.height > viewport + RESUME_FILL_SLACK_ROWS:
-            # Scrollable, so "scroll up to load" is a gesture the reader can
-            # actually perform. The notice keeps its promise — reconciled
-            # anyway, because this is also the exit taken when a page mounted
-            # by an earlier attempt exhausted the head, and the notice would
-            # otherwise still be promising more.
+        notice = self._resume_head_notice
+        prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
+        # Loader chrome is not historical content. At exact-fit sizes it used
+        # to supply the last row of the promised one-viewport reserve itself.
+        goal = max(viewport + prefix, target or 0)
+        if view.parent is None or not viewport or self._resume_paging or view.scroll_y >= goal:
             self._resume_fill_active = False
             self._reconcile_head_notice()
             return
+        source = self._interaction
+        generation = self._sidebar_navigation.generation
+        serial = self._resume_fill_serial
+        pending_count = len(self._resume_pending_head)
+        before_token = getattr(self._session, "history_before_token", None)
 
-        session = self._session
-        if self._resume_pending_head:
-            # Save and restore the latch across the mount: whatever the settle
-            # does with it, the reader's first real scroll still owns the page
-            # it is entitled to. See the docstring — this guarantee is kept
-            # structurally rather than inherited.
-            armed = self._resume_in_zone
-
-            def settled() -> None:
-                self._resume_in_zone = armed
-                self._fill_resume_until_scrollable(_attempt + 1)
-
-            # Chained to the SETTLE, not to the next refresh: see the
-            # docstring. `_attempt` is carried through so the cap still bounds
-            # a head whose rows measure to no height.
-            self._mount_older_resume_page(on_settled=settled)
-            return
-        if session is not None and getattr(session, "history_before_token", None):
-            # The remote/server-paged case: nothing is held locally, but the
-            # conversation continues on the server. Same gate, so this cannot
-            # race a gesture's own fetch.
-            #
-            # The continuation is chained to the WORKER, not to the next
-            # refresh: the fetch is a network round trip, so a refresh-scheduled
-            # re-measure would run while it is still in flight, see the gate
-            # held and stand down — leaving the fill one page short on exactly
-            # the sessions (remote, long) it is most needed for.
-            self._resume_paging = True
-            armed = self._resume_in_zone
-            # Pinned BEFORE the round trip, and checked after it: the identity
-            # test below is close to a tautology on its own, because
-            # `_transcript_view` is the main transcript and is never removed or
-            # reparented. The generation is what actually answers "is this
-            # still the conversation that asked?" — without it, a sidebar
-            # switch during the fetch runs an unrequested fill against the
-            # conversation the reader moved TO. Every other async continuation
-            # in this file pins it the same way (`_mount_newer_resume_page`,
-            # `_transcript_scrolled`).
-            generation = self._sidebar_navigation.generation
-            source = self._interaction
-
-            async def fetch_then_refill() -> None:
-                await self._fetch_older_display_page(source)
-                if (
-                    self._transcript_view() is view
-                    and self._is_current(source)
-                    and self._sidebar_navigation.generation == generation
-                ):
-                    # Restored for the same reason as the local branch: the
-                    # fetch's own mount must not spend the reader's latch.
-                    self._resume_in_zone = armed
-                    self._fill_resume_until_scrollable(_attempt + 1)
-                elif self._is_current(source):
-                    # The reader moved on mid-fetch, so this fill is abandoned
-                    # and no later exit will clear the flag. Cleared here so a
-                    # conversation cannot be left permanently "filling", which
-                    # would suppress the unreachable copy forever. Guarded on
-                    # `_is_current` so an abandoned fetch does not reach into
-                    # the state of the conversation the reader moved TO, which
-                    # is running its own fill.
+        def settled() -> None:
+            if (
+                self._is_current(source)
+                and self._transcript is view
+                and self._sidebar_navigation.generation == generation
+                and self._resume_fill_active
+                and self._resume_fill_serial == serial
+            ):
+                progressed = (
+                    len(self._resume_pending_head) < pending_count
+                    if pending_count
+                    else getattr(self._session, "history_before_token", None) != before_token
+                )
+                if not progressed:
                     self._resume_fill_active = False
+                    self._reconcile_head_notice()
+                elif _attempt + 1 >= RESUME_FILL_MAX_PAGES:
+                    # A long hidden prefix is not a reason to strand the
+                    # reader. Yield an additional idle frame between bursts;
+                    # _start_resume_fill fences the new callback to this view.
+                    self._start_resume_fill(target=target)
+                else:
+                    self._fill_resume_until_scrollable(_attempt + 1, target=target)
 
+        if self._resume_pending_head:
+            self._mount_older_resume_page(on_settled=settled)
+        elif self._session is not None and getattr(self._session, "history_before_token", None):
+            lease = self._acquire_paging_lease(source)
+            if lease is None:
+                # A prior transaction for this source is still outstanding —
+                # including one started before a switch away and back. Filling
+                # resumes from that transaction's own settle callback rather
+                # than sending a second request against the same cursor (F1).
+                return
             self.run_worker(
-                fetch_then_refill(),
+                self._fetch_older_display_page(source, lease, on_settled=settled),
                 group=source.worker_group("history-page"),
             )
-            return
-        # No more history in either direction. The frame is as tall as the
-        # conversation allows.
-        self._resume_fill_active = False
-        self._reconcile_head_notice()
+        else:
+            self._resume_fill_active = False
+            self._reconcile_head_notice()
 
     def _reconcile_head_notice(self) -> None:
         """Never promise history the reader cannot actually reach.
@@ -6704,10 +6905,11 @@ class OperatorApp(App[None]):
           should now state where the conversation begins rather than point at
           nothing;
         * the head is NOT exhausted but the transcript still does not exceed
-          its viewport — the fill hit its cap, or the remaining rows measure to
-          nothing. There is no offset to travel and no trigger to reach, so the
-          instruction cannot be followed. Saying "start of conversation" would
-          be a lie in the other direction, so the notice is restated to name
+          its viewport — the fill was interrupted, its cursor stopped moving,
+          or the remaining rows measure to nothing. There is no offset to travel
+          and no trigger to reach, so the instruction cannot be followed.
+          Saying "start of conversation" would be a lie in the other direction,
+          so the notice is restated to name
           what is actually true: more exists, and it is not reachable by
           scrolling here.
 
@@ -6839,42 +7041,12 @@ class OperatorApp(App[None]):
             self._mount_newer_resume_page()
 
     def on_older_history_notice_requested(self, message: OlderHistoryNotice.Requested) -> None:
-        """Activating the head notice loads the next older page.
-
-        The head twin of the handler above. Routed through the same mount the
-        scroll trigger uses, so a click and a scroll-to-top earn exactly one
-        page each and share the single-flight gate — an activation arriving
-        while a page is still settling is dropped by `_mount_older_resume_page`
-        rather than queued, which is the same contract a keypress gets.
-
-        This is the ONLY way out of the unreachable state
-        (:data:`RESUME_UNREACHABLE_NOTICE`), where by construction there is no
-        offset to travel and the scroll trigger can never fire.
-        """
+        """The explicit affordance uses the same demand lease as upward input."""
         message.stop()
-        if message.notice is not self._resume_head_notice:
-            return
-        if self._resume_pending_head:
-            self._mount_older_resume_page()
-            return
-        session = self._session
-        if session is not None and getattr(session, "history_before_token", None):
-            # Remote/server-paged: the same fetch the scroll trigger runs.
-            if self._resume_paging:
-                return
-            self._resume_paging = True
-            # Pinned once and passed through, for the reason the fill's remote
-            # branch states at length: `self._interaction` read twice can be
-            # two different conversations if the reader switches between the
-            # reads. Narrower here than in the fill — nothing awaits between
-            # them — but the two twins running the same fetch through the same
-            # worker group must not disagree about the rule, or a later reader
-            # fixes whichever one they find second (review round 2, R7).
-            source = self._interaction
-            self.run_worker(
-                self._fetch_older_display_page(source),
-                group=source.worker_group("history-page"),
-            )
+        if message.notice is self._resume_head_notice:
+            self._resume_fill_active = False
+            self._resume_in_zone = True
+            self._check_resume_page(force=True)
 
     def _jump_newer_resume_tail(self) -> None:
         if not self._resume_pending_tail:
@@ -6944,31 +7116,87 @@ class OperatorApp(App[None]):
             view.remove_block(notice)
             self._resume_tail_notice = None
 
-    async def _fetch_older_display_page(self, source: SessionInteraction) -> None:
+    async def _fetch_older_display_page(
+        self,
+        source: SessionInteraction,
+        lease: _PagingLease,
+        on_settled: Callable[[], None] | None = None,
+    ) -> None:
+        """Hold ONE transaction's lease from remote request through paint.
+
+        Network completion is not insertion completion. Releasing in finally
+        after scheduling an insert admitted a second page into unsettled DOM
+        and let the fill measure provisional heights, so the lease is instead
+        transferred to the mount callback.
+
+        Two distinct questions are asked separately, and conflating them is
+        what F1 reported. PUBLICATION — may these rows touch the screen — is
+        answered by source, view and navigation generation. OWNERSHIP — may
+        this completion open the gate or retire the fill — is answered only by
+        `_release_paging_lease`, which compares identity: after a switch away
+        and back to the cached presentation, a stale completion matches the
+        source and the view yet must not retire the newer transaction.
+        """
         session = source.session
+        view = self._transcript_view()
+        generation = self._sidebar_navigation.generation
+        transferred = False
+        completed = False
+
+        def current() -> bool:
+            return (
+                self._is_current(source)
+                and self._transcript is view
+                and self._sidebar_navigation.generation == generation
+            )
+
+        def owns() -> bool:
+            return self._paging_leases.get(lease.source_token) is lease
+
         try:
             from local_operator.session.remote import RemoteSession
 
             if not isinstance(session, RemoteSession):
                 return
             rows = await session.load_older_display_page()
+            completed = True
             source.presentation_revision += 1
-            if not self._is_current(source):
+            if not self._is_current(source) or self._transcript is not view:
                 return
+            # A navigation attempt can fail without replacing this view.
+            # Retain fetched rows on its own replay model even then, but do
+            # not let the superseded request mount or continue filling.
             self._resume_pending_head = rows + self._resume_pending_head
             for message in rows:
                 if getattr(message, "role", "") == "tool" and getattr(
                     message, "tool_call_id", None
                 ):
                     self._resume_results[message.tool_call_id] = message
-            self._resume_paging = False
-            self._mount_older_resume_page()
+            if current() and owns() and self._resume_pending_head:
+                self._mount_older_resume_page(on_settled=on_settled, lease=lease)
+                transferred = True
         except Exception as exc:
-            if self._is_current(source):
+            if current() and owns():
+                self._resume_fill_active = False
                 self._notice(f"Could not load earlier messages: {exc}", "error")
         finally:
-            if self._is_current(source):
-                self._resume_paging = False
+            # `transferred` means the mount now carries the lease to its settle.
+            # Otherwise this transaction ends here, and only it may end itself.
+            if not transferred and self._release_paging_lease(lease):
+                if current() and completed and on_settled is not None:
+                    on_settled()
+                else:
+                    self._resume_fill_active = False
+                # `view.parent` as well as identity: a transaction can settle
+                # while Textual is tearing this surface down, and re-deriving
+                # the transcript from the DOM there raises `NoMatches`.
+                if (
+                    self._is_current(source)
+                    and self._transcript is view
+                    and view.parent is not None
+                ):
+                    self._reconcile_head_notice()
+                    self._transcript_scrolled(None)
 
     def _transcript_extent_changed(self) -> None:
         """Re-decide the head notice whenever the geometry it describes moves.
@@ -7001,145 +7229,119 @@ class OperatorApp(App[None]):
             return
         self._reconcile_head_notice()
 
-    def _transcript_scrolled(self, *_args: Any, continuous: bool = False) -> None:
-        """Mount the next older page when the reader reaches the top.
+    @property
+    def _resume_paging(self) -> bool:
+        """Whether the CURRENT source owes a page it has not finished painting."""
+        return self._interaction.token in self._paging_leases
 
-        Fired from the transcript's ``scroll_y`` WATCH (every offset the
-        viewport actually passes through) and from ``note_user_scroll`` (the
-        gesture that moves NOTHING — Home while already at the top changes no
-        offset, so the watch alone would miss the one key that most clearly
-        means "show me the start"). Both are needed, and neither alone is
-        enough; the guards inside :meth:`_check_resume_page` are what keep
-        the many firings of one animated gesture to ONE page.
+    def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
+        """Take the backward-paging gate for ``source``, or refuse.
 
-        This hook is also the latch's only re-arm (see `_resume_in_zone`),
-        and the RULE is deliberate: a gesture re-arms only when it can
-        actually have moved the reader OUT of the trigger zone, or when it
-        is a discrete act. Every input path announces itself here before it
-        moves anything, and the mount's own displacement never passes
-        through it — but a wheel notch arriving while the viewport is
-        already clamped at the top moves NOTHING, and re-arming on it let a
-        held wheel mount a page per notch while the reader sat at y=0 (the
-        "held scroll-up at the top" half of the reported loop). A discrete
-        act at the top is different: a keypress, an affordance click, or a
-        caller announcing a gesture by hand is the deliberate "next page
-        please", and one act is one page because the check consumes the
-        latch again.
-
-        Consequence for a SUSTAINED drag, stated plainly because it is the
-        behaviour and not an accident: a long wheel drag CAN mount several
-        pages. Each mount displaces the reader a page-height down (the
-        insert goes above them), so a wheel that keeps running travels that
-        distance back up and genuinely re-arrives at the top — one page per
-        real arrival, which is the contract. What this rule removes is the
-        page that no travel paid for: notches clamped at the top, settle
-        frames, and the mount's own restore. That is the half of the
-        reported loop the operator actually saw — chunks loading "without
-        requiring me to scroll up to the top again on the new height".
+        Refusing rather than queueing is the whole single-flight contract: a
+        second request for a source whose fetch is still outstanding is the
+        duplicate RPC F1 reported, and the cursor it would send is the one the
+        first request is already consuming (`history changed while paging`).
         """
-        view = self._transcript_view()
+        if source.token in self._paging_leases:
+            return None
+        lease = _PagingLease(source_token=source.token)
+        self._paging_leases[source.token] = lease
+        return lease
+
+    def _release_paging_lease(self, lease: _PagingLease | None) -> bool:
+        """Drop ``lease`` only if it is still the holder. Returns whether it was.
+
+        Identity, not source equality: a stale completion arriving after a
+        revisit names the same source as the transaction now in flight, and
+        letting it release on that basis is exactly the bug — the newer fetch
+        loses its gate while it is still running.
+        """
+        if lease is None:
+            return False
+        if self._paging_leases.get(lease.source_token) is not lease:
+            return False
+        del self._paging_leases[lease.source_token]
+        return True
+
+    def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
+        """Coalesce real upward input, never infer demand from layout motion.
+
+        The widget reports True/False for directional input and None for an
+        offset observation. A clamped wheel notch is still input. Observations
+        may complete an animated gesture, but cannot earn another page. One
+        boolean retains at most one additional demand while fetch/mount is
+        busy; a downward gesture cancels that debt.
+        """
+        # A final animation tick may arrive while Textual is unmounting this
+        # surface. Hooks belong to the cached active view; never rediscover a
+        # transcript (or dispatch paging) after that view has been retired.
+        view = self._transcript
+        if view is None or view.parent is None:
+            return
+        upward = args[0] if args else True
+        if upward is not None:
+            # Reader movement, for saved-position ownership, on the same
+            # provenance the paging demand uses: a passive layout correction
+            # must not discard an anchor still being restored.
+            self._interaction.scroll_revision += 1
+            self._resume_fill_active = False
+            self._resume_in_zone = bool(upward)
         if self._resume_pending_tail and view.scroll_y > 0 and view.is_near_bottom():
             self._mount_newer_resume_page()
             return
-        if not self._resume_pending_head:
-            session = self._session
-            if (
-                session is not None
-                and getattr(session, "history_before_token", None)
-                and not self._resume_paging
-                and view.scroll_y <= RESUME_PAGE_TRIGGER_ROWS
-                and (not continuous or self._resume_in_zone)
-            ):
-                self._resume_paging = True
-                self._resume_in_zone = False
-                self.run_worker(
-                    self._fetch_older_display_page(self._interaction),
-                    group=self._interaction.worker_group("history-page"),
-                )
-            return
-        if self._resume_paging:
-            # A page this same gesture requested is still mounting. The
-            # notches still arriving from that wheel land inside the trigger
-            # rows before the first page settles, and re-arming on them made
-            # one drag mount a second page the moment the gate re-opened —
-            # a page no travel paid for. The next page waits for a gesture
-            # that arrives after this one's page has landed.
-            return
-        if not continuous or self._transcript_view().scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS:
-            self._resume_in_zone = True
-        # SINGLE-FLIGHT: exactly one deferred check may be pending at a time.
-        # The watch fires once per animation frame and each firing used to
-        # schedule its own check, so one animated gesture queued hundreds;
-        # they all drained the moment the gate re-opened and each one mounted
-        # another page — the same cascade the gate exists to prevent, arriving
-        # one settle-pass later (M1/U1). A flag is enough because the pending
-        # check always runs before the next frame's watch can fire again.
-        if self._resume_check_pending:
+        if not self._resume_in_zone or self._resume_check_pending or self._resume_paging:
             return
         self._resume_check_pending = True
-
         generation = self._sidebar_navigation.generation
+        source = self._interaction
 
         def run_check() -> None:
-            if self._transcript is not view or self._sidebar_navigation.generation != generation:
+            if self._transcript is not view or not self._is_current(source):
                 return
             self._resume_check_pending = False
-            self._check_resume_page()
+            if self._sidebar_navigation.generation == generation:
+                self._check_resume_page()
 
-        self._transcript_view().call_after_refresh(run_check)
+        if upward is not None:
+            # Keyboard scroll helpers enqueue their actual motion after the
+            # refresh too. Our input hook runs first to release tail-follow;
+            # checking in that same callback batch would retire the demand
+            # before Home/PageUp had even installed its animation target.
+            view.call_after_refresh(lambda: view.call_after_refresh(run_check))
+        else:
+            view.call_after_refresh(run_check)
 
-    def _check_resume_page(self) -> None:
-        """Answer "is the reader at the top" from a viewport at rest.
-
-        Re-asks frame-by-frame while the viewport is still travelling — an
-        animated page-up is mid-flight for its whole duration, and every
-        intermediate offset is nearer the top than where the reader will land
-        — and again while a page this gesture already mounted is still
-        settling, so a second gesture arriving inside that window is answered
-        the moment the gate re-opens rather than silently dropped. Both waits
-        end: the animation finishes, and the settle callback releases the
-        gate (:meth:`_mount_older_resume_page`). The requeue is single-flight
-        (see `_transcript_scrolled`), so waiting never accumulates.
-
-        :data:`RESUME_PAGE_TRIGGER_ROWS` fires slightly before the hard top so
-        the rows are already there when the reader arrives, rather than
-        appearing under a viewport that had stopped.
-
-        EDGE, not level: the mount below fires only on the latch
-        (`_resume_in_zone`), which is armed by a user gesture arriving after
-        the previous page landed and consumed by this mount. A level test
-        here mounted on every settle frame — the anchor restore after a page
-        lands the reader back INSIDE the zone by construction, which is the
-        whole point of preserving the anchor — and the next watch firing
-        mounted another page. Home pressed while already parked at the top
-        still loads one page: that gesture re-arms the latch (it is a real
-        input) and the check consumes it again — one press, one page.
-        """
-        if not self._resume_pending_head:
+    def _check_resume_page(self, *, force: bool = False) -> None:
+        """Spend one demand only after motion settles in the prefetch zone."""
+        if not self._resume_in_zone or self._resume_paging:
             return
-        transcript = self._transcript_view()
+        view = self._transcript_view()
         if (
-            transcript.app.animator.is_being_animated(transcript, "scroll_y")
-            # A scroll that has been REQUESTED but not started yet — the
-            # callback can land between the key binding and the animation it
-            # schedules, where `is_being_animated` is still False and the
-            # offset still pre-gesture. `scroll_target_y` is where the
-            # viewport is committed to go; differing means travel is coming.
-            or transcript.scroll_target_y != transcript.scroll_offset.y
-            or self._resume_paging
+            view.app.animator.is_being_animated(view, "scroll_y")
+            or view.scroll_target_y != view.scroll_offset.y
         ):
-            self._transcript_scrolled()
+            self._transcript_scrolled(None)
             return
-        if transcript.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS and self._resume_in_zone:
-            # Consume FIRST, mount second: the mount's settle re-fires the
-            # watch, and an unconsumed latch would answer it with another
-            # page. `self._resume_paging` also holds across the mount, but
-            # the latch is the contract that survives a settle whose gate
-            # released while the reader stayed parked in the zone.
+        if not force and view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS:
+            # This gesture has landed without needing a page. Leaving it armed
+            # would let an unrelated later resize/clamp spend stale input.
             self._resume_in_zone = False
-            self._mount_older_resume_page()
+            return
+        self._resume_in_zone = False
+        if self._resume_pending_head or (
+            self._session is not None and getattr(self._session, "history_before_token", None)
+        ):
+            # Input requests a rendered buffer, not an arbitrary raw-event
+            # slice. Small slices yield during construction; transparent rows
+            # continue automatically until one viewport has appeared above the
+            # held reading position. Remote fetches still bring bounded pages
+            # into the local pending head, not one RPC per slice/notch.
+            viewport = view.container_size.height or view.size.height
+            self._fill_resume_until_scrollable(target=view.scroll_y + viewport)
 
-    def _mount_older_resume_page(self, on_settled: Callable[[], None] | None = None) -> None:
+    def _mount_older_resume_page(
+        self, on_settled: Callable[[], None] | None = None, *, lease: _PagingLease | None = None
+    ) -> None:
         """Mount the next older page of a bounded resume, at the top.
 
         ``on_settled`` runs once this page is fully answered and the paging
@@ -7172,9 +7374,16 @@ class OperatorApp(App[None]):
         the unbounded render cost this bound exists to remove, paid
         mid-interaction on the very sessions it targets.
         """
-        if self._resume_paging or not self._resume_pending_head:
+        if not self._resume_pending_head:
             return
-        self._resume_paging = True
+        source = self._interaction
+        if lease is None:
+            # A gesture-driven mount opens its own transaction; a fetch hands
+            # over the one it already holds so the gate is never briefly free
+            # between the network completing and the rows being painted.
+            lease = self._acquire_paging_lease(source)
+            if lease is None:
+                return
         head = self._resume_pending_head
         # Same turn-boundary snap as the initial cut: a page that opened on
         # a tool result whose call is still in the remaining head would
@@ -7195,9 +7404,34 @@ class OperatorApp(App[None]):
         ]
         transcript = self._transcript_view()
         notice = self._resume_head_notice
-        blocks = self._collect_resume_page_blocks(page)
+        mounted_ids = set(self._resume_mounted_ids)
+        try:
+            blocks = self._collect_resume_page_blocks(page)
+        except BaseException:
+            # Projection is synchronous and has not mounted anything yet.
+            # Keep the page retryable instead of losing its cursor or leaving
+            # the input lease stuck after a malformed persisted row.
+            self._resume_pending_head = head
+            self._resume_mounted_ids.intersection_update(mounted_ids)
+            self._release_paging_lease(lease)
+            self._resume_fill_active = False
+            raise
+        generation = self._sidebar_navigation.generation
 
         def release_gate() -> None:
+            # A hidden/replaced view cannot release the new view's lease, and
+            # a completion that no longer holds the gate cannot release it at
+            # all — that identity check is F1's remediation.
+            if not self._release_paging_lease(lease):
+                return
+            if not self._is_current(source) or self._transcript is not transcript:
+                return
+            if self._sidebar_navigation.generation != generation:
+                # A failed/cancelled navigation can leave THIS view active.
+                # Retire the fill without continuing superseded work.
+                self._resume_fill_active = False
+                self._reconcile_head_notice()
+                return
             # Cleared from the settle pass, not from a `finally`: the settle
             # is the first moment the gesture that armed the gate is fully
             # answered — the page is mounted, the gaps settled, and the anchor
@@ -7206,7 +7440,7 @@ class OperatorApp(App[None]):
             # Releasing any earlier re-opens the gate while an animated page-up
             # is still crossing the trigger row, and the next animation frame
             # mounts another page.
-            self._resume_paging = False
+            #
             # This page changed both terms the head notice is decided from —
             # how much history is left, and whether the frame can reach it —
             # so restate it from the geometry this mount just produced. Without
@@ -7217,6 +7451,7 @@ class OperatorApp(App[None]):
             # page finds the gate open rather than standing down against it.
             if on_settled is not None:
                 on_settled()
+            self._transcript_scrolled(None)
 
         if blocks:
             # Index 1 when the notice heads the list: the page goes BELOW
@@ -7226,16 +7461,9 @@ class OperatorApp(App[None]):
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
-            release_gate()
-        if not self._resume_pending_head and notice is not None:
-            # The head is exhausted, so the promise of more becomes a
-            # statement of where the conversation begins. Restated in place
-            # rather than removed: removing it would shift every row above
-            # the viewport by one and undo the anchor the insert just held.
-            # Through the shared funnel so the row also stops advertising the
-            # action it no longer has (D7) — a local exhaustion reaches here
-            # rather than through the reconcile.
-            self._restate_head_notice(notice, RESUME_START_NOTICE, "info")
+            # Hidden-only pages still yield; otherwise initial fill projects
+            # several raw pages synchronously without letting input run.
+            transcript.call_after_refresh(release_gate)
 
     def _collect_resume_page_blocks(self, page: list[Any]) -> list[Any]:
         """Build the blocks for one deferred page WITHOUT mounting them.
@@ -8061,6 +8289,7 @@ class OperatorApp(App[None]):
         # would report a number for history no longer on screen — until the new
         # session's first turn happened to end.
         self._status.update(
+            connection="",
             model_label=MODEL_PENDING,
             # Cleared with the label it describes: a name left standing beside
             # `MODEL_PENDING` would be the dead session's model.
@@ -8195,12 +8424,10 @@ class OperatorApp(App[None]):
         self._request_relaunch()
 
     def _turn_is_live(self) -> bool:
-        """A mid-turn exec would drop work the user can still abort with esc.
+        """Include lock-held compaction and loops, not only streamed tokens.
 
-        Compaction holds the session lock with ``is_streaming`` False (see
-        the hold in :meth:`on_editor_submitted`), so it has to count here
-        too: ``/update`` and ``/reload`` would otherwise tear the process
-        down while history is being rewritten.
+        Local execution cannot survive a terminal exec; a detached owner can.
+        ``_relaunch_refusal`` makes that ownership distinction separately.
         """
         session = self._session
         streaming = session is not None and bool(getattr(session, "is_streaming", False))
@@ -8218,16 +8445,47 @@ class OperatorApp(App[None]):
             return "esc first — a loop is still running"
         return "esc first — a turn is still running"
 
+    def _relaunch_refusal(self) -> str:
+        """Only out-of-process work survives replacing the terminal image."""
+        from local_operator.session.remote import RemoteSession
+
+        for source in self._interactions.values():
+            worker = source.shell.worker
+            if worker is not None and not worker.is_finished:
+                return "wait for the local shell command to finish before relaunching"
+            session = source.session
+            if (
+                session is not None
+                and session is not self._session
+                and (not isinstance(session, RemoteSession) or not session.can_detach_runtime)
+                and (
+                    getattr(session, "is_streaming", False)
+                    or source.loop.running
+                    or source.compaction.active
+                )
+            ):
+                return "wait for local session work to finish before relaunching"
+        if not self._turn_is_live():
+            return ""
+        session = self._session
+        if not isinstance(session, RemoteSession) or not session.can_detach_runtime:
+            return self._live_turn_refuse_copy()
+        if not self._resumable_session_id():
+            return "wait for this conversation to be saved before relaunching"
+        return ""
+
     def _request_relaunch(self, *, force: bool = False) -> None:
         """Stash a :class:`RestartPlan` and exit 75 so ``cli.main`` re-execs.
 
-        ``force`` is the completed-upgrade path: the wheel is already on
-        disk, so a turn that started during the installer must not cancel
-        the relaunch. The composer is locked for that window; this is the
-        belt if something still looks live.
+        ``force`` identifies the completed-upgrade path so a refusal releases
+        the installer mutex. Recheck ownership even then: an in-process legacy
+        takeover during installation must not have its work killed by exec.
         """
-        if not force and self._turn_is_live():
-            self._system_notice(self._live_turn_refuse_copy(), "warning")
+        refusal = self._relaunch_refusal()
+        if refusal:
+            self._system_notice(refusal, "warning")
+            if force:
+                self._finish_update()
             return
         from local_operator.reexec import REEXEC_CODE, make_plan, stash_plan
 
@@ -8240,7 +8498,14 @@ class OperatorApp(App[None]):
         # carries no ``--resume`` and comes back as a cold launch. The
         # completed-upgrade path already painted ``restarting…`` on the
         # same tick, so it does not get a second line.
-        if not force:
+        from local_operator.session.remote import RemoteSession
+
+        if isinstance(self._session, RemoteSession) and self._session.can_detach_runtime:
+            self._system_notice(
+                "relaunching terminal; runtime work continues. "
+                "New runtime code waits until all work is safely idle."
+            )
+        elif not force:
             if resume_id is None:
                 self._system_notice("relaunching… this will open a new session")
             else:
@@ -8269,8 +8534,9 @@ class OperatorApp(App[None]):
         if self._update_in_progress:
             self._system_notice("an update is already running", "warning")
             return
-        if self._turn_is_live():
-            self._system_notice(self._live_turn_refuse_copy(), "warning")
+        refusal = self._relaunch_refusal()
+        if refusal:
+            self._system_notice(refusal, "warning")
             return
         # Armed BEFORE the worker so a second ``/update`` typed while the
         # first is still scheduling cannot start a second installer. The
@@ -8379,7 +8645,10 @@ class OperatorApp(App[None]):
                     "the foreground lop mobile serve process to pick up the new UI",
                     "warning",
                 )
-            self._system_notice(f"updated to v{installed} — restarting…")
+            if self._relaunch_refusal():
+                self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
+            else:
+                self._system_notice(f"updated to v{installed} — restarting…")
             self._request_relaunch(force=True)
 
         self.call_from_thread(_relaunch_after_upgrade)
@@ -8748,9 +9017,62 @@ class OperatorApp(App[None]):
                 if editor.argument_command in ("team", "teams", "agent", "agents"):
                     self._fill_name_argument_list(editor, editor.argument_command)
 
-    def composer_submission_blocked(self) -> bool:
-        """Whether Editor must retain rather than submit its current draft."""
-        return self._session_transition_pending or self._model_activation_pending is not None
+    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings"})
+
+    def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
+        """One authority boundary for Enter, shortcuts and async continuations.
+
+        A socket object can exist before its canonical sync. Never derive
+        permission from that object or queue a user mutation until it binds.
+        Local draft clearing, copy and exiting do not require owner authority.
+
+        Scoped to the SOURCE deliberately. ``_session_transition_pending`` is a
+        different state with its own better answers — ``/stop`` says "still
+        starting" there, and ``/reload`` owns the window — so folding it in
+        here would replace those with this method's generic refusal.
+        """
+        source = source or self._interaction
+        return (
+            self._is_current(source)
+            and not source.retired
+            and not source.display_only
+            and not source.command_frame_pending
+            and not self._sidebar_navigation.requested_id
+        )
+
+    def _allow_source_command(self, source: SessionInteraction | None = None) -> bool:
+        if self._source_commands_ready(source):
+            return True
+        if source is None or self._is_current(source):
+            hint = (
+                " Select this session again to retry." if self._interaction.connection_error else ""
+            )
+            self._notice(f"Commands unavailable until connected.{hint}", "warning")
+        return False
+
+    def composer_submission_refused(self) -> None:
+        if self._interaction.display_only or self._interaction.command_frame_pending:
+            hint = (
+                " Select this session again to retry." if self._interaction.connection_error else ""
+            )
+            self._notice(f"Send unavailable until connected.{hint}", "warning")
+
+    def composer_submission_blocked(
+        self, text: str | None = None, *, shell: bool | None = None
+    ) -> bool:
+        """Check the draft, or the immutable payload after Editor clears it."""
+        if self._session_transition_pending or self._model_activation_pending is not None:
+            return True
+        if self._source_commands_ready():
+            return False
+        try:
+            editor = self._editor()
+        except NoMatches:
+            return True
+        if (editor.shell_mode if shell is None else shell) or self._aside_is_open():
+            return True
+        entry = slash_command_for(editor.text if text is None else text)
+        return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -10820,6 +11142,21 @@ class OperatorApp(App[None]):
             # reasoning as the branch above, and it keeps the two causes the
             # branch can honestly name without asserting which one applies.
             text = "Couldn't attach that file. Too large, or not an image."
+        elif message.reason == "credential-blank":
+            # A paste while ARMED that carried no value. States the outcome and
+            # the one fact the operator cannot read off the screen: the arm
+            # SURVIVED, so the next paste is still captured. Without that, the
+            # frame is neither "captured" nor "failed" and the natural repair —
+            # re-typing the gesture — is a move they do not need (design round
+            # 1, D3).
+            text = "Nothing to capture — still armed for the next paste."
+        elif message.reason == "credential-sealed":
+            # ctrl+r on a credential chip. The refusal is the security property
+            # working, but a bare no-op reads as a missed keystroke because
+            # every other marker kind answers this key — so the sentence states
+            # the property and names the gesture that DOES work (design round
+            # 1, D6).
+            text = "A credential can't be expanded — backspace forgets it."
         elif message.reason == "too_large":
             # Names the payload, not the clipboard. The bound is deliberate -
             # truncating a paste is invisible damage - so the honest report is
@@ -11956,7 +12293,7 @@ class OperatorApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
-        if self.composer_submission_blocked():
+        if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
             # already have been posted, so return the draft rather than routing
@@ -11978,6 +12315,18 @@ class OperatorApp(App[None]):
         # screenshot pasted with no words still submits, carrying its marker.
         if not text and not message.shell:
             return
+        # INLINE CREDENTIALS, before every exit below. This is the one seam
+        # where the secret leaves the composer's map for the session store, and
+        # it has to run ahead of the aside/shell/slash branches because each of
+        # them returns: a credential captured into a draft that was then sent
+        # to `/btw` would otherwise be silently dropped, and the marker naming
+        # it would reach the model as a promise of a key nothing stored.
+        #
+        # It rewrites `text` in place, so from here down NOTHING carries a
+        # credential citation any further than the name — the transcript row,
+        # the history entry, the journal and the model all read the substituted
+        # form, and the value exists only in the store.
+        text = self._capture_inline_credentials(text, message.attachments)
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
         # (`esc close · enter ask again`) and its placeholder says so, and a
@@ -12458,7 +12807,139 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         dock.set_class(message.active, COMPOSER_SHELL_CLASS)
-        chevron.update(SHELL_CHEVRON if message.active else PROMPT_CHEVRON)
+        # Leaving bang-mode RESTORES the armed marker rather than the resting
+        # one when a capture is still armed. The two modes are independently
+        # reachable (`!` then `/credential`, or the reverse), and a state that
+        # silently lost its glyph on the way out of another mode is the exact
+        # invisibility D2 is about — the arm would still be live and nothing
+        # would say so.
+        armed = self._editor().credential_armed()
+        if message.active:
+            chevron.update(SHELL_CHEVRON)
+        else:
+            chevron.update(CREDENTIAL_CHEVRON if armed else PROMPT_CHEVRON)
+
+    def on_credential_arm_changed(self, message: CredentialArmChanged) -> None:
+        """Follow the composer's ARMED state onto the dock class, glyph and copy.
+
+        The same treatment bang-mode gets, for a state whose misread is worse:
+        the class is the colour cue, the glyph the colour-independent one, and
+        the picker's notice row says it in words while its list is open. They
+        flip on one message so they cannot drift.
+
+        The placeholder is written too, but it does NOT paint here — a
+        placeholder needs an empty buffer and arming needs the token in it (see
+        :data:`CREDENTIAL_PLACEHOLDER`, design round 2, D8). It is kept in sync
+        as state, and the restore branch below is load-bearing for the aside
+        regardless of whether anything is drawn.
+
+        Bang-mode's class is left to outrank this one in the stylesheet — the
+        two are mutually reachable (``!`` then ``/credential``) and Enter
+        running a command is the louder claim about the key the operator is
+        about to press.
+
+        A disarm the operator DID NOT ASK FOR gets a word. ``captured`` needs
+        none (the marker in the buffer is the receipt) and ``gone`` was them
+        deleting the token, but ``argument`` is the case where they kept typing
+        and the mode changed underneath: they typed a flag, which means they are
+        addressing the command rather than arming, and the next paste would land
+        in plaintext. That is the false negative D2 names as unrecoverable, so
+        it is the one that must never be silent.
+        """
+        try:
+            dock = self.query_one("#input-dock")
+            chevron = self.query_one("#prompt-chevron", Chrome)
+        except NoMatches:
+            return
+        editor = self._editor()
+        dock.set_class(message.active, COMPOSER_CREDENTIAL_CLASS)
+        if editor.shell_mode:
+            # Bang-mode owns the glyph while it is on; the class above still
+            # goes on so the state is not lost when the mode is left.
+            pass
+        elif message.active:
+            chevron.update(CREDENTIAL_CHEVRON)
+        else:
+            chevron.update(PROMPT_CHEVRON)
+        # The placeholder is a SHARED channel — bang-mode, the aside and the
+        # read-only subagent page each own it in their own mode — so this only
+        # writes it where the resting copy is what would otherwise be showing,
+        # and only restores what it replaced. Restoring `resting_placeholder`
+        # unconditionally would have overwritten "Ask the aside…" with
+        # "Message Local Operator…" for anyone who armed a capture inside the
+        # aside, silently relabelling a surface this change has no business
+        # touching.
+        if not editor.shell_mode:
+            if message.active and editor.placeholder == editor.resting_placeholder:
+                editor.placeholder = CREDENTIAL_PLACEHOLDER
+            elif not message.active and editor.placeholder == CREDENTIAL_PLACEHOLDER:
+                editor.placeholder = editor.resting_placeholder
+        # THE PICKER'S OWN ROW, when the list is open. `CREDENTIAL_ARMED_NOTICE`
+        # is written on `ArgumentQueryOpened`, which fires when the list OPENS —
+        # so a disarm that happens while it is already open never revised it,
+        # and the row went on promising "armed — paste the secret; it is
+        # captured, never shown" after the state had ended. The flag disarm is
+        # the reachable case: deleting the token closes the list and a capture
+        # replaces the buffer, but typing `-` leaves the list open, and it is
+        # exactly the disarm the operator is least likely to expect (design
+        # round 2, D7).
+        #
+        # Worse than a stale hint: it sat NEARER the caret than the transcript
+        # notice below, so the two channels contradicted each other and the row
+        # the operator was looking at was the false one — a promise that the
+        # next paste is never shown, immediately above the plaintext paste.
+        #
+        # The disarm branch falls back to the HELD notice rather than to blank
+        # (design round 3, D9): a capture disarms, and if the list is still open
+        # over a buffer that now cites the chip, the rows are suppressed for the
+        # citation instead. Blanking the row there would leave the list looking
+        # empty for no stated reason — the same "vanished, so the gesture must
+        # have been dropped" reading `CREDENTIAL_ARMED_NOTICE` exists to
+        # prevent. Rows are deliberately NOT refilled on this path: this handler
+        # only ever narrows what the list offers, so no disarm can hand back a
+        # destructive row the fill above withheld.
+        if editor.argument_command in ("credential", "cred"):
+            editor.picker.set_notice(
+                CREDENTIAL_ARMED_NOTICE
+                if message.active
+                else (CREDENTIAL_HELD_NOTICE if editor.credential_cited() else "")
+            )
+        if not message.active and message.reason == "argument":
+            self._notice(
+                "credential capture disarmed — that is an argument to "
+                "/credential, so the next paste is NOT captured",
+                "warning",
+            )
+
+    def session_credential_names(self) -> tuple[str, ...]:
+        """Names the session store already holds, for the composer's key guard.
+
+        The composer generates a name for an inline capture and must avoid one
+        already in use — a collision SILENTLY REPLACES a live credential, and
+        its own map resets on every submit, so it cannot see a credential the
+        operator handed over earlier in the session (review round 1, R3). This
+        is the read that closes that gap.
+
+        Names only, never values: a viewer or a store that cannot answer yields
+        an empty tuple, which degrades the guard to probability rather than
+        failing a capture whose secret is already out of the buffer.
+        """
+        store = getattr(self._session, "variables", None) if self._session is not None else None
+        names = getattr(store, "credential_names", None)
+        if not callable(names):
+            return ()
+        try:
+            # The store is reached duck-typed (a viewer has no `variables` at
+            # all), so the call's return is untyped here: narrowed rather than
+            # trusted, because a double returning something unexpected must
+            # degrade the guard, not raise on the submit seam.
+            reported = names()
+            if not isinstance(reported, (list, tuple, set, frozenset)):
+                return ()
+            return tuple(str(name) for name in reported)
+        except Exception:  # noqa: BLE001 — an unreadable store is an empty set
+            logger.debug("could not read stored credential names", exc_info=True)
+            return ()
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
         """Ctrl+C from the composer — the NORMAL path, since it holds focus.
@@ -12739,6 +13220,9 @@ class OperatorApp(App[None]):
         loop would immediately submit the next — the user would have to press
         Ctrl+C once per remaining iteration to actually stop.
         """
+        if not self._allow_source_command():
+            self._abort_shell_command()
+            return
         if self._loop_running:
             self._loop_cancelled = True
         # A turn parked on an approval cannot see the abort signal until the
@@ -12845,6 +13329,8 @@ class OperatorApp(App[None]):
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
         if self._close_settings_view():
+            return
+        if not self._allow_source_command():
             return
         # A live `ask` picker takes Escape as "leave this question unanswered",
         # which is what its own footer advertises (`esc skip`) and what its
@@ -13420,6 +13906,8 @@ class OperatorApp(App[None]):
             # otherwise raise InvalidStateError out of Textual's callback.
             if not future.done() and view_generation == source.gate_view_generation:
                 source.gate_draft = None
+                if result:
+                    self._preserve_source_gate_reply(source)
                 future.set_result(result)
 
         # The subagent page hides the transcript and the aside floats over it,
@@ -13831,7 +14319,15 @@ class OperatorApp(App[None]):
             and (key is None or key == self._sidebar_gate_identity(source))
         ):
             source.gate_draft = None
+            self._preserve_source_gate_reply(source)
             self._latch_approval_answer(answer)
+
+    @staticmethod
+    def _preserve_source_gate_reply(source: SessionInteraction) -> None:
+        from local_operator.session.remote import RemoteSession
+
+        if isinstance(source.session, RemoteSession):
+            source.session.preserve_viewer_gate_reply()
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -14762,6 +15258,8 @@ class OperatorApp(App[None]):
         # Unlike paint-only workers, bang-mode owns a subprocess and a durable
         # receipt. Abort and join it BEFORE the blanket cancellation: cancelling
         # execute_bash directly can bypass its normal result/persistence path.
+        if self._restart_plan is not None:
+            await self._detach_relaunch_gates()
         await self._settle_shell_command()
         self.workers.cancel_all()
         await super()._shutdown()
@@ -14839,6 +15337,7 @@ class OperatorApp(App[None]):
             len(self.screen_stack) != 1
             or not self.app_focus
             or self._session_transition_pending
+            or self._interaction.display_only
             or self._sidebar_frame_pending
         ):
             return False
@@ -16093,8 +16592,39 @@ class OperatorApp(App[None]):
             logger.info("terminal front end closed; session is quiescent — exiting cleanly")
             self.exit()
 
+    async def _detach_relaunch_gates(self) -> None:
+        """Withdraw every viewer bridge before widget cleanup resolves futures.
+
+        Approval/ask widget teardown normally answers its local future. On a
+        relaunch that must not become a denial sent to the still-running owner;
+        the next viewer receives the unanswered gate from canonical state.
+        Sidebar sources can hold gates too, not just the visible conversation.
+        """
+        from local_operator.session.remote import RemoteSession
+
+        sessions = [source.session for source in self._interactions.values()]
+        sessions.append(self._session)
+        seen: set[int] = set()
+        pending = []
+        for session in sessions:
+            if (
+                isinstance(session, RemoteSession)
+                and session.can_detach_runtime
+                and id(session) not in seen
+            ):
+                seen.add(id(session))
+                pending.append(session.detach_viewer_gates(preserve_answers=True))
+        # Suspend every source before waiting on any one reply, so a background
+        # source cannot create a successor gate while another socket drains.
+        await asyncio.gather(*pending)
+
     async def on_unmount(self) -> None:
         from textual.worker import WorkerCancelled, WorkerFailed
+
+        # Keep direct hook callers safe too; normal shutdown already withdrew
+        # these bridges before Textual pruned the widgets or cancelled workers.
+        if self._restart_plan is not None:
+            await self._detach_relaunch_gates()
 
         if self._sidebar_prefetch is not None:
             self._sidebar_prefetch.cancel()
@@ -16104,6 +16634,15 @@ class OperatorApp(App[None]):
                 pass
             except WorkerFailed:
                 logger.debug("sidebar prewarm failed during shutdown", exc_info=True)
+        connections = [
+            source.connection_task
+            for source in self._interactions.values()
+            if source.connection_task is not None and not source.connection_task.done()
+        ]
+        for connection in connections:
+            connection.cancel()
+        if connections:
+            await asyncio.gather(*connections, return_exceptions=True)
         await self._sidebar_navigation.close()
         await self._sidebar_drafts.close()
         if self._sidebar_timer is not None:
@@ -20309,14 +20848,8 @@ class OperatorApp(App[None]):
         parts = text.split(maxsplit=1)
         entry = slash_command_for(text)
         command = f"/{entry.name}" if entry is not None else parts[0].lower()
-        if self._sidebar_navigation.requested_id and command not in (
-            "/sidebar",
-            "/help",
-            "/settings",
-        ):
-            self._system_notice(
-                "Wait for the conversation to open before sending a command", "warning"
-            )
+        if not self._source_commands_ready() and command not in self._SAVED_LOCAL_COMMANDS:
+            self._allow_source_command()
             return
         arg = parts[1].strip() if len(parts) > 1 else ""
         # The argument of a ``consumes_prompt`` command with its collapsed
@@ -21425,6 +21958,8 @@ class OperatorApp(App[None]):
         on screen says the next launch comes back on the old one — so the command
         that fixes that was reachable only by already knowing it existed.
         """
+        if arg and not self._allow_source_command():
+            return
         session = self._session
         if not arg:
             # The persist-hint notice is NOT printed here: reopening the list
@@ -21634,6 +22169,11 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
     ) -> None:
+        # Resolution can yield across a view switch. Recheck the captured
+        # session, then the shared readiness boundary, immediately before any
+        # setter or cold-bind task can be created.
+        if session is not self._session or not self._allow_source_command():
+            return
         old_label = session.model_label
         # The DESTINATION is derived from the spec this command resolved, never
         # re-read from ``session.model_label`` after ``set_model``. On a local
@@ -22229,6 +22769,8 @@ class OperatorApp(App[None]):
         spec (the embedders and pilot fakes this module degrades for) would
         otherwise get a line announcing a level nothing is running.
         """
+        if not self._allow_source_command():
+            return False
         session = self._session
         spec = _model_spec(session)
         if session is None or spec is None or not hasattr(session, "set_model"):
@@ -22262,6 +22804,8 @@ class OperatorApp(App[None]):
         REPLACED under a running app, and READ BACK rather than trusted so a
         receipt is never printed for a state the session is not carrying.
         """
+        if not self._allow_source_command():
+            return False
         session = self._session
         spec = _model_spec(session)
         if session is None or spec is None or not hasattr(session, "set_model"):
@@ -23598,6 +24142,8 @@ class OperatorApp(App[None]):
         useful response is to begin the login, not to refuse and make them retype
         the provider name into a different command.
         """
+        if not self._allow_source_command():
+            return
         notice = self._notice
         if not row.connected:
             notice(f"{row.provider} needs a login first — starting it now", "warning")
@@ -25622,6 +26168,9 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        if not self._source_commands_ready():
+            panel.set_notice("Connect before adding this aside to the conversation")
+            return
         pairs = panel.fork_messages()
         if not pairs:
             panel.set_notice("ask something first — there is nothing to fork")
@@ -25650,6 +26199,8 @@ class OperatorApp(App[None]):
         user asked to keep is what they are left looking at, rather than a
         popup over it.
         """
+        if session is not self._session or not self._source_commands_ready():
+            return
         messages: list[Message] = []
         for question, answer in pairs:
             messages.append(Message.user(question))
@@ -25657,7 +26208,10 @@ class OperatorApp(App[None]):
         try:
             await session.adopt_aside(messages)
         except Exception as error:  # noqa: BLE001 — surfaced, never swallowed
-            self._system_notice(f"could not fork the aside: {error}", "warning")
+            if session is self._session:
+                self._system_notice(f"could not fork the aside: {error}", "warning")
+            return
+        if session is not self._session:
             return
         self._close_aside()
         for question, answer in pairs:
@@ -25806,8 +26360,17 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("credential", "cred"):
-            picker.set_choices(self._credential_choices())
-            picker.set_notice("")
+            # Both suppression reasons are read here, and the notice follows
+            # whichever applies. ARMED wins the notice when both are true (a
+            # second gesture armed while an earlier chip is still in the
+            # draft): the operator is mid-gesture, so what the NEXT paste does
+            # is the more urgent of the two things to say.
+            armed = editor.credential_armed()
+            cited = editor.credential_cited()
+            picker.set_choices(self._credential_choices(armed=armed, cited=cited))
+            picker.set_notice(
+                CREDENTIAL_ARMED_NOTICE if armed else (CREDENTIAL_HELD_NOTICE if cited else "")
+            )
             return
         if message.command in ("team", "teams", "agent", "agents"):
             # Rows and the render-time name snapshot are one fill operation. The
@@ -25905,14 +26468,62 @@ class OperatorApp(App[None]):
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
 
-    def _credential_choices(self) -> list[ArgumentChoice]:
+    def _credential_choices(
+        self, *, armed: bool = False, cited: bool = False
+    ) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
 
         Verbs first so a user who opened the list to store something is not
         looking at a forget row. Stored keys are offered as ``--forget KEY``
         rather than the bare name: completing a stored key into the buffer
         would re-open the paste prompt for a key that is already held.
+
+        EMPTY WHILE A CAPTURE IS ARMED, which is the fix for the destructive
+        default row (design round 1, D1). The two intents are mutually
+        exclusive — "I am about to hand you a secret" and "forget the secrets I
+        already handed you" — and offering the second while the operator is
+        mid-way through the first parked them on a preselected, unconfirmed
+        ``--forget-all`` with a ghost under the caret. Two proven consequences
+        on the real app: Enter+Enter completed and ran the highlighted row and
+        wiped a live store with no confirm and no undo; Tab accepted the ghost,
+        which consumed the arming token, so the very next paste landed the
+        secret IN PLAINTEXT on screen.
+
+        EMPTY ALSO WHILE THE BUFFER CITES A CAPTURE (design round 3, D9), which
+        is the same defect one step later in the same gesture. ``armed`` covers
+        only the window BEFORE the secret arrives, and the capture itself ends
+        it — so a draft that mentions the command twice (``fix the /credential
+        command`` typed before the real gesture, which is an ordinary sentence)
+        keeps a second, now-UNARMED token in the buffer once the marker splices
+        at the first. Its argument slot is empty, so every row came back with
+        ``--forget-all`` preselected, and pure keystrokes out of the feature's
+        own post-capture output — ``end,enter,enter`` — wiped the whole store
+        INCLUDING the credential just captured, while its chip was still sitting
+        in the buffer citing it. That last part is the load-bearing half: the
+        frame then showed a chip promising a credential the store no longer
+        held, which is two rows of one screen contradicting each other.
+
+        Why the citation and not the leftover token: splicing the marker at the
+        caret's token instead cannot fix this, because with two mentions a
+        capture consumes exactly one and the other is stray either way — it only
+        changes WHICH one is left. Moving the ARM to the caret's token was the
+        other candidate and it is worse than a no-op: ``CREDENTIAL_ARM``
+        transiently matches an earlier ``/cred`` while that sentence is still
+        being typed, so re-latching per sync migrates the arm onto a token the
+        operator never armed — exactly the R6b/R6c leak this PR closed in round
+        2. The condition that actually tracks the hazard is "this composer is
+        holding a secret the operator can see", which is what a citation means.
+
+        Still NOT a redesign of ``--forget-all``'s own confirmation. That row
+        and this picker predate this PR and the same wipe reproduces on ``main``
+        without any of this — the defect owned here is that a new happy path
+        routes the operator through that state, so the fix stays scoped to the
+        states this feature creates, and the destructive verb is reached exactly
+        as before by typing it (``CREDENTIAL_ARGUMENT`` disarms on a leading
+        ``-``, and a typed flag is the explicit act the rows are not).
         """
+        if armed or cited:
+            return []
         choices = [
             ArgumentChoice(
                 "--forget-all",
@@ -26489,6 +27100,181 @@ class OperatorApp(App[None]):
             f"{verb} {stored_key}. Injected into every bash command "
             "as an environment variable; the agent cannot read the value."
         )
+
+    def _capture_inline_credentials(self, text: str, attachments: Mapping[int, Marked]) -> str:
+        """Store every credential ``text`` cites; return the text to send on.
+
+        The submit-side half of the inline ``/credential`` gesture. The
+        composer took the secret OUT of the buffer at paste time and left a
+        ``[Credential #N, <len> chars]`` receipt; this is where the value goes
+        into the session store under its generated name and the receipt is
+        rewritten to NAME that credential for the model.
+
+        Returns ``text`` unchanged when nothing was captured, which is the
+        overwhelmingly common case and costs one dict scan.
+
+        WHY THE SUBSTITUTION HAPPENS EVEN WHEN THE STORE REFUSES: a marker left
+        in the outgoing text would tell the model a credential exists that
+        nothing holds. Every failure path below therefore rewrites the citation
+        too — to an explicit "not stored" phrase — so the model is never handed
+        a name it cannot use, which is the silent failure the viewer split in
+        ``_FRONTEND_LOCAL_SLASHES`` exists to prevent.
+
+        PER CREDENTIAL, not per submit. That invariant is only true if each
+        citation reflects ITS OWN payload's outcome, and an aggregate guard
+        cannot deliver it: guarding on "did anything store" rewrote every
+        citation to the confident form whenever ONE payload landed, so a
+        message carrying a refused credential beside a stored one advertised
+        ``$LOP_SECRET_…`` for a key ``credential_env()`` does not contain
+        (review round 1 R1, QA round 1 Q1 — two independent derivations of the
+        same defect).
+
+        That mixed case is REACHABLE through shipped components: a draft spilled
+        to the sidebar's temp JSON comes back with ``value=""`` by design (the
+        encoder deliberately does not persist secrets), ``store_credential``
+        refuses a blank, and one restored credential beside one freshly pasted
+        one is exactly the shape. The docstring above asserted the invariant
+        twice while the code held it only in the all-or-nothing case.
+        """
+        payloads = credential_payloads(text, attachments)
+        if not payloads:
+            return text
+        session = self._session
+        store = getattr(session, "variables", None)
+        if store is None or not hasattr(store, "store_credential"):
+            # A VIEWER (or a session still starting). The store that matters is
+            # the OWNER's — `credential_env()` is read by the `bash` tool in
+            # the owner's process — and this path is synchronous, on the submit
+            # seam, with no place to await the remote op. Rather than store
+            # locally (a key no tool could read: the exact leak
+            # `_FRONTEND_LOCAL_SLASHES` documents) the capture DEGRADES
+            # LOUDLY: the secret is dropped here, the operator is told, and the
+            # model is told nothing was stored. `/credential <KEY>` still
+            # routes to the owner over the dedicated op and remains the
+            # supported way to hand a secret over from a viewer.
+            self._system_notice(
+                "inline /credential needs the session that runs the tools; "
+                "use /credential <KEY> here and the secret is stored on the owner",
+                "warning",
+            )
+            return self._mark_credentials_unstored(text, attachments)
+        stored: list[str] = []
+        # Keyed by the payload's OWN key, so the citation rewrite below can ask
+        # about each credential individually. A list of successes is not enough:
+        # the rewrite has to be able to say "this one did not land" for a
+        # specific marker, which is the whole of R1/Q1.
+        refused: dict[str, CredentialStoreFailure] = {}
+        for payload in payloads:
+            result = store.store_credential(payload.key, payload.value, "command")
+            if not result.ok or result.credential is None:
+                # `empty-value` is the reachable one (a restored spilled draft
+                # carries no bytes); `empty-key` cannot happen for a generated
+                # name, but the reason is carried through rather than assumed so
+                # the model is told what actually refused.
+                refused[payload.key] = result.reason or "empty-value"
+                continue
+            stored.append(result.credential.key)
+            # Journalled exactly as the masked-paste flow journals, so a
+            # credential handed over inline is visible to the next turn and to
+            # a resume. The record names the KEY only; `journal_credential_
+            # change` never sees the value.
+            self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
+        if refused:
+            # THE OPERATOR HEARS IT TOO, on every refusal and not only the
+            # all-failed one. The composer has already cleared and the marker is
+            # gone, so silence here left them believing they had handed over a
+            # credential that the store refused and the model was told was
+            # missing — the one belief this feature must never create (QA round
+            # 1, Q2). Warning rather than info: it reports a gesture that did
+            # not do what it looked like it did.
+            noun = "credential" if len(refused) == 1 else "credentials"
+            self._system_notice(
+                f"{len(refused)} {noun} could not be stored "
+                f"({', '.join(sorted(refused))}); the agent has been told so. "
+                "Paste the value again after /credential to retry.",
+                "warning",
+            )
+        if not stored:
+            return self._mark_credentials_unstored(text, attachments, refused)
+        substituted = substitute_credentials(text, attachments, refused)
+        # SCRUB THE MAP once the store owns the value. The same attachments map
+        # rides on past this point into `SessionDraft` (the accepted-draft and
+        # `/reload` hand-back), the compaction hold and the aside stash — all
+        # in-memory, none of which needs the bytes now that
+        # `VariableStore._credentials` holds them. Emptying the payload here
+        # means those seams are safe BY CONSTRUCTION rather than by an argument
+        # about which of them re-expands.
+        #
+        # WHAT THIS SCRUB DOES NOT REACH, stated exactly, because an earlier
+        # version of this comment claimed it bounded a secret's lifetime to the
+        # one turn it was pasted in and that is FALSE (review round 1, R2). It
+        # reaches every holder that shares this map OBJECT. It cannot reach a
+        # copy taken before it ran, and `Editor._navigate_history` takes one:
+        # pressing Up with an unsubmitted credential does
+        # `_draft_attachments = dict(self._attachments)`, and `PastedCredential`
+        # is frozen, so replacing the entry here cannot reach that copy. A
+        # parked session therefore holds the plaintext in
+        # `SessionDraft.history_stash_attachments` for as long as the draft is
+        # parked, across sidebar switches.
+        #
+        # That retention is DELIBERATE and it is not a leak — verified: the
+        # field is absent from `_encode_draft`'s list (`session_drafts.py`), so
+        # it never reaches disk, and nothing re-expands it into a prompt. It is
+        # the operator's own unsubmitted draft, and scrubbing it would hand them
+        # back a credential marker with no value behind it, which
+        # `store_credential` then refuses — destroying unsubmitted work to
+        # shorten the lifetime of a secret that never leaves memory. The
+        # narrower claim is the true one: this bounds what the SUBMITTED turn's
+        # downstream holders carry, not what a parked draft retains.
+        #
+        # The key and marker stay so a restored draft still paints its receipt.
+        # A restore that re-submits finds an empty value, which
+        # `store_credential` refuses, and the operator is told it was not
+        # stored rather than the model being promised a key twice.
+        if isinstance(attachments, MutableMapping):
+            for index, payload in list(attachments.items()):
+                if isinstance(payload, PastedCredential):
+                    attachments[index] = PastedCredential("", payload.key, payload.marker)
+        # The receipt names what the agent can now use. Plural-safe because two
+        # pastes while armed capture two credentials (see `_capture_credential`).
+        self._notice(
+            f"Stored {', '.join(stored)}. Injected into every bash command "
+            "as an environment variable; the agent cannot read the value."
+        )
+        return substituted
+
+    def _mark_credentials_unstored(
+        self,
+        text: str,
+        attachments: Mapping[int, Marked],
+        refused: Mapping[str, CredentialStoreFailure] | None = None,
+    ) -> str:
+        """Rewrite credential citations to say the value did NOT land.
+
+        The honest form of the degraded path. Stripping the citation instead
+        would send the operator's description of a secret with no mention that
+        the secret is missing, and the agent would go looking for an env var
+        nobody set.
+
+        ``refused`` names why each key was refused, when a store was present and
+        said no. Without it the phrase is the viewer case — there is no store on
+        this side at all. The distinction is the whole of QA finding Q3: the
+        sentence used to hard-code "no session store available" for both, so a
+        store that WAS present and refused an empty value told the model the
+        store was unavailable, pointing any diagnosis at the wrong subsystem.
+        """
+        from local_operator.tui.widgets.editor import cite, describe_unstored
+
+        spans = [
+            (span, payload)
+            for index, payload in attachments.items()
+            if isinstance(payload, PastedCredential)
+            and (span := cite(text, index, payload)) is not None
+        ]
+        for (start, end), payload in sorted(spans, reverse=True):
+            reason = (refused or {}).get(payload.key)
+            text = text[:start] + describe_unstored(reason) + text[end:]
+        return text
 
     async def _credential_store_flow(self, store: object, key: str) -> None:
         """Masked paste for ``/credential <KEY>``, then store what arrived."""
