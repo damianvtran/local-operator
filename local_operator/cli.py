@@ -2214,7 +2214,12 @@ def _wake_create(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    print(f"{schedule.id}  {_format_due((due_at - now_ms) / 1000.0)}  {schedule.message}")
+    from local_operator.wakes.display import format_wake_time
+
+    print(
+        f"{schedule.id}  {format_wake_time(due_at)} "
+        f"({_format_due((due_at - now_ms) / 1000.0)})  {schedule.message}"
+    )
     if installed_reason:
         print(f"supervisor: {installed_reason}")
     return 0
@@ -2313,9 +2318,10 @@ def wake_command(args: argparse.Namespace) -> int:
             print("no scheduled wakes")
             return 0
         from local_operator.harness.wake import format_duration
+        from local_operator.wakes.display import format_wake_time
 
         for row in rows:
-            when = _format_due(row["due_in_s"])
+            when = f'{format_wake_time(row["next_due_at"])} ({_format_due(row["due_in_s"])})'
             mark = " (dormant — session stopped)" if row["dormant"] else ""
             name = row["session_id"]
             # `every …` reuses the same renderer the tool listing and the wake

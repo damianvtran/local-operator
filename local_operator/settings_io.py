@@ -838,6 +838,19 @@ SETTINGS: tuple[Setting, ...] = (
         # four `session.cleanup.*` rows already use (design round 1, D4).
     ),
     Setting(
+        key="display.time_format",
+        path=("display.time_format",),
+        section="appearance",
+        label="Wake time format",
+        kind=Kind.ENUM,
+        default="12h",
+        help="Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock.",
+        choices=(
+            Choice("12h", "12-hour", "7:52 PM PDT"),
+            Choice("24h", "24-hour", "19:52 PDT"),
+        ),
+    ),
+    Setting(
         # The session's INITIAL dock density, not a hard override: `ctrl+g`
         # cycles freely from it and never writes it back (the same split as
         # `tool_approval_mode` vs `/approvals`). A hard override would make

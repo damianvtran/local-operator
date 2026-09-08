@@ -11,7 +11,6 @@ will wake at 09:00 is to catch the delivery line as it scrolls past.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from rich.style import Style
@@ -22,6 +21,7 @@ from textual.widgets import Static
 from local_operator.harness.wake import format_duration
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.tool_card import truncate_cells
+from local_operator.wakes.display import format_wake_time
 
 #: The most wake rows the band will spend. ``MAX_WAKE_SCHEDULES`` is 16, far
 #: more than the band can afford; the cap plus an overflow marker keeps a
@@ -102,8 +102,7 @@ class WakePanel(Container):
         clock must not count as a change, or the once-a-second poll would
         repaint a panel whose visible text did not move.
         """
-        due = datetime.fromtimestamp(schedule.next_due_at / 1000).astimezone()
-        due_label = due.strftime("%H:%M" if due.date() == datetime.now().date() else "%b %d %H:%M")
+        due_label = format_wake_time(schedule.next_due_at)
         every = f"every {format_duration(schedule.every_ms)}" if schedule.every_ms else "once"
         message = " ".join(str(schedule.message).split())
         return (str(schedule.id), due_label, every, message)
