@@ -22,6 +22,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.paths import config_dir
+from local_operator.tools.builtin import _validation_error
 from local_operator.web_search.models import SearchProviderId, SearchResponse
 from local_operator.web_search.providers import PROVIDERS, tavily_response_from_payload
 from local_operator.web_search.service import (
@@ -324,7 +325,10 @@ async def execute_web_search(
     try:
         params = WebSearchParams.model_validate(args)
     except ValidationError as error:
-        return _result(tool_call_id, f"Invalid web_search arguments: {error}", error=True)
+        # Shared with the builtins rather than hand-built here: the fault
+        # classification must not depend on WHICH tool the model picked, or
+        # `validity` acquires a hidden dependence on tool identity.
+        return _validation_error(tool_call_id, "web_search", error)
 
     manager = ConfigManager(config_dir())
     settings = load_search_settings(manager)

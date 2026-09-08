@@ -136,9 +136,27 @@ class WakeBuilt(TypedDict):
 
 
 class WakeBuildFailed(TypedDict):
-    """Why the request was rejected, phrased for the model to act on."""
+    """Why the request was rejected, phrased for the model to act on.
+
+    ``malformed`` separates the two reasons a request can be refused, because
+    only one of them is the MODEL's fault (see
+    ``harness.types.InvalidToolArgumentsError``):
+
+    - ``True`` — an argument could never have been valid: ``in='soonish'`` is
+      not a duration in any world. ``in``/``at``/``every``/``until`` are typed
+      as plain strings, so no JSON-Schema check can reject these before the
+      parser sees them.
+    - ``False`` — the request parsed but the world refuses it: the schedule
+      table is full, or the requested time has already passed. Well-formed,
+      merely unsatisfiable, and not a model fault.
+
+    Carried as data rather than raised so ``build_wake_schedule`` keeps its
+    documented "returns the error text, never raises" contract, which the
+    union's exactly-one-key typing depends on.
+    """
 
     error: str
+    malformed: bool
 
 
 #: :func:`build_wake_schedule` returns a mapping rather than raising because
@@ -289,8 +307,11 @@ def build_wake_schedule(
     request: dict[str, Any], existing: list[WakeSchedule], now_ms: int
 ) -> WakeBuildResult:
     """Validate a wake-create request. Returns ``{"schedule": WakeSchedule}``
-    or ``{"error": str}`` — it returns the error text rather than raising, so
-    the tool's failure path is a sentence the model can act on.
+    or ``{"error": str, "malformed": bool}`` — it returns the error text
+    rather than raising, so the tool's failure path is a sentence the model
+    can act on. ``malformed`` tells the caller whether the refusal was the
+    model's fault (see :class:`WakeBuildFailed`); the caller uses it to pick
+    the fault class, so a new error branch must set it deliberately.
 
     Recognized request keys: ``message`` (required), ``in`` or ``at`` (one
     required), plus optional ``every``, ``until``, ``limit``. Ids ``w1``..``w16``
@@ -298,34 +319,49 @@ def build_wake_schedule(
     """
     message = request.get("message")
     if not isinstance(message, str) or not message.strip():
-        return {"error": "wake requires a non-empty 'message'."}
+        return {"error": "wake requires a non-empty 'message'.", "malformed": True}
     message = message.strip()
     if len(message) > MAX_WAKE_MESSAGE_CHARS:
-        return {"error": f"wake message must be at most {MAX_WAKE_MESSAGE_CHARS} characters."}
+        return {
+            "error": f"wake message must be at most {MAX_WAKE_MESSAGE_CHARS} characters.",
+            "malformed": True,
+        }
     if len(existing) >= MAX_WAKE_SCHEDULES:
-        return {"error": f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed."}
+        return {
+            "error": f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed.",
+            "malformed": False,
+        }
 
     in_val = request.get("in")
     at_val = request.get("at")
     if in_val is not None:
         duration = parse_wake_duration(str(in_val))
         if duration is None:
-            return {"error": f"invalid duration '{in_val}'; use e.g. 45s, 30m, 2h, 7d, 1w."}
+            return {
+                "error": f"invalid duration '{in_val}'; use e.g. 45s, 30m, 2h, 7d, 1w.",
+                "malformed": True,
+            }
         next_due_at = now_ms + duration
     elif at_val is not None:
         parsed = parse_wake_at(str(at_val), now_ms)
         if parsed is None:
             return {
-                "error": f"invalid time '{at_val}'; use +duration, HH:MM, or an ISO-8601 timestamp."
+                "error": (
+                    f"invalid time '{at_val}'; use +duration, HH:MM, or an " "ISO-8601 timestamp."
+                ),
+                "malformed": True,
             }
         next_due_at = parsed
     else:
-        return {"error": "wake requires 'in' (e.g. '30m') or 'at' (e.g. '09:00')."}
+        return {
+            "error": "wake requires 'in' (e.g. '30m') or 'at' (e.g. '09:00').",
+            "malformed": True,
+        }
 
     # Past-at grace: up to PAST_AT_GRACE_MS in the past is accepted and fires
     # immediately; anything older is a user mistake worth surfacing.
     if next_due_at < now_ms - PAST_AT_GRACE_MS:
-        return {"error": "wake time is in the past."}
+        return {"error": "wake time is in the past.", "malformed": False}
     if next_due_at < now_ms:
         next_due_at = now_ms
 
@@ -334,16 +370,19 @@ def build_wake_schedule(
     if every_val is not None:
         every_ms = parse_wake_duration(str(every_val))
         if every_ms is None:
-            return {"error": f"invalid 'every' duration '{every_val}'."}
+            return {"error": f"invalid 'every' duration '{every_val}'.", "malformed": True}
         if every_ms < MIN_WAKE_INTERVAL_MS:
-            return {"error": f"wake interval must be at least {MIN_WAKE_INTERVAL_MS // 1000}s."}
+            return {
+                "error": f"wake interval must be at least {MIN_WAKE_INTERVAL_MS // 1000}s.",
+                "malformed": True,
+            }
 
     until_at: int | None = None
     until_val = request.get("until")
     if until_val is not None:
         until_at = parse_wake_at(str(until_val), now_ms)
         if until_at is None:
-            return {"error": f"invalid 'until' time '{until_val}'."}
+            return {"error": f"invalid 'until' time '{until_val}'.", "malformed": True}
 
     limit: int | None = None
     limit_val = request.get("limit")
@@ -351,9 +390,9 @@ def build_wake_schedule(
         try:
             limit = int(limit_val)
         except (TypeError, ValueError):
-            return {"error": f"invalid 'limit' '{limit_val}'."}
+            return {"error": f"invalid 'limit' '{limit_val}'.", "malformed": True}
         if limit < 1:
-            return {"error": "'limit' must be a positive integer."}
+            return {"error": "'limit' must be a positive integer.", "malformed": True}
 
     used = {schedule.id for schedule in existing}
     wake_id: str | None = None
@@ -363,7 +402,7 @@ def build_wake_schedule(
             wake_id = candidate
             break
     if wake_id is None:
-        return {"error": "no free wake id."}
+        return {"error": "no free wake id.", "malformed": False}
 
     schedule = WakeSchedule(
         id=wake_id,

@@ -69,16 +69,16 @@ from local_operator.harness.wake import WakeSchedule
 
 
 #: Key under which ``ToolResult.details`` carries WHY a call did not run
-#: cleanly. The vocabulary itself (``FAULT_UNKNOWN_TOOL`` and friends) is
-#: declared in ``harness.loop``, which owns classification; only the key and
-#: the one value a TOOL BODY may claim live here, because tool modules import
-#: this module and must not import the loop.
+#: cleanly. Declared HERE, and re-exported by ``harness.loop`` (which owns the
+#: rest of the vocabulary and all classification), because tool modules import
+#: this module and must not import the loop. One definition, two importers —
+#: so the ledger's spelling cannot drift between writer and classifier.
 FAULT_KEY = "__fault"
 
-#: The single fault class a tool body may assert about itself: the arguments
-#: the model emitted were MALFORMED. Duplicated as a literal rather than
-#: imported from ``harness.loop`` for the layering reason above; a test pins
-#: the two spellings together so they cannot drift.
+#: The single fault class a TOOL BODY may assert about itself: the arguments
+#: the model emitted were MALFORMED. Lives here for the same layering reason;
+#: the value must stay a member of ``analytics.model.MODEL_FAULTS``, which is
+#: what a test pins.
 FAULT_INVALID_ARGUMENTS = "invalid_arguments"
 
 
@@ -119,6 +119,35 @@ class InvalidToolArgumentsError(ValueError):
     exactly the principle ``AgentLoop._classify_fault`` is built on: the
     marker is SET at the source, never text-matched out of a message
     afterwards.
+    """
+
+
+class EnvironmentDependentRejectionError(ValueError):
+    """A validator refused a value for a reason OUTSIDE the arguments.
+
+    The escape hatch from :class:`InvalidToolArgumentsError`, for the case a
+    params model rejects a value by consulting live config, the environment,
+    the filesystem or the clock rather than by inspecting the argument's
+    shape. Such a rejection is NOT the model's fault: the value may be exactly
+    what the advertised schema offered, and the world moved underneath it.
+
+    The motivating case is ``effort``. Its enum is rendered into the schema at
+    tool-BUILD time from the configured tiers, but the validator re-checks the
+    tier against config at CALL time. Between the two, an operator can edit a
+    tier away — or ``config.yml`` can simply become unreadable, which
+    ``configured_effort_tiers`` deliberately reports as "no tiers" rather than
+    raising, precisely so a corrupt config costs a tier picker and not a
+    session. Without this class the model emits the one value its own schema
+    contained, gets refused, and is billed a model fault for the operator's
+    config — inflating the published benchmark in the direction
+    :class:`InvalidToolArgumentsError` calls the worse one.
+
+    Raise it from inside a pydantic validator; ``ValidationError.errors()``
+    preserves the original exception under ``ctx['error']``, which is how the
+    tool layer tells this apart from a static shape violation WITHOUT matching
+    on message text. Any rejection that is a pure function of the arguments
+    (``extra="forbid"``, a type error, a constrained int, a cross-field
+    validator) must NOT use this — those are genuine model faults.
     """
 
 

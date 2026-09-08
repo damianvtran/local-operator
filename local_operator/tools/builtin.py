@@ -91,6 +91,7 @@ from local_operator.harness.types import (
     AskQuestion,
     BrowserSurface,
     BrowserSurfaceProtocol,
+    EnvironmentDependentRejectionError,
     ImageContent,
     InvalidToolArgumentsError,
     TextContent,
@@ -1057,22 +1058,52 @@ def _image(
     )
 
 
+def _rejection_is_environmental(exc: ValidationError) -> bool:
+    """True when ANY sub-error was raised for a reason outside the arguments.
+
+    Reads the original exception pydantic preserves under ``ctx['error']``, so
+    the distinction is made from the raised TYPE and never from message text —
+    the same source-of-truth rule ``_classify_fault`` is built on.
+
+    Conservative on purpose: one environment-dependent rejection anywhere in
+    the error set makes the whole call environmental. A ``ValidationError``
+    reports every failed field at once, so a mixed set (a genuine shape error
+    plus a vanished config tier) cannot be split into two verdicts on one
+    call, and the fail-safe direction is to NOT bill the model. Under-claiming
+    merely leaves the figure incomplete; over-claiming corrupts it.
+    """
+    for err in exc.errors():
+        if isinstance((err.get("ctx") or {}).get("error"), EnvironmentDependentRejectionError):
+            return True
+    return False
+
+
 def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
     correct its call from the message; the stack trace could not.
 
-    Marked as a model fault. A pydantic rejection of the params model IS the
-    model violating the tool's contract — the same class the loop's own
-    ``validate_tool_arguments`` records — and it only lands here instead of
-    there because the params model is strictly finer than the advertised
-    JSON-Schema type (extra="forbid", cross-field validators, constrained
-    ints). Leaving it unmarked recorded every one of them as ``execution``.
+    Marked as a model fault ONLY when the rejection is a pure function of the
+    arguments — ``extra="forbid"``, a type error, a constrained int, a
+    cross-field validator. Those are the model violating the tool's contract,
+    the same class the loop's ``validate_tool_arguments`` records, and they
+    land here rather than there because the params model is finer than the
+    advertised JSON-Schema type.
+
+    A validator that consults live config, the environment, the filesystem or
+    the clock is NOT in that set: it can refuse a value the advertised schema
+    itself offered, which is the world changing rather than the model erring.
+    Those raise ``EnvironmentDependentRejectionError`` and stay ``execution``.
+    Marking them would let a corrupt ``config.yml`` inflate a published
+    accuracy figure — see ``_validate_effort_tier``, the case that proved it.
     """
     lines = [
         f"- {'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
         for err in exc.errors()
     ]
-    return _invalid_arguments(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
+    body = "invalid arguments:\n" + "\n".join(lines)
+    if _rejection_is_environmental(exc):
+        return _error(tool_call_id, tool_name, body)
+    return _invalid_arguments(tool_call_id, tool_name, body)
 
 
 #: The shape every ``execute_*`` in this module has. It differs from
@@ -2702,7 +2733,11 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     """
     ref = parse_handle(target)
     if ref is None:
-        return _error(
+        # Malformed, matching the regex branch in `_search_spill` below: the
+        # handle rides inside `path`, a plain schema string, so a value that
+        # is not a handle at all can only be caught here. A well-formed handle
+        # the store cannot serve is a different case and stays `execution`.
+        return _invalid_arguments(
             tool_call_id,
             "read",
             f"Malformed spill handle '{target}'. Expected "
@@ -5315,6 +5350,12 @@ async def _wake_create(
     }
     outcome = build_wake_schedule(request, existing, now_ms)
     if "error" in outcome:
+        # `in`/`at`/`every`/`until` are plain strings in the schema, so an
+        # unparseable duration only fails here — the coarse-schema case this
+        # classification exists for. A full schedule table or a past time is
+        # well-formed and unsatisfiable, and stays an execution error.
+        if outcome["malformed"]:
+            return _invalid_arguments(tool_call_id, "wake", outcome["error"])
         return _error(tool_call_id, "wake", outcome["error"])
     schedule = outcome["schedule"]
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
@@ -8460,7 +8501,15 @@ def _validate_effort_tier(value: str | None) -> str | None:
         return None
     rejection = effort_tier_rejection(value)
     if rejection is not None:
-        raise ValueError(rejection)
+        # NOT a model fault, however it reads. The enum the model chose from
+        # was rendered into the schema at BUILD time and this check reads
+        # config at CALL time, so a value that was valid when advertised can
+        # be refused because the operator edited a tier away — or because
+        # ``config.yml`` became unreadable, which ``configured_effort_tiers``
+        # reports as "no tiers" by design rather than raising. Billing that to
+        # the model would put an operator config error into a published
+        # accuracy figure.
+        raise EnvironmentDependentRejectionError(rejection)
     return value
 
 
