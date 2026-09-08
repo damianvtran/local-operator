@@ -29,6 +29,9 @@ await build({
 });
 await cp(resolve(root, "manifest.json"), resolve(dist, "manifest.json"));
 await cp(resolve(root, "src/popup/popup.html"), resolve(dist, "popup/popup.html"));
+// Copied, never bundled: esbuild would emit it as a module entry and the
+// deferral is exactly what it exists to avoid. See src/popup/first-paint.js.
+await cp(resolve(root, "src/popup/first-paint.js"), resolve(dist, "popup/first-paint.js"));
 await cp(resolve(root, "src/popup/popup.css"), resolve(dist, "popup/popup.css"));
 await cp(resolve(root, "src/options/options.html"), resolve(dist, "options/options.html"));
 await cp(resolve(root, "src/options/options.css"), resolve(dist, "options/options.css"));
