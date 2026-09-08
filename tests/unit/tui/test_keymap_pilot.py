@@ -167,8 +167,9 @@ async def test_capture_mode_disarms_app_actions_in_both_directions() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "route", ["escape", "commit", "cursor-move", "leave-page", "close-mode"]
-)  # noqa: E501
+    "route",
+    ["escape", "commit", "cursor-move", "leave-page", "close-mode", "bare-unmount"],
+)
 async def test_every_exit_route_clears_capture_mode(route: str) -> None:
     """RISK R1, one case per route.
 
@@ -207,6 +208,15 @@ async def test_every_exit_route_clears_capture_mode(route: str) -> None:
             # hears about it, and a message posted from a removed widget is
             # never delivered — so the app has to clear the flag itself.
             app._close_settings_view()
+        elif route == "bare-unmount":
+            # The widget removed WITHOUT the app's help. No caller does this
+            # today — every teardown path goes through `_close_settings_view`
+            # — so this asserts the backstop `on_unmount` claims to be, rather
+            # than a reachable user gesture. It failed before round 1's M3
+            # fix: `on_unmount` cleared the page's own field and left
+            # `app._keymap_capture` True, disarming ctrl+c for the rest of the
+            # process.
+            await view.remove()
         await pilot.pause()
 
         assert not app._keymap_capture, f"capture leaked out of the {route} route"
@@ -489,3 +499,154 @@ def test_keyed_tip_templates_stay_within_their_width_budget() -> None:
             assert cell_len(f"{welcome.TIP_GLYPH} {template}") <= welcome.TIP_MIN_WIDTH, template
             continue
         assert cell_len(template.replace("{key}", "")) <= 32, template
+
+
+def test_composer_keys_has_not_drifted_from_the_editor_bindings() -> None:
+    """``COMPOSER_KEYS`` is a hand-maintained mirror; this is what catches drift.
+
+    ``keymap.py`` deliberately does not import the TUI — it is loaded by the
+    CLI and the server, neither of which should pay for Textual — so the
+    composer table cannot be derived at runtime and is copied by hand. That
+    trade is sound, but it leaves nothing failing when ``Editor.BINDINGS``
+    gains a key: the new key silently stops producing its "the composer uses
+    this" warning, and a user remaps onto it and finds the hotkey dead while
+    they are typing, which is the one place a non-priority binding loses
+    (review round 1, m3).
+
+    The import cost argument does not apply to a test in ``tests/unit/tui``,
+    which already imports the whole app. Only keys that are BINDABLE are
+    asserted: the composer also binds `enter`, `escape` and friends, which the
+    reserved set refuses outright, so a warning about them is unreachable.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    declared: set[str] = set()
+    for binding in Editor.BINDINGS:
+        raw = getattr(binding, "key", None) or (binding[0] if isinstance(binding, tuple) else None)
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            declared.add(part.strip())
+
+    bindable = {key for key in declared if key and keymap.validate_key(key) is None}
+    missing = sorted(bindable - keymap.COMPOSER_KEYS)
+    assert not missing, (
+        f"Editor.BINDINGS gained bindable keys that COMPOSER_KEYS does not mirror: {missing}. "
+        "Add them there so a remap onto one still warns."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24), (60, 20), (46, 18)])
+@pytest.mark.parametrize("scenario", ["empty", "pending", "conflict", "refused"])
+async def test_the_capture_line_always_states_the_way_out(
+    size: tuple[int, int], scenario: str
+) -> None:
+    """The exit survives every width, and a cut carries a mark.
+
+    While capture is live ``check_action`` has disarmed every app binding, so
+    this line is the ONLY correct statement of how to leave. It used to be
+    appended straight into a `height: 2`, no-wrap widget and clipped without a
+    mark: at 80x24 `esc cancels` was cut to `esc`, and at 60x20 the contract
+    was gone entirely and the line ended on a dangling `·` (design round 1,
+    D1).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.pause()
+        if scenario == "pending":
+            await pilot.press("f5")
+        elif scenario == "conflict":
+            await pilot.press("ctrl+t")
+        elif scenario == "refused":
+            await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        painted = view._detail_text.plain
+        assert "esc cancels" in painted, f"{scenario} at {size} lost the exit: {painted!r}"
+        # A shed must never leave the separator that joined the dropped part.
+        assert not painted.rstrip().endswith("\u00b7"), f"dangling separator: {painted!r}"
+        assert len(painted) <= view._detail_width() + 1, f"overflowed its width: {painted!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_offers_enter_only_once_a_key_is_pending() -> None:
+    """A lit hint whose key does nothing, and here it actively errors.
+
+    ``enter`` is reserved, so pressing it while capture is empty is REFUSED
+    and repaints the detail line in danger ink. Advertising it in that phase
+    named a key, had the user obey, and gave them an error (design round 1,
+    D2). Once a key IS pending, ``enter`` is the last lead shed, so the only
+    committing gesture stays advertised down to 46x18 (D4).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(46, 18)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not view._enter_hint.display, "enter advertised before a key was pressed"
+
+        await pilot.press("f5")
+        await pilot.pause()
+        assert view._enter_hint.display, "the commit key was shed at 46x18 while pending"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_key_is_marked_without_relying_on_colour() -> None:
+    """Pending and saved differed only by hue (design round 1, D5).
+
+    The other cue was the ABSENCE of the `▸` affordance, and an absence reads
+    as "less" rather than as "uncommitted" — neither survives a monochrome
+    terminal.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.pause()
+
+        def row() -> str:
+            return next(line for line in view.render_lines_for_test() if "New session" in line)
+
+        assert "?" not in row()
+        await pilot.press("enter")
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert "?" in row(), "a pending key carries no non-colour mark"
+
+
+@pytest.mark.asyncio
+async def test_a_live_capture_still_names_its_exit_when_the_page_is_too_short() -> None:
+    """A modal state with no visible representation must still say `esc`.
+
+    Shrinking while capture is open hides the body but leaves capture live and
+    every app binding disarmed, with nothing on screen naming the way out
+    (design round 1, D6).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await pilot.resize_terminal(80, 10)
+        await pilot.pause()
+        assert view._too_short and view._capture is not None
+        assert "esc" in view._detail_text.plain, "no exit advertised while capture is hidden"

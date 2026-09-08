@@ -22340,7 +22340,12 @@ class OperatorApp(App[None]):
         of the routes the user has for fixing it.
 
         ``announce`` is False for a write made in THIS process, where the
-        settings page is its own receipt.
+        settings page is its own receipt. That branch cannot actually produce
+        a rejection — the page and every other writer validate at the write
+        boundary, so an unusable value never reaches disk from in-process —
+        which makes the suppression belt-and-braces rather than load-bearing.
+        Stated because a reader otherwise has to work out what it hides
+        (review round 1, m2).
         """
         if values is None:
             try:
@@ -22350,8 +22355,13 @@ class OperatorApp(App[None]):
             except Exception:  # noqa: BLE001 — fall back to the shipped defaults
                 logger.debug("keymap: no watcher snapshot at apply", exc_info=True)
                 values = {}
+        # Resolved OUTSIDE the guard: it is pure and touches no app state, so
+        # including it would widen the guard past the one call that can fail
+        # while also swallowing the `rejected` notice a resolver error never
+        # produces. Narrow so a partial apply cannot pass for a clean one
+        # (review round 1, m1).
+        resolved, rejected = _keymap.resolved_keymap(values)
         try:
-            resolved, rejected = _keymap.resolved_keymap(values)
             self.set_keymap(resolved)
         except Exception:  # noqa: BLE001 — a bad keymap must not take down the app
             logger.debug("keymap: apply failed", exc_info=True)

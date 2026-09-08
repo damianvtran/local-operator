@@ -1657,7 +1657,7 @@ def coerce(setting: Setting, text: str) -> Any:
     return text
 
 
-def validate(setting: Setting, value: Any) -> str | None:
+def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = None) -> str | None:
     """``None`` when ``value`` may be stored, else the reason it may not.
 
     Bounds are enforced HERE rather than left to the consumer's own clamping,
@@ -1665,7 +1665,24 @@ def validate(setting: Setting, value: Any) -> str | None:
     timeout to 1-120 on read). A page that accepted 500 and stored it would
     show 500 forever while the tool used 120 — the config and the behaviour
     disagreeing, with nothing on screen admitting it.
+
+    ``values`` is the current config snapshot, needed only by the checks that
+    are about a value's relationship to its SIBLINGS rather than to its own
+    schema — today just the hotkey group, where two actions sharing one key
+    leaves one silently unreachable. Optional because most settings are
+    self-contained and the unit hosts validate without a config; when it is
+    omitted the group check is skipped, and :func:`write_setting` always
+    supplies it, so no write can reach disk unchecked.
     """
+    if (
+        setting.kind is Kind.HOTKEY
+        and values is not None
+        and isinstance(value, str)
+        and value.strip()
+    ):
+        group_problem = _keymap.group_conflict(setting.key, value, values)
+        if group_problem is not None:
+            return group_problem
     if setting.validate_value is not None:
         try:
             setting.validate_value(value)
@@ -1770,7 +1787,11 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
         # display `ctrl+N` while the runtime bound a key nobody can press.
         # One normalization at the single point every write funnels through.
         value = _keymap.normalize_key(value)
-    problem = validate(setting, value)
+    # The group check needs the CURRENT config, so it is supplied here rather
+    # than left to each caller: this is the one function every writer funnels
+    # through, including `lop config edit` and `PATCH /v1/settings`, neither of
+    # which has a UI that could warn.
+    problem = validate(setting, value, manager.get_config().values)
     if problem is not None:
         raise ValueError(problem)
     if value is None and setting.default is None:

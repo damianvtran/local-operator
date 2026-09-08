@@ -213,3 +213,49 @@ def test_reset_deletes_the_override_rather_than_writing_the_default(tmp_path) ->
     settings_io.reset_setting(manager, setting)
     assert setting.key not in manager.get_config().values
     assert settings_io.read_setting(manager, setting) == setting.default
+
+
+def test_action_holding_reads_the_persisted_key_not_the_shipped_one() -> None:
+    """The stale-map hazard, as a unit fact.
+
+    ``set_keymap`` never rewrites ``OperatorApp.BINDINGS``, so anything that
+    answers "who holds this key?" from the declared map keeps naming a
+    remapped action at its SHIPPED key forever. That produced both halves of
+    review round 1's M1 on the real page: a false positive warning that a
+    freed key was taken, and a false negative missing the action that actually
+    held the captured key.
+    """
+    values = {"keymap.new_session": "ctrl+g"}
+
+    # The shipped key is now FREE and must not be attributed to anyone.
+    assert keymap.action_holding("ctrl+n", values) is None
+    # The key it actually moved to names the action that holds it now.
+    holder = keymap.action_holding("ctrl+g", values)
+    assert holder is not None and holder.id == "keymap.new_session"
+    # An action sitting at its DEFAULT is still found: `resolved_keymap` omits
+    # defaults (omission encodes "unset"), so an inverted resolver would miss
+    # exactly the actions a user is most likely to collide with.
+    at_default = keymap.action_holding("ctrl+s", values)
+    assert at_default is not None and at_default.id == "keymap.resume"
+    # A row is never its own victim.
+    assert keymap.action_holding("ctrl+g", values, excluding="keymap.new_session") is None
+
+
+def test_two_actions_may_not_share_one_key() -> None:
+    """Design §C.4. Both victims are inside the feature being configured.
+
+    Without this, the survivor is decided by position in ``KEY_ACTIONS`` and
+    the loser is reachable only by slash command with nothing saying why —
+    the silent-disable failure this module exists to prevent, reached from the
+    other direction (review round 1, M2).
+    """
+    values = {"keymap.new_session": "ctrl+g"}
+
+    problem = keymap.group_conflict("keymap.resume", "ctrl+g", values)
+    assert problem is not None and "already uses that key" in problem
+    # Normalization is applied before comparing, so an equivalent spelling of
+    # the same chord cannot slip past the check.
+    assert keymap.group_conflict("keymap.resume", "CTRL+G", values) is not None
+    # A free key, and the row keeping its own key, are both allowed.
+    assert keymap.group_conflict("keymap.resume", "f5", values) is None
+    assert keymap.group_conflict("keymap.new_session", "ctrl+g", values) is None
