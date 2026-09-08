@@ -68,6 +68,60 @@ from local_operator.harness.wake import WakeSchedule
 # ---------------------------------------------------------------------------
 
 
+#: Key under which ``ToolResult.details`` carries WHY a call did not run
+#: cleanly. The vocabulary itself (``FAULT_UNKNOWN_TOOL`` and friends) is
+#: declared in ``harness.loop``, which owns classification; only the key and
+#: the one value a TOOL BODY may claim live here, because tool modules import
+#: this module and must not import the loop.
+FAULT_KEY = "__fault"
+
+#: The single fault class a tool body may assert about itself: the arguments
+#: the model emitted were MALFORMED. Duplicated as a literal rather than
+#: imported from ``harness.loop`` for the layering reason above; a test pins
+#: the two spellings together so they cannot drift.
+FAULT_INVALID_ARGUMENTS = "invalid_arguments"
+
+
+class InvalidToolArgumentsError(ValueError):
+    """The model emitted an argument this tool cannot parse.
+
+    Raise this — never a bare ``ValueError`` — when an argument's SHAPE is
+    wrong, and the executor records the call as ``invalid_arguments`` (a MODEL
+    fault, counted in the tool-call error rate) instead of ``execution``.
+
+    **MALFORMED, NOT MERELY UNSATISFIABLE. Read this before raising it.**
+    The test is whether the argument could ever have been valid, not whether
+    the call succeeded:
+
+    - Malformed — raise this. ``range='"270-330"'`` is not a line range in any
+      world; ``pattern='('`` is not a regex. The model could have known, from
+      the schema alone, that the value was wrong before sending it.
+    - Unsatisfiable — do NOT raise this; return an ordinary error result and
+      let it classify as ``execution``. A path that does not exist, an HTTP
+      500, a refused credential, a file that vanished between planning and
+      execution. The argument was well-formed; the world did not cooperate.
+      A missing file is the canonical case and is explicitly NOT a model fault
+      even though it arrives at the same handler.
+
+    Why the boundary is worth this much prose: ``invalid_arguments`` feeds
+    ``analytics.model.MODEL_FAULTS``, and therefore the published
+    ``validity`` / ``tool_call_error_rate`` benchmark figures. Marking an
+    unsatisfiable call as a model fault INFLATES the error rate, which is the
+    worse failure direction — under-reporting is merely incomplete, while
+    over-reporting corrupts the measurement. When a case is genuinely
+    ambiguous, leave it as ``execution``.
+
+    This exists because a JSON-Schema type is coarser than an argument's real
+    grammar. ``read``'s ``range`` is typed ``str | None``, so ``'"270-330"'``
+    passes ``validate_tool_arguments`` and fails in the tool body — arriving
+    at the generic handler indistinguishable from a genuine execution failure.
+    The class is known where the value is parsed and nowhere else, which is
+    exactly the principle ``AgentLoop._classify_fault`` is built on: the
+    marker is SET at the source, never text-matched out of a message
+    afterwards.
+    """
+
+
 class RenderedStreamError(Exception):
     """A stream failure whose ``str()`` is the whole story for the user.
 

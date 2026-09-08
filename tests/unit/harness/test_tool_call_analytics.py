@@ -423,3 +423,149 @@ async def test_shipped_eval_nested_exclusion_is_not_a_failed_tool_call(
             assert nested.split("excluded", 1)[1].strip().startswith("1")
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# The classification BOUNDARY: malformed argument vs unsatisfiable request.
+#
+# Both arrive at the same generic handler as an is_error result from a tool
+# body, and before the marker existed both recorded as `execution` — which is
+# how a session with four model-caused invalid calls rendered a 0.0% error
+# rate. These pin the boundary in BOTH directions, because the permissive
+# direction (calling an execution error a model fault) inflates a published
+# benchmark and is the worse failure.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_read_tool(tmp_path) -> AgentTool:
+    """The REAL shipped ``read``, not a stand-in: the claim under test is that
+    its own argument parsing is classified correctly."""
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    return next(t for t in create_tools(context) if t.name == "read")
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_range_is_a_model_fault_not_an_execution_error(tmp_path):
+    """The operator's exact repro: ``range='"270-330"'`` — a line range with
+    literal quote characters embedded.
+
+    ``range`` is typed ``str | None``, so this passes the loop's schema check
+    and fails inside the tool body. It is unambiguously the model emitting an
+    argument the tool cannot use, and recording it as ``execution`` is what
+    laundered it out of the accuracy figure.
+    """
+    (tmp_path / "a.txt").write_text("l1\nl2\nl3\n")
+    recorded = await _run(
+        _calls((0, "c1", "read", '{"path":"a.txt","range":"\\"270-330\\""}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "invalid_arguments"}
+
+
+@pytest.mark.asyncio
+async def test_a_wellformed_range_on_a_missing_file_stays_an_execution_error(tmp_path):
+    """The regression that matters most. A path that does not exist is
+    UNSATISFIABLE, not malformed — the file may have vanished after the model
+    planned the call — so it must NOT be credited to the model."""
+    recorded = await _run(
+        _calls((0, "c1", "read", '{"path":"ghost.txt","range":"1-5"}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_regex_is_a_model_fault_but_a_missing_path_is_not(tmp_path):
+    """``grep``'s two rejections sit three lines apart in the same function and
+    fall on opposite sides of the boundary."""
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    grep = next(t for t in create_tools(context) if t.name == "grep")
+
+    bad_regex = await _run(
+        _calls((0, "c1", "grep", '{"pattern":"("}')) + [StreamEndEvent(stop_reason="toolUse")],
+        [grep],
+        cwd=str(tmp_path),
+    )
+    assert _faults(bad_regex) == {"grep": "invalid_arguments"}
+
+    missing_path = await _run(
+        _calls((0, "c1", "grep", '{"pattern":"x","path":"no/such/dir"}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [grep],
+        cwd=str(tmp_path),
+    )
+    assert _faults(missing_path) == {"grep": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_tool_body_raising_the_typed_error_is_translated_by_the_executor():
+    """A tool may RAISE rather than hand-build a marked result; the executor
+    performs the translation so every tool gets it for free."""
+    from local_operator.harness.types import InvalidToolArgumentsError
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        raise InvalidToolArgumentsError("not a duration: 'soonish'")
+
+    tool = AgentTool(
+        name="wake",
+        parameters={"type": "object", "properties": {"in": {"type": "string"}}},
+        execute=execute,
+    )
+    recorded = await _run(
+        _calls((0, "c1", "wake", '{"in":"soonish"}')) + [StreamEndEvent(stop_reason="toolUse")],
+        [tool],
+    )
+    assert _faults(recorded) == {"wake": "invalid_arguments"}
+
+
+def test_the_fault_marker_spellings_agree_across_the_layering_gap():
+    """``harness.types`` duplicates two constants ``harness.loop`` also uses,
+    because tool modules may not import the loop. A drift would not fail — it
+    would silently write an unrecognised fault name into the ledger, dropping
+    those calls out of ``MODEL_FAULTS`` and back to under-reporting."""
+    from local_operator.analytics.model import MODEL_FAULTS
+    from local_operator.harness import loop as loop_module
+    from local_operator.harness import types as types_module
+
+    assert types_module.FAULT_KEY == loop_module.FAULT_KEY == "__fault"
+    assert types_module.FAULT_INVALID_ARGUMENTS == loop_module.FAULT_INVALID_ARGUMENTS
+    assert types_module.FAULT_INVALID_ARGUMENTS in MODEL_FAULTS
+
+
+@pytest.mark.asyncio
+async def test_the_builtin_guard_does_not_swallow_the_typed_error():
+    """``_guard`` wraps every builtin and catches ``Exception`` INSIDE the tool,
+    so the loop's translation branch never sees a raise from one.
+
+    Without its own branch there, the guard's catch-all converted a deliberate
+    argument-shape rejection into an unmarked "failed unexpectedly" traceback —
+    the marker lost, the call recorded as ``execution``, and the raise mechanism
+    silently useless for exactly the tools it was built for. A genuine internal
+    error must still take the traceback path.
+    """
+    from local_operator.harness.types import InvalidToolArgumentsError
+    from local_operator.tools.builtin import _guard
+
+    @_guard("demo")
+    async def malformed(tool_call_id, args, signal=None, on_update=None, context=None):
+        raise InvalidToolArgumentsError("not a duration: 'soonish'")
+
+    @_guard("demo")
+    async def internal(tool_call_id, args, signal=None, on_update=None, context=None):
+        raise RuntimeError("genuine internal failure")
+
+    rejected = await malformed("c", {}, None, None, None)
+    assert rejected.is_error and rejected.details == {"__fault": "invalid_arguments"}
+    assert "Traceback" not in rejected.text
+
+    crashed = await internal("c", {}, None, None, None)
+    assert crashed.is_error
+    assert not (crashed.details or {}).get("__fault"), "an internal error is not a model fault"

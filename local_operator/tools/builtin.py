@@ -82,6 +82,8 @@ from local_operator.harness.subagent import (
     effort_tier_rejection,
 )
 from local_operator.harness.types import (
+    FAULT_INVALID_ARGUMENTS,
+    FAULT_KEY,
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
@@ -90,6 +92,7 @@ from local_operator.harness.types import (
     BrowserSurface,
     BrowserSurfaceProtocol,
     ImageContent,
+    InvalidToolArgumentsError,
     TextContent,
     ToolContext,
     ToolResult,
@@ -984,6 +987,26 @@ def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
     )
 
 
+def _invalid_arguments(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
+    """An error result MARKED as the model's fault, not the machine's.
+
+    Same shape as :func:`_error`, plus the ``__fault`` marker that makes the
+    call count as ``invalid_arguments`` in the tool-call error rate. Use it
+    only where an argument is MALFORMED — see
+    :class:`~local_operator.harness.types.InvalidToolArgumentsError` for the
+    malformed-vs-unsatisfiable rule and why guessing wrong in the permissive
+    direction is the worse error. A missing file or a failed request is an
+    ordinary :func:`_error`.
+    """
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        content=[TextContent(text=message)],
+        details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+        is_error=True,
+    )
+
+
 def _text(
     tool_call_id: str,
     tool_name: str,
@@ -1036,12 +1059,20 @@ def _image(
 
 def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
-    correct its call from the message; the stack trace could not."""
+    correct its call from the message; the stack trace could not.
+
+    Marked as a model fault. A pydantic rejection of the params model IS the
+    model violating the tool's contract — the same class the loop's own
+    ``validate_tool_arguments`` records — and it only lands here instead of
+    there because the params model is strictly finer than the advertised
+    JSON-Schema type (extra="forbid", cross-field validators, constrained
+    ints). Leaving it unmarked recorded every one of them as ``execution``.
+    """
     lines = [
         f"- {'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
         for err in exc.errors()
     ]
-    return _error(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
+    return _invalid_arguments(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
 
 
 #: The shape every ``execute_*`` in this module has. It differs from
@@ -1155,6 +1186,19 @@ def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
         ) -> ToolResult:
             try:
                 return await fn(tool_call_id, args, signal, on_update, context)
+            except InvalidToolArgumentsError as exc:
+                # Handled BEFORE the catch-all, which would otherwise convert a
+                # deliberate argument-shape rejection into an unmarked
+                # "failed unexpectedly" traceback — losing the fault marker and
+                # recording a model fault as an execution error. This guard sits
+                # inside the tool, so the loop's identical branch never sees a
+                # raise from a guarded tool; both exist because unguarded tools
+                # (MCP bridges, hosts) reach the loop directly.
+                #
+                # No traceback: the model can correct a malformed argument from
+                # the message, and a stack trace of our own parser cannot help
+                # it — the same reasoning as ``_validation_error``.
+                return _invalid_arguments(tool_call_id, tool_name, f"invalid arguments: {exc}")
             except Exception:  # noqa: BLE001 — boundary: nothing may escape
                 return _error(
                     tool_call_id,
@@ -2223,15 +2267,33 @@ _LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
 
 
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
+    """Parse a ``'start-end'`` / ``'start-'`` range spec.
+
+    Raises :class:`InvalidToolArgumentsError` (a ``ValueError`` subclass, so
+    existing ``except ValueError`` callers are unaffected) because every
+    rejection here is a MALFORMED argument: the schema types ``range`` as a
+    plain string, so a value like ``'"270-330"'`` — the literal-quoted form a
+    model really emitted — passes validation and only fails at this parse.
+    Marking it here is what keeps it out of the execution bucket.
+
+    Callers deliberately catch the SUBCLASS rather than ``ValueError``: an
+    unrelated ``ValueError`` escaping this call is a bug in our own code, not
+    the model's mistake, and catching the broad type would credit it to the
+    model and inflate the benchmark. Narrow is the fail-safe direction — an
+    unexpected error falls through to the execution bucket, which merely
+    under-reports.
+    """
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
-        raise ValueError(f"invalid line range '{spec}' (expected 'start-end' or 'start-')")
+        raise InvalidToolArgumentsError(
+            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
+        )
     start = int(match.group(1))
     if start < 1:
-        raise ValueError(f"invalid line range '{spec}': start must be >= 1")
+        raise InvalidToolArgumentsError(f"invalid line range '{spec}': start must be >= 1")
     end = int(match.group(2)) if match.group(2) else None
     if end is not None and end < start:
-        raise ValueError(f"invalid line range '{spec}': end must be >= start")
+        raise InvalidToolArgumentsError(f"invalid line range '{spec}': end must be >= start")
     return start, end
 
 
@@ -2666,8 +2728,8 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if range_spec:
         try:
             start, end = _parse_line_range(range_spec)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
     result = store.read_lines(ref.handle, start, end)
     if result is None:
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
@@ -2721,8 +2783,12 @@ def _search_spill(
     try:
         found = store.search(ref.handle, ref.query, SPILL_SEARCH_MATCH_LIMIT)
     except re.error as exc:
-        return _error(tool_call_id, "read", f"invalid regex '{ref.query}': {exc}")
+        # Malformed, same as grep's pattern: the `?q=` fragment rides inside a
+        # URL string, so no schema can reject a bad regex before it parses.
+        return _invalid_arguments(tool_call_id, "read", f"invalid regex '{ref.query}': {exc}")
     if found is None:
+        # Unsatisfiable, not malformed — the handle parsed fine and the store
+        # could not serve it. Stays `execution`.
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     matches, total_matches, total_lines = found
     if range_spec:
@@ -2731,8 +2797,8 @@ def _search_spill(
         # whenever the matches fell outside the requested line window.
         try:
             start, end = _parse_line_range(range_spec)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
         matches = matches[start - 1 : end]
     details = {"url": f"{ref.handle}?q={ref.query}"}
     if not matches:
@@ -3143,8 +3209,8 @@ async def execute_read(
     if params.range:
         try:
             start, end = _parse_line_range(params.range)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
         selected = lines[start - 1 : end]
         if not selected:
             return _text(
@@ -4391,11 +4457,16 @@ async def execute_grep(
     try:
         regex = re.compile(params.pattern, 0 if params.case else re.IGNORECASE)
     except re.error as exc:
-        return _error(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
+        # Malformed: `pattern` is typed `string`, so an unbalanced group passes
+        # schema validation and only fails here. The model could have known.
+        return _invalid_arguments(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
 
     cwd = _safe_cwd(context)
     target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not target.exists():
+        # Deliberately NOT a model fault: a well-formed path that does not
+        # exist is unsatisfiable, not malformed, and the file may have vanished
+        # after the model planned the call. Stays `execution`.
         return _error(tool_call_id, "grep", f"Path does not exist: {target}")
 
     # Outside-workspace searches escalate to an approval prompt regardless
@@ -10050,8 +10121,8 @@ async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) 
     if params.range is not None:
         try:
             start, end = _parse_line_range(params.range)
-        except ValueError as exc:
-            return _error(tool_call_id, "hub", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "hub", str(exc))
     window = await comms.peek(ids[0], start=start, end=end, steps=params.steps)
     if window.error is not None:
         return _error(tool_call_id, "hub", f"{window.label} ({window.job_id}): {window.error}")
