@@ -19,6 +19,7 @@ to find unread work would be cleared by the toast telling them about it.
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1296,3 +1297,431 @@ async def test_the_digest_title_and_subtitle_describe_the_same_sessions(
     # shrinking the title's scope fails here rather than silently reopening D11.
     assert str(len(whole_tick)) in title, (title, whole_tick)
     assert str(len(remainder)) not in title.split()[0], (title, remainder)
+
+
+def _with_assistant_reply(directory: Path, text: str) -> None:
+    """Append one assistant turn, so the session has something it last SAID.
+
+    Written through the same one-line-per-entry shape ``_make_session`` uses
+    rather than through a writer helper, because what is under test is exactly
+    the tail read ``session_preview`` performs over the bytes on disk.
+    """
+    entry = json.dumps(
+        {
+            "id": "a1",
+            "ts": 2,
+            "type": "message",
+            "payload": {"kind": "message", "role": "assistant", "content": [{"text": text}]},
+        }
+    )
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(entry + "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_banner_body_carries_the_final_assistant_line(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The operator's request: say WHAT the session concluded, not where they were.
+
+    The body was the fixed sentence ``BODY_BACKGROUND`` — a routing fact the
+    reader is already the authority on — so eleven completions in one window
+    produced eleven identical bodies. The session's last assistant line answers
+    the question the banner actually raises, and it is the same fact the
+    sidebar row already shows.
+    """
+    from local_operator.tui.notify import BODY_BACKGROUND
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Article-search-svc schema review")
+    _with_assistant_reply(background, "The schema review is done: two indexes are redundant.")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        title, body, session_id, _subtitle = spawned[0]
+        assert body == "The schema review is done: two indexes are redundant."
+        # The routing sentence is GONE from the default frame, not merely
+        # joined: it is the fallback now, and a body carrying both would spend
+        # the content line on the thing that made this uninformative.
+        assert BODY_BACKGROUND not in body
+        # The title still identifies WHICH session, which is what carries the
+        # routing fact now that the body carries content (D5 is not reopened by
+        # restating it beside the snippet).
+        assert title == "Article-search-svc schema review"
+        assert session_id == "bg0000000001"
+
+
+@pytest.mark.asyncio
+async def test_the_last_reply_wins_over_earlier_ones(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """A snippet of the FINAL message, not the first — the preview reads the tail."""
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Long conversation")
+    _with_assistant_reply(background, "First pass: I am still investigating.")
+    _with_assistant_reply(background, "Final answer: the leak was the unclosed cursor.")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        body = spawned[0][1]
+        assert body == "Final answer: the leak was the unclosed cursor."
+        assert "still investigating" not in body
+
+
+@pytest.mark.asyncio
+async def test_the_snippet_is_kept_off_the_banner_by_the_privacy_flag(
+    store_root: Path, spawned: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`display.notification_session_name` off means NO session text at all.
+
+    The flag exists to keep model-written session text off a screen other
+    people can see, and a transcript snippet is strictly more session-derived
+    than the name it was written for: a name is a topic, a snippet is content.
+    A gate that covered only the title would leak the conversation itself into
+    the frame directly beneath the brand the opt-out substitutes — the same
+    review round 1 M2 shape, where a flag governing only some banners makes its
+    own settings copy false.
+    """
+    from local_operator.tui.notify import APP_NAME, BODY_BACKGROUND
+
+    monkeypatch.setattr("local_operator.tui.notify.session_names_in_notifications", lambda: False)
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Secret client migration")
+    _with_assistant_reply(background, "Merged the acquisition due-diligence data room export.")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        title, body, _session_id, _subtitle = spawned[0]
+        assert body == BODY_BACKGROUND
+        assert title == APP_NAME
+        # Not one word of the conversation reaches the frame.
+        argv = " ".join(spawned[0])
+        assert "acquisition" not in argv
+        assert "due-diligence" not in argv
+        assert "Secret client migration" not in argv
+
+
+@pytest.mark.asyncio
+async def test_a_tool_only_final_turn_falls_back_to_the_neutral_sentence(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """A turn that only made tool calls SAID nothing, so there is nothing to quote.
+
+    ``session_preview`` skips a text-free assistant entry by contract; what is
+    pinned here is that the observer path renders the neutral sentence for it
+    rather than a banner with an empty content line.
+    """
+    from local_operator.tui.notify import BODY_BACKGROUND
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Tool only run")
+    with (background / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "a1",
+                    "ts": 2,
+                    "type": "message",
+                    "payload": {"kind": "message", "role": "assistant", "content": []},
+                }
+            )
+            + "\n"
+        )
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        assert spawned[0][1] == BODY_BACKGROUND
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_transcript_still_delivers_the_banner(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """A snippet read must never cost the notification (it runs in the 1 s poll).
+
+    The body is chrome; delivery is not. An unreadable transcript degrades to
+    the neutral sentence and the toast still goes out with its title, subtitle
+    and click-through intact.
+    """
+    from local_operator.tui.notify import BODY_BACKGROUND
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Unreadable session")
+    _with_assistant_reply(background, "should never be read")
+    (background / "transcript.jsonl").chmod(0o000)
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _booted(app, pilot)
+            await _settle(app, pilot)
+            assert len(spawned) == 1, spawned
+            title, body, session_id, _subtitle = spawned[0]
+            assert body == BODY_BACKGROUND
+            assert title == "Unreadable session"
+            assert session_id == "bg0000000001"
+    finally:
+        # Restored so the tmp tree can be cleaned up on every platform.
+        (background / "transcript.jsonl").chmod(0o644)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_carrying_escape_sequences_is_sanitised(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The snippet crosses the same wires as the title, so it gets the same scrub.
+
+    The text is MODEL-WRITTEN and reaches an argv (cmux, the signed bundle,
+    ``notify-send``) and, on the ``osascript`` leg, an AppleScript string
+    literal — the wires ``sanitize_text`` exists for on this path (D16). It
+    does NOT reach an OSC escape: the only OSC emitter passes a fixed
+    ``BODIES`` constant, never this text (review round 1, m2).
+    """
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Escape session")
+    _with_assistant_reply(background, "done\x1b]0;pwned\x07 and\nwrapped\ttoo")
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        body = spawned[0][1]
+        assert "\x1b" not in body
+        assert "\x07" not in body
+        # Collapsed to one line as well: a banner body is a line, not a block.
+        assert "\n" not in body and "\t" not in body
+        assert body == "done ]0;pwned and wrapped too"
+
+
+@pytest.mark.asyncio
+async def test_a_long_reply_is_cut_to_the_banner_budget(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """A banner is read in about a second; an unbounded paragraph is its own defect.
+
+    Nothing on the wire forces this — Notification Centre WRAPS a body rather
+    than clipping it, and both argv legs take it as one element — so the bound
+    is chosen for the reader and has to be asserted, or it silently stops
+    applying the day someone passes the text through unbudgeted.
+    """
+    from local_operator.tui.notify import BACKGROUND_SNIPPET_MAX_CHARS
+
+    reply = (
+        "I finished the migration audit across all seventeen tenant schemas and found "
+        "three tables still carrying the legacy tenant_id column, which the backfill "
+        "job skipped because their names do not match the prefix filter it uses."
+    )
+    # Comfortably past the budget, so the case cannot go vacuous if the number
+    # is nudged: a reply that only just exceeds it would pass against a bound
+    # that had been quietly raised.
+    assert len(reply) > BACKGROUND_SNIPPET_MAX_CHARS + 80, "the case must exceed the budget"
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Long reply session")
+    _with_assistant_reply(background, reply)
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        body = spawned[0][1]
+        assert len(body) <= BACKGROUND_SNIPPET_MAX_CHARS
+        assert body.startswith("I finished the migration audit")
+        # Ellipsised on a word boundary, so the cut reads as a truncation
+        # rather than as the model having stopped mid-word.
+        assert body.endswith("…")
+        assert not body[:-1].endswith(" ")
+
+
+#: A last assistant line that SOUNDS like success, which is what the snippet
+#: path returns for a session that failed after it: `session_preview` filters to
+#: `role == "assistant"`, and a runtime failure is never an assistant message.
+#: Deliberately a sentence a reader would act on, so a regression that reopens
+#: M1/D1 fails here as the contradiction a user would actually see rather than
+#: as an abstract string mismatch.
+_SUCCESS_SOUNDING_REPLY = "All 412 tests pass. The migration is complete."
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_body"),
+    [
+        ("error", "Stopped with an error"),
+        ("interrupted", "Stopped before finishing"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_non_complete_session_says_its_state_rather_than_its_last_reply(
+    store_root: Path, spawned: list[list[str]], kind: str, expected_body: str
+) -> None:
+    """The snippet is only true of a session that COMPLETED (review M1, design D1).
+
+    The failure that produced `error`, and the abort that produced
+    `interrupted`, are runtime facts that write no assistant message — so the
+    last assistant line is always PRE-failure text, and a session whose previous
+    turn went well hands the banner a success sentence to print under a
+    "Needs attention" subtitle. The two content lines of the frame would assert
+    opposite things.
+
+    `interrupted` is gated alongside `error` even though design round 1 would
+    have accepted restricting it to `error`: whether a mid-work last line reads
+    honestly is a property of the TEXT, and the fixture below is an interrupted
+    session whose last line closes a sub-task. Nothing in the kind separates
+    that from the coherent case, so the rule is decided by the kind alone.
+
+    Asserts the COMPOSED body, not that some substring is absent: what shipped
+    without this coverage was a body nobody had looked at for these kinds.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Nightly index rebuild")
+    _with_assistant_reply(background, _SUCCESS_SOUNDING_REPLY)
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", kind)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        title, body, _session_id, subtitle = spawned[0]
+        assert body == expected_body
+        # The transcript is not merely absent from the body — no word of it
+        # reaches ANY field, so the assertion cannot be satisfied by the snippet
+        # having moved to the subtitle or the title.
+        assert "migration" not in " ".join(spawned[0]).lower()
+        # The state vocabulary agrees across the frame: the subtitle is this
+        # kind's category and the body is this kind's sentence, which is what
+        # "no line contradicts another" means here.
+        from local_operator.tui.notify import CONTEXTS
+
+        assert subtitle == CONTEXTS[kind]
+        # The title still identifies WHICH session; gating the body does not
+        # cost the routing cue (D2/D5).
+        assert title == "Nightly index rebuild"
+
+
+@pytest.mark.asyncio
+async def test_a_completed_session_still_carries_its_last_reply(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The other side of the gate: `complete` is unaffected by it.
+
+    Same transcript as the non-complete cases above, so the pair isolates the
+    KIND as the only variable — the snippet reaching the body on `complete` and
+    not on the others is then a property of the gate rather than of the fixture.
+    """
+    from local_operator.tui.notify import BODIES, CONTEXT_COMPLETE
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Nightly index rebuild")
+    _with_assistant_reply(background, _SUCCESS_SOUNDING_REPLY)
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        _title, body, _session_id, subtitle = spawned[0]
+        assert body == _SUCCESS_SOUNDING_REPLY
+        assert subtitle == CONTEXT_COMPLETE
+        # `complete` takes the snippet, never the house sentence — that constant
+        # is what the OTHER kinds say, and swapping them would make every
+        # completed banner say "Task complete" again (D5's tautology).
+        assert body != BODIES["complete"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_session_with_no_transcript_still_says_it_failed(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The state sentence does not depend on a readable transcript.
+
+    `error` is the kind most likely to have nothing to read — a session that
+    died early may never have written an assistant turn at all — so the gate
+    must resolve before the tail read rather than after it. If the body were
+    computed first and corrected afterwards, this case would degrade to the
+    neutral routing sentence and lose the one fact worth stating.
+    """
+    from local_operator.tui.notify import BODY_BACKGROUND, BODY_ERROR
+
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Died on startup")
+    # No assistant turn was ever written: only the seeded user message.
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "error")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 1, spawned
+        body = spawned[0][1]
+        assert body == BODY_ERROR
+        assert body != BODY_BACKGROUND
+
+
+@pytest.mark.asyncio
+async def test_the_privacy_opt_out_covers_every_completion_kind(
+    store_root: Path, spawned: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state sentence is house prose, so the opt-out neither adds nor removes it.
+
+    `BODIES[kind]` is a fixed constant carrying nothing session-derived, so a
+    user who opted out of session text is entitled to see it — the flag's
+    promise is about MODEL-WRITTEN text, and gating the state sentence too would
+    make the opt-out a strictly worse banner for no privacy gain. The completed
+    case in the same run is what shows the flag is still doing its job.
+    """
+    from local_operator.tui.notify import APP_NAME, BODY_BACKGROUND, BODY_INTERRUPTED
+
+    monkeypatch.setattr("local_operator.tui.notify.session_names_in_notifications", lambda: False)
+    _make_session(store_root, "current", "Current conversation")
+    halted = _make_session(store_root, "bg0000000001", "Halted rebuild")
+    _with_assistant_reply(halted, _SUCCESS_SOUNDING_REPLY)
+    finished = _make_session(store_root, "bg0000000002", "Finished rebuild")
+    _with_assistant_reply(finished, _SUCCESS_SOUNDING_REPLY)
+    store = AttentionStore(store_root / "attention.db")
+    store.publish(conversation_identity(halted), str(uuid.uuid4()), "fresh", "interrupted")
+    store.publish(conversation_identity(finished), str(uuid.uuid4()), "fresh", "complete")
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        assert len(spawned) == 2, spawned
+        bodies = {call[3]: call[1] for call in spawned}
+        assert bodies["Interrupted"] == BODY_INTERRUPTED
+        # The completed one loses its snippet to the flag, which is the gate
+        # still working: no word of the transcript survives in any field.
+        assert bodies["Complete"] == BODY_BACKGROUND
+        assert all(call[0] == APP_NAME for call in spawned), spawned
+        assert "migration" not in " ".join(" ".join(call) for call in spawned).lower()
