@@ -534,6 +534,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The install-provenance marker, written atomically after an upgrade. Both
+    # calls are confined to the temp file this function itself created with
+    # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename
+    # target is the single FILE ``<prefix>/.lop-source``. Neither name is ever
+    # derived from a session path, and the install prefix is not under the
+    # session store.
+    (
+        "local_operator/update.py::write_source_marker",
+        "<path>.replace",
+        "temp FILE -> .lop-source FILE in the install prefix",
+    ),
+    (
+        "local_operator/update.py::write_source_marker",
+        "<path>.unlink",
+        "cleanup of this function's own mkstemp temp FILE",
+    ),
     ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),

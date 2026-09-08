@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -347,23 +349,32 @@ def test_install_kind_editable_outranks_pip_installer(tmp_path: Path) -> None:
         assert install_kind(prefix=tmp_path) is InstallKind.EDITABLE
 
 
-def test_perform_upgrade_runs_detected_argv() -> None:
+def test_perform_upgrade_runs_detected_argv(tmp_path: Path) -> None:
     seen: list[list[str]] = []
 
     def run(argv: list[str]) -> int:
         seen.append(argv)
         return 0
 
-    out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=run)
+    # ``prefix`` is passed on every call because a successful UV_TOOL upgrade
+    # now writes ``.lop-source`` at the prefix; without it this test would
+    # drop a marker into the developer's own ``sys.prefix``.
+    out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=run, prefix=tmp_path)
     assert out == "0.28.0"
     assert seen == [["uv", "tool", "install", "--force", "local-operator"]]
 
     seen.clear()
-    perform_upgrade(target="0.28.0", kind=InstallKind.PIPX, run=run)
+    perform_upgrade(target="0.28.0", kind=InstallKind.PIPX, run=run, prefix=tmp_path)
     assert seen == [["pipx", "upgrade", "local-operator"]]
 
     seen.clear()
-    perform_upgrade(target="0.28.0", kind=InstallKind.PIP, run=run, executable="/venv/bin/python")
+    perform_upgrade(
+        target="0.28.0",
+        kind=InstallKind.PIP,
+        run=run,
+        executable="/venv/bin/python",
+        prefix=tmp_path,
+    )
     assert seen == [["/venv/bin/python", "-m", "pip", "install", "-U", "local-operator"]]
 
 
@@ -374,9 +385,9 @@ def test_perform_upgrade_refuses_editable_and_unknown() -> None:
         perform_upgrade(target="0.28.0", kind=InstallKind.UNKNOWN, run=lambda _: 0)
 
 
-def test_perform_upgrade_nonzero_installer() -> None:
+def test_perform_upgrade_nonzero_installer(tmp_path: Path) -> None:
     with pytest.raises(UpdateError, match="exited 9"):
-        perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=lambda _: 9)
+        perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=lambda _: 9, prefix=tmp_path)
 
 
 def test_installer_argv_matches_kind() -> None:
@@ -713,12 +724,14 @@ def test_update_command_unsupervised_warns(capsys: pytest.CaptureFixture[str]) -
     assert "lop mobile restart" not in captured.err
 
 
-def test_perform_upgrade_does_not_refresh() -> None:
+def test_perform_upgrade_does_not_refresh(tmp_path: Path) -> None:
     with (
         patch.object(update_mod, "refresh_mobile_after_upgrade") as refresh,
         patch("subprocess.run") as run,
     ):
-        out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=lambda _: 0)
+        out = perform_upgrade(
+            target="0.28.0", kind=InstallKind.UV_TOOL, run=lambda _: 0, prefix=tmp_path
+        )
     assert out == "0.28.0"
     refresh.assert_not_called()
     run.assert_not_called()
@@ -1024,6 +1037,204 @@ def test_same_version_rebuilds_are_different_builds() -> None:
     after = update_mod.BuildStamp(version="0.49.0", source_ref="bbbbbbb2222")
     assert before != after
     assert before.version == after.version, "the version alone cannot tell them apart"
+
+
+def test_source_ref_ignores_the_pypi_sentinel(tmp_path: Path) -> None:
+    """``pypi <version>`` is an honest "no commit", not a ref to render.
+
+    A PyPI upgrade has no git commit at all. The marker still records what is
+    installed, so the file exists — but ``source_ref`` must not hand a caller
+    the word ``pypi`` to print as ``0.51.9@pypi``.
+    """
+    (tmp_path / ".lop-source").write_text("pypi 0.51.9\n", encoding="utf-8")
+    assert update_mod.source_ref(tmp_path) == ""
+    assert update_mod.installed_build(tmp_path).source_ref == ""
+
+
+def test_is_git_snapshot_follows_the_token_not_the_files_existence(tmp_path: Path) -> None:
+    """The regression this whole change is about, stated as a predicate.
+
+    Before ``/update`` wrote the marker, existence WAS the test — correct only
+    while ``lop-update`` was the sole writer. Now a wheel installed over a git
+    snapshot leaves a marker behind, and calling that host a git snapshot
+    would keep printing "this runtime was built from git" about a wheel.
+    """
+    marker = tmp_path / ".lop-source"
+
+    marker.write_text("4d3ce1d1a48f4f3b799efdfabb014979e70e0630 main\n", encoding="utf-8")
+    assert update_mod.is_git_snapshot(tmp_path) is True
+
+    marker.write_text("pypi 0.51.9\n", encoding="utf-8")
+    assert update_mod.is_git_snapshot(tmp_path) is False
+
+
+def test_write_source_marker_records_a_pypi_install(tmp_path: Path) -> None:
+    assert update_mod.write_source_marker(tmp_path, version="0.51.9") is True
+    assert (tmp_path / ".lop-source").read_text(encoding="utf-8") == "pypi 0.51.9\n"
+    assert update_mod.source_ref(tmp_path) == ""
+    assert update_mod.is_git_snapshot(tmp_path) is False
+
+
+def test_write_source_marker_keeps_lop_updates_two_token_shape(tmp_path: Path) -> None:
+    """``lop-update`` is a second writer, out of this tree; the format is the contract.
+
+    It writes ``printf '%s %s\\n' "$COMMIT" "$REF"``. Writing the same shape
+    here is what keeps the two interchangeable — a marker written by either
+    reads identically through ``source_ref``.
+    """
+    sha = "4d3ce1d1a48f4f3b799efdfabb014979e70e0630"
+    assert update_mod.write_source_marker(tmp_path, version="0.51.9", commit=sha, ref="main")
+    assert (tmp_path / ".lop-source").read_text(encoding="utf-8") == f"{sha} main\n"
+    assert update_mod.source_ref(tmp_path) == sha
+    assert update_mod.is_git_snapshot(tmp_path) is True
+
+
+def test_write_source_marker_replaces_a_stale_marker(tmp_path: Path) -> None:
+    """The reported state: a marker naming the build the upgrade DISPLACED."""
+    stale = "f1cd77900182616a683c4e7e58f0b0e01be580b3"
+    (tmp_path / ".lop-source").write_text(f"{stale} main\n", encoding="utf-8")
+    assert update_mod.source_ref(tmp_path) == stale
+
+    update_mod.write_source_marker(tmp_path, version="0.51.9")
+    assert update_mod.source_ref(tmp_path) == ""
+    assert (tmp_path / ".lop-source").read_text(encoding="utf-8") == "pypi 0.51.9\n"
+
+
+def test_write_source_marker_never_raises_on_an_unwritable_root(tmp_path: Path) -> None:
+    """A failed marker write must not turn a SUCCESSFUL upgrade into an error."""
+    missing = tmp_path / "does-not-exist"
+    assert update_mod.write_source_marker(missing, version="0.51.9") is False
+
+
+def test_write_source_marker_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    """Temp-and-rename: a reader must never see a partial marker.
+
+    ``RuntimeServer.__init__`` reads this file, so a torn write would reach
+    every runtime on the host (review round 1, R1-2).
+
+    NOT SUFFICIENT ON ITS OWN. A plain ``path.write_text`` leaves no temp file
+    either, so this assertion is satisfied by the very implementation it reads
+    as rejecting; it passed against both non-atomic mutants in review round 1.
+    The two tests below are the ones that discriminate — this one only pins
+    that the temp file is cleaned up.
+    """
+    update_mod.write_source_marker(tmp_path, version="0.51.9")
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".lop-source"]
+
+
+def test_write_source_marker_installs_by_rename_not_by_writing_in_place(
+    tmp_path: Path,
+) -> None:
+    """The destination is only ever reached by a rename, never opened for write.
+
+    THIS IS THE ATOMICITY GUARD, and it is structural rather than timed: a
+    rename REPLACES the destination, so the inode a reader would open changes;
+    truncating the destination in place (``path.write_text``, or a
+    ``shutil.copyfile`` over it) keeps the same inode and exposes a window in
+    which a concurrent ``RuntimeServer.__init__`` reads a half-written marker.
+    Inode identity is a fact about how the file got there, so this cannot flake
+    the way a race-the-writer test would.
+
+    Verified to discriminate (review round 1, R1-1): both the ``write_text``
+    and ``copyfile`` mutants keep the inode and fail here.
+    """
+    marker = tmp_path / ".lop-source"
+    marker.write_text("f1cd77900182 main\n", encoding="utf-8")
+    before = marker.stat().st_ino
+
+    assert update_mod.write_source_marker(tmp_path, version="0.51.9") is True
+
+    after = marker.stat().st_ino
+    assert after != before, (
+        "the marker must be installed by renaming a fully-written temp file over it; "
+        f"the inode was unchanged ({before}), so the destination was written in place"
+    )
+
+
+def test_a_failed_marker_write_leaves_the_previous_marker_byte_intact(
+    tmp_path: Path,
+) -> None:
+    """A write that cannot start must not damage what is already there.
+
+    The companion to the rename guard above, covering the failure path: with
+    the temp file unavailable there is nothing to rename, so the function has
+    to report ``False`` and leave the existing marker exactly as it found it.
+    An implementation that writes the destination directly reports success and
+    overwrites a marker it never managed to replace — which is worse than not
+    writing at all, because every runtime on the host then reads it.
+    """
+    marker = tmp_path / ".lop-source"
+    stale = "f1cd77900182 main\n"
+    marker.write_text(stale, encoding="utf-8")
+
+    with patch.object(update_mod.tempfile, "mkstemp", side_effect=OSError("no temp")):
+        assert update_mod.write_source_marker(tmp_path, version="0.51.9") is False
+
+    assert marker.read_text(encoding="utf-8") == stale
+
+
+def test_upgrading_a_uv_tool_records_what_it_just_installed(tmp_path: Path) -> None:
+    """End to end over ``perform_upgrade``: the marker follows the payload.
+
+    Nothing in Python wrote ``.lop-source`` before this, so an upgrade driven
+    from ``lop update`` or the TUI's ``/update`` left it naming the displaced
+    build for as long as the host lived.
+    """
+    stale = "f1cd77900182616a683c4e7e58f0b0e01be580b3"
+    (tmp_path / ".lop-source").write_text(f"{stale} main\n", encoding="utf-8")
+
+    perform_upgrade(target="0.51.9", kind=InstallKind.UV_TOOL, run=lambda _: 0, prefix=tmp_path)
+
+    assert (tmp_path / ".lop-source").read_text(encoding="utf-8") == "pypi 0.51.9\n"
+    assert update_mod.source_ref(tmp_path) == "", "no commit may be invented for a wheel"
+
+
+def test_a_failed_upgrade_leaves_the_marker_alone(tmp_path: Path) -> None:
+    """The marker describes what is INSTALLED, and a failed install changed nothing."""
+    stale = "f1cd77900182616a683c4e7e58f0b0e01be580b3"
+    (tmp_path / ".lop-source").write_text(f"{stale} main\n", encoding="utf-8")
+
+    with pytest.raises(UpdateError):
+        perform_upgrade(target="0.51.9", kind=InstallKind.UV_TOOL, run=lambda _: 1, prefix=tmp_path)
+
+    assert update_mod.source_ref(tmp_path) == stale
+
+
+def test_only_the_uv_tool_layout_gets_a_marker(tmp_path: Path) -> None:
+    """pipx and pip installs never had a marker and gain nothing from one."""
+    perform_upgrade(target="0.51.9", kind=InstallKind.PIPX, run=lambda _: 0, prefix=tmp_path)
+    assert not (tmp_path / ".lop-source").exists()
+
+
+def test_build_marker_age_reads_the_newest_write_not_the_marker(tmp_path: Path) -> None:
+    """The settle guard must not be disarmed by a marker older than the payload.
+
+    A stale marker reported a minutes-old install as ~19000 s old on the
+    reporting host. Taking the most recent of marker and dist-info can only
+    make the age smaller, and a smaller age makes the guard wait longer —
+    the safe direction.
+    """
+    marker = tmp_path / ".lop-source"
+    marker.write_text("pypi 0.51.9\n", encoding="utf-8")
+    old = time.time() - 19_000
+    os.utime(marker, (old, old))
+
+    dist_dir = tmp_path / "local_operator-0.51.9.dist-info"
+    dist_dir.mkdir()
+
+    class _Located:
+        _path = dist_dir
+
+    with patch.object(update_mod, "distribution", return_value=_Located()):
+        age = update_mod.build_marker_age_s(tmp_path)
+
+    assert age is not None
+    assert age < 60, f"the fresh dist-info must win over the stale marker, got {age}"
+
+
+def test_build_marker_age_is_none_without_either_signal(tmp_path: Path) -> None:
+    with patch.object(update_mod, "distribution", side_effect=PackageNotFoundError()):
+        assert update_mod.build_marker_age_s(tmp_path) is None
 
 
 def test_a_build_label_names_the_ref_only_when_there_is_one() -> None:

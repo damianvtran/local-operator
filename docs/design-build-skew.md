@@ -117,6 +117,14 @@ can: `lop-update` records `<git-sha> <tag>` there (live example:
 **pair**: `(version, source_ref)`, with `version` the fallback when
 `.lop-source` is absent (PyPI/pipx installs, editable checkouts).
 
+> **Amended after the stale-marker fix.** `lop-update` is no longer the only
+> writer: a PyPI upgrade through `perform_upgrade` (`lop update` and the TUI's
+> `/update`) now records `pypi <version>` at the same path, because leaving the
+> marker alone made it describe the build the upgrade had *displaced*. The file
+> therefore no longer implies "git snapshot" by its mere existence — the first
+> token does, and `source_ref` returns `""` for the `pypi` sentinel so a wheel
+> still compares on version alone exactly as described above.
+
 ## 4. The change, file by file
 
 ### 4.0 New shared helper — `local_operator/update.py`
