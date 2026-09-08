@@ -385,6 +385,14 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     """
     yield
 
+    # The broker is a POSIX daemon (`client.py` imports `fcntl`, `peer.py`
+    # authenticates over a unix socket), so on Windows there is nothing to
+    # sweep and the import below would raise `ModuleNotFoundError` for every
+    # test in the run — which is exactly how the `filesystem-boundaries-windows`
+    # job caught this.
+    if os.name == "nt":
+        return
+
     candidates = _secret_config_dirs(request, isolate_environment)
     if not candidates:
         return
