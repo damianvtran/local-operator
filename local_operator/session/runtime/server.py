@@ -1739,6 +1739,16 @@ class RuntimeServer:
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+            if isinstance(exc, ProfileRegistryUnavailable) and exc.count is not None:
+                # The count rides as its own INTEGER field so the attach client
+                # can rebuild the actionable wording locally. Without it the
+                # client reconstructs from the bare code and renders the
+                # countless sentence, which is the unactionable message this
+                # detail exists to replace -- and ``/team`` attach is one of
+                # the two surfaces that motivated it. An integer carries no
+                # path, host or identity, so it does not widen what
+                # ``session/errors.py`` admits across this boundary.
+                frame["error_count"] = exc.count
             await self._send_to(conn, frame)
             await self._push()
 
