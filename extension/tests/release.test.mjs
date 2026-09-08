@@ -56,7 +56,13 @@ async function runRelease(args, handlers) {
 
 test("manifest requests tabGroups exactly once", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
-  assert.equal(manifest.version, "0.1.8");
+  // The invariant is that the two manifests AGREE, not that they sit at one
+  // hardcoded number: the store package is built from manifest.json while every
+  // release script reads package.json, so a bump applied to only one of them
+  // ships a zip whose version does not match what was promoted. A literal here
+  // just has to be edited on every release, and says nothing when it is.
+  assert.equal(manifest.version, VERSION, "manifest.json and package.json must carry the same version");
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/, "the manifest version must be a plain semver triple");
   assert.equal(manifest.permissions.filter((permission) => permission === "tabGroups").length, 1);
 });
 

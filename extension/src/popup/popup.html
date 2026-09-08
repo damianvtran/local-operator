@@ -2,6 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <!-- CLASSIC script, in <head>, BEFORE the stylesheet, on purpose. popup.js
+         is a deferred module and so cannot size #pending before the compositor
+         paints; this can. It must precede the <link> because a classic script
+         placed after one blocks on that stylesheet loading first, which delays
+         the parser past the point where the body can paint unstyled. See
+         first-paint.js — it is the only thing that runs pre-paint. -->
+    <script src="first-paint.js"></script>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -84,20 +91,55 @@
               autocomplete="one-time-code"
               aria-describedby="pair-error"
             />
+            <!-- ABOVE the button, and inside the form. The error's reserved
+                 slot (popup.css) is permanent, so below `.actions` it parked a
+                 66px void between the last control and the footer rule, which
+                 reads as a mis-measured card rather than as rhythm; between the
+                 field and the button the same slack reads as form spacing. It
+                 also puts the message next to the field it is about instead of
+                 below the button that produced it, so failure does not send the
+                 eye past the primary action and back. -->
+            <p class="error hidden" id="pair-error" role="alert"></p>
             <div class="actions">
               <button type="submit" class="btn primary block">Pair</button>
             </div>
           </form>
-          <p class="error hidden" id="pair-error" role="alert"></p>
         </section>
 
-        <section id="disconnected" class="state">
+        <!-- Ships HIDDEN like every other section. A diagnostic error state must
+             never be the pre-render default: render() is async (it awaits
+             getSession() and a real /health fetch), so whichever section ships
+             visible is what Chrome paints before any show() runs. This one used
+             to be it, and every popup open flashed "Not connected." for the
+             length of the health round trip — worst exactly when the daemon is
+             slow rather than dead, and it resized the auto-sizing popup window
+             as the card swapped. The neutral #pending section below is the
+             first paint instead. -->
+        <section id="disconnected" class="state hidden">
           <h1 class="title">Not connected.</h1>
           <p class="sub">
             Local Operator isn't reachable on this computer. Make sure it's running
             (<code>lop browser status</code>).
           </p>
           <div class="actions"><button id="retry" class="btn block">Retry</button></div>
+        </section>
+
+        <!-- The pre-render placeholder, and the ONLY section that ships visible.
+             It asserts nothing about the connection: render() resolves it away
+             into whichever state is real, so a slow probe reads as "still
+             looking" rather than as a diagnosis that is about to be retracted.
+             Its height matches the states it most often resolves into, so the
+             popup window does not jump as it settles. -->
+        <section id="pending" class="state" role="status">
+          <!-- The title states what is happening, like every other state
+               ("Connected.", "Paired.", "Not connected.", "Update needed.").
+               It previously repeated the wordmark 14px above it, spending the
+               card's strongest typographic slot on a word already on screen and
+               making a legitimate loading state read as an empty broken card.
+               The copy still refuses to diagnose: this is the one state that
+               has established nothing yet. -->
+          <h1 class="title">Checking connection.</h1>
+          <p class="sub">Looking for Local Operator on this computer…</p>
         </section>
 
         <section id="incompatible" class="state hidden">
