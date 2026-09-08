@@ -226,16 +226,24 @@ class Toast(Static):
         evicts it (UX round 1, U2) — this is how its owner learns to announce
         again rather than treating the news as delivered.
 
-        Carries the card's TEXT as well as its owner: an owner that raises a
-        second card legitimately evicts its own first one, and the text is what
-        lets it tell "my stale card was dropped" from "my current card is the
-        one that dropped it".
+        Carries the card's GENERATION as well as its owner, and the text for
+        the reader's convenience only. The generation is the identity: an owner
+        that raises a second card legitimately evicts its own first one, and
+        matching on TEXT cannot tell "my stale card was dropped" from "my
+        current card is the one that dropped it" whenever the same words recur.
+        That is not hypothetical — a server that breaks, recovers and breaks
+        again inside one card's 5 s produces A→B→A, so the queued
+        ``Evicted(text=A)`` matches a record that has since come back to A and
+        releases an announce the user is reading right now (review round 2,
+        R2-3). :attr:`Toast.generation` exists for exactly this and says so:
+        "two notices can word themselves identically".
         """
 
-        def __init__(self, owner: object, text: str) -> None:
+        def __init__(self, owner: object, text: str, generation: int) -> None:
             super().__init__()
             self.owner = owner
             self.text = text
+            self.generation = generation
 
     def __init__(self) -> None:
         super().__init__("")
@@ -339,8 +347,17 @@ class Toast(Static):
         # is owed the news that the interruption it asked for never landed. See
         # :class:`Evicted`. Only OWNED cards are reported: an unowned card has
         # nobody to tell, and posting for one is traffic with no reader.
-        if self.display and self._owner is not None:
-            self.post_message(self.Evicted(self._owner, self._message))
+        #
+        # Captured BEFORE the state below is overwritten, but posted AFTER every
+        # guard that can still decline the slot, so the notice is true by
+        # construction rather than by the current guard ordering: any early
+        # return added between here and the replacement would otherwise announce
+        # an eviction that never happened (review round 2, R2-4).
+        evicted = (
+            self.Evicted(self._owner, self._message, self._generation)
+            if self.display and self._owner is not None
+            else None
+        )
         self._deferred = None
         self._stop_timer()
         self._generation += 1
@@ -360,6 +377,8 @@ class Toast(Static):
         self.display = True
         self._refit()
         self._timer = self.set_timer(duration_ms / 1000, self.dismiss_toast)
+        if evicted is not None:
+            self.post_message(evicted)
 
     def withdraw(self, owner: object) -> None:
         """Retire ``owner``'s card, whether it is SHOWING or still held.

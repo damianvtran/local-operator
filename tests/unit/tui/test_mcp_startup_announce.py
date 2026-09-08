@@ -1,4 +1,4 @@
-"""The MCP startup toast announces once per process, per distinct outcome.
+"""The MCP startup toast announces once per session, per distinct outcome.
 
 Reported: "MCP ready: 12 servers, 425 tools" fired on EVERY session attach,
 including every click in the session sidebar. ``session.mcp_startup`` is a
@@ -7,14 +7,19 @@ sidebar switch re-announced a round that happened minutes ago — and, through
 ``RemoteSession``'s rehydration of the owner's outcome, sometimes a round this
 process never ran at all.
 
-These tests pin the rule the fix implements: the toast announces only what
-differs from the sentence CURRENTLY announced, so a re-attach saying the same
-thing is silent (A→A) while a server that breaks, recovers and breaks again is
-announced every time (A→B→A). The record is taken when the card is DISPLAYED,
-not when ``show`` is called, so an announce evicted unread is not spent. The
-durable failure notice is deduped per session AND per failure instead. The
-status band is asserted alongside, because the suppression is only safe while
-the band keeps re-stating live MCP state on every attach.
+These tests pin the rule the fix implements: each SESSION remembers the last
+sentence it was told and stays silent while its own outcome is unchanged, so
+clicking away and back is quiet (A→B→A→B across sessions) while a server that
+breaks, recovers and breaks again is announced every time (A→B→A on one
+session). A session seeing a sentence that is CURRENTLY on screen inherits
+that record, which is what keeps one shared MCP set to one toast. The identity
+is the UNTRUNCATED sentence — the card still shows the width-fitted one — so
+terminal width cannot re-arm or swallow an announce. The record is taken when
+the card is DISPLAYED, not when ``show`` is called, and is released by
+eviction for every session that card spoke for. The durable failure notice is
+deduped per session AND per failure instead. The status band is asserted
+alongside, because the suppression is only safe while the band keeps
+re-stating live MCP state on every attach.
 """
 
 from __future__ import annotations
@@ -91,6 +96,18 @@ _SLACK_DOWN = dict(
     tool_count=310,
 )
 
+#: Two errors whose FULL sentences differ but whose 50-column renders are
+#: byte-identical (both ellipsize to ``failed: slack — command not found:
+#: slack-…``). The pair review and UX both measured collapsing into one
+#: announce on the round-2 head, swallowing the second failure (R2-2, U2-1).
+_TRUNCATION_COLLISION_A = "command not found: slack-mcp-stdio-bridge"
+_TRUNCATION_COLLISION_B = "command not found: slack-mcp-oauth-refresh-expired"
+
+#: An error long enough to fit the 100-column card WHOLE but truncate at 46,
+#: so a resize between attaches changed the round-2 head's key for an
+#: unchanged outcome (R2-1).
+_RESIZE_SENSITIVE_ERROR = "command not found: slack-mcp-stdio-bridge-v2-bin"
+
 
 async def _until(pilot, predicate) -> bool:  # type: ignore[no-untyped-def]
     """Pause until ``predicate()`` holds, or the budget runs out.
@@ -100,6 +117,14 @@ async def _until(pilot, predicate) -> bool:  # type: ignore[no-untyped-def]
     U6), and AGENTS.md's timing section says to wait on the event, not the
     clock. Returns whether it held, so a caller asserting the NEGATIVE (a toast
     that must stay silent) can still spend the full budget looking for it.
+
+    The budget is 200 ``pause()`` calls, not seconds: a pause is one event-loop
+    tick, and the observed settle for this surface is single-digit ticks (the
+    announce is synchronous in ``show``; only the posted ``Toast.Evicted`` ever
+    needs a drain). 200 is roughly two orders of magnitude above that need
+    while still costing milliseconds — tight enough that a genuine hang fails
+    the test quickly, loose enough that CI under load cannot turn a pass into
+    a flake (review round 2, R2-5).
     """
     for _ in range(200):
         await pilot.pause()
@@ -177,6 +202,59 @@ async def test_four_sidebar_clicks_onto_one_mcp_set_announce_once() -> None:
             assert toast.display is False
 
         assert shown == [], f"a re-attach re-announced: {shown}"
+
+
+@pytest.mark.asyncio
+async def test_alternating_clicks_between_two_mcp_sets_announce_once_each() -> None:
+    """QA round 2, Q2-1 — the reported defect had returned at full strength.
+
+    The sidebar catalogue is not cwd-scoped (``load_catalog`` scans the whole
+    store) while MCP is wired per session cwd, so alternating between a repo
+    with a ``.mcp.json`` and one without is ordinary A→B→A→B. One global
+    sentence slot cannot tell "the world changed" from "I clicked elsewhere
+    and came back": every single click re-announced — 20 announces in 20
+    clicks, identical to the unfixed tree. Per session, each side of the
+    alternation is unchanged since its own last announce, so only the first
+    click per distinct outcome speaks.
+
+    QA's own shape: the real ``_adopt_session``, the card dismissed between
+    clicks so eviction is not the variable, and announces counted at the real
+    ``Toast.show``. The boot session carries a third outcome so neither click
+    target has been told yet — the expected count is then exactly one per
+    distinct session outcome.
+    """
+    boot = _session(
+        _outcome(
+            configured=("github", "linear"),
+            connected=("github", "linear"),
+            tool_count=180,
+        ),
+        session_id="boot",
+    )
+    repo = _session(_outcome(), session_id="repo")
+    plain = _session(
+        _outcome(configured=("github",), connected=("github",), tool_count=40),
+        session_id="plain",
+    )
+    app = OperatorApp(lambda: _factory(boot))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        announced = 0
+        for index in range(20):
+            app._adopt_session(repo if index % 2 == 0 else plain, replay_history=False)
+            await _quiet(pilot)
+            if toast.display:
+                announced += 1
+                toast.dismiss_toast()
+                await pilot.pause()
+        assert announced == 2, (
+            f"{announced} announces in 20 alternating clicks between two MCP "
+            "sets — expected exactly one per distinct session outcome"
+        )
 
 
 @pytest.mark.asyncio
@@ -283,6 +361,70 @@ async def test_the_same_failure_recurring_after_a_recovery_announces_again() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_flap_on_one_session_announces_through_sibling_clicks() -> None:
+    """U1 and Q2-1 together — the two shapes UX walked in one flow.
+
+    The sibling clicks must stay silent (nothing changed for either session)
+    while the break→recover→break on ONE session announces every transition:
+    per-session records are what let both hold at once, where the single
+    global slot could only ever trade one for the other.
+    """
+    # The sibling carries a THIRD sentence, distinct from both of a's states:
+    # the point is that a's transitions announce on their own merits, not that
+    # they coincide with words the user just read on the sibling's card.
+    broken = _session(_outcome(**_SLACK_DOWN), session_id="a")
+    sibling = _session(
+        _outcome(
+            configured=("notion", "sentry", "stripe"),
+            connected=("notion", "sentry", "stripe"),
+            tool_count=512,
+        ),
+        session_id="b",
+    )
+    app = OperatorApp(lambda: _factory(broken))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        assert "2 of 3 servers up" in toast.message  # a breaks (announce 1)
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(sibling, replay_history=False)
+        assert await _until(pilot, lambda: toast.display)  # b's first (2)
+        assert "3 servers" in toast.message and "512 tools" in toast.message
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(broken, replay_history=False)
+        await _quiet(pilot)
+        assert toast.display is False, "clicking back to an unchanged outcome re-announced"
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(sibling, replay_history=False)
+        await _quiet(pilot)
+        assert toast.display is False, "the sibling's unchanged outcome re-announced"
+
+        broken.mcp_startup = _outcome()  # a recovers (announce 3)
+        app._report_mcp_startup(broken)
+        assert await _until(pilot, lambda: toast.display)
+        assert "MCP ready: 3 servers" in toast.message
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(sibling, replay_history=False)
+        await _quiet(pilot)
+        assert toast.display is False
+
+        broken.mcp_startup = _outcome(**_SLACK_DOWN)  # a breaks AGAIN (4)
+        app._report_mcp_startup(broken)
+        assert await _until(
+            pilot, lambda: toast.display
+        ), "a recurring failure after a recovery went silent — U1 must stay closed"
+        assert "2 of 3 servers up" in toast.message
+
+
+@pytest.mark.asyncio
 async def test_an_announce_evicted_before_it_is_read_is_not_spent() -> None:
     """UX round 1, U2 \u2014 the announce is consumed on being SEEN, not on being
     shown.
@@ -318,6 +460,46 @@ async def test_an_announce_evicted_before_it_is_read_is_not_spent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_eviction_releases_every_session_the_card_spoke_for() -> None:
+    """U2's release, per session now — the evicted card spoke for more than
+    its raiser.
+
+    A session that stayed silent because the words were ALREADY on screen
+    inherited its record from that card, so the card being thrown away unread
+    owes that session its announce back too. A session told by an earlier,
+    delivered card keeps its record: it was told by a card that retired
+    normally. Pins the per-session release; passes on the round-2 head as
+    well, where the single slot coincided with this behaviour.
+    """
+    first = _session(_outcome(), session_id="a")
+    second = _session(_outcome(), session_id="b")
+    third = _session(_outcome(), session_id="c")
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+
+        # b and c inherit the LIVE card's record: same words, on screen now.
+        app._adopt_session(second, replay_history=False)
+        await _quiet(pilot)
+        app._adopt_session(third, replay_history=False)
+        await _quiet(pilot)
+        assert toast.display, "the boot card is still showing"
+
+        # A routine copy receipt throws that card away unread. Everyone it
+        # spoke for — its raiser and its inheritors — is owed the announce.
+        toast.show("copied 12 lines to clipboard", yield_to_actionable=True)
+        assert await _until(pilot, lambda: toast.message.startswith("copied"))
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(third, replay_history=False)
+        assert await _until(
+            pilot, lambda: toast.display
+        ), "an inheritor's record survived the eviction of the card that spoke for it"
+
+
+@pytest.mark.asyncio
 async def test_an_announce_the_user_actually_saw_is_not_re_announced() -> None:
     """The other half of U2: eviction is not the same as expiry.
 
@@ -337,6 +519,47 @@ async def test_an_announce_the_user_actually_saw_is_not_re_announced() -> None:
         app._adopt_session(second, replay_history=False)
         await _quiet(pilot)
         assert toast.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_flap_inside_one_card_does_not_release_the_live_announce() -> None:
+    """Review round 2, R2-3 — a stale ``Evicted`` released a live announce.
+
+    ``Evicted`` is posted, so it arrives after further reports have run. A
+    flap A→B→A inside one card's lifetime queues ``Evicted(text=A)`` from the
+    FIRST card; matching the release on the WORDS made it clear a record that
+    had since come back to A, re-arming the announce for a sentence the user
+    was reading right then. The release matches the card's GENERATION, which
+    cannot alias. Sentences here are short so truncation is not the variable.
+    """
+    session = _session(_outcome(), session_id="a")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        assert "MCP ready: 3 servers" in toast.message  # A takes the slot
+
+        # No dismissal: each report evicts the previous card, queueing its
+        # Evicted behind the pump.
+        session.mcp_startup = _outcome(**_SLACK_DOWN)
+        app._report_mcp_startup(session)  # B evicts A
+        session.mcp_startup = _outcome()
+        app._report_mcp_startup(session)  # A evicts B — the flap closes
+
+        # The queued Evicted(text=A) is delivered here and must not release
+        # the record: the card on screen IS A, and the user is reading it.
+        await pilot.pause()
+        await _quiet(pilot)
+        assert toast.display, "the live announce card vanished"
+        assert "MCP ready: 3 servers" in toast.message
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._report_mcp_startup(session)
+        await _quiet(pilot)
+        assert (
+            toast.display is False
+        ), "the A→B→A flap re-armed the announce for a sentence already on screen"
 
 
 @pytest.mark.asyncio
@@ -394,6 +617,86 @@ async def test_two_server_sets_rendering_one_sentence_announce_once() -> None:
         app._adopt_session(second, replay_history=False)
         await _quiet(pilot)
         assert toast.display is False, f"the same sentence {sentence!r} was announced twice"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_resize_does_not_re_announce_news_the_user_read() -> None:
+    """Review round 2, R2-1 / UX round 2, U2-2 — width leaked into identity.
+
+    The round-2 head keyed the TRUNCATED sentence, so the same outcome keyed
+    differently at two widths: announce at 100 columns, narrow the pane,
+    re-attach, and the identical outcome announced again. The key is now the
+    untruncated sentence; the card still shows the width-fitted renderable.
+    This error fits a 100-column card whole but truncates at 46, so the two
+    keys genuinely differed on the round-2 head.
+    """
+    session = _session(
+        _outcome(
+            connected=("github", "linear"),
+            failures={"slack": _RESIZE_SENSITIVE_ERROR},
+            tool_count=310,
+        ),
+        session_id="a",
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        # The card truncates at BOTH widths — differently, which is the point:
+        # the round-2 head keyed this rendered text, so the resize changed the
+        # key for an unchanged outcome.
+        at_wide = toast.message
+        assert "slack" in at_wide
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        await pilot.resize_terminal(46, 24)
+        await pilot.pause()
+        app._report_mcp_startup(session)
+        await _quiet(pilot)
+        assert toast.display is False, "a resize re-announced an unchanged outcome"
+
+
+@pytest.mark.asyncio
+async def test_two_failures_that_truncate_identically_both_announce() -> None:
+    """Review round 2, R2-2 / UX round 2, U2-1 — the serious half.
+
+    Truncation is lossy, so two genuinely different failures whose 50-column
+    renders are byte-identical collapsed into one key on the round-2 head and
+    the SECOND failure was silently swallowed — the one case this surface
+    exists to raise. Keying the untruncated sentence, both announce. The card
+    may still SHOW the same ellipsized text; what matters is that it is raised.
+    """
+    first = _session(
+        _outcome(
+            connected=("github", "linear"),
+            failures={"slack": _TRUNCATION_COLLISION_A},
+            tool_count=310,
+        ),
+        session_id="a",
+    )
+    second = _session(
+        _outcome(
+            connected=("github", "linear"),
+            failures={"slack": _TRUNCATION_COLLISION_B},
+            tool_count=310,
+        ),
+        session_id="b",
+    )
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(50, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        assert "slack-" in toast.message  # truncated, but raised
+        rendered = toast.message
+        toast.dismiss_toast()
+        await pilot.pause()
+
+        app._adopt_session(second, replay_history=False)
+        assert await _until(pilot, lambda: toast.display), (
+            "a genuinely different failure was swallowed because it truncates "
+            f"identically to the last one ({rendered!r})"
+        )
 
 
 @pytest.mark.asyncio
@@ -586,12 +889,17 @@ async def test_the_notice_pointer_wraps_rather_than_truncating(columns: int) -> 
 
 
 @pytest.mark.asyncio
-async def test_the_announce_record_is_one_slot_not_a_ledger() -> None:
-    """UX round 1, U5 \u2014 the toast ledger grew for the life of the process.
+async def test_the_announce_record_is_bounded_by_sessions_not_outcomes() -> None:
+    """UX round 1, U5 / review round 1, R1-3 \u2014 the record's growth, re-stated
+    for the per-session shape.
 
-    Forty distinct outcomes left 41 entries behind. Holding only the CURRENT
-    sentence there is no growth to bound: this asserts the shape, so a future
-    change back to a set fails here rather than in a memory profile.
+    The round-1 ledger grew per distinct OUTCOME: forty outcomes left forty
+    entries behind, for the life of the process. The record is now one entry
+    per ATTACHED session \u2014 outcome churn on one session rewrites that
+    session's entry, and a re-attach adds nothing \u2014 so the bound is the
+    session count (276 B measured per entry), not the outcome count. This
+    asserts the shape, so a future change back to per-outcome growth fails
+    here rather than in a memory profile.
     """
     session = _session(_outcome(), session_id="a")
     app = OperatorApp(lambda: _factory(session))
@@ -604,5 +912,22 @@ async def test_the_announce_record_is_one_slot_not_a_ledger() -> None:
             session.mcp_startup = _outcome(tool_count=100 + index)
             app._report_mcp_startup(session)
             assert await _until(pilot, lambda: toast.display)
-        assert isinstance(app._announced_mcp_startup, str)
-        assert f"{100 + 39} tools" in app._announced_mcp_startup
+        assert list(app._announced_mcp_startup) == ["a"], (
+            "forty distinct outcomes on one session left more than that " "session's entry behind"
+        )
+        assert f"{100 + 39} tools" in app._announced_mcp_startup["a"].sentence
+
+        # The other direction of the bound: sessions grow the record, attaches
+        # do not. Five sessions is five entries; re-adopting all of them again
+        # is still five.
+        others = [_session(_outcome(), session_id=f"s{i}") for i in range(4)]
+        for other in others:
+            toast.dismiss_toast()
+            await pilot.pause()
+            app._adopt_session(other, replay_history=False)
+            await _quiet(pilot)
+        assert sorted(app._announced_mcp_startup) == ["a", "s0", "s1", "s2", "s3"]
+        for again in [session, *others]:
+            app._adopt_session(again, replay_history=False)
+        await _quiet(pilot)
+        assert sorted(app._announced_mcp_startup) == ["a", "s0", "s1", "s2", "s3"]
