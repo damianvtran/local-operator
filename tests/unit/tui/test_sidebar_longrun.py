@@ -113,9 +113,9 @@ async def test_the_startup_cleanup_recheck_chain_does_not_accumulate_across_adop
         # the symptom the operator sees, stated once at the aggregate so a
         # second per-adoption repeater added later is caught here too.
         timers_after = len(list(app._timers))
-        assert timers_after <= timers_before, (
-            f"app timers grew {timers_before} -> {timers_after} over 20 adoptions"
-        )
+        assert (
+            timers_after <= timers_before
+        ), f"app timers grew {timers_before} -> {timers_after} over 20 adoptions"
 
 
 # --- Assembled-app fixture: N live in-process owners behind one sidebar ------
@@ -124,7 +124,7 @@ async def test_the_startup_cleanup_recheck_chain_does_not_accumulate_across_adop
 @asynccontextmanager
 async def live_owners(
     config: Path, count: int, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[list[str], Callable[[str], Awaitable[RemoteSession]]]]:
+) -> AsyncIterator[tuple[list[str], Callable[[str | None], Awaitable[RemoteSession]]]]:
     """``count`` real ``RuntimeServer`` owners, each discoverable by the catalog.
 
     Production runs one session per process, so ``registry.publish`` keys the
@@ -176,7 +176,8 @@ async def live_owners(
         async def never() -> Any:
             raise AssertionError("view navigation must never take execution ownership")
 
-        async def resume(sid: str) -> RemoteSession:
+        async def resume(sid: str | None) -> RemoteSession:
+            assert sid is not None
             return await RemoteSession.connect(
                 servers[sid]._record,
                 sid,
@@ -268,7 +269,7 @@ async def test_alternating_within_the_working_set_hits_the_cache_every_time(
             # Two more laps: every switch must reveal a parked presentation.
             for _ in range(2):
                 for sid in ids:
-                    if sid == app._session.session_id:
+                    if sid == getattr(app._session, "session_id", ""):
                         continue
                     await one_switch(app, sid)
                     switches += 1
@@ -361,7 +362,7 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
                 await one_poll(app, pilot)
             finally:
                 app._sidebar_navigation.intent_id = ""
-            assert target in app._sidebar_presentations, (
-                "the guard starved the row the user is navigating toward"
-            )
+            assert (
+                target in app._sidebar_presentations
+            ), "the guard starved the row the user is navigating toward"
             assert len(app._sidebar_presentations) == bound
