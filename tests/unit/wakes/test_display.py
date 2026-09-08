@@ -70,7 +70,8 @@ def test_persisted_preference(value: str, expected: str, tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> None:
+@pytest.mark.parametrize("columns", [100, 60])
+async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path, columns: int) -> None:
     from types import SimpleNamespace
 
     from local_operator.harness.wake import WakeSchedule
@@ -81,11 +82,14 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> N
 
     session: Any = FakeSession()
     schedule = WakeSchedule(
-        id="w1", message="build", next_due_at=ms("2026-09-09T02:52:00+00:00"), created_at=1
+        id="w1",
+        message="Check the build and report every failing stage",
+        next_due_at=ms("2026-09-09T02:52:00+00:00"),
+        created_at=1,
     )
     session.wake_scheduler = SimpleNamespace(schedules=[schedule])
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(columns, 30)) as pilot:
         async with asyncio.timeout(5):
             while app._session is None:
                 await pilot.pause()
@@ -93,6 +97,8 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> N
         app._refresh_band()
         assert app._wake_panel._shown is not None
         assert "7:52 PM PDT" in app._wake_panel._shown[0][0][1]
+        await pilot.pause()
+        assert app._wake_panel.size.width <= app.screen.size.width
         app._run_slash_command("/settings")
         await pilot.pause()
         view = app.query_one(SettingsView)
@@ -109,6 +115,17 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> N
         assert "19:52 PDT" in app._wake_panel._shown[0][0][1]
         assert schedule.next_due_at == ms("2026-09-09T02:52:00+00:00")
         assert not app.screen.show_vertical_scrollbar
+        await pilot.resize_terminal(40, 30)
+        async with asyncio.timeout(5):
+            while app._wake_panel._shown[2] != app.screen.size.width - 2:
+                await pilot.pause()
+        await pilot.pause()
+        assert app._wake_panel.size.width <= app.screen.size.width
+        from rich.cells import cell_len
+
+        lines = app._wake_panel._build(app._wake_panel._shown[0]).plain.splitlines()
+        assert all(cell_len(line) <= app.screen.size.width - 2 for line in lines)
+        assert any(line.endswith("…") for line in lines)
 
 
 def test_cli_create_list_and_json_preserve_instant(
