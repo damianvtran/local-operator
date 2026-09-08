@@ -70,9 +70,17 @@ class OriginVerifier:
     def __init__(self, access: dict[str, Any], client: httpx.AsyncClient) -> None:
         self.access = access
         self.client = client
-        self.keys: dict[str, Any] = {
-            row["kid"]: jwt.PyJWK.from_dict(row).key for row in access["jwks"]["keys"]
-        }
+        self.keys: dict[str, Any] = {}
+        for row in access["jwks"]["keys"]:
+            # A repeated kid makes key selection ambiguous, and a dict
+            # comprehension resolves that ambiguity silently by position: the
+            # last row wins. A JWKS carrying both the real key and a second key
+            # under the same kid would then be accepted, with which one
+            # verifies tokens decided by serialization order rather than by
+            # policy. Refuse the whole set instead of picking a winner.
+            if row["kid"] in self.keys:
+                raise ValueError("Duplicate key identifier in pinned origin keys.")
+            self.keys[row["kid"]] = jwt.PyJWK.from_dict(row).key
         if any(key.key_size < 2048 for key in self.keys.values()):
             raise ValueError("Origin proof requires RSA keys of at least 2048 bits.")
         self.used: dict[str, float] = {}
@@ -86,6 +94,7 @@ class OriginVerifier:
         method: str,
         target: str,
         body: bytes,
+        websocket: bool = False,
     ) -> dict[str, Any]:
         if not token or len(token) > 16384:
             raise ValueError("Missing origin assertion.")
@@ -127,7 +136,16 @@ class OriginVerifier:
             or not 0 < expires - issued <= 30
         ):
             raise ValueError("Origin assertion lifetime exceeds thirty seconds.")
-        if method not in {"GET", "HEAD", "OPTIONS"}:
+        # A replayed idempotent read yields the same bytes the captor already
+        # holds, so GET/HEAD/OPTIONS are exempt to keep the nonce cache small.
+        # A WebSocket upgrade is signed as method="GET" but is NOT idempotent:
+        # replaying it opens an ADDITIONAL live bidirectional channel to the
+        # harness, which the captor can then drive. It therefore consumes the
+        # nonce like a mutation. The edge mints a fresh jti per request
+        # (Worker setJti(crypto.randomUUID()) on the single forward path that
+        # upgrades take), so legitimate rapid reconnects each carry their own
+        # nonce and are unaffected.
+        if websocket or method not in {"GET", "HEAD", "OPTIONS"}:
             # No await between check and insertion: concurrent replays on this
             # event loop cannot both pass. Refuse a full cache rather than
             # evict a still-live nonce and reopen its replay window.
@@ -355,6 +373,7 @@ class Gateway:
                 method="GET",
                 target=target,
                 body=b"",
+                websocket=True,
             )
             headers = self.headers(socket.headers, host, harness)
             headers.pop("host", None)
