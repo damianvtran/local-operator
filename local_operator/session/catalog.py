@@ -115,9 +115,10 @@ class CatalogEntry:
 
         One consequence reaches MEMBERSHIP, not just order: :func:`load_catalog`
         ranks before applying ``[:limit]``, so at the ``CATALOG_SCAN_LIMIT``
-        boundary an ancient session with an armed wake can now enter the window
-        and displace a newer row that would otherwise have made it (measured at
-        251 sessions). That is arguably the point of the feature — a scheduled
+        boundary an ancient session carrying a wake — armed or dormant, since
+        both bands outrank a plain row — can now enter the window and displace
+        a newer row that would otherwise have made it (measured at 251
+        sessions). That is arguably the point of the feature — a scheduled
         session is usually an old one, and being unfindable is the report — but
         it is a real behaviour change beyond reordering, so it is recorded here.
         """
