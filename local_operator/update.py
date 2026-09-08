@@ -30,6 +30,7 @@ still rewrite the cache so the next splash is free.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -39,6 +40,8 @@ from enum import Enum
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 from typing import Any, Callable, Literal
+
+logger = logging.getLogger(__name__)
 
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
@@ -558,6 +561,14 @@ def install_kind(
 #: PyPI wheel rather than from a git snapshot. A sentinel rather than a fake
 #: commit: a PyPI upgrade genuinely HAS no git ref, and copying the previous
 #: install's sha forward is exactly the lie this module exists to stop.
+#:
+#: Expect one cosmetic artefact in the upgrade window that introduces this
+#: token: a runtime still on PRE-SENTINEL code reads the whole first token as
+#: a ref and renders ``/info`` as ``source git snapshot @ pypi``. It is
+#: self-clearing rather than sticky — the marker's mtime still CHANGES, so
+#: those runtimes see a new build and retire on their own (measured at ~1.5 s,
+#: QA round 1, Q2) — and it is unavoidable for a format change that must keep
+#: the marker a single file shared with ``lop-update``.
 PYPI_SOURCE_TOKEN = "pypi"
 
 
@@ -572,6 +583,14 @@ def _looks_like_git_sha(token: str) -> bool:
     to "no ref" instead of being rendered as a bogus commit.
 
     A PyPI version can never collide: it carries dots, which are not hex.
+
+    The shape test is deliberately loose: it admits any 7-40 hex token, so a
+    hex-looking BRANCH name (``deadbeef``) in the second writer's ref position
+    would read as a commit. It cannot fire today — ``lop-update`` only ever
+    writes ``git rev-parse --verify`` output into the first token — but it is
+    the constraint on anyone adding a sentinel later: A FUTURE SENTINEL MUST
+    NOT BE HEX, or it will render as a bogus commit instead of degrading to
+    "no ref" (review round 1, R1-3).
     """
     if not (7 <= len(token) <= 40):
         return False
@@ -762,6 +781,25 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     ``None`` when neither can be read — an editable checkout has no dist-info
     of its own and no marker, and the caller treats "unknown" as "not
     settled", which is the same safe side.
+
+    THE TWO TERMS ARE NOT SCOPED THE SAME WAY, ON PURPOSE
+    -----------------------------------------------------
+    The marker is read from ``prefix``; the dist-info is always the RUNNING
+    INTERPRETER's, because :func:`distribution` resolves through ``sys.path``
+    and takes no prefix. In production the two are the same tree — a
+    runtime's ``prefix`` IS its own install — so the distinction is invisible.
+    It shows only through the ``LOP_BUILD_PREFIX`` test seam, where a caller
+    passing a foreign prefix gets an age mixing that prefix's marker with this
+    interpreter's dist-info (review round 1, R1-2).
+
+    That is deliberate rather than merely tolerated. Scoping the dist-info to
+    ``prefix`` means globbing ``<prefix>/lib/*/site-packages/*.dist-info``,
+    and a layout that glob does not match degrades this back to reading the
+    MARKER ALONE — which is precisely the stale-marker failure the max-of-two
+    was introduced to fix, reintroduced on the production path to sharpen a
+    seam only the e2e stage uses. The mixed answer is also safe in the one
+    direction that matters: an extra mtime can only make the age SMALLER, so
+    the settle guard waits longer, never less.
     """
     root = Path(prefix) if prefix is not None else Path(sys.prefix)
     mtimes: list[float] = []
@@ -918,7 +956,19 @@ def perform_upgrade(
         # always a PyPI wheel: ``installer_argv`` runs `uv tool install
         # --force local-operator` with no --from, so no git ref exists to
         # record. Passing no commit is what makes the marker say so.
-        write_source_marker(root, version=target)
+        if not write_source_marker(root, version=target):
+            # Deliberately not fatal: the upgrade itself SUCCEEDED, and a
+            # failed marker only costs accuracy in the labels. But without a
+            # line here the host silently reverts to the pre-fix behaviour —
+            # a marker naming the displaced build — with nothing to find
+            # afterwards, so log it rather than discarding the result
+            # (review round 1, R1-4).
+            logger.warning(
+                "Upgraded to %s but could not record it in %s/.lop-source; "
+                "version labels will keep naming the previous build.",
+                target,
+                root,
+            )
     return target
 
 

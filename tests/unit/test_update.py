@@ -918,9 +918,66 @@ def test_write_source_marker_leaves_no_temp_file_behind(tmp_path: Path) -> None:
 
     ``RuntimeServer.__init__`` reads this file, so a torn write would reach
     every runtime on the host (review round 1, R1-2).
+
+    NOT SUFFICIENT ON ITS OWN. A plain ``path.write_text`` leaves no temp file
+    either, so this assertion is satisfied by the very implementation it reads
+    as rejecting; it passed against both non-atomic mutants in review round 1.
+    The two tests below are the ones that discriminate — this one only pins
+    that the temp file is cleaned up.
     """
     update_mod.write_source_marker(tmp_path, version="0.51.9")
     assert sorted(p.name for p in tmp_path.iterdir()) == [".lop-source"]
+
+
+def test_write_source_marker_installs_by_rename_not_by_writing_in_place(
+    tmp_path: Path,
+) -> None:
+    """The destination is only ever reached by a rename, never opened for write.
+
+    THIS IS THE ATOMICITY GUARD, and it is structural rather than timed: a
+    rename REPLACES the destination, so the inode a reader would open changes;
+    truncating the destination in place (``path.write_text``, or a
+    ``shutil.copyfile`` over it) keeps the same inode and exposes a window in
+    which a concurrent ``RuntimeServer.__init__`` reads a half-written marker.
+    Inode identity is a fact about how the file got there, so this cannot flake
+    the way a race-the-writer test would.
+
+    Verified to discriminate (review round 1, R1-1): both the ``write_text``
+    and ``copyfile`` mutants keep the inode and fail here.
+    """
+    marker = tmp_path / ".lop-source"
+    marker.write_text("f1cd77900182 main\n", encoding="utf-8")
+    before = marker.stat().st_ino
+
+    assert update_mod.write_source_marker(tmp_path, version="0.51.9") is True
+
+    after = marker.stat().st_ino
+    assert after != before, (
+        "the marker must be installed by renaming a fully-written temp file over it; "
+        f"the inode was unchanged ({before}), so the destination was written in place"
+    )
+
+
+def test_a_failed_marker_write_leaves_the_previous_marker_byte_intact(
+    tmp_path: Path,
+) -> None:
+    """A write that cannot start must not damage what is already there.
+
+    The companion to the rename guard above, covering the failure path: with
+    the temp file unavailable there is nothing to rename, so the function has
+    to report ``False`` and leave the existing marker exactly as it found it.
+    An implementation that writes the destination directly reports success and
+    overwrites a marker it never managed to replace — which is worse than not
+    writing at all, because every runtime on the host then reads it.
+    """
+    marker = tmp_path / ".lop-source"
+    stale = "f1cd77900182 main\n"
+    marker.write_text(stale, encoding="utf-8")
+
+    with patch.object(update_mod.tempfile, "mkstemp", side_effect=OSError("no temp")):
+        assert update_mod.write_source_marker(tmp_path, version="0.51.9") is False
+
+    assert marker.read_text(encoding="utf-8") == stale
 
 
 def test_upgrading_a_uv_tool_records_what_it_just_installed(tmp_path: Path) -> None:
