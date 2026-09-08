@@ -48,8 +48,10 @@ from textual.widgets import Static
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
+    MODEL_FAULTS,
     SessionReport,
     TimingSummary,
+    ToolCallStats,
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
@@ -377,8 +379,6 @@ def _metric_meta(metric: str, prefix: str) -> str:
 def _group_rows(
     groups: list[tuple[str, UsageAggregate]],
     metric: str,
-    *,
-    failures: dict[str, int] | None = None,
 ) -> tuple[list[_BarRow], bool]:
     """Rows for a partitioning table (by model, by purpose), biggest first.
 
@@ -406,6 +406,24 @@ def _group_rows(
     and leaves the honest ``$—``, which is the only figure here we can stand
     behind. This is the same rule as ``_timing_rows`` and ``_gauge_row``: an
     absent measurement is never drawn as a measured zero.
+
+    **The failure tally is ``calls - ok_calls``, never a test on the ``outcome``
+    string.** ``ok`` is the recorded truth: a boolean the provider path writes on
+    every row. ``outcome`` is ``str(stop_reason)`` (``model/configure.py``) drawn
+    from each adapter's finish-reason map — ``stop``/``length``/``toolUse``/
+    ``refusal`` — or an exception class name, so its vocabulary is
+    PROVIDER-SPECIFIC and drifts whenever an adapter is added. The predicate this
+    replaced tested ``outcome not in ("ok", "unknown")`` against a string nothing
+    has ever written, so every healthy request rendered in ``warning`` as failed
+    while ``Totals`` — which already read ``ok_calls`` — said zero on the same
+    screen. Keep the predicate on ``ok``; the next vocabulary change must not be
+    able to reach it.
+
+    ``ok`` is safe to read unconditionally: ``calls.ok INTEGER NOT NULL DEFAULT
+    1`` has existed since the table was created, it is not in
+    ``store._MIGRATION_COLUMNS``, and ``session_report`` already refuses any DB
+    missing the base column set — so no reachable ledger lacks it, and a group
+    reporting every request failed is a real state that must still render.
     """
     total = sum(_metric_value(agg, metric) for _, agg in groups)
     ordered = sorted(
@@ -416,7 +434,7 @@ def _group_rows(
     rows: list[_BarRow] = []
     for name, agg in ordered:
         note: list[tuple[str, str]] = [(f"{agg.calls} req", "dim")]
-        failed = (failures or {}).get(name, 0)
+        failed = max(0, agg.calls - agg.ok_calls)
         if failed:
             # ``warning``, not ``dim``: a failed request is the one thing on this
             # screen a reader must not scroll past, and at the far right of the
@@ -435,27 +453,6 @@ def _group_rows(
             )
         )
     return rows, total > 0
-
-
-def _failures(report: SessionReport) -> dict[str, int]:
-    """Non-``ok`` request count per purpose, from the existing outcome cross-tab.
-
-    ``by_purpose`` carries the consumption and ``by_purpose_outcome`` carries
-    the outcomes; the failure tally is the second folded onto the first, not a
-    third query.
-    """
-    # ``unknown`` is excluded, not folded into the failures: an older ledger has
-    # no ``outcome`` column, so every row reads ``unknown`` and counting those
-    # would paint a healthy legacy session as entirely failed — in ``warning``,
-    # the one colour on this screen that must never cry wolf.
-    return {
-        purpose: sum(
-            count
-            for (name, outcome), count in report.by_purpose_outcome.items()
-            if name == purpose and outcome not in ("ok", "unknown")
-        )
-        for purpose in report.by_purpose
-    }
 
 
 def _component_rows(aggregate: UsageAggregate) -> tuple[list[_BarRow], int]:
@@ -613,7 +610,15 @@ class _Body:
     def blank(self) -> None:
         self.lines.append(Text())
 
-    def kv(self, name: str, value: str, note: str = "", *, notes: Sequence[str] = ()) -> None:
+    def kv(
+        self,
+        name: str,
+        value: str,
+        note: str = "",
+        *,
+        notes: Sequence[str] = (),
+        dim_value: bool = False,
+    ) -> None:
         """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly.
 
         ``notes`` is a ladder of progressively shorter spellings of the SAME
@@ -626,12 +631,38 @@ class _Body:
         that looks like a wrong one, which is the defect this screen exists to
         fix. Cropping a qualifier is fine; cropping the scope is not.
 
+        **A LADDER RUNG IS STILL SHEDDABLE, SO NOTHING LOAD-BEARING MAY LIVE
+        ONLY HERE.** The ladder narrows the range of widths at which a qualifier
+        disappears; it cannot remove it, because below the shortest rung's budget
+        there is nothing left to draw and cropping mid-word is the other failure
+        this screen forbids. The first version of ``Execution errors`` put the
+        whole load-bearing distinction — that the number is NOT a model-accuracy
+        figure — in these notes, so at 68 columns the row rendered as a bare
+        integer named "errors" sitting under an accuracy percentage: worse than
+        the ``note`` path it replaced, which at least shed at a documented
+        :data:`_NOTE_MIN` (design round 1, D1).
+
+        The rule that followed: **a distinction the reader must not lose belongs
+        in the LABEL, which is never shed; the notes carry only the refinement.**
+        That is why the row is now ``Tool-side errors`` rather than ``Execution
+        errors`` — the scope survives every width by construction, and the ladder
+        is free to shed the rate and its denominator as the frame narrows.
+        ``test_the_execution_scope_survives_at_every_supported_width`` pins it.
+
+        ``dim_value`` renders the value cell in ``dim`` rather than ``fg``, for
+        the literal ``unknown``: an absent measurement should not carry the same
+        ink as a measured number, which is the treatment ``_timing_rows``
+        already established with ``unknown (0 samples)`` (design round 1, D5).
+
         Callers with a purely decorative qualifier keep passing ``note`` and keep
         the old shed-below-``_NOTE_MIN`` behaviour.
         """
         row = Text()
         row.append(f"  {name:<22}", style=semantic_style("dim"))
-        row.append(f"{value:<{_VALUE_CELL}}", style=semantic_style("fg"))
+        row.append(
+            f"{value:<{_VALUE_CELL}}",
+            style=semantic_style("dim" if dim_value else "fg"),
+        )
         if notes:
             # Budget measured from the row as actually built, not from a
             # restated literal: a change to _VALUE_CELL or the label column
@@ -641,6 +672,12 @@ class _Body:
                 if len(candidate) <= budget:
                     row.append(f"  {candidate}", style=semantic_style("dim"))
                     break
+            # No `else`: when no rung fits the qualifier sheds rather than being
+            # cropped mid-word. That is safe ONLY because no caller keeps a
+            # load-bearing distinction here — see the docstring's label rule.
+            # Drawing the last rung unconditionally was tried and rejected: it
+            # reintroduces the mid-word crop the ladder exists to avoid, at
+            # exactly the widths where it would fire.
         elif note and self.width >= _NOTE_MIN:
             # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50
             # columns the note wraps onto its own unindented line and reads as a
@@ -825,7 +862,7 @@ def _shared_columns(
     # Measured WITH the failure annotations, because they are what the draw
     # pass emits: measuring `14 req` and then drawing `14 req · 2 failed` sizes
     # the note column too small and crops it to `14 req · 2 f`.
-    rows.extend(_group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))[0])
+    rows.extend(_group_rows(list(report.by_purpose.items()), metric)[0])
     component_rows, component_total = _component_rows(aggregate)
     rows.extend(component_rows)
     rows.extend(_tool_rows(aggregate, component_total))
@@ -946,7 +983,7 @@ def _draw_recorded_usage(
     _draw_by_model(body, report, width, metric, cols)
     _draw_by_purpose(body, report, width, metric, cols)
     _draw_input_split(body, aggregate, width, cols)
-    _draw_tool_surface(body, aggregate, width, cols)
+    _draw_tool_surface(body, aggregate, width, cols, report.tool_calls)
     _draw_request_sequence(body, report, width, metric)
     body.header("Timings", "observed wall time · includes retries", "wall time")
     body.extend(_timing_rows(report.timings, width))
@@ -1032,7 +1069,7 @@ def _draw_by_purpose(
     """
     if not report.by_purpose:
         return
-    rows, priced = _group_rows(list(report.by_purpose.items()), metric, failures=_failures(report))
+    rows, priced = _group_rows(list(report.by_purpose.items()), metric)
     body.header("By purpose", _metric_meta(metric, _own_scope(report)), _metric_meta(metric, ""))
     # Only when there is a contrast to explain: the legend defines ``turn``
     # against the harness's own purposes, so it is noise when the rows are all
@@ -1058,9 +1095,286 @@ def _draw_input_split(body: _Body, aggregate: UsageAggregate, width: int, cols: 
     body.blank()
 
 
-def _draw_tool_surface(body: _Body, aggregate: UsageAggregate, width: int, cols: _Columns) -> None:
+def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
+    """Measured tool-call counts and the two rates, above the estimated bars.
+
+    Scalars via ``kv``, deliberately WITHOUT bars. A bar asserts a shared
+    denominator — the rule stated on ``Totals`` and ``_group_rows`` — and these
+    two rates have different ones: invocation errors are over calls the model EMITTED,
+    the execution rate is over calls that actually RAN. Drawn side by side as
+    tracks they would invite a comparison that is arithmetically meaningless.
+
+    **The unknown rule, which is this screen's standing invariant.** ``stats is
+    None`` means no tool data for this session — either a ledger predating the
+    feature or a session that recorded none — and it renders as ``unknown``,
+    never as ``0 calls`` or ``0%``. Every session recorded before this shipped
+    is in that state, and a fabricated zero on a diagnostics screen is worse
+    than a withheld fact: the reader cannot tell it from a measurement.
+    """
+    if stats is None or stats.recorded <= 0:
+        # ``recorded``, not ``total``: a session whose only tool calls came from
+        # eval's bridge DID make calls, and reading it as "unknown" would be the
+        # mirror of the fabricated zero this rule forbids.
+        body.kv("Tool calls", "unknown", "not recorded for this session", dim_value=True)
+        # The two rates are OMITTED rather than shown as unknown: three unknown
+        # rows is noise, and the one row above already says why.
+        return
+
+    # THE BLOCK IS A SUBTRACTION CHAIN, and every step of it is on screen
+    # (design round 1, D2). The headline is EVERY call recorded; each ` └ ` row
+    # below removes a class from it, in the order the rates remove them, so the
+    # invocation-error denominator is reached by reading downward rather than by
+    # trusting an unexplained shift:
+    #
+    #   Tool calls          35   <- recorded, both origins
+    #    └ nested (eval)     3   <- not the model emitting a call
+    #    └ never completed   1   <- returned no result to judge
+    #   Tool-call error rate          4 invalid of 31 emitted   (35 - 3 - 1)
+    #
+    # This is why the headline is `recorded` and not `total`: under the ` └ `
+    # idiom a sub-row is PART of the row above it, so a model-origin headline
+    # with a nested sub-row under it would be arithmetically false. The previous
+    # version printed 35 and then a 34-call denominator one line later with
+    # nothing accounting for the difference, which reads as the screen
+    # miscounting — the exact misreading this feature exists to remove.
+    #
+    # `failed` MUST NEVER INCLUDE OPERATOR-EXCLUDED CALLS. This is the founding
+    # bug of this whole PR, and it reappeared here one block lower: the first
+    # version of this line was `stats.recorded - ok`, which swept `excluded`
+    # (denied / aborted / skipped / gate_failed) into `failed` and painted
+    # `0 ok · 4 failed` on a session where the operator declined four calls and
+    # nothing failed at all (design round 2, D7) — the same shape as the
+    # operator's original report, `15 req · 15 failed` on a session where
+    # nothing failed. A call the operator refused is not a failure of anything,
+    # and the ` └ ` row directly beneath says so in as many words, so the
+    # headline was contradicting its own sub-row.
+    #
+    # Derived by SUBTRACTING the excluded rather than by adding the two fault
+    # classes: `model_faults + execution_faults` is equal today only because the
+    # fault vocabulary happens to be closed (`_classify_fault` falls back to
+    # `FAULT_EXECUTION`), so a future fault name outside all three frozensets
+    # would silently vanish from the headline instead of being counted. Framed
+    # this way it lands in `failed`, which is the safe direction: an unnamed
+    # fault is still a fault, while a miscounted denial is this block's defining
+    # error.
+    #
+    # Nested failures are added for the same reason the headline is `recorded`:
+    # `ok` already spans both origins, so a model-origin-only `failed` would
+    # leave a failed eval-bridge call in neither term of a pair that reads as a
+    # partition. The three terms are exhaustive by construction —
+    # `ok + failed + all_excluded == recorded`. Nested exclusions are part of
+    # the nested sub-row, NOT the next subtraction: removing nested_total has
+    # already removed them from the model-origin denominator.
+    ok = stats.ok + stats.nested_ok
+    failed = stats.recorded - ok - stats.all_excluded
+    detail = f"{ok} ok" + (f" · {failed} failed" if failed else "")
+    body.kv("Tool calls", str(stats.recorded), detail)
+
+    if stats.nested_total:
+        # Nested calls are real work the session did, so they are shown — but
+        # apart, and labelled, because no rate here is computed over them (see
+        # the origin partition on ``ToolCallStats``). Without this row a reader
+        # watching 20 eval-dispatched calls happen sees a rate over 3 and
+        # concludes the counter is broken.
+        body.kv(
+            " └ nested (eval)",
+            str(stats.nested_total),
+            notes=(
+                f"{stats.nested_ok} ok · eval's calls, not the model's",
+                f"{stats.nested_ok} ok · not the model's",
+                "not the model's",
+            ),
+        )
+        if stats.nested_excluded:
+            # A child of the nested subtotal, not a second top-level subtraction.
+            # The count stays in the value column even when notes cannot fit.
+            body.kv(
+                "    └ excluded",
+                str(stats.nested_excluded),
+                notes=("already included in nested", "included above"),
+            )
+    if stats.excluded:
+        # The denied/aborted calls: correctly outside both denominators, and
+        # previously invisible, which left the headline `N failed` short of the
+        # sub-rows by exactly this number. With the approval gate on, denials
+        # are the DEFAULT posture, so this was the modal unaccountable count.
+        #
+        # THE NOTE IS ATTRIBUTION-NEUTRAL ON PURPOSE. It used to read "you
+        # stopped these, not the model", which is true of `denied` and `aborted`
+        # but false of the other two members of ``EXCLUDED_FAULTS``:
+        # `gate_failed` is OUR approval plumbing raising — a harness bug — and
+        # `skipped` is steering redirecting before the call ran. Both rendered
+        # as the operator's own decision, so a block whose entire purpose is
+        # correct attribution handed the reader a harness defect and blamed them
+        # for it (review round 2, N1). The arithmetic was never affected; only
+        # the wording was. "outside both rates" is the one thing true of all
+        # four, and it states the fact the row exists to state: these calls are
+        # in neither denominator below.
+        #
+        # THE LABEL MUST COVER THE WHOLE SET, and "denied or aborted" named two
+        # of the four members of ``EXCLUDED_FAULTS`` while the row counted all
+        # four (design round 2, D9). A `skipped` or `gate_failed` call landed
+        # under a heading that described neither, which is the N1 defect one
+        # cell to the left: the note was made neutral and the label above it
+        # kept blaming.
+        #
+        # "never dispatched" — design's suggested wording, and the note rung
+        # this replaces — is FALSE, and measurably so. Driving the real
+        # ``AgentLoop`` with a tool that blocks and aborting mid-execution
+        # records `aborted` for a call whose body HAD run: `interruptible_runner`
+        # cancels a tool task that is already in flight and parks a synthetic
+        # result for it. `denied` and `gate_failed` never dispatch; `aborted`
+        # and `skipped` may dispatch and be cut short. So the cover for the set
+        # is not "never started" but "never FINISHED": what all four share is
+        # that no real tool outcome came back, which is exactly why they are in
+        # neither denominator. "never" rather than "not" because this screen
+        # reports a settled session — "not completed" invites the reading that
+        # the call is still running.
+        body.kv(
+            " └ never completed",
+            str(stats.excluded),
+            notes=(
+                "refused, stopped or interrupted · outside both rates",
+                "no result to judge · outside both rates",
+                "outside both rates",
+            ),
+        )
+
+    error_rate = stats.tool_call_error_rate
+    if error_rate is None:
+        # Rows exist but nothing counted toward the denominator (every call was
+        # denied or aborted). Mirrors ``_timing_rows``' "unknown (0 samples)"
+        # wording on purpose, so the two read as the same kind of statement.
+        body.kv("Tool-call error rate", "unknown", "0 emitted", dim_value=True)
+        if body.width < _NOTE_MIN:
+            body.note("0 eligible model-emitted calls")
+    else:
+        invalid = stats.model_faults
+        # A ladder, not a plain note: this qualifier carries the SCOPE of the
+        # percentage (which calls it is over), and a scope cropped mid-word or
+        # shed wholesale leaves a correct figure looking like a wrong one — the
+        # defect ``kv``'s ``notes`` parameter exists to fix.
+        #
+        # EVERY RUNG KEEPS THE WORD `invalid`, because the count's DIRECTION is
+        # not a refinement — it is the whole meaning of the number. The middle
+        # rung was `"{invalid} of {emitted} emitted"`, which at body widths
+        # 52-59 painted a bare `4 of 34 emitted` beside `88.2%` (design round 2,
+        # D8). With `invalid` dropped, `4 of 34` reads far more naturally as "4
+        # VALID of 34" — the exact inverse of the truth — and the only thing
+        # available to disambiguate it is dividing 4 by 34 in your head and
+        # noticing it is not 88.2%. That is the same defect class as D6 one row
+        # below: a shorter rung that is not a shorter spelling of the same
+        # qualifier but a different and false claim. `of` is what makes the
+        # inversion readable, so the compact rung uses `/`, which cannot be
+        # parsed as a partitive.
+        #
+        # AND EVERY RUNG KEEPS THE DENOMINATOR, matching the rule `Tool-side
+        # errors` was fixed to obey: a percentage drawn without the population
+        # it is a percentage OF states a proportion of nothing. The old floor
+        # rung `"emitted calls"` did exactly that at body 50-51 — scope word,
+        # no numbers — so it is replaced by `{invalid} invalid/{emitted}`, which
+        # is both shorter (12 against 13) and strictly more informative. The two
+        # rate rows now obey one rule between them rather than each having its
+        # own.
+        body.kv(
+            "Tool-call error rate",
+            f"{error_rate * 100:.1f}%",
+            notes=(
+                f"{invalid} invalid of {stats.emitted} emitted",
+                f"{invalid} invalid of {stats.emitted}",
+                f"{invalid} invalid/{stats.emitted}",
+            ),
+        )
+        # Below the shortest rung, wrap the scope instead of leaving a bare
+        # benchmarking percentage whose population the reader cannot recover.
+        if len(f"{invalid} invalid/{stats.emitted}") > body.width - 24 - _VALUE_CELL - 2:
+            body.note(f"{invalid} invalid of {stats.emitted} emitted")
+        # Name the faults rather than only counting them: "which one" is the
+        # actionable half, and it is what makes the figure a benchmark rather
+        # than a score. Biggest first; the NAME breaks ties, because the sort
+        # runs over a frozenset and set order for strings varies with
+        # PYTHONHASHSEED — tied rows swapping between two renders of the same
+        # data reads as the data changing (design round 1, D3).
+        for name in sorted(MODEL_FAULTS, key=lambda f: (-stats.faults.get(f, 0), f)):
+            count = stats.faults.get(name, 0)
+            if count:
+                # Leading space matches ``_tool_rows``' " └ " exactly: the two
+                # sub-row groups sit in the same section, and two different
+                # indents for the same relationship reads as a misalignment.
+                body.kv(f" └ {name.replace('_', ' ')}", str(count))
+
+    execution = stats.execution_error_rate
+    if execution is not None:
+        # Drawn whenever calls were DISPATCHED, including at zero. Suppressing
+        # the zero made "no execution errors" and "not measured" identical on
+        # screen, which is the converse of this screen's standing invariant and
+        # is inconsistent with `Tool-call error rate` one line above, which shows its
+        # own zero (design round 1, D4). The modal healthy session is exactly
+        # the case that was being hidden.
+        #
+        # THE LABEL CARRIES THE SCOPE, not the note. "Tool-side" says whose
+        # fault these are in the one cell that is never shed, so the distinction
+        # survives a 50-column pane; the note then refines it with the rate and
+        # the denominator and may shed freely. Named "Execution errors" first,
+        # which put the entire distinction in the shed-able half and rendered as
+        # a bare integer under an accuracy percentage at 68 columns (D1). It
+        # counts the web being down and an MCP server refusing credentials — a
+        # reader who takes it for a model metric blames the model for the
+        # network — and it covers model-emitted calls only, like every count in
+        # this block.
+        #
+        # EVERY RUNG STATES THE DENOMINATOR, and the last one drops the VERB to
+        # keep it. The floor rung was `"{pct}% dispatched"`, which at body widths
+        # 52-57 painted `7.4% dispatched` — a sentence asserting the INVERSE of
+        # the truth, since it reads as "7.4% got dispatched" on a session where
+        # 27 of 31 did (design round 2, D6). A bare percentage next to a verb is
+        # not a shorter spelling of the same qualifier, it is a different and
+        # false claim, so the ladder's contract — progressively shorter
+        # spellings of ONE qualifier — was broken at the bottom rung. `% of 27`
+        # keeps the half that makes the figure legible and sheds the half that
+        # inverts it, and at 10 characters against the broken rung's 15 it fits
+        # a strictly wider band than the string it replaces.
+        dispatched = stats.emitted - stats.model_faults
+        body.kv(
+            "Tool-side errors",
+            str(stats.execution_faults),
+            notes=(
+                f"{execution * 100:.1f}% of {dispatched} dispatched · "
+                "not a model-accuracy figure",
+                f"{execution * 100:.1f}% of {dispatched} dispatched · not model accuracy",
+                f"{execution * 100:.1f}% of {dispatched} dispatched",
+                f"{execution * 100:.1f}% of {dispatched}",
+            ),
+        )
+    body.note(
+        "Both rates cover eligible model-emitted calls only. Tool-call errors count "
+        "rejected or invalid invocations, not semantic tool-selection correctness. "
+        "Execution errors are separate; not all errors are model-caused."
+    )
+
+
+def _draw_tool_surface(
+    body: _Body,
+    aggregate: UsageAggregate,
+    width: int,
+    cols: _Columns,
+    stats: ToolCallStats | None = None,
+) -> None:
     rows = _tool_rows(aggregate, _component_rows(aggregate)[1])
-    body.header("Tool surface", "≈ estimated share of context tokens", "≈ estimated")
+    # The meta says "measured calls" AND "≈ estimated tokens" because the
+    # section now carries both kinds of number: the call counts below are
+    # counted, the token bars under them are apportioned. A single "≈ estimated"
+    # header would have mislabelled the measured half as an estimate.
+    body.header("Tool surface", "measured calls · ≈ estimated tokens", "measured · ≈ est.")
+    # Measured rows FIRST, then the estimated bars: they are the stronger fact,
+    # and the disclaimer below applies only to the bars.
+    #
+    # NO blank line between the two groups. A blank ENDS a section on this
+    # screen — that is the rule ``_section`` encodes and the reader learns from
+    # every other block — so separating them would render one section as two,
+    # the second of which has no header. The `kv` scalars and the bar rows are
+    # already visually distinct without inventing a second section boundary.
+    _draw_tool_call_rows(body, stats)
     if rows:
         body.extend(_render_rows(rows, cols, width, estimated=True))
     else:
@@ -1070,9 +1384,14 @@ def _draw_tool_surface(body: _Body, aggregate: UsageAggregate, width: int, cols:
     # support: there is no per-tool-name token or cost column, and cost is
     # priced per call at record time, so splitting it across these three
     # components would invent a number the provider never billed.
+    #
+    # Reworded from "this is" to "the token bars above are" now that the
+    # section also carries MEASURED call counts. The original wording would
+    # have swept those into the same disclaimer and told the reader that a
+    # counted number was an estimate.
     body.note(
-        "Per-tool-name tokens and dollars are not recorded; this is the tool "
-        "machinery's share of input, not the cost of any one tool call."
+        "Per-tool-name tokens and dollars are not recorded; the token bars above "
+        "are the tool machinery's share of input, not the cost of any one tool call."
     )
     body.blank()
 
@@ -1123,7 +1442,16 @@ def _draw_request_sequence(body: _Body, report: SessionReport, width: int, metri
     rows: list[_BarRow] = []
     for request, value in zip(series, values):
         note: tuple[tuple[str, str], ...] = ((request.purpose, "dim"),)
-        if request.outcome != "ok":
+        # ``ok``, not the ``outcome`` string, decides whether this row is a
+        # failure — the same rule as ``_group_rows`` and for the same reason:
+        # ``outcome`` is a provider-specific finish reason, and testing it
+        # against a literal ``"ok"`` nothing writes painted every healthy
+        # request in ``warning``. Three-state on purpose: ``None`` is UNKNOWN
+        # (a ledger with no ``ok`` column) and takes the clean path, because an
+        # absent measurement is never rendered as a failure on this screen.
+        # The outcome string is still DISPLAYED once ``ok`` has established the
+        # row is a failure — it is what says which failure.
+        if request.ok is False:
             note = ((request.purpose, "dim"), (" · ", "dim"), (request.outcome, "warning"))
         rows.append(
             _BarRow(

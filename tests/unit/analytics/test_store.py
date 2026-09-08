@@ -8,7 +8,10 @@ per-provider and per-session breakdowns the ``/analytics`` screen renders.
 
 from __future__ import annotations
 
+import sqlite3
 import time
+
+import pytest
 
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.store import (
@@ -1186,3 +1189,246 @@ def test_aggregate_exposes_parent_edges_for_the_table_rollup(tmp_path):
     assert set(agg.by_session) == {"root", "kid", "solo"}
     assert sum(a.cost_micro for a in agg.by_session.values()) == agg.cost_micro
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# tool_calls: recording, rollup, retention, and the unknown rule
+# ---------------------------------------------------------------------------
+
+
+def test_tool_calls_roundtrip_and_classification(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1")])
+    assert (
+        store.record_tool_calls(
+            [
+                (1, "s1", "read", "model", "", 30.0),
+                (2, "s1", "read", "model", "", 31.0),
+                (3, "s1", "reed_file", "model", "unknown_tool", 1.0),
+                (4, "s1", "edit", "model", "invalid_arguments", 1.0),
+                (5, "s1", "web_fetch", "model", "execution", 900.0),
+                (6, "s1", "bash", "model", "denied", 1.0),
+                (7, "s1", "read", "nested", "", 12.0),
+            ]
+        )
+        == 7
+    )
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    # SIX model-origin rows, not seven: row 7 is nested and is counted apart.
+    # This assertion previously read `total == 7`, pooling the eval-bridge call
+    # into the model's figures — the shape the schema comment forbids, and the
+    # reason the origin partition is now asserted in its own tests below.
+    assert stats.total == 6 and stats.ok == 2
+    assert stats.nested_total == 1 and stats.nested_ok == 1
+    assert stats.recorded == 7
+    assert stats.faults == {
+        "unknown_tool": 1,
+        "invalid_arguments": 1,
+        "execution": 1,
+        "denied": 1,
+    }
+    # denied leaves the denominator: 5 emitted, 2 of them model faults.
+    assert stats.emitted == 5
+    assert stats.excluded == 1
+    assert stats.validity == pytest.approx(3 / 5)
+    # The hallucinated NAME is retained, which is what a per-tool view needs.
+    assert stats.faults_by_tool["reed_file"] == 1
+
+
+def test_a_session_with_no_tool_rows_reads_unknown_not_zero(tmp_path):
+    """The pre-ship case: requests recorded, tool calls never were."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1")])
+    store.record_tool_calls([(1, "other", "read", "model", "", 30.0)])
+    assert store.session_report("s1").tool_calls is None
+
+
+def test_a_ledger_without_the_tool_calls_table_reads_unknown(tmp_path):
+    """An older ledger must open and report unknown, never raise."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,"
+        " session_id TEXT NOT NULL, provider TEXT NOT NULL, model_id TEXT NOT NULL,"
+        " ok INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER NOT NULL DEFAULT 0,"
+        " output_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_read_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_write_tokens INTEGER NOT NULL DEFAULT 0,"
+        " reasoning_tokens INTEGER NOT NULL DEFAULT 0,"
+        " context_tokens INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (1, 's1', 'p', 'm');"
+    )
+    conn.commit()
+    conn.close()
+    report = AnalyticsStore(path).session_report("s1")
+    assert report.available
+    assert report.tool_calls is None
+
+
+def test_prune_bounds_the_tool_call_table(tmp_path):
+    store = AnalyticsStore(tmp_path / "a.db", retention_days=90)
+    now = 10_000_000_000
+    old = now - 91 * 86_400_000
+    store.record_tool_calls(
+        [(old, "s1", "read", "model", "", 1.0), (now, "s1", "read", "model", "", 1.0)]
+    )
+    store.prune(now_ms=now)
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None and stats.total == 1
+
+
+def test_recent_requests_carry_ok_and_a_missing_column_reads_unknown(tmp_path):
+    """``ok`` on the projection, and ``col('ok','NULL')`` — not ``'0'``.
+
+    The zero default would report every request on a column-less ledger as
+    FAILED, which is the false alarm this field was added to remove.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_batch([_snap(session_id="s1", ok=True), _snap(session_id="s1", ok=False)])
+    flags = {r.ok for r in store.session_report("s1").recent}
+    assert flags == {True, False}
+
+    path = tmp_path / "noflag.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE calls (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER NOT NULL,"
+        " session_id TEXT NOT NULL, provider TEXT NOT NULL, model_id TEXT NOT NULL,"
+        " input_tokens INTEGER NOT NULL DEFAULT 0,"
+        " output_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_read_tokens INTEGER NOT NULL DEFAULT 0,"
+        " cache_write_tokens INTEGER NOT NULL DEFAULT 0,"
+        " reasoning_tokens INTEGER NOT NULL DEFAULT 0,"
+        " context_tokens INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id) VALUES (1, 's1', 'p', 'm');"
+    )
+    conn.commit()
+    conn.close()
+    recent = AnalyticsStore(path).session_report("s1").recent
+    assert recent and recent[0].ok is None, "an absent ok column must read unknown, not failed"
+
+
+def test_origin_partitions_the_rates_so_an_eval_loop_cannot_set_them(tmp_path):
+    """The coverage gap that let the read side land without the partition.
+
+    ``origin`` was written, stored and documented, but the aggregation grouped
+    by ``fault, tool_name`` only — so nested rows were pooled into the headline
+    accuracy figure, which is exactly what the schema comment forbids. No test
+    asserted what ``origin`` DOES to a rate, only that the loop emits it, which
+    is why the write side landed complete and the read side landed empty.
+
+    The numbers here are the review's reproduction: two model calls, one of them
+    faulted, plus one twenty-iteration ``eval`` loop. Pooled, that reports 95.5%
+    validity; partitioned, it reports the truth, 50%. A rate that a scripted
+    loop can move is not a measurement of the model.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rows = [
+        (1, "s1", "read", "model", "unknown_tool", 1.0),
+        (2, "s1", "read", "model", "", 1.0),
+    ]
+    rows += [(10 + i, "s1", "bash", "nested", "", 1.0) for i in range(20)]
+    store.record_tool_calls(rows)
+
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    # Model-origin counts exclude the loop entirely.
+    assert stats.total == 2 and stats.ok == 1
+    assert stats.emitted == 2 and stats.model_faults == 1
+    assert stats.validity == pytest.approx(0.5), "an eval loop moved the accuracy figure"
+    # The nested calls are still counted — kept visible, kept out of the rates.
+    assert stats.nested_total == 20 and stats.nested_ok == 20
+    assert stats.recorded == 22
+    store.close()
+
+
+def test_a_nested_fault_never_reaches_the_model_fault_breakdown(tmp_path):
+    """A tool the model's CODE called wrongly is not the model emitting junk.
+
+    Guards the other direction of the partition: nested faults must not appear
+    in ``faults`` / ``faults_by_tool``, which feed the on-screen "which
+    invalidity dominated" sub-rows and the validity numerator.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_tool_calls(
+        [
+            (1, "s1", "read", "model", "", 1.0),
+            (2, "s1", "reed_file", "nested", "unknown_tool", 1.0),
+            (3, "s1", "web_fetch", "nested", "execution", 1.0),
+        ]
+    )
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    assert stats.faults == {}, "a nested fault leaked into the model breakdown"
+    assert stats.faults_by_tool == {}
+    assert stats.model_faults == 0 and stats.execution_faults == 0
+    assert stats.validity == pytest.approx(1.0)
+    # But they are accounted for rather than dropped.
+    assert stats.nested_total == 2 and stats.nested_ok == 0
+    store.close()
+
+
+def test_an_unrecognised_origin_stays_out_of_the_benchmarking_figure(tmp_path):
+    """A future third origin defaults to "not the model", not into the rate.
+
+    The safe default under the origin partition: an origin nobody has decided
+    about yet must not silently join the number the model is graded on.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_tool_calls(
+        [
+            (1, "s1", "read", "model", "unknown_tool", 1.0),
+            (2, "s1", "read", "subagent", "", 1.0),
+        ]
+    )
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    assert stats.total == 1 and stats.nested_total == 1
+    assert stats.validity == pytest.approx(0.0)
+    store.close()
+
+
+def test_a_session_with_only_nested_calls_is_not_unknown(tmp_path):
+    """Nested-only sessions DID make tool calls; ``unknown`` would be a lie.
+
+    The mirror of the fabricated-zero rule: withholding a fact that was measured
+    is as wrong as inventing one that was not.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    store.record_tool_calls([(1, "s1", "bash", "nested", "", 1.0)])
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    assert stats.recorded == 1 and stats.total == 0
+    # No rate is claimed over a population no rate is defined for.
+    assert stats.validity is None
+    assert stats.tool_call_error_rate is None
+    store.close()
+
+
+@pytest.mark.parametrize("fault", ["denied", "aborted", "skipped", "gate_failed"])
+@pytest.mark.parametrize("origin", ["model", "nested"])
+def test_exclusions_partition_both_origins_without_changing_model_rates(tmp_path, fault, origin):
+    from local_operator.analytics.model import EXCLUDED_FAULTS
+
+    assert fault in EXCLUDED_FAULTS
+    store = AnalyticsStore(tmp_path / "excluded.db")
+    try:
+        store.record_tool_calls(
+            [(i, "s1", "read", "model", "", 1.0) for i in range(3)]
+            + [(4, "s1", "reed", "model", "unknown_tool", 1.0)]
+            + [(5, "s1", "write", origin, fault, 1.0)]
+            + [(6, "s1", "retry", "nested", "execution", 1.0)]
+        )
+        stats = store.session_report("s1").tool_calls
+        assert stats is not None
+        assert stats.excluded == (1 if origin == "model" else 0)
+        assert stats.nested_excluded == (1 if origin == "nested" else 0)
+        assert stats.all_excluded == 1
+        assert stats.emitted == 4
+        assert stats.model_faults == 1
+        assert stats.tool_call_error_rate == pytest.approx(0.25)
+        assert stats.validity == pytest.approx(0.75)
+        assert stats.execution_error_rate == 0
+        assert stats.recorded == 6
+    finally:
+        store.close()

@@ -1585,6 +1585,32 @@ class LoopConfig(BaseModel):
     # becomes a message. ``None`` means no credentials are stored.
     redact_tool_result: Callable[[str], str] | None = Field(default=None, exclude=True)
 
+    #: Report one tool call's outcome to the host, as
+    #: ``(tool_name, origin, fault, duration_ms)``. A CALLBACK rather than a
+    #: direct analytics call because this package has no analytics dependency
+    #: and must keep none: the harness is the thing being measured, and a
+    #: measurement import here would make the loop depend on the ledger.
+    #:
+    #: ``origin`` is ``"model"`` (the model emitted a tool_use block) or
+    #: ``"nested"`` (eval's ``dispatch_tool`` bridge). ``fault`` is ``""`` for a
+    #: clean call, else the classification made where the reason is known \u2014 see
+    #: ``_FAULT_*`` in ``loop.py``.
+    #:
+    #: The loop invokes this SYNCHRONOUSLY on the EVENT LOOP inside a live turn,
+    #: once per finished tool call, so an implementation must be non-blocking and
+    #: must not raise. The loop guards against the raising half — a host that
+    #: breaks its contract must still not be able to kill a turn with a bad
+    #: analytics hook — but it CANNOT guard against the blocking half: there is
+    #: no timeout around the call, so whatever time this hook spends is added
+    #: directly to the turn. Measured: a hook that sleeps 0.75 s turns a 0.002 s
+    #: turn into a 0.754 s one. The shipped implementation is a single bounded
+    #: ``put_nowait`` at ~0.0018 ms/call, which is the budget an implementer
+    #: should hold to; anything that touches disk, a lock or a socket belongs on
+    #: the far side of a queue, not here.
+    record_tool_call: Callable[[str, str, str, float], None] | None = Field(
+        default=None, exclude=True
+    )
+
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.
     get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(

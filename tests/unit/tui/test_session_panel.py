@@ -13,18 +13,26 @@ from rich.style import Style
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
+    EXCLUDED_FAULTS,
     SessionReport,
     SessionRequest,
     TimingSummary,
+    ToolCallStats,
     UsageAggregate,
 )
 from local_operator.analytics.store import AnalyticsStore
 from local_operator.session.frontend_state import FrontendSessionState
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp, slash_command_for
-from local_operator.tui.widgets.analytics_panel import METRIC_COST, METRIC_TOKENS
+from local_operator.tui.widgets.analytics_panel import (
+    METRIC_COST,
+    METRIC_TOKENS,
+    semantic_style,
+)
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_panel import (
+    _MIN_CARD_WIDTH,
+    _NOTE_MIN,
     SessionDiagnostics,
     SessionScreen,
     build_session_report,
@@ -147,6 +155,18 @@ async def test_assembled_slash_snapshot_scroll_and_focus(tmp_path, monkeypatch, 
         await pilot.pause()
         assert screen._scroll.scroll_y > 0
         await pilot.press("home")
+        # Wait on the ANIMATION, not on a fixed number of pauses. ``home``
+        # animates ``scroll_y`` back to the top, so the number of frames it
+        # needs is proportional to how far it has to travel — a taller panel
+        # (this one grew by the measured tool-call rows) simply takes more of
+        # them. Asserting after one ``pause`` was a bet on the panel's height,
+        # which is why it broke on a section being added rather than on
+        # anything about scrolling changing. Same idiom as
+        # ``test_resume_render._press_and_settle``.
+        for _ in range(160):
+            if not app.animator.is_being_animated(screen._scroll, "scroll_y"):
+                break
+            await pilot.pause()
         await pilot.pause()
         assert screen._scroll.scroll_y == 0
         store.record_batch([_snap(session_id="sess")])
@@ -357,7 +377,21 @@ def _agg(calls=1, ok=None, ctx=0, out=0, cost=0, known=0, components=None, reaso
     return aggregate
 
 
-def _request(index, purpose="turn", outcome="ok", ctx=40000, out=1000, duration=2000.0):
+def _request(
+    index,
+    purpose="turn",
+    outcome="toolUse",
+    ctx=40000,
+    out=1000,
+    duration=2000.0,
+    ok: bool | None = True,
+):
+    # ``outcome`` defaults to a string the recorder ACTUALLY writes. The old
+    # default was ``"ok"``, which nothing in the product has ever emitted: the
+    # provider path writes ``str(stop_reason)`` (stop/length/toolUse/refusal) or
+    # an exception class name. Fixtures asserting the impossible value are what
+    # let the "every healthy request failed" defect ship, so the vocabulary here
+    # is now the real one and ``ok`` — the recorded truth — decides success.
     return SessionRequest(
         request_id=f"r{index}",
         ts_ms=1788602400000 + index * 47000,
@@ -371,6 +405,7 @@ def _request(index, purpose="turn", outcome="ok", ctx=40000, out=1000, duration=
         duration_ms=duration,
         ttft_ms=400.0,
         preparation_ms=25.0,
+        ok=ok,
     )
 
 
@@ -397,12 +432,16 @@ def _populated():
             "compaction": _agg(3, 2, 270000, 2700, 3870, 3),
             "aside": _agg(4, 4, 48000, 1200, 5340, 4),
         },
+        # The shape the recorder really produces: healthy rows carry a provider
+        # finish reason, not the literal "ok". Failure counts come from
+        # ``ok_calls`` on the aggregates above, never from this cross-tab.
         by_purpose_outcome={
-            ("turn", "ok"): 12,
-            ("turn", "error"): 2,
-            ("compaction", "ok"): 2,
-            ("compaction", "error"): 1,
-            ("aside", "ok"): 4,
+            ("turn", "toolUse"): 10,
+            ("turn", "stop"): 2,
+            ("turn", "ProviderError"): 2,
+            ("compaction", "stop"): 2,
+            ("compaction", "ProviderError"): 1,
+            ("aside", "stop"): 4,
         },
         timings={
             "duration_ms": TimingSummary(25, 2223, 400, 3770),
@@ -725,7 +764,7 @@ def test_full_share_row_does_not_crop_its_failure_count():
         aggregate=one,
         by_model={("anthropic", "claude-sonnet-4-6"): one},
         by_purpose={"turn": one},
-        by_purpose_outcome={("turn", "ok"): 16, ("turn", "error"): 2},
+        by_purpose_outcome={("turn", "toolUse"): 16, ("turn", "ProviderError"): 2},
     )
     # 84 is the real card width of a 100-column terminal, where this reproduced.
     for width in (84, 88, 100):
@@ -881,10 +920,21 @@ def test_sequence_chart_never_renders_an_absent_duration_as_zero():
     # themselves: an unmeasured request must not define the window max either.
     mixed = (
         SessionRequest(
-            "b", 1788602400000 + 10000, "p", "m", "turn", "ok", True, 1000, 100, 4000.0, None, None
+            "b",
+            1788602400000 + 10000,
+            "p",
+            "m",
+            "turn",
+            "toolUse",
+            True,
+            1000,
+            100,
+            4000.0,
+            None,
+            None,
         ),
         SessionRequest(
-            "a", 1788602400000, "p", "m", "turn", "ok", True, 1000, 100, None, None, None
+            "a", 1788602400000, "p", "m", "turn", "toolUse", True, 1000, 100, None, None, None
         ),
     )
     report = SessionReport("sess", aggregate=_agg(2, 2, 2000, 200), recent=mixed)
@@ -1043,3 +1093,731 @@ def test_restored_floor_is_reconciled_in_prose_not_copied():
 
     plain = build_session_report(_tree_report(), runtime(), width=120).plain
     assert "restored floor" not in plain
+
+
+# ---------------------------------------------------------------------------
+# Failure accounting: `ok`, never the `outcome` string
+# ---------------------------------------------------------------------------
+
+
+def test_healthy_session_reports_no_failures_whatever_the_outcome_strings():
+    """The operator's bug: a fully-successful session read "15 req · 15 failed".
+
+    The cause was a predicate testing ``outcome not in ("ok", "unknown")``
+    against a vocabulary that never contains ``"ok"`` — the recorder writes
+    ``str(stop_reason)`` (``stop``/``length``/``toolUse``) or an exception class
+    name. This fixture uses those REAL strings, so it fails on the code that
+    shipped and cannot be satisfied by reintroducing an ``"ok"`` literal.
+    """
+    turn = _agg(15, 15, 1_100_000, 30_000)
+    naming = _agg(1, 1, 220, 40)
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(16, 16, 1_100_220, 30_040),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(16, 16, 1_100_220, 30_040)},
+        by_purpose={"turn": turn, "naming": naming},
+        by_purpose_outcome={
+            ("turn", "toolUse"): 12,
+            ("turn", "stop"): 3,
+            ("naming", "stop"): 1,
+        },
+    )
+    text = build_session_report(report, runtime(), 100).plain
+    assert "failed" not in text, "a healthy session must not report a failure anywhere"
+    for row in _rows(text, "By purpose"):
+        assert "req" in row
+
+
+def test_a_genuinely_failed_session_still_reports_it():
+    """The guard must still be able to go red.
+
+    A test that only proves the false alarm is gone would also pass if the
+    annotation were deleted outright, which would hide real outages — so the
+    negative case above is only meaningful beside this one.
+    """
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(15, 12, 1_100_000, 30_000),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(15, 12, 1_100_000, 30_000)},
+        by_purpose={"turn": _agg(15, 12, 1_100_000, 30_000)},
+        # Deliberately EMPTY: the count comes from ``ok_calls``, so the failure
+        # must be reported even with no outcome cross-tab to label it.
+        by_purpose_outcome={},
+    )
+    text = build_session_report(report, runtime(), 100).plain
+    assert "3 failed" in text
+    # ``By model`` gains the annotation too, correctly: a provider failing every
+    # call used to be invisible there.
+    assert sum("3 failed" in row for row in _rows(text, "By model")) == 1
+
+
+def test_request_sequence_warns_on_ok_false_and_not_on_an_outcome_string():
+    """``_draw_request_sequence`` had the same string bug; ``ok`` decides now."""
+    healthy = SessionReport(
+        "sess",
+        aggregate=_agg(2, 2, 2000, 200),
+        recent=(_request(1, outcome="toolUse", ok=True), _request(0, outcome="stop", ok=True)),
+    )
+    text = build_session_report(healthy, runtime(), 88).plain
+    rows = _section(text, "Last 2 requests")
+    assert rows and not any("toolUse" in r or "stop" in r for r in rows)
+
+    failed = SessionReport(
+        "sess",
+        aggregate=_agg(2, 1, 2000, 200),
+        recent=(
+            _request(1, outcome="ProviderError", ok=False),
+            _request(0, outcome="toolUse", ok=True),
+        ),
+    )
+    rows = _section(build_session_report(failed, runtime(), 88).plain, "Last 2 requests")
+    # Still red when it should be: the outcome string is DISPLAYED once ``ok``
+    # has established the row is a failure.
+    assert sum("ProviderError" in r for r in rows) == 1
+
+
+def test_unknown_ok_is_not_a_failure():
+    """``ok=None`` is an absent measurement, and this screen never paints one red.
+
+    That is the 419k-row case on the operator's live ledger: legacy rows whose
+    ``outcome`` is the literal ``'unknown'``. They carry ``ok=1``, but a ledger
+    old enough to lack the column entirely yields ``None``, and neither may
+    render as a warning.
+    """
+    report = SessionReport(
+        "sess",
+        aggregate=_agg(2, 2, 2000, 200),
+        recent=(
+            _request(1, outcome="unknown", ok=None),
+            _request(0, outcome="unknown", ok=None),
+        ),
+    )
+    rows = _section(build_session_report(report, runtime(), 88).plain, "Last 2 requests")
+    assert rows and not any("unknown" in r.split("·")[-1] for r in rows if "·" in r)
+
+
+# ---------------------------------------------------------------------------
+# Tool-call validity
+# ---------------------------------------------------------------------------
+
+
+def _tool_report(stats):
+    return SessionReport(
+        "sess",
+        aggregate=_agg(4, 4, 4000, 400),
+        by_model={("anthropic", "claude-sonnet-4-6"): _agg(4, 4, 4000, 400)},
+        by_purpose={"turn": _agg(4, 4, 4000, 400)},
+        tool_calls=stats,
+    )
+
+
+def test_no_tool_data_reads_unknown_and_never_a_measured_zero():
+    """Every session recorded before this shipped has no tool rows.
+
+    ``unknown``, not ``0%``: a fabricated zero on a diagnostics screen cannot be
+    told apart from a measurement, which is this screen's standing invariant.
+    """
+    text = build_session_report(_tool_report(None), runtime(), 100).plain
+    section = _section(text, "Tool surface")
+    assert any("Tool calls" in r and "unknown" in r for r in section)
+    # The rates are omitted entirely rather than shown as unknown.
+    assert not any("Tool-call error rate" in r for r in section)
+    assert not any("Tool-side errors" in r for r in section)
+    assert "0%" not in "".join(section)
+
+
+def test_a_real_zero_fault_count_renders_as_a_measurement():
+    """A session that emitted 20 clean calls has 0% errors — that IS measured."""
+    stats = ToolCallStats(total=20, ok=20, faults={}, faults_by_tool={})
+    text = build_session_report(_tool_report(stats), runtime(), 100).plain
+    section = _section(text, "Tool surface")
+    assert any("Tool-call error rate" in r and "0.0%" in r for r in section)
+    assert any("Tool calls" in r and "20" in r for r in section)
+
+
+@pytest.mark.parametrize("fault", sorted(EXCLUDED_FAULTS))
+def test_nested_exclusions_are_visible_but_never_subtracted_twice(fault):
+    stats = ToolCallStats(
+        total=5,
+        ok=3,
+        faults={"unknown_tool": 1, fault: 1},
+        faults_by_tool={},
+        nested_total=3,
+        nested_ok=1,
+        nested_excluded=1,
+    )
+    assert stats.recorded == 8
+    assert stats.all_excluded == 2
+    assert stats.emitted == 4
+    assert stats.tool_call_error_rate == 0.25
+    for width in range(_MIN_CARD_WIDTH, 121):
+        rows = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        headline = next(row for row in rows if "Tool calls" in row)
+        if width >= _NOTE_MIN:
+            assert "4 ok" in headline and "2 failed" in headline
+        nested = next(row for row in rows if "└ excluded" in row)
+        assert nested.split("excluded", 1)[1].strip().startswith("1")
+        model_excluded = next(row for row in rows if "never completed" in row)
+        assert model_excluded.split("never completed", 1)[1].strip().startswith("1")
+        rate = next(row for row in rows if "Tool-call error rate" in row)
+        assert "25.0%" in rate
+        assert "4 emitted" in " ".join(rows) or "1 invalid/4" in rate or "1 invalid of 4" in rate
+        assert all(len(row) <= width for row in rows)
+
+
+def test_tool_call_error_rate_keeps_direct_ratio_precision():
+    stats = ToolCallStats(total=3000, ok=2999, faults={"unknown_tool": 1}, faults_by_tool={})
+    # A rounded validity complement would lose this measured nonzero entirely.
+    assert stats.tool_call_error_rate == 1 / 3000
+    zero = ToolCallStats(total=0, ok=0, faults={}, faults_by_tool={})
+    assert zero.tool_call_error_rate is None
+
+
+def test_validity_counts_only_model_faults_and_excludes_user_cancellations():
+    """The benchmarking number must not move when the USER declines a call.
+
+    10 calls: 2 model faults, 1 execution error, 2 denied. Validity is over the
+    8 EMITTED (10 - 2 denied), so 6/8 = 75.0% — the denied pair is removed from
+    the denominator rather than counted either way.
+    """
+    stats = ToolCallStats(
+        total=10,
+        ok=5,
+        faults={"unknown_tool": 1, "invalid_arguments": 1, "execution": 1, "denied": 2},
+        faults_by_tool={"reed_file": 1, "edit": 1, "web_fetch": 1, "bash": 2},
+    )
+    assert stats.emitted == 8
+    assert stats.model_faults == 2
+    assert stats.validity == pytest.approx(0.75)
+    # Execution rate is over calls that actually RAN: 8 emitted - 2 rejected = 6.
+    assert stats.execution_error_rate == pytest.approx(1 / 6)
+
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    joined = "\n".join(section)
+    assert "25.0%" in joined
+    assert "2 invalid of 8 emitted" in joined
+    # The execution row is labelled as NOT an accuracy figure, every time. The
+    # LABEL carries that scope (never shed) and the note refines it (D1).
+    assert "Tool-side errors" in joined
+    assert "not a model-accuracy figure" in joined
+
+
+def test_validity_is_unknown_when_nothing_countable_was_emitted():
+    """Rows exist but every call was denied: a rate over an empty denominator."""
+    stats = ToolCallStats(total=3, ok=0, faults={"denied": 3}, faults_by_tool={"bash": 3})
+    assert stats.emitted == 0
+    assert stats.validity is None
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    assert any("Tool-call error rate" in r and "unknown" in r for r in section)
+
+
+def test_the_validity_qualifier_survives_a_narrow_frame():
+    """The scope of a percentage is not sheddable chrome.
+
+    ``kv``'s ``notes`` ladder exists because a qualifier cropped mid-word or
+    dropped wholesale leaves a correct figure looking like a wrong one.
+
+    **This asserts the rung's MEANING at every supported width, not a sampled
+    suffix.** The predecessor sampled four widths and asserted only that the
+    word ``emitted`` was present, which the defect it was standing next to
+    satisfied: the middle rung ``"4 of 31 emitted"`` contains ``emitted``, sits
+    between two sampled widths (60 and 72), and drops the word that carries the
+    count's DIRECTION. Beside ``87.1%`` a bare ``4 of 31`` reads as "4 valid of
+    31" — the inverse of the truth — and nothing but doing the division
+    distinguishes the two readings (design round 2, D8). An assertion a broken
+    string satisfies is a decoration, which is the lesson D6 already paid for
+    one row below.
+
+    So the two properties asserted here are the two a shorter rung may not
+    trade away, and they are checked at EVERY width the row is drawn at:
+
+    * **the direction** — any rung showing the invalid count says ``invalid``,
+      so the number can never be read as its own complement;
+    * **the denominator** — a percentage is never drawn without the population
+      it is over, the same rule
+      ``test_the_execution_scope_survives_at_every_supported_width`` pins.
+
+    Refinements above those (the verb ``emitted``, the word ``of``) stay free to
+    shed as the frame narrows; that is what a ladder is for.
+    """
+    stats = ToolCallStats(total=412, ok=389, faults={"invalid_arguments": 12}, faults_by_tool={})
+    # Recomputed rather than restated, so a fixture change cannot leave the
+    # guard asserting a stale denominator.
+    invalid, emitted = stats.model_faults, stats.emitted
+    assert (invalid, emitted) == (12, 412)
+    drawn = 0
+    for width in range(_MIN_CARD_WIDTH, 121):
+        section = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        row = next(r for r in section if "Tool-call error rate" in r)
+        assert len(row) <= width
+        tail = row.rstrip()
+        # `12` alone would also match the percentage's own digits, so the
+        # qualifier is detected by the count sitting at the start of a rung.
+        if str(invalid) in tail.split("%", 1)[-1]:
+            drawn += 1
+            assert "invalid" in tail, (
+                f"at {width} the invalid count is drawn without the word that "
+                f"gives it its direction, so it reads as its own complement: {row!r}"
+            )
+            assert str(emitted) in tail, (
+                f"at {width} the rate is drawn without its denominator, "
+                f"so it states a proportion of nothing: {row!r}"
+            )
+    # The ladder is actually exercised: the loop is not vacuously passing on
+    # widths where every rung is shed.
+    assert drawn > 0
+
+
+def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
+    """The last rung of every ``notes`` ladder must FIT, not merely exist.
+
+    ``kv`` now draws its final rung unconditionally, so a caller that appends a
+    long one turns "shed silently" into "cropped mid-word" — a different failure
+    of the same rule. The floor is stated once, here, over the real rendered
+    rows rather than over the literals, so a new ladder is covered the day it is
+    added: at ``_NOTE_MIN`` every qualifier is present and uncropped.
+    """
+    stats = ToolCallStats(
+        total=40,
+        ok=30,
+        faults={"invalid_arguments": 3, "unknown_tool": 2, "execution": 3, "denied": 2},
+        faults_by_tool={"edit": 3, "reed_file": 2, "web_fetch": 3, "bash": 2},
+        nested_total=6,
+        nested_ok=6,
+    )
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), _NOTE_MIN).plain, "Tool surface"
+    )
+    # Every row carrying a ladder still shows its scope at the narrowest frame,
+    # and none of them is cut mid-word (a cropped row would lose its last char).
+    expected = {
+        # Whichever rung wins, the SCOPE word survives; validity's own floor
+        # rung is exercised by the width sweep in the test below.
+        "Tool-call error rate": "emitted",
+        "Tool-side errors": "dispatched",
+        " └ nested (eval)": "not the model's",
+        # Attribution-NEUTRAL at every rung: `gate_failed` and `skipped` are in
+        # this row too, and neither is the operator's decision (review N1).
+        " └ never completed": "outside both rates",
+    }
+    for label, floor in expected.items():
+        row = next((r for r in section if label in r), None)
+        assert row is not None, f"{label} row missing at width {_NOTE_MIN}"
+        assert len(row) <= _NOTE_MIN
+        assert floor in row, f"floor rung lost at {_NOTE_MIN} for {label}: {row!r}"
+
+
+def test_the_execution_scope_survives_at_every_supported_width():
+    """D1: at 68 columns this row used to read as a bare unqualified integer.
+
+    It carries no ``%`` in its value cell, so unlike ``Tool-call error rate`` it
+    self-describes not at all — an integer named "errors" sitting under a
+    model-accuracy percentage is precisely the misreading the scope exists to
+    prevent. The old ladder ``break``-ed with no fallback, so when nothing fit
+    the scope was gone at an undocumented width.
+
+    The fix is structural, not another rung: the scope moved into the LABEL,
+    which is never shed. So this asserts across the FULL supported range,
+    including widths where every note is shed — a rung-based fix cannot pass it.
+
+    **It also asserts the note's MEANING, not its suffix, because the first
+    version of this guard could not see the defect it was written beside.** That
+    version asserted ``tail.endswith(("dispatched", "accuracy", "figure"))``,
+    and the broken floor rung ``"13.3% dispatched"`` ends with ``dispatched`` —
+    so the guard passed a string asserting the INVERSE of the truth (it reads as
+    "13.3% got dispatched" where 15 of 17 did) across a seven-column band
+    (design round 2, D6). An assertion a broken string satisfies is a
+    decoration.
+
+    The property that actually distinguishes them is that **a percentage is
+    never drawn without the denominator it is a percentage OF**: every rung
+    carrying ``%`` must also carry ``of <dispatched>``. A rung may shed the verb
+    and the disclaimer freely — those are refinements — but shedding the
+    denominator turns a proportion into a different and false claim, so it is
+    the one part the ladder may not drop.
+    """
+    stats = ToolCallStats(
+        total=17,
+        ok=13,
+        faults={"invalid_arguments": 2, "execution": 2},
+        faults_by_tool={"edit": 2, "web_fetch": 2},
+    )
+    # Recomputed from the stats rather than restated as a literal, so a change
+    # to the fixture cannot leave the guard asserting a stale denominator.
+    dispatched = stats.emitted - stats.model_faults
+    assert dispatched == 15
+    for width in range(_MIN_CARD_WIDTH, 121):
+        section = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        row = next(r for r in section if "errors" in r)
+        assert len(row) <= width
+        # The scope is in the label, so it cannot shed at ANY width.
+        assert "Tool-side" in row, f"scope vanished at {width}: {row!r}"
+        tail = row.rstrip()
+        # A rate is meaningless without its denominator: any width that draws a
+        # percentage must also say what it is a percentage of.
+        if "%" in tail:
+            assert f"of {dispatched}" in tail, (
+                f"at {width} the rate is drawn without its denominator, "
+                f"so it states a proportion of nothing: {row!r}"
+            )
+        # And nothing is cut mid-word: every rung ends on a complete word, so a
+        # truncated tail could only be a crop.
+        if "dispatch" in tail:
+            assert tail.endswith(("dispatched", "accuracy", "figure")), (width, row)
+
+
+def test_the_block_reconciles_its_own_counts_on_screen():
+    """D2: no number in the block may be unaccountable.
+
+    ``7 failed`` under a breakdown naming only six was the reported defect: the
+    seventh was a denied call, correctly outside both rates and never surfaced.
+    With the approval gate on, denials are the DEFAULT posture, so an operator
+    would routinely see a count they could not account for and read it as the
+    new feature miscounting — the exact misreading this feature removes.
+    """
+    stats = ToolCallStats(
+        total=35,
+        ok=28,
+        faults={
+            "invalid_arguments": 2,
+            "duplicate_id": 1,
+            "unknown_tool": 1,
+            "execution": 2,
+            "denied": 1,
+        },
+        faults_by_tool={"edit": 2, "read": 1, "reed_file": 1, "web_fetch": 2, "bash": 1},
+        nested_total=5,
+        nested_ok=5,
+    )
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    joined = "\n".join(section)
+    # The headline is EVERY recorded call, both origins: under the ` └ ` idiom
+    # a sub-row is part of the row above, so a model-only headline carrying a
+    # nested sub-row would be arithmetically false.
+    # `6 failed`, not 7: the denied call is accounted for by its own ` └ ` row
+    # and is NOT a failure (D7).
+    assert any("Tool calls" in r and "40" in r and "6 failed" in r for r in section)
+    # Each class removed from the denominator is named, in the order it is
+    # removed, so the reader reaches `emitted` by reading downward.
+    nested_row = next(r for r in section if "nested (eval)" in r)
+    assert "5" in nested_row and "not the model's" in nested_row
+    excluded_row = next(r for r in section if "never completed" in r)
+    assert "1" in excluded_row and "outside both rates" in excluded_row
+    # Every denominator the rates use is printed rather than implied.
+    assert "34 emitted" in joined, "the validity denominator is unstated"
+    assert "30 dispatched" in joined, "the execution denominator is unstated"
+
+    # The two chains the reader can actually do on screen both close.
+    assert stats.recorded - stats.nested_total - stats.excluded == stats.emitted == 34
+    assert stats.emitted - stats.model_faults == 30
+    named = stats.model_faults + stats.execution_faults + stats.excluded
+    assert named == stats.total - stats.ok == 7
+    # And the headline's own three terms partition `recorded` exactly, with the
+    # excluded broken out rather than folded into `failed` (D7).
+    headline_ok = stats.ok + stats.nested_ok
+    headline_failed = (stats.total - stats.ok - stats.excluded) + (
+        stats.nested_total - stats.nested_ok
+    )
+    assert headline_ok + headline_failed + stats.excluded == stats.recorded == 40
+    assert (headline_ok, headline_failed, stats.excluded) == (33, 6, 1)
+
+
+def test_the_headline_never_calls_an_operator_denial_a_failure():
+    """D7: this is the founding bug of the feature, reproduced one block lower.
+
+    The operator's original report was ``15 req · 15 failed`` on a session where
+    nothing had failed. The first version of the headline computed
+    ``failed = recorded - ok``, which pulled ``EXCLUDED_FAULTS`` — the calls the
+    operator DENIED at the approval gate, plus the harness's own
+    ``gate_failed``/``skipped`` — into ``failed``, and painted exactly that
+    shape again: ``0 ok · 4 failed`` on a session whose four calls the operator
+    declined and where nothing failed at all. The ` └ ` row one line beneath
+    said so in as many words, so the headline contradicted its own sub-row.
+
+    Both states are asserted because they fail differently. Under ``denials``
+    the defect is a wrong NUMBER beside a correct one, which a reader can only
+    catch by doing the subtraction; under ``nodispatch`` the excluded calls are
+    the entire headline, so the whole line is false and the ``failed`` clause
+    must not be drawn at all.
+    """
+    # Denials dominant, with one real fault of each kind so `failed` is nonzero
+    # and a wrong `failed` cannot pass by being coincidentally equal.
+    denials = ToolCallStats(
+        total=13,
+        ok=4,
+        faults={"denied": 7, "invalid_arguments": 1, "execution": 1},
+        faults_by_tool={"read": 1, "web_fetch": 1},
+    )
+    section = _section(
+        build_session_report(_tool_report(denials), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert "4 ok" in headline and "2 failed" in headline, headline
+    assert (
+        "9 failed" not in headline
+    ), f"the operator's 7 denials are counted as failures: {headline!r}"
+    # The seven are not lost — they are accounted for by their own row.
+    assert any("never completed" in r and "7" in r for r in section)
+
+    # Nothing dispatched: every recorded call was excluded, so there is no
+    # `failed` clause to draw. A `0 ok · 4 failed` here is the founding bug
+    # verbatim.
+    nodispatch = ToolCallStats(total=4, ok=0, faults={"denied": 4}, faults_by_tool={})
+    section = _section(
+        build_session_report(_tool_report(nodispatch), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert "0 ok" in headline, headline
+    assert (
+        "failed" not in headline
+    ), f"a session where the operator declined every call reports a total loss: {headline!r}"
+
+    # A FAILED NESTED CALL IS STILL A FAILURE. This is why `failed` subtracts
+    # the excluded rather than adding `model_faults + execution_faults`: those
+    # two are model-origin only, so the obvious one-liner drops an eval-bridge
+    # call that failed inside its tool and leaves it in NEITHER headline term,
+    # against an `ok` that spans both origins. The bridge really can produce
+    # this — `dispatch_tool` reports `origin="nested"` for its own faults
+    # (`loop.py`) — so it is a reachable state, not a constructed one.
+    nested_faults = ToolCallStats(
+        total=10,
+        ok=8,
+        faults={"execution": 2},
+        faults_by_tool={"web_fetch": 2},
+        nested_total=6,
+        nested_ok=4,
+    )
+    section = _section(
+        build_session_report(_tool_report(nested_faults), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert (
+        "12 ok" in headline and "4 failed" in headline
+    ), f"two failed nested calls are in neither term of the headline: {headline!r}"
+
+
+def test_the_excluded_row_does_not_blame_the_operator_for_a_harness_fault():
+    """N1: ``gate_failed`` is OUR bug and ``skipped`` is steering, not a decision.
+
+    ``EXCLUDED_FAULTS`` has four members and only two of them — ``denied`` and
+    ``aborted`` — are the operator stopping something. The note read "you
+    stopped these, not the model" at every rung, so a session whose exclusions
+    were entirely the approval plumbing raising told the operator they had
+    stopped calls they never saw. In a block whose whole purpose is correct
+    attribution, that hands a harness defect to the user.
+
+    Asserted at every width the ladder draws, because the defect lived in the
+    rungs: a fix applied to the widest spelling only would still blame the
+    operator on a narrow frame.
+    """
+    stats = ToolCallStats(total=5, ok=3, faults={"gate_failed": 2}, faults_by_tool={})
+    drawn = 0
+    for width in range(_MIN_CARD_WIDTH, 121):
+        section = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        row = next(r for r in section if "never completed" in r)
+        # "you"/"your" is the whole finding: the row must not address the reader
+        # as the cause of a fault the harness produced.
+        assert (
+            "you" not in row.lower()
+        ), f"a harness fault is attributed to the operator at {width}: {row!r}"
+        if row.rstrip().endswith("rates"):
+            drawn += 1
+    # The neutral wording is actually reached, so the loop is not vacuously
+    # passing on widths where every note is shed.
+    assert drawn > 0
+
+
+def test_the_excluded_label_covers_every_fault_the_row_counts():
+    """D9: the label named two of the four classes the row's number counts.
+
+    ``└ denied or aborted`` is a disjunction over ``{denied, aborted}``, but the
+    count beside it sums all of ``EXCLUDED_FAULTS`` — ``skipped`` (steering
+    redirected) and ``gate_failed`` (our approval plumbing raised) land under a
+    heading that describes neither. That is the N1 defect one cell to the left:
+    the note was made attribution-neutral while the label above it kept naming
+    the operator's two decisions as though they were the whole set.
+
+    **The label is checked against ``EXCLUDED_FAULTS`` itself, not against a
+    restated list**, so a fifth member added later fails here rather than
+    quietly widening the gap between what the row says and what it counts.
+
+    Design suggested ``never dispatched`` / ``not run``. Both are FALSE for this
+    set and the falsity is measured, not argued: driving the real ``AgentLoop``
+    with a blocking tool and aborting mid-execution records ``aborted`` for a
+    call whose body had already run (``interruptible_runner`` cancels a task in
+    flight and parks a synthetic result). ``denied`` and ``gate_failed`` never
+    dispatch; ``aborted`` and ``skipped`` may. What is true of all four is that
+    no real tool outcome came back — which is precisely why they are in neither
+    denominator — so the label says ``never completed``.
+    """
+    # Every member of the set, one at a time: each must render under a label
+    # that is true of it, at every width the row is drawn.
+    for fault in sorted(EXCLUDED_FAULTS):
+        stats = ToolCallStats(total=5, ok=3, faults={fault: 2}, faults_by_tool={})
+        assert stats.excluded == 2, f"{fault} is not being excluded at all"
+        for width in (_MIN_CARD_WIDTH, _NOTE_MIN, 74, 100):
+            section = _section(
+                build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+            )
+            row = next((r for r in section if "2" in r and "└" in r), None)
+            assert row is not None, f"the excluded row vanished for {fault} at {width}"
+            assert len(row) <= width
+            lowered = row.lower()
+            # The label must not name a proper SUBSET of what it counts: a
+            # `gate_failed` call is not the operator denying anything.
+            for decision in ("denied", "aborted"):
+                if decision in lowered:
+                    assert fault in {"denied", "aborted"}, (
+                        f"a {fault!r} call is labelled {decision!r} at {width}, "
+                        f"which names a class it is not in: {row!r}"
+                    )
+            # Nor may it claim the call never started: `aborted` and `skipped`
+            # can be cut short after dispatch (measured against the real loop).
+            for started in ("never dispatched", "not dispatched", "never run", "not run"):
+                assert started not in lowered, (
+                    f"a {fault!r} call is claimed never to have started at {width}, "
+                    f"which the loop contradicts for aborted/skipped: {row!r}"
+                )
+
+
+def test_fault_sub_rows_are_ordered_deterministically_on_a_tie():
+    """D3: ``sorted`` over a ``frozenset`` reorders tied counts per process.
+
+    Set iteration order for strings depends on ``PYTHONHASHSEED``, so the same
+    data rendered twice produced different row orders — reproduced across four
+    captured frames in one batch. A user comparing two sessions, or the same
+    session before and after a resize, saw rows swap for no reason and read it
+    as the data changing.
+    """
+    stats = ToolCallStats(
+        total=9,
+        ok=6,
+        # All three tied at 1, so ONLY the tiebreak decides the order.
+        faults={"invalid_arguments": 1, "duplicate_id": 1, "unknown_tool": 1},
+        faults_by_tool={"edit": 1, "read": 1, "reed_file": 1},
+    )
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    order = [r.split("└")[1].strip().split("  ")[0] for r in section if "└" in r]
+    assert order == ["duplicate id", "invalid arguments", "unknown tool"], order
+
+    # And the count still dominates the name: a bigger fault outranks it.
+    bigger = ToolCallStats(
+        total=9,
+        ok=6,
+        faults={"invalid_arguments": 1, "duplicate_id": 1, "unknown_tool": 7},
+        faults_by_tool={},
+    )
+    section = _section(
+        build_session_report(_tool_report(bigger), runtime(), 100).plain, "Tool surface"
+    )
+    order = [r.split("└")[1].strip().split("  ")[0] for r in section if "└" in r]
+    assert order[0] == "unknown tool", order
+
+
+def test_a_measured_zero_execution_error_count_is_drawn():
+    """D4: "none" and "not measured" must not look identical.
+
+    The standing invariant is that an absent measurement is never drawn as a
+    measured zero; the converse is the same principle. Suppressing this row at
+    zero made a clean run — the MODAL shape for a healthy session — say nothing
+    where ``Tool-call error rate`` on the very next line happily shows its own zero.
+    """
+    stats = ToolCallStats(total=10, ok=10, faults={}, faults_by_tool={})
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    row = next((r for r in section if "Tool-side errors" in r), None)
+    assert row is not None, "a measured zero was hidden"
+    assert "0" in row and "0.0%" in row
+    # Still absent when nothing was dispatched: that IS unmeasured.
+    denied_only = ToolCallStats(total=3, ok=0, faults={"denied": 3}, faults_by_tool={"bash": 3})
+    section = _section(
+        build_session_report(_tool_report(denied_only), runtime(), 100).plain, "Tool surface"
+    )
+    assert not any("Tool-side errors" in r for r in section)
+
+
+def test_unknown_is_dimmed_like_the_other_absent_measurement_on_this_screen():
+    """D5: ``unknown`` must not carry the same ink as a measured number.
+
+    ``_timing_rows`` already draws ``unknown (0 samples)`` in ``dim``; two
+    absent-measurement states styled differently on one screen reads as an
+    oversight. This is the modal state for every session recorded before the
+    feature shipped, so it is the shape most users see first.
+    """
+    dim = semantic_style("dim")
+    fg = semantic_style("fg")
+
+    def value_style(text, label):
+        """The style of the VALUE cell on ``label``'s row.
+
+        Asserted positionally rather than by searching for the word: the timing
+        rows already draw their own dim ``unknown (0 samples)`` on this screen,
+        so a substring search over dim spans passes whether or not THIS cell was
+        ever dimmed — which is a guard that cannot go red.
+        """
+        line_start = text.plain.rindex("\n", 0, text.plain.index(label)) + 1
+        value_at = line_start + 2 + 22
+        return next(s.style for s in text.spans if s.start <= value_at < s.end)
+
+    text = build_session_report(_tool_report(None), runtime(), 100)
+    assert value_style(text, "Tool calls") == dim, "unknown drawn in full-strength ink"
+
+    # A measured value keeps the normal foreground: only ABSENCE is dimmed.
+    stats = ToolCallStats(total=20, ok=20, faults={}, faults_by_tool={})
+    text = build_session_report(_tool_report(stats), runtime(), 100)
+    assert value_style(text, "Tool calls") == fg
+    assert value_style(text, "Tool-call error rate") == fg
+
+    # And the other unknown on this block takes the same treatment.
+    denied = ToolCallStats(total=3, ok=0, faults={"denied": 3}, faults_by_tool={"bash": 3})
+    text = build_session_report(_tool_report(denied), runtime(), 100)
+    assert value_style(text, "Tool-call error rate") == dim
+
+
+def test_nested_calls_are_shown_but_named_as_outside_the_rates():
+    """M1 on screen: the calls are visible, the rate is not computed over them.
+
+    A reader who watched twenty eval-dispatched calls happen and then sees a
+    rate over three needs the twenty accounted for, or they conclude the counter
+    is broken. Showing them without saying they are unrated would re-open the
+    conflation in the reader's head even though the arithmetic is right.
+    """
+    stats = ToolCallStats(
+        total=3,
+        ok=2,
+        faults={"unknown_tool": 1},
+        faults_by_tool={"reed_file": 1},
+        nested_total=20,
+        nested_ok=20,
+    )
+    section = _section(
+        build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
+    )
+    row = next(r for r in section if "nested (eval)" in r)
+    assert "20" in row and "not the model's" in row
+    # The headline counts every call; the RATE stays model-origin.
+    assert any("Tool calls" in r and "23" in r for r in section)
+    assert any("Tool-call error rate" in r and "33.3%" in r for r in section)
+    # And the row is absent when there are none, so a clean session stays clean.
+    plain = ToolCallStats(total=3, ok=3, faults={}, faults_by_tool={})
+    section = _section(
+        build_session_report(_tool_report(plain), runtime(), 100).plain, "Tool surface"
+    )
+    assert not any("nested" in r for r in section)
