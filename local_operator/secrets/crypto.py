@@ -59,8 +59,14 @@ NAME_INDEX_BYTES = 16
 #: unbounded AAD, not to be tight.
 MAX_NAME_LENGTH = 256
 
+#: Bytes of :func:`key_fingerprint`. 16 bytes of a domain-separated HKDF
+#: output: long enough that two distinct master keys never collide in a store
+#: that holds a handful of generations, short enough to sit in a meta row.
+KEY_FINGERPRINT_BYTES = 16
+
 _SUBKEY_INFO_PREFIX = b"local-operator/secret-store/record/v1/gen="
 _NAME_INDEX_INFO = b"local-operator/secret-store/name-index/v1"
+_FINGERPRINT_INFO = b"local-operator/secret-store/key-fingerprint/v1"
 
 
 def normalize_name(name: str) -> str:
@@ -112,13 +118,35 @@ def derive_record_key(master_key: bytes, key_generation: int) -> bytes:
     return _hkdf(master_key, _SUBKEY_INFO_PREFIX + str(key_generation).encode("ascii"))
 
 
+def key_fingerprint(master_key: bytes) -> bytes:
+    """A public, non-reversible identifier for a master key.
+
+    This is what lets a session answer "is the key I am holding still the key
+    this store is sealed under?" without holding the store's key. ``rotate``
+    records the incoming key's fingerprint in ``meta``, and every write
+    compares its own key against that row inside its transaction — the check
+    that stops a session holding a pre-rotation key from committing a record
+    nobody can ever read (the store-bricking interleave).
+
+    Derived through HKDF with its own ``info`` label rather than hashing the
+    key directly: it is written to the database in the clear, so it must be
+    domain-separated from the record subkeys and the index key. Recovering the
+    master key from it is exactly as hard as inverting HKDF-SHA256.
+    """
+    return _hkdf(master_key, _FINGERPRINT_INFO)[:KEY_FINGERPRINT_BYTES]
+
+
 def derive_name_index_key(master_key: bytes) -> bytes:
     """The HMAC key behind the blind index.
 
-    Deliberately NOT per-generation. The blind index has to stay stable across
-    a key rotation or every lookup would break the moment the generation moved,
-    and rewriting every index during rotation would be a second thing that can
-    half-finish.
+    Stable across a GENERATION bump, and rewritten wholesale on a master-key
+    rotation. The distinction matters and the earlier wording had it backwards:
+    this key comes from the master key, not from the generation counter, so
+    ``update`` and ``set`` never move an index, but ``rotate`` installs a new
+    master key and therefore changes every index. That is why
+    :meth:`SecretStore.rotate` rewrites every ``name_index`` column inside the
+    same transaction that re-seals the ciphertexts — the two must move together
+    or a lookup finds nothing.
     """
     return _hkdf(master_key, _NAME_INDEX_INFO)
 

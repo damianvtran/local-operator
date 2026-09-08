@@ -68,6 +68,20 @@ class IncompatibleStore(SecretStoreError):
     """
 
 
+class StaleKeyEpoch(SecretStoreError):
+    """The master key this caller holds is no longer the store's key.
+
+    Raised when a write's key does not match the fingerprint the store records,
+    which happens when another session completed a ``rotate`` after this one
+    loaded the key — the routine case on a machine running ~10 sessions at
+    once. The write is refused rather than committed, because a record sealed
+    under a superseded key is indexed under a superseded index key too: it
+    would be unreachable by name AND undecryptable, while ``set`` reported
+    success. Failing closed costs the operator one retry; succeeding costs them
+    the secret.
+    """
+
+
 class InsecurePermissions(SecretStoreError):
     """A store file is readable by someone other than its owner.
 

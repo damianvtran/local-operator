@@ -169,6 +169,55 @@ def load_master_key(base: Path | None = None, *, create: bool = False) -> bytes:
     return key
 
 
+def staged_key_path(base: Path | None = None) -> Path:
+    """Path to the key a rotation has staged but not yet installed.
+
+    See :func:`stage_master_key` for why this file exists rather than the
+    rotation simply writing the key after it commits.
+    """
+    return secrets_dir(base) / "master.key.incoming"
+
+
+def stage_master_key(base: Path | None, key: bytes) -> None:
+    """Persist a rotation's new key BEFORE the re-seal transaction commits.
+
+    This is the ordering that makes rotation crash-safe, and getting it wrong
+    loses every secret in the store. ``rotate`` re-seals every record under the
+    new key; if the process dies after that COMMIT but before the key reaches
+    disk, the database is sealed under a key that existed only in the dead
+    process's memory and nothing can ever open it again. An ordinary power cut
+    during a routine rotate is total, unrecoverable loss.
+
+    So the new key is written here first, alongside the old one. At every
+    instant of a rotation, a key that opens the store exists on disk:
+
+    * before staging — database sealed under the old key, ``master.key`` is it;
+    * staged, not committed — database still under the old key, ``master.key``
+      is still it, and the staged file is inert;
+    * committed, not installed — database under the new key, which is the
+      staged file; :func:`resolve_master_key` finds it by fingerprint and
+      completes the install;
+    * installed — ``master.key`` is the new key and the staged file is removed.
+
+    Written with ``O_EXCL`` semantics via a fresh unlink so a leftover file
+    from an abandoned rotation can never be mistaken for this one's.
+    """
+    ensure_secrets_dir(base)
+    path = staged_key_path(base)
+    path.unlink(missing_ok=True)
+    write_private_file(path, key)
+
+
+def discard_staged_master_key(base: Path | None = None) -> None:
+    """Remove a staged key. Called when a rotation failed before committing.
+
+    Leaving it would be harmless — :func:`resolve_master_key` only adopts a
+    staged key that matches the database's recorded fingerprint — but a stray
+    copy of key material on disk is worth not keeping around.
+    """
+    staged_key_path(base).unlink(missing_ok=True)
+
+
 def replace_master_key(base: Path | None, key: bytes) -> None:
     """Install a new master key, used by ``rotate`` once every record has moved.
 
@@ -176,9 +225,26 @@ def replace_master_key(base: Path | None, key: bytes) -> None:
     leaves either the old key or the new one, never a truncated file that
     decrypts nothing. The temporary lives in the same 0700 directory, so it is
     never more exposed than the key it replaces.
+
+    The staged copy is removed last: until ``os.replace`` lands, the staged
+    file is the only on-disk copy of the key the committed database needs.
+
+    The temporary name is unique PER CALL, not fixed and not merely per-pid,
+    because this is no longer a single-caller path: ``resolve_master_key``
+    completes an interrupted rotation, so several sessions — and several
+    threads inside one session — can land here at once. With a shared name one
+    caller's ``os.replace`` consumes the file another has just written, which
+    surfaced as a spurious ``FileNotFoundError`` from an install that had in
+    fact succeeded. Each caller renaming its OWN file makes the concurrent case
+    a harmless last-writer-wins between identical keys.
     """
     path = key_path(base)
-    temporary = path.with_suffix(".key.new")
-    write_private_file(temporary, key)
-    os.replace(temporary, path)
+    temporary = path.with_name(f"{path.name}.new.{os.getpid()}.{os.urandom(6).hex()}")
+    try:
+        write_private_file(temporary, key)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     os.chmod(path, FILE_MODE)
+    discard_staged_master_key(base)

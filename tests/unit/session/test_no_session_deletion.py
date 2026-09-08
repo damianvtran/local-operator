@@ -268,6 +268,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> master.key, both under config_dir()/secrets",
     ),
+    # The same temp file, unlinked when the rename fails. The name is
+    # `master.key.new.<pid>.<random>` next to `master.key`; it is per-process precisely
+    # so concurrent rotations cannot consume each other's, and no caller input
+    # reaches it.
+    (
+        "local_operator/secrets/keys.py::replace_master_key",
+        "<path>.unlink",
+        "the master.key.new.<pid>.<random> temp FILE this call just wrote",
+    ),
+    # Removing a rotation's staged key: a fixed basename under
+    # config_dir()/secrets, no caller input, never a session directory.
+    (
+        "local_operator/secrets/keys.py::discard_staged_master_key",
+        "<path>.unlink",
+        "master.key.incoming under config_dir()/secrets",
+    ),
+    # `stage_master_key` clears any leftover staging file before writing its
+    # own, for the same fixed path.
+    (
+        "local_operator/secrets/keys.py::stage_master_key",
+        "<path>.unlink",
+        "master.key.incoming under config_dir()/secrets",
+    ),
     # `lop secret file` materialises a file-shaped secret for the lifetime of
     # one command. The directory removed is the one `tempfile.mkdtemp()`
     # returned to this same function moments earlier, under $TMPDIR — it is
