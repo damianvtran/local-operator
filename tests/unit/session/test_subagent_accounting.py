@@ -195,6 +195,7 @@ def test_mixed_child_unknown_keeps_parent_lower_bound():
 @pytest.mark.asyncio
 async def test_rendered_footer_uses_whole_owner_ledger():
     from local_operator.tui.app import OperatorApp
+    from tests.e2e.harness import wait_for_adoption
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -209,6 +210,9 @@ async def test_rendered_footer_uses_whole_owner_ledger():
             subagent_cost=0.131,
             subagent_cost_knowledge=CostKnowledge.PARTIAL,
         )
+        # A mounted band is not owner readiness: adoption selects a new
+        # interaction/accounting ledger and discards any earlier injected cost.
+        await wait_for_adoption(app, pilot)
         app._apply_frontend_state(state)
         await pilot.pause()
         assert app._spend_total() == 0.131
