@@ -446,6 +446,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Reconcile advertised state against reality: drop tabs that no longer "
         "exist and republish a fresh heartbeat. Safe while sessions are live.",
     )
+    for action in ("tabs", "reconcile"):
+        inventory_browser = browser_subparsers.add_parser(
+            action, help="Inspect redacted browser ownership; never close tabs"
+        )
+        inventory_browser.add_argument("--json", action="store_true")
+    cleanup_browser = browser_subparsers.add_parser(
+        "cleanup", help="Close one proven-terminal browser owner after revalidation"
+    )
+    cleanup_browser.add_argument("session_id")
+    cleanup_browser.add_argument("--generation", required=True)
+    cleanup_browser.add_argument("--yes", action="store_true", help="Approve this exact cleanup")
     for action in ("start", "stop", "restart"):
         browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
     pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
@@ -1302,6 +1313,47 @@ def config_list_command() -> int:
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
+    if command in ("tabs", "reconcile", "cleanup"):
+        import asyncio
+        import json
+
+        from local_operator.browser_bridge.resources import (
+            cleanup_exact,
+            read_inventory,
+        )
+
+        sessions = config_dir() / "sessions"
+        if command == "cleanup":
+            if not args.yes:
+                print("No changes. Repeat with --yes to approve this exact session and generation.")
+                return 1
+            if Path(args.session_id).name != args.session_id or args.session_id in (".", ".."):
+                print("Invalid session id; no action taken.")
+                return 1
+            try:
+                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+            except Exception as exc:
+                print(f"Cleanup blocked: {type(exc).__name__}; no unproven tab was selected.")
+                return 1
+            print(f"Browser cleanup: {result.state}. {result.detail}")
+            return 0 if result.state in ("closed", "retained") else 1
+        rows = read_inventory(sessions)
+        if args.json:
+            print(json.dumps({"resources": rows, "mode": "read-only"}))
+        elif not rows:
+            print("No durable browser ownership records. Legacy tabs remain unknown and untouched.")
+        else:
+            for row in rows:
+                print(
+                    f"{row['session_id']}  {row['state']}  generation={row.get('generation', '')}"
+                )
+                print(
+                    f"  terminal={row.get('terminal') or 'not established'}; "
+                    f"retention={row.get('retention') or 'none recorded'}"
+                )
+            print("Read-only. PID absence, age, and localhost URLs never authorize cleanup.")
+            print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
+        return 0
     if command == "serve":
         from local_operator.browser_bridge.daemon import main as serve_main
 

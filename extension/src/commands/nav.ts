@@ -9,6 +9,7 @@ import {
 } from "../origins";
 import { settle } from "../settle";
 import { reconcileTabGroup } from "../tab-groups";
+import { recordAllocation } from "../ownership";
 import {
   atSurfaceCap,
   getSurfaces,
@@ -150,20 +151,39 @@ export async function open(params: Record<string, unknown>, requestId: string): 
     tabId: tab.id,
     nonce: crypto.randomUUID().replaceAll("-", ""),
     epoch: 1,
+    allocationId: typeof params.allocation_id === "string" ? params.allocation_id : undefined,
     createdAt: now,
     lastUsedAt: now,
   };
-  await putSurface(surface);
-  await attach(tab.id);
-  // Start buffering console/runtime logs immediately after attach and BEFORE
-  // navigating, so the `logs` command captures output from the destination
-  // page's very first script (finding: logs must be "since the surface opened").
-  await startLogCapture(tab.id, cdp);
-  // Security-sensitive ordering stays intact: blank tab persisted, debugger
-  // attached, and log capture armed before presentation, then navigation.
-  await reconcileTabGroup(surface, params, true);
-  const live = await navigate(tab.id, url, requestId, admission);
-  return { tab: surfaceToken(surface), ...live };
+  try {
+    await putSurface(surface);
+    await recordAllocation(params, surfaceToken(surface), "allocated");
+    await attach(tab.id);
+    // Arm capture and the origin gate before navigation; opening directly at
+    // the destination would let a redirect escape permission admission.
+    await startLogCapture(tab.id, cdp);
+    await reconcileTabGroup(surface, params, true);
+    const live = await navigate(tab.id, url, requestId, admission);
+    await recordAllocation(params, surfaceToken(surface), "owned");
+    return { tab: surfaceToken(surface), ...live };
+  } catch (error) {
+    // Only THIS fresh allocation is rollback-owned. A failed resume/goto must
+    // preserve the pre-existing tab (including a login the user is finishing).
+    try {
+      await closeSurface(surfaceToken(surface), surface);
+      await recordAllocation(params, "", "closed");
+    } catch {
+      // Do not hide the original navigation failure, but retain a capability
+      // when removal failed: otherwise neither close nor teardown can retry.
+      surface.cleanupPending = true;
+      await putSurface(surface);
+      await recordAllocation(params, surfaceToken(surface), "cleanup_pending");
+      const code = error instanceof BridgeCommandError ? error.code : "internal";
+      const message = error instanceof Error ? error.message : String(error);
+      throw new BridgeCommandError(code, message, { tab: surfaceToken(surface), cleanup_pending: true });
+    }
+    throw error;
+  }
 }
 
 export async function goto(params: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> {
@@ -237,7 +257,22 @@ export async function tabs(_params: Record<string, unknown>): Promise<Record<str
 async function closeSurface(token: string, surface: StoredSurface): Promise<void> {
   dropLogCapture(surface.tabId);
   await detach(surface.tabId);
-  try { await chrome.tabs.remove(surface.tabId); } catch { /* already gone is success */ }
+  try {
+    await chrome.tabs.remove(surface.tabId);
+  } catch (error) {
+    // Only a confirmed missing tab is idempotent success. Policy/debugger or
+    // transient failures must leave the capability available for retry.
+    try { await chrome.tabs.get(surface.tabId); } catch (missing) {
+      if (missing instanceof Error && /No tab with id|Invalid tab ID/i.test(missing.message)) {
+        await removeSurface(token);
+        return;
+      }
+      throw error;
+    }
+    surface.cleanupPending = true;
+    await putSurface(surface);
+    throw error;
+  }
   await removeSurface(token);
 }
 
@@ -259,6 +294,9 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
   if (params.tab !== undefined && params.tab !== null && params.tab !== "") {
     const surface = await requireSurface(params.tab);
     const token = surfaceToken(surface);
+    if (surface.allocationId && !params.owner_proof) {
+      throw new BridgeCommandError("internal", "owner-aware client required");
+    }
     await closeSurface(token, surface);
     return { closed: token };
   }
@@ -280,6 +318,11 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
     );
   }
   const [token, surface] = entries[0]!;
+  // Legacy close inferred its sole target AFTER dispatch authorization. Check
+  // the resolved target too, or close({}) bypasses the explicit-handle fence.
+  if (surface.allocationId && !params.owner_proof) {
+    throw new BridgeCommandError("internal", "owner-aware client required");
+  }
   await closeSurface(token, surface);
   return { closed: token };
 }

@@ -763,6 +763,7 @@ def _make_runner(
             # records outlive them so a child stays resumable, and without
             # this the roster (``hub op='list'``) could not say whether a
             # swept child finished or crashed.
+            await _finish_child_browser(child, comms, job_id, "completed")
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -786,6 +787,9 @@ def _make_runner(
             # the record's ``paused`` flag alone precisely so the roster can
             # still tell the two apart.
             with contextlib.suppress(BaseException):
+                await _settle_child_cleanup(
+                    asyncio.create_task(_finish_child_browser(child, comms, job_id, "cancelled"))
+                )
                 await _publish_terminal_outcome(
                     comms,
                     emit,
@@ -800,6 +804,7 @@ def _make_runner(
             # is what the roster shows for a failed child once the row is
             # swept, which is the state an operator is most likely to be
             # looking at when they ask what went wrong.
+            await _finish_child_browser(child, comms, job_id, "failed")
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -934,6 +939,36 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
             break
         cut = index
     return messages[:cut]
+
+
+async def _finish_child_browser(
+    child: "Session | None", comms: Any, job_id: str, outcome: str
+) -> None:
+    """Resource settlement precedes authoritative outcome publication.
+
+    Pausing cancels the runner too, but is not task completion. Preserve that
+    explicit lifecycle hold through dispose rather than classifying cancellation
+    (or a dead process) as authority to close a suspended interaction.
+    """
+    if child is None:
+        return
+    record = comms._record(job_id) if comms is not None else None
+    resource = getattr(getattr(child, "_browser", None), "resource", None)
+    if record is not None and record.paused and resource is not None:
+        if resource.generation or resource.path.exists():
+            try:
+                resource.initialize()
+                resource.record["retention"] = "paused scope"
+                resource.remember(child._browser.surface_id, state="retained")
+            except (RuntimeError, OSError, ValueError):
+                logger.warning("paused browser ownership changed; retained successor untouched")
+        return
+    if callable(getattr(child, "finish_browser_scope", None)):
+        result = await child.finish_browser_scope(
+            scope_id=child.session_id, generation=child.browser_generation, outcome=outcome
+        )
+        if result.state not in ("closed", "retained"):
+            logger.warning("child browser cleanup %s: %s", result.state, result.detail)
 
 
 async def _dispose_child(child: "Session") -> None:
