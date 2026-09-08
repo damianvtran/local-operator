@@ -1137,8 +1137,35 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
     # version printed 35 and then a 34-call denominator one line later with
     # nothing accounting for the difference, which reads as the screen
     # miscounting — the exact misreading this feature exists to remove.
+    #
+    # `failed` MUST NEVER INCLUDE OPERATOR-EXCLUDED CALLS. This is the founding
+    # bug of this whole PR, and it reappeared here one block lower: the first
+    # version of this line was `stats.recorded - ok`, which swept `excluded`
+    # (denied / aborted / skipped / gate_failed) into `failed` and painted
+    # `0 ok · 4 failed` on a session where the operator declined four calls and
+    # nothing failed at all (design round 2, D7) — the same shape as the
+    # operator's original report, `15 req · 15 failed` on a session where
+    # nothing failed. A call the operator refused is not a failure of anything,
+    # and the ` └ ` row directly beneath says so in as many words, so the
+    # headline was contradicting its own sub-row.
+    #
+    # Derived by SUBTRACTING the excluded rather than by adding the two fault
+    # classes: `model_faults + execution_faults` is equal today only because the
+    # fault vocabulary happens to be closed (`_classify_fault` falls back to
+    # `FAULT_EXECUTION`), so a future fault name outside all three frozensets
+    # would silently vanish from the headline instead of being counted. Framed
+    # this way it lands in `failed`, which is the safe direction: an unnamed
+    # fault is still a fault, while a miscounted denial is this block's defining
+    # error.
+    #
+    # Nested failures are added for the same reason the headline is `recorded`:
+    # `ok` already spans both origins, so a model-origin-only `failed` would
+    # leave a failed eval-bridge call in neither term of a pair that reads as a
+    # partition. The three terms are exhaustive by construction —
+    # `ok + failed + excluded == recorded` — and each one is on screen, the last
+    # as the ` └ denied or aborted` row.
     ok = stats.ok + stats.nested_ok
-    failed = stats.recorded - ok
+    failed = (stats.total - stats.ok - stats.excluded) + (stats.nested_total - stats.nested_ok)
     detail = f"{ok} ok" + (f" · {failed} failed" if failed else "")
     body.kv("Tool calls", str(stats.recorded), detail)
 
@@ -1162,13 +1189,25 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # previously invisible, which left the headline `N failed` short of the
         # sub-rows by exactly this number. With the approval gate on, denials
         # are the DEFAULT posture, so this was the modal unaccountable count.
+        #
+        # THE NOTE IS ATTRIBUTION-NEUTRAL ON PURPOSE. It used to read "you
+        # stopped these, not the model", which is true of `denied` and `aborted`
+        # but false of the other two members of ``EXCLUDED_FAULTS``:
+        # `gate_failed` is OUR approval plumbing raising — a harness bug — and
+        # `skipped` is steering redirecting before the call ran. Both rendered
+        # as the operator's own decision, so a block whose entire purpose is
+        # correct attribution handed the reader a harness defect and blamed them
+        # for it (review round 2, N1). The arithmetic was never affected; only
+        # the wording was. "outside both rates" is the one thing true of all
+        # four, and it states the fact the row exists to state: these calls are
+        # in neither denominator below.
         body.kv(
             " └ denied or aborted",
             str(stats.excluded),
             notes=(
-                f"you stopped {'these' if stats.excluded > 1 else 'this'}, not the model",
-                "your decision, not the model's",
-                "your decision",
+                "stopped or never dispatched · outside both rates",
+                "never dispatched · outside both rates",
+                "outside both rates",
             ),
         )
 
@@ -1226,6 +1265,18 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # reader who takes it for a model metric blames the model for the
         # network — and it covers model-emitted calls only, like every count in
         # this block.
+        #
+        # EVERY RUNG STATES THE DENOMINATOR, and the last one drops the VERB to
+        # keep it. The floor rung was `"{pct}% dispatched"`, which at body widths
+        # 52-57 painted `7.4% dispatched` — a sentence asserting the INVERSE of
+        # the truth, since it reads as "7.4% got dispatched" on a session where
+        # 27 of 31 did (design round 2, D6). A bare percentage next to a verb is
+        # not a shorter spelling of the same qualifier, it is a different and
+        # false claim, so the ladder's contract — progressively shorter
+        # spellings of ONE qualifier — was broken at the bottom rung. `% of 27`
+        # keeps the half that makes the figure legible and sheds the half that
+        # inverts it, and at 10 characters against the broken rung's 15 it fits
+        # a strictly wider band than the string it replaces.
         dispatched = stats.emitted - stats.model_faults
         body.kv(
             "Tool-side errors",
@@ -1235,7 +1286,7 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
                 "not a model-accuracy figure",
                 f"{execution * 100:.1f}% of {dispatched} dispatched · not model accuracy",
                 f"{execution * 100:.1f}% of {dispatched} dispatched",
-                f"{execution * 100:.1f}% dispatched",
+                f"{execution * 100:.1f}% of {dispatched}",
             ),
         )
 

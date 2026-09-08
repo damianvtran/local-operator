@@ -1321,7 +1321,9 @@ def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
         "Call validity": "emitted",
         "Tool-side errors": "dispatched",
         " └ nested (eval)": "not the model's",
-        " └ denied or aborted": "your decision",
+        # Attribution-NEUTRAL at every rung: `gate_failed` and `skipped` are in
+        # this row too, and neither is the operator's decision (review N1).
+        " └ denied or aborted": "outside both rates",
     }
     for label, floor in expected.items():
         row = next((r for r in section if label in r), None)
@@ -1342,6 +1344,22 @@ def test_the_execution_scope_survives_at_every_supported_width():
     The fix is structural, not another rung: the scope moved into the LABEL,
     which is never shed. So this asserts across the FULL supported range,
     including widths where every note is shed — a rung-based fix cannot pass it.
+
+    **It also asserts the note's MEANING, not its suffix, because the first
+    version of this guard could not see the defect it was written beside.** That
+    version asserted ``tail.endswith(("dispatched", "accuracy", "figure"))``,
+    and the broken floor rung ``"13.3% dispatched"`` ends with ``dispatched`` —
+    so the guard passed a string asserting the INVERSE of the truth (it reads as
+    "13.3% got dispatched" where 15 of 17 did) across a seven-column band
+    (design round 2, D6). An assertion a broken string satisfies is a
+    decoration.
+
+    The property that actually distinguishes them is that **a percentage is
+    never drawn without the denominator it is a percentage OF**: every rung
+    carrying ``%`` must also carry ``of <dispatched>``. A rung may shed the verb
+    and the disclaimer freely — those are refinements — but shedding the
+    denominator turns a proportion into a different and false claim, so it is
+    the one part the ladder may not drop.
     """
     stats = ToolCallStats(
         total=17,
@@ -1349,6 +1367,10 @@ def test_the_execution_scope_survives_at_every_supported_width():
         faults={"invalid_arguments": 2, "execution": 2},
         faults_by_tool={"edit": 2, "web_fetch": 2},
     )
+    # Recomputed from the stats rather than restated as a literal, so a change
+    # to the fixture cannot leave the guard asserting a stale denominator.
+    dispatched = stats.emitted - stats.model_faults
+    assert dispatched == 15
     for width in range(_MIN_CARD_WIDTH, 121):
         section = _section(
             build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
@@ -1357,9 +1379,16 @@ def test_the_execution_scope_survives_at_every_supported_width():
         assert len(row) <= width
         # The scope is in the label, so it cannot shed at ANY width.
         assert "Tool-side" in row, f"scope vanished at {width}: {row!r}"
+        tail = row.rstrip()
+        # A rate is meaningless without its denominator: any width that draws a
+        # percentage must also say what it is a percentage of.
+        if "%" in tail:
+            assert f"of {dispatched}" in tail, (
+                f"at {width} the rate is drawn without its denominator, "
+                f"so it states a proportion of nothing: {row!r}"
+            )
         # And nothing is cut mid-word: every rung ends on a complete word, so a
         # truncated tail could only be a crop.
-        tail = row.rstrip()
         if "dispatch" in tail:
             assert tail.endswith(("dispatched", "accuracy", "figure")), (width, row)
 
@@ -1394,13 +1423,15 @@ def test_the_block_reconciles_its_own_counts_on_screen():
     # The headline is EVERY recorded call, both origins: under the ` └ ` idiom
     # a sub-row is part of the row above, so a model-only headline carrying a
     # nested sub-row would be arithmetically false.
-    assert any("Tool calls" in r and "40" in r and "7 failed" in r for r in section)
+    # `6 failed`, not 7: the denied call is accounted for by its own ` └ ` row
+    # and is NOT a failure (D7).
+    assert any("Tool calls" in r and "40" in r and "6 failed" in r for r in section)
     # Each class removed from the denominator is named, in the order it is
     # removed, so the reader reaches `emitted` by reading downward.
     nested_row = next(r for r in section if "nested (eval)" in r)
     assert "5" in nested_row and "not the model's" in nested_row
     excluded_row = next(r for r in section if "denied or aborted" in r)
-    assert "1" in excluded_row and "not the model" in excluded_row
+    assert "1" in excluded_row and "outside both rates" in excluded_row
     # Every denominator the rates use is printed rather than implied.
     assert "34 emitted" in joined, "the validity denominator is unstated"
     assert "30 dispatched" in joined, "the execution denominator is unstated"
@@ -1410,6 +1441,121 @@ def test_the_block_reconciles_its_own_counts_on_screen():
     assert stats.emitted - stats.model_faults == 30
     named = stats.model_faults + stats.execution_faults + stats.excluded
     assert named == stats.total - stats.ok == 7
+    # And the headline's own three terms partition `recorded` exactly, with the
+    # excluded broken out rather than folded into `failed` (D7).
+    headline_ok = stats.ok + stats.nested_ok
+    headline_failed = (stats.total - stats.ok - stats.excluded) + (
+        stats.nested_total - stats.nested_ok
+    )
+    assert headline_ok + headline_failed + stats.excluded == stats.recorded == 40
+    assert (headline_ok, headline_failed, stats.excluded) == (33, 6, 1)
+
+
+def test_the_headline_never_calls_an_operator_denial_a_failure():
+    """D7: this is the founding bug of the feature, reproduced one block lower.
+
+    The operator's original report was ``15 req · 15 failed`` on a session where
+    nothing had failed. The first version of the headline computed
+    ``failed = recorded - ok``, which pulled ``EXCLUDED_FAULTS`` — the calls the
+    operator DENIED at the approval gate, plus the harness's own
+    ``gate_failed``/``skipped`` — into ``failed``, and painted exactly that
+    shape again: ``0 ok · 4 failed`` on a session whose four calls the operator
+    declined and where nothing failed at all. The ` └ ` row one line beneath
+    said so in as many words, so the headline contradicted its own sub-row.
+
+    Both states are asserted because they fail differently. Under ``denials``
+    the defect is a wrong NUMBER beside a correct one, which a reader can only
+    catch by doing the subtraction; under ``nodispatch`` the excluded calls are
+    the entire headline, so the whole line is false and the ``failed`` clause
+    must not be drawn at all.
+    """
+    # Denials dominant, with one real fault of each kind so `failed` is nonzero
+    # and a wrong `failed` cannot pass by being coincidentally equal.
+    denials = ToolCallStats(
+        total=13,
+        ok=4,
+        faults={"denied": 7, "invalid_arguments": 1, "execution": 1},
+        faults_by_tool={"read": 1, "web_fetch": 1},
+    )
+    section = _section(
+        build_session_report(_tool_report(denials), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert "4 ok" in headline and "2 failed" in headline, headline
+    assert (
+        "9 failed" not in headline
+    ), f"the operator's 7 denials are counted as failures: {headline!r}"
+    # The seven are not lost — they are accounted for by their own row.
+    assert any("denied or aborted" in r and "7" in r for r in section)
+
+    # Nothing dispatched: every recorded call was excluded, so there is no
+    # `failed` clause to draw. A `0 ok · 4 failed` here is the founding bug
+    # verbatim.
+    nodispatch = ToolCallStats(total=4, ok=0, faults={"denied": 4}, faults_by_tool={})
+    section = _section(
+        build_session_report(_tool_report(nodispatch), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert "0 ok" in headline, headline
+    assert (
+        "failed" not in headline
+    ), f"a session where the operator declined every call reports a total loss: {headline!r}"
+
+    # A FAILED NESTED CALL IS STILL A FAILURE. This is why `failed` subtracts
+    # the excluded rather than adding `model_faults + execution_faults`: those
+    # two are model-origin only, so the obvious one-liner drops an eval-bridge
+    # call that failed inside its tool and leaves it in NEITHER headline term,
+    # against an `ok` that spans both origins. The bridge really can produce
+    # this — `dispatch_tool` reports `origin="nested"` for its own faults
+    # (`loop.py`) — so it is a reachable state, not a constructed one.
+    nested_faults = ToolCallStats(
+        total=10,
+        ok=8,
+        faults={"execution": 2},
+        faults_by_tool={"web_fetch": 2},
+        nested_total=6,
+        nested_ok=4,
+    )
+    section = _section(
+        build_session_report(_tool_report(nested_faults), runtime(), 100).plain, "Tool surface"
+    )
+    headline = next(r for r in section if "Tool calls" in r)
+    assert (
+        "12 ok" in headline and "4 failed" in headline
+    ), f"two failed nested calls are in neither term of the headline: {headline!r}"
+
+
+def test_the_excluded_row_does_not_blame_the_operator_for_a_harness_fault():
+    """N1: ``gate_failed`` is OUR bug and ``skipped`` is steering, not a decision.
+
+    ``EXCLUDED_FAULTS`` has four members and only two of them — ``denied`` and
+    ``aborted`` — are the operator stopping something. The note read "you
+    stopped these, not the model" at every rung, so a session whose exclusions
+    were entirely the approval plumbing raising told the operator they had
+    stopped calls they never saw. In a block whose whole purpose is correct
+    attribution, that hands a harness defect to the user.
+
+    Asserted at every width the ladder draws, because the defect lived in the
+    rungs: a fix applied to the widest spelling only would still blame the
+    operator on a narrow frame.
+    """
+    stats = ToolCallStats(total=5, ok=3, faults={"gate_failed": 2}, faults_by_tool={})
+    drawn = 0
+    for width in range(_MIN_CARD_WIDTH, 121):
+        section = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        row = next(r for r in section if "denied or aborted" in r)
+        # "you"/"your" is the whole finding: the row must not address the reader
+        # as the cause of a fault the harness produced.
+        assert (
+            "you" not in row.lower()
+        ), f"a harness fault is attributed to the operator at {width}: {row!r}"
+        if row.rstrip().endswith("rates"):
+            drawn += 1
+    # The neutral wording is actually reached, so the loop is not vacuously
+    # passing on widths where every note is shed.
+    assert drawn > 0
 
 
 def test_fault_sub_rows_are_ordered_deterministically_on_a_tie():
