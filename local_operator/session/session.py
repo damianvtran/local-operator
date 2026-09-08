@@ -3526,9 +3526,8 @@ class Session:
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
-            # ``_apply_config_change``). ``_adopt_configured_model`` passes
-            # ``explicit=True`` too — for the fallback-pin withdrawal below —
-            # and resets this flag itself afterwards.
+            # ``_apply_config_change``, which now never selects a model off a
+            # default reload — only reports one).
             self._explicit_model_choice = True
         # The measured byte cap belonged to the provider that demonstrated it,
         # and that provider is gone. Keeping it would pin a session to a
@@ -11096,6 +11095,10 @@ class Session:
         values = getattr(change, "values", None)
         if not isinstance(values, Mapping):
             return
+        # ``disk`` for anything this session did not write, which is the
+        # conservative default: only the model branch below consults it, and
+        # only to stay quiet about a write this process already reported.
+        source = getattr(change, "source", "disk")
         if any(key.startswith("compaction.") for key in changed):
             # Same outcome as the factory's ``coerce_compaction_settings`` at
             # build (dict -> validated, invalid -> defaults, absent -> None,
@@ -11155,7 +11158,7 @@ class Session:
             if self._job_id is None:
                 self._web_tools_dirty = True
         if "hosting" in changed or "model_name" in changed:
-            self._on_configured_model_changed(values)
+            self._on_configured_model_changed(values, local=source == "local")
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -11187,15 +11190,66 @@ class Session:
             return
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
-    def _on_configured_model_changed(self, values: Mapping[str, Any]) -> None:
+    def _on_configured_model_changed(self, values: Mapping[str, Any], *, local: bool) -> None:
         """Defaults seed NEW conversations; reloading them never selects a model.
 
         A watcher cannot identify which pane authored an edit. Local commands
         that promise a switch call set_model explicitly on their own session.
         Treating a config-sourced birth as a subscription moved every sibling
         at the next provider call, invalidating its cache and conversation.
+
+        ``local`` writes print NOTHING, and that is a correctness fix rather
+        than a volume one (#785). The model default is TWO registry keys, and
+        ``settings_io`` notifies once per FACADE call — so ``/model default
+        p/m``, which loops over ``("hosting", provider)`` and ``("model_name",
+        model_id)``, delivers two synchronous changes to this listener. The
+        first carries a TORN pair: the new provider beside the OLD model name,
+        a combination the user never asked for and that was never on disk as a
+        unit. It differs from the session's model, so the check below fired and
+        printed ``keeping <model>; default changed for new sessions`` — for a
+        save whose whole point was to make that model the default. The receipt
+        the command had already written said the opposite one line above.
+
+        Suppressing on ``source`` rather than coalescing the notices is what
+        matches the watcher's own contract: ``ConfigChange.source`` exists to
+        say "this process wrote it, and the surface that wrote it already told
+        the user" (see :class:`~local_operator.config_watch.ConfigChange` and
+        the TUI's ``_on_config_change``, which has honoured it since it was
+        added). ``local`` covers exactly the writers that go through the
+        ``settings_io`` facade, because only ``settings_io._store`` calls
+        ``notify_local``: the ``/model`` forms, which print their own receipt
+        naming the pair they saved, and the ``/settings`` Model section, which
+        reports scope on its own surface — its rows repaint to the values just
+        typed, under a ``takes effect: new sessions`` label. Each is its own
+        receipt, so staying quiet here loses nothing the user needed.
+
+        Writers that reach ``ConfigManager.set_config_value`` directly are NOT
+        covered, since that call has no ``notify_local`` hook: ``/login``
+        (``OperatorApp._save_login_defaults``), the missing-model setup
+        recovery and the CLI ``login`` all write this pair and arrive here as
+        ``disk``, so they still print. Pre-existing, and unchanged by #785 —
+        but it means anyone extending this gate has to route the write through
+        the facade rather than add another source check.
+
+        What is verified about the disk path is narrower than "it cannot
+        tear". A config write is one atomic ``os.replace`` of the whole file,
+        so a two-key external save that a SINGLE tick observes delivers one
+        change carrying the matched pair; that is what
+        ``test_another_process_changing_the_default_still_says_so_once`` pins,
+        and it is why the notice a user actually needs — someone else changed
+        the default under me — prints once with a real pair. Two separate
+        replaces are NOT seen as one. External edits that straddle a tick (the
+        poll interval, or a per-write kqueue wake on macOS) arrive as two
+        ``disk`` deliveries, the first carrying a torn pair, and print twice.
+        That is pre-existing on the disk path, is not the contradiction #785
+        describes, and is deliberately not addressed here: closing it needs
+        per-tick coalescing of the notice, which a source flag cannot express.
+        The fix is scoped to ``local`` because ``source`` identifies that
+        writer set exactly, not because tearing is impossible elsewhere.
         """
         if self._job_id is not None:
+            return
+        if local:
             return
         if (values.get("hosting"), values.get("model_name")) == (
             self.model.provider,
