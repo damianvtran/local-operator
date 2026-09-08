@@ -3989,7 +3989,12 @@ class RemoteSession:
     def set_goal(self, text: str) -> str:
         client = self._client
         if client is not None:
-            asyncio.create_task(client.slash("goal", text))
+            # This protocol setter is metadata-only, unlike a user's /goal.
+            # RemoteSession declares goal_set as consumed at attachment, so a
+            # typed receipt leaves admission here; deliberately not rendering
+            # it prevents a compatibility setter plus prompt from double-sending.
+            # Bare /goal now means status on every owner, so clearing is explicit.
+            asyncio.create_task(client.slash_result("goal", text.strip() or "clear"))
         return text.strip()
 
     @property

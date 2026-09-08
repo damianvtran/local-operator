@@ -1630,7 +1630,8 @@ async def test_owner_slash_result_producers_match_local_handler_vocabulary() -> 
                 break
         goal = await app.run_slash_authoritative("goal", "ship it")
         assert goal["kind"] == "notice"
-        assert "goal set — applies from the next turn" in goal["text"]
+        assert goal["text"] == "goal set"
+        assert goal["data"]["request"] == "ship it"
         assert session.goal == "ship it"
 
         bare_goal = await app.run_slash_authoritative("goal", "")
