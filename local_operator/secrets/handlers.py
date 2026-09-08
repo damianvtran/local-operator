@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ from local_operator.secrets.access import open_store, session_id
 from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
 from local_operator.secrets.store import SecretRecord
+
+#: How long `broker stop`/`restart` waits for the daemon's socket to go away.
+#: Generous: the broker drains in-flight requests before exiting (§13), and a
+#: restart that raced a dying broker would leave the operator on the old one.
+_BROKER_STOP_TIMEOUT_S = 10.0
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -269,23 +275,46 @@ def _status(args: argparse.Namespace) -> int:
 
     directory = secrets_dir()
     mode = key_mode()
+    exists = (directory / "store.db").exists()
+    # Open the store FIRST when there is one, then sample the broker (QA Q3).
+    # `open_store` lazily starts a broker, so sampling first reported "not
+    # running" while this very command was starting one — wrong precisely on
+    # the first run after a reboot, which is when an operator most needs this
+    # diagnostic to be true.
+    #
+    # A failure to open is NOT fatal here, and that matters more than the
+    # ordering: `status` is the command an operator runs when the store is
+    # already misbehaving — locked, hardened-but-not-unlocked, permissions
+    # wrong — and it has to keep reporting the directory, the tier and the
+    # broker state in exactly those cases. Letting the exception escape would
+    # print nothing at all and exit 2 on a locked hardened store, which is the
+    # single case where the operator most needs to be told "locked — run
+    # `lop secret unlock`".
+    store = None
+    store_error: str | None = None
+    if exists:
+        try:
+            store = open_store()
+        except SecretStoreError as exc:
+            store_error = str(exc)
     broker = broker_status()
     payload: dict[str, Any] = {
         "directory": str(directory),
-        "exists": (directory / "store.db").exists(),
+        "exists": exists,
         "key_mode": mode,
         "broker_running": broker is not None,
         "broker_pid": (broker or {}).get("pid"),
         "broker_locked": (broker or {}).get("locked"),
     }
-    if payload["exists"]:
-        store = open_store()
+    if store is not None:
         payload["secrets"] = len(store.list())
         payload["key_generation"] = store.key_generation()
         ok, position, message = store.verify_audit()
         payload["audit_ok"] = ok
         payload["audit_message"] = message
         payload["audit_break_at"] = position
+    elif store_error is not None:
+        payload["store_error"] = store_error
 
     if args.json:
         print(json.dumps(payload, indent=2))
@@ -300,6 +329,13 @@ def _status(args: argparse.Namespace) -> int:
         print(f"broker      running, pid {payload['broker_pid']}{locked}")
     if not payload["exists"]:
         print("store       not created yet (lop secret set NAME creates it)")
+        return 0
+    if store is None:
+        # The store exists but could not be opened — almost always a hardened
+        # store that has not been unlocked this boot. Everything above still
+        # printed, which is the point: the operator learns the tier and the
+        # broker state, which is what tells them what to do next.
+        print(f"store       present but not readable: {store_error}")
         return 0
     print(f"secrets     {payload['secrets']}")
     print(f"key gen     {payload['key_generation']}")
@@ -510,8 +546,49 @@ def _unlock(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stop_broker(client: Any) -> bool | None:
+    """Stop a running broker. ``True`` stopped, ``None`` none ran, ``False`` failed.
+
+    Three outcomes rather than a bool because ``restart`` must continue after
+    "none was running" but abort after a real failure, and ``stop`` reports
+    those two differently.
+
+    Stopping waits for the socket to go away instead of returning the moment
+    SIGTERM is delivered: ``restart`` immediately starts another, and the lazy
+    start would otherwise find the dying broker's socket still present, decide
+    one is already running, and leave the operator on the OLD process — the
+    exact skew this verb exists to clear.
+    """
+    status = client.broker_status(None)
+    if status is None:
+        # Exit 0, deliberately (QA Q6). `stop` names a desired END STATE, and
+        # that state already holds — the daemon is started lazily and exits on
+        # its own idle timer, so "no broker" is its normal resting condition
+        # rather than an error. Returning non-zero would make every teardown
+        # script that stops a broker it did not start report a failure.
+        _err("No secret broker is running.")
+        return None
+    pid = status.get("pid")
+    if not isinstance(pid, int):
+        _err("The broker did not report a pid; not killing anything.")
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        _err(f"Could not stop the secret broker (pid {pid}): {exc}")
+        return False
+    deadline = time.monotonic() + _BROKER_STOP_TIMEOUT_S
+    while time.monotonic() < deadline and client.is_running(None):
+        time.sleep(0.05)
+    if client.is_running(None):
+        _err(f"The secret broker (pid {pid}) did not exit within {_BROKER_STOP_TIMEOUT_S:g}s.")
+        return False
+    _err(f"stopped secret broker (pid {pid})")
+    return True
+
+
 def _broker(args: argparse.Namespace) -> int:
-    """``lop secret broker {status,start,stop,run}``."""
+    """``lop secret broker {status,start,stop,restart,run}``."""
     from local_operator.secrets import broker as broker_module
     from local_operator.secrets import client
 
@@ -530,18 +607,22 @@ def _broker(args: argparse.Namespace) -> int:
         _err("Could not start the secret broker.")
         return 2
 
-    if command == "stop":
-        status = client.broker_status(None)
-        if status is None:
-            _err("No secret broker is running.")
-            return 0
-        pid = status.get("pid")
-        if not isinstance(pid, int):
-            _err("The broker did not report a pid; not killing anything.")
+    if command in ("stop", "restart"):
+        stopped = _stop_broker(client)
+        if stopped is False:
             return 2
-        os.kill(pid, signal.SIGTERM)
-        _err(f"stopped secret broker (pid {pid})")
-        return 0
+        if command == "stop":
+            return 0
+        # restart: the reason this verb exists is version skew, which
+        # AGENTS.md calls routine here because `lop-update` runs under live
+        # sessions. The broker's own protocol-mismatch error names it, so it
+        # has to exist (QA Q4).
+        if client.ensure_broker(None):
+            status = client.broker_status(None) or {}
+            _err(f"secret broker restarted (pid {status.get('pid', '?')})")
+            return 0
+        _err("Could not start the secret broker.")
+        return 2
 
     status = client.broker_status(None)
     if getattr(args, "json", False):

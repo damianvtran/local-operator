@@ -152,6 +152,10 @@ def add_parser(subparsers: Any) -> None:
     broker_actions.add_parser("start", help="Start a broker if one is not already running")
     broker_actions.add_parser("stop", help="Stop the running broker")
     broker_actions.add_parser(
+        "restart",
+        help="Stop the running broker and start a fresh one (use after `lop-update`)",
+    )
+    broker_actions.add_parser(
         "run", help="Run a broker in the foreground (for debugging; normally started on demand)"
     )
 
