@@ -35,6 +35,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.tui.app import RETAINED_PRESENTATIONS
 from local_operator.tui.session_presentation import (
     RETAIN_TEXT_BYTES,
     PreparedReplay,
@@ -132,13 +133,19 @@ def test_the_budget_still_refuses_a_payload_above_it():
     # below is derived from `RETAIN_TEXT_BYTES`, so they all scale with it and
     # stay green if the constant is raised 100x — which is exactly the
     # mis-tuning this file exists to catch, and it has already happened twice
-    # in the same direction. `RETAINED_PRESENTATIONS` (4) parked views each get
-    # this budget, so the retained-text ceiling is 4x it; on a host that has
-    # hit macOS "out of application memory", 4 MiB of retained text is the most
-    # that can be justified without a fresh RSS measurement.
+    # in the same direction. `RETAINED_PRESENTATIONS` parked views each get
+    # this budget, so the retained-text ceiling is N x it. On a host that has
+    # hit macOS "out of application memory", 12 MiB of retained text (12 views
+    # at 1 MiB, measured at +11-17 MB RSS for the whole cache at full
+    # occupancy) is the most that can be justified without a fresh RSS
+    # measurement; pin the PRODUCT so raising either factor alone trips this.
     assert RETAIN_TEXT_BYTES <= 4 * 1024 * 1024, (
         "the retain budget grew without a measurement: N x this bounds retained "
         "text, and this host has hit 'out of application memory'"
+    )
+    assert RETAINED_PRESENTATIONS * RETAIN_TEXT_BYTES <= 12 * 1024 * 1024, (
+        "the retained-text ceiling (views x per-view budget) grew without a "
+        "measurement; see RETAINED_PRESENTATIONS for the numbers that sized it"
     )
 
     text = "x" * (RETAIN_TEXT_BYTES + 64 * 1024)
