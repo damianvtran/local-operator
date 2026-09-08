@@ -547,9 +547,10 @@ The pieces, and what each guarantees:
     `AdapterDiscoveryError: adapter launch path has a symlink or lexical
     alias` before any spend. `--link-mode copy` does not change it (that
     governs the *package* store, not the interpreter shims), nor do
-    `--managed-python` or `--relocatable`; `--python-preference` is not a
-    `uv venv` flag at all. Use
-    `<base-python> -m venv --copies --without-pip <venv>`.
+    `--managed-python`, `--relocatable`, or the now-undocumented
+    `--python-preference only-managed` — which is still parsed and honoured
+    despite being absent from `uv venv --help` since `--managed-python`
+    superseded it. Use `<base-python> -m venv --copies --without-pip <venv>`.
   - **`venv --copies` copies the interpreter but not its runtime library.**
     On the uv-managed macOS toolchain the copied binary resolves
     `libpython3.12.dylib` through `@rpath` relative to the venv, so it dies at
@@ -558,16 +559,16 @@ The pieces, and what each guarantees:
     creating the venv. A venv whose interpreter cannot start is
     indistinguishable, from the batch log, from a harness bug.
 
-  **The adapter must be installed as a wheel, never `-e`.** An editable
-  install *does* write a `RECORD` — and `distribution_digest` hashes it
-  happily — but that RECORD covers only the `.pth` shim and the metadata
-  directory: it has **no rows under the package source**. So
-  `_resolve_module_artifact` finds no artifact for the entry module and
-  `discovery.py` raises `adapter entry module is not uniquely
-  RECORD-covered`. The error names RECORD coverage, not the editable install,
-  so read it as "the entry module's source is not listed", which is also what
-  it means in the rarer case of a genuinely malformed wheel. Build with
-  `uv build --wheel` and install the artifact.
+  - **The adapter must be installed as a wheel, never `-e`.** An editable
+    install *does* write a `RECORD` — and `distribution_digest` hashes it
+    happily — but that RECORD covers only the `.pth` shim and the metadata
+    directory: it has **no rows under the package source**. So
+    `_resolve_module_artifact` finds no artifact for the entry module and
+    `discovery.py` raises `adapter entry module is not uniquely
+    RECORD-covered`. The error names RECORD coverage, not the editable install,
+    so read it as "the entry module's source is not listed", which is also what
+    it means in the rarer case of a genuinely malformed wheel. Build with
+    `uv build --wheel` and install the artifact.
 
   `local-operator` itself may be editable without breaking discovery — only
   the adapter distribution is resolved this way — but installing it as a
