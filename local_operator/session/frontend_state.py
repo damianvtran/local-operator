@@ -2679,7 +2679,25 @@ class FrontendStateStore:
                 f"{name!r} is not a copy-free derived label; read it through `state` "
                 "so the caller cannot reach the store's own instance"
             )
-        return str(getattr(self._state, name))
+        # ENFORCED, not coerced, per the finding on review round 1: a `str()`
+        # here would silently stringify a label property whose return type
+        # drifted — a tuple-shaped label would render "(a, b)" and pass —
+        # masking the contract instead of upholding it. `str()` always builds
+        # a fresh string so it can never share state; the failure it hides is
+        # the CONTRACT one (a non-str is exactly the shape the allow-list's
+        # closure test exists to catch, and this is the boundary where a drift
+        # it missed must stop). `TypeError` at the boundary is the label
+        # sibling of `read_field`'s `KeyError` on a non-allowlisted name: the
+        # gate raises rather than papering over the input.
+        value = getattr(self._state, name)
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{name!r} is not a copy-free derived label: expected a freshly built "
+                f"str, got {type(value).__name__!r}. The value may be one of the "
+                "store's own objects rather than a derived label, so it must not "
+                "leave the store through this path."
+            )
+        return value
 
     @property
     def pending_gate(self) -> "PendingGateState | None":
