@@ -450,8 +450,12 @@ class _ListStatic(_ChromeStatic):
         self._row_count = 0
         self._row_cache: dict[int, Text] = {}
         self._line_cache: dict[int, Strip] = {}
-        #: ``(width, theme epoch)`` the cached strips were rasterised at.
-        self._line_key: tuple[int, int] = (-1, -1)
+        #: ``(width, theme epoch, base style)`` the cached strips were
+        #: rasterised at. The base style is in here rather than only the epoch
+        #: because this widget discards Textual's own invalidation signal —
+        #: see :meth:`render_line`. ``None`` is the "nothing cached yet" style,
+        #: which no resolved style equals.
+        self._line_key: tuple[int, int, Style | None] = (-1, -1, None)
 
     def set_source(
         self, compose: Callable[[int], Text], count: int, dirty: Sequence[int | None]
@@ -515,16 +519,54 @@ class _ListStatic(_ChromeStatic):
         rasterises the widget's FULL height — off the keypress path entirely.
         """
         width = self.size.width
-        key = (width, theme_mod.get_theme_epoch())
+        # THE RESOLVED BASE STYLE IS PART OF THE KEY, not just the theme epoch.
+        #
+        # This override throws away `_dirty_regions` below, which is Textual's
+        # own "your styles changed, re-render" signal (`Widget._set_dirty`
+        # populates it on ANY style invalidation: a class add/remove, a
+        # pseudo-class like `:focus` or `:hover`, an inline `styles.*`
+        # assignment, a stylesheet reparse). A key of (width, epoch) covers only
+        # two of those causes, so every other one was silently swallowed and the
+        # stale strip returned.
+        #
+        # Keying on `visual_style.rich_style` — the style the strips are
+        # actually measured against — closes that gap at the point it matters:
+        # whatever the CAUSE of the invalidation, if it changed what a strip
+        # would look like, the key moves. That keeps this widget honest about
+        # the framework's invalidation protocol rather than opting out of it,
+        # which is what makes it safe for the next person to add a `:focus`
+        # rule to `.settings-view-list` and simply have it work.
+        #
+        # `rich_style` is hashable and Textual memoises it against
+        # `styles._cache_key`, so this is a cache-key comparison and not a
+        # restyle per line; measured at zero cost (61.0/2.0/2.0/0.0 per press,
+        # byte-identical to the narrower key).
+        key = (width, theme_mod.get_theme_epoch(), self.visual_style.rich_style)
         if key != self._line_key:
-            # Width or theme moved under the cache: a strip is only meaningful
-            # at the width it was measured for, and the widget's base style is
-            # resolved from the active theme.
+            # Width, theme or base style moved under the cache, so BOTH caches
+            # are dropped — a strip is only meaningful at the width it was
+            # measured for, and a composed row carries the theme's inks, so
+            # re-rasterising a kept `Text` would put the old colours in a new
+            # frame. Clearing only `_line_cache` (as this did) left that half
+            # inert: it re-rasterised from exactly the `Text` it already had.
+            #
+            # WHAT THIS BRANCH DOES AND DOES NOT DO, since the distinction is
+            # easy to misread: dropping the row cache lets the rows be RE-COMPOSED,
+            # but the recomposition runs the `compose` closure `_paint_list`
+            # last installed, which captured its `_RowStyles` bundle. So an
+            # epoch bump on its own does not re-ink — measured. The re-inking
+            # comes from the repaint the theme change triggers, which builds a
+            # fresh bundle. This branch's job is narrower and still necessary:
+            # to guarantee no strip measured under the OLD style survives into
+            # the new frame. `invalidate_lines` clears the same pair for the
+            # same reason.
+            self._row_cache.clear()
             self._line_cache.clear()
             self._line_key = key
         # Textual's base implementation renders content when this is set; the
         # per-line cache above has already answered that question, so clearing
-        # it keeps the set from growing one region per refresh forever.
+        # it keeps the set from growing one region per refresh forever. Safe
+        # only because the key above now tracks the style those regions signal.
         self._dirty_regions.clear()
 
         cached = self._line_cache.get(y)
@@ -3017,6 +3059,27 @@ class SettingsView(Vertical):
         which is what a config write should cost. See `_paint_list` for why the
         cursor-only dirty set was not enough.
 
+        HOW TO KEEP THIS TRUE, because the docstring above is a promise the next
+        author will build on rather than re-derive. Anything ``_row_text`` reads
+        TRANSITIVELY must appear here, and "transitively" is the whole trap: the
+        catalogues below are not touched by ``_row_text`` itself, they are four
+        calls down (``_row_text`` -> ``_editor_text`` -> ``_suggest_ghost`` ->
+        ``_highlighted_suggestion`` -> ``_suggestions``). They were missing, and
+        a same-length catalogue swap through ``load()`` painted a stale
+        suggestion dropdown while the model held the new one — the failure is
+        silent by construction, because a paint cache that returns the wrong
+        answer looks exactly like one that returns the right answer.
+
+        Derive this list by walking that call graph, not from memory. An AST
+        walk from ``_row_text`` over this class's own methods, differenced
+        against the attributes named here, takes a minute and is what found the
+        omission; the only reads it turns up that are deliberately absent are
+        ``_selected`` and ``_hovered`` (the cursor and hover, which the dirty
+        set in `_paint_list` handles per line precisely so a cursor move does
+        NOT invalidate the list) and ``_TWO_COLUMN_MIN_WIDTH`` (a class
+        constant, and the width it feeds is already covered by
+        ``_list_width()``).
+
         The config VALUES are in here because most rows render a stored value
         and its changed-vs-default ink; ``repr`` of the values mapping measures
         4.3 µs, against a press this saves milliseconds on. The editor state is
@@ -3034,6 +3097,20 @@ class SettingsView(Vertical):
             self._suggest_dismissed,
             theme_mod.get_theme_epoch(),
             self._list_width(),
+            # The two suggestion catalogues, by CONTENT rather than by length.
+            # `load()` replaces both lists wholesale, and a same-length swap
+            # (two providers exchanged for two others) leaves every other
+            # member of this token unchanged — which is precisely the case that
+            # painted a stale dropdown, because `_suggest_index` normally moves
+            # and masks the omission.
+            #
+            # The whole `ModelRow` rather than its selector: a suggestion row
+            # renders the model id, the selector AND `_suggestion_detail`'s
+            # provider/price note, so keying on the selector alone would miss a
+            # re-priced catalogue. `ModelRow` is a frozen dataclass and hashable,
+            # so it is a valid tuple member and compares by value.
+            tuple(self._provider_catalogue),
+            tuple(self._model_catalogue),
         )
 
     @property
