@@ -399,12 +399,44 @@ on; upstream still combines it with the task's proxy hint. Explicit `false`
 sets the switch off regardless of that hint, and post-policy requirements no
 longer demand `OSWORLD_PROXY_CREDENTIALS` or `OSWORLD_PROXY_ENDPOINT`.
 
-**Enabled setup remains incomplete.** The legacy credential/endpoint declarations
-are retained for omission and enabled proxy tasks for compatibility, but are
-insufficient: upstream expects an actual `ProxyPool`; the adapter does not wire
-those `OSWORLD_PROXY_*` inputs into one. Setting `true` or supplying those inputs
-is not proof of a working proxy. A real enabled setup needs a separately reviewed
-follow-up; this change builds no proxy bridge and fabricates no credentials.
+**Enabled setup now works, through `PROXY_CONFIG_FILE`.** This was the
+"separately reviewed follow-up" this section previously called for.
+
+Upstream builds its pool at *module import*: `desktop_env/controllers/setup.py`
+calls `init_proxy_pool(PROXY_CONFIG_FILE)` at the top level, reading that name
+via `os.getenv` with a default of the **CWD-relative**
+`evaluation_examples/settings/proxy/dataimpulse.json`. The adapter worker is
+spawned `-I` from an arbitrary CWD, so that default never resolved, and
+`load_proxies_from_file` swallows the error into a log line — leaving an empty
+pool that only failed later, at `reset_start`, with the VM already billed. Two
+of the ten frozen pilot tasks died that way on every model tried.
+
+Pass an absolute path to an upstream proxy-pool JSON file:
+
+```sh
+--infra PROXY_CONFIG_FILE=/abs/path/to/proxies.json
+```
+
+The file is a JSON list of objects with at least `host` and `port`
+(`username`, `password`, `protocol` optional), exactly as
+`ProxyPool.load_proxies_from_file` parses it. It is validated **before
+allocation** — absolute, a regular file, readable, size-bounded, and shaped the
+way upstream actually accepts — so a bad path is a free refusal naming both
+ways out rather than a paid crash. Because upstream re-reads the path at import,
+validation cannot guarantee the bytes it will load; a file edited in between can
+still yield a degraded pool.
+
+`PROXY_CONFIG_FILE` is **required** for a task whose descriptor sets
+`proxy = True` unless `OSWORLD_ENABLE_PROXY=false` selects system-disabled mode.
+The requirement is enforced in `reset_start` rather than `prepare` because
+`PrepareParams` carries no `task_id`: at `prepare` the task's proxy hint is
+structurally unknowable, so a check there would pass every task it was meant to
+protect.
+
+`OSWORLD_PROXY_CREDENTIALS` is **no longer declared** — nothing in the package
+ever consumed it, and demanding a secret the apparatus cannot use trains an
+operator to fabricate one. `OSWORLD_PROXY_ENDPOINT` remains declared but
+optional, so existing invocations are accepted unchanged.
 
 The requested switch is sealed as `osworld_enable_proxy_override` via the same
 manifest disclosure table as the compute overrides. An older adapter that does

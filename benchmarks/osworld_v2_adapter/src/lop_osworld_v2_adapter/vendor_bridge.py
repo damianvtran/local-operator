@@ -28,6 +28,7 @@ inherit it. See ``adapter.OSWorldV2Adapter._install_judge_environment``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -73,13 +74,41 @@ SECRET_ENV_NAMES = frozenset({JUDGE_KEY_ENV, USER_SIM_KEY_ENV})
 # import succeeds. ``ENABLE_TTL=false`` is set for the same reason: OSWorld's
 # own TTL path is a warning-on-failure one we never rely on, and leaving it
 # enabled would race our own schedule with a second, unnamed one.
-_OSWORLD_IMPORT_ENV = ("AWS_REGION", "AWS_SUBNET_ID", "AWS_SECURITY_GROUP_ID")
+# Names upstream reads at MODULE IMPORT time rather than at call time.
+#
+# Both this tuple and ``_ENV_INJECTABLE`` feed the SAME condition below, so
+# membership in either injects the value identically -- the split is
+# documentation of WHEN upstream reads a name, not a mechanism that changes
+# behaviour. It earns its place because the two sets have different failure
+# modes when the adapter is refactored: injecting an import-time name after the
+# first ``desktop_env`` import is a silent no-op, not an error, so a future
+# change that moves injection later breaks these names and nothing else.
+#
+# PROXY_CONFIG_FILE is the case that cost a paid episode:
+# ``desktop_env/controllers/setup.py`` calls ``init_proxy_pool(PROXY_CONFIG_FILE)``
+# at import (module level), reading the name through ``os.getenv`` with a default
+# of the CWD-RELATIVE ``evaluation_examples/settings/proxy/dataimpulse.json``.
+# The adapter worker is spawned with ``-I`` from an arbitrary CWD, so that
+# relative default never resolves, ``load_proxies_from_file`` swallows the error
+# into a log line, the pool loads zero proxies, and every proxy-declaring task
+# dies at ``reset_start`` with "No proxy available from proxy pool" AFTER the VM
+# is already allocated and paid for.
+_OSWORLD_IMPORT_ENV = (
+    "AWS_REGION",
+    "AWS_SUBNET_ID",
+    "AWS_SECURITY_GROUP_ID",
+    "PROXY_CONFIG_FILE",
+)
 
 
 def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None:
     """Write non-secret infra values into the worker's own process env.
 
-    Called at the START of ``reset_start``, before any ``desktop_env`` import.
+    Called from ``prepare``, which is earlier than the old docstring claimed
+    and still strictly before any ``desktop_env`` import -- the only ordering
+    that matters, since several of these names are read by upstream at import
+    time and a later write would be a silent no-op.
+
     A value not on the closed injectable list is refused, so a secret named
     like an env var cannot leak into the process environment where a child
     process or a crash report would inherit it.
@@ -141,11 +170,39 @@ def instantiate_task(module_path: str, task_id: str) -> Any:
 
     from desktop_env.task_base import BaseTask  # type: ignore[import-not-found]
 
-    spec = importlib.util.spec_from_file_location(f"osworld_task_{task_id}", module_path)
+    module_name = f"osworld_task_{task_id}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot build an import spec for {module_path!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register BEFORE exec, which is what the import system itself does and
+    # what upstream's loader gets for free by going through ``import``.
+    # Skipping it breaks any task module combining ``from __future__ import
+    # annotations`` with ``@dataclass``: string annotations send dataclasses
+    # into ``_is_type``, which does ``sys.modules.get(cls.__module__)`` and
+    # then reads ``.__dict__`` on the result -- None for an unregistered
+    # module, so the task dies with a bare
+    # ``AttributeError: 'NoneType' object has no attribute '__dict__'``
+    # at reset_start, with the VM already allocated. Reproduced exactly:
+    # unregistered raises, registered imports cleanly.
+    #
+    # A SUCCESSFUL import stays registered -- that is the fix, not an
+    # oversight, and a module whose annotations are resolved lazily would break
+    # again if it were popped afterwards. Only a FAILED import is removed, so a
+    # half-initialised module is not left visible.
+    #
+    # Note what that removal actually does when the same task_id is imported
+    # twice: the assignment below has already displaced any earlier module
+    # object of this name, so a failed re-import unregisters the previously
+    # good one too. Harmless in the current one-episode-per-worker model (a
+    # live task object holds its own reference), but the pop is not a pure
+    # rollback and should not be read as one.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     get_task = getattr(module, "get_task", None)
     if callable(get_task):
         return get_task()

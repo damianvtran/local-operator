@@ -418,6 +418,14 @@ class OSWorldV2Adapter:
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
         provisioning.resolve_proxy_policy(params.infra_values)
+        # A SUPPLIED proxy config is validated here, at the earliest point that
+        # exists. This deliberately does NOT cover the absent-but-needed case:
+        # PrepareParams carries no task_id, so ``self._task`` is still None and
+        # the task's own proxy hint is unknowable at this boundary. Passing
+        # enable_proxy=False states that plainly instead of reading a hint that
+        # is always False and calling it a check. Requiredness is enforced in
+        # reset_start, after the task loads and still before allocation.
+        provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=False)
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
@@ -475,6 +483,31 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+        # The proxy pool, checked HERE rather than in prepare because prepare
+        # has no task: PrepareParams carries no task_id and self._task is first
+        # populated a few lines above, so a prepare-time check reads
+        # task_proxy=False for every task and cannot fire for the very tasks
+        # that need it. This is the same shape as the judge refusal directly
+        # above -- fail AFTER the task is known and BEFORE anything is
+        # allocated, so the refusal is free. Upstream would instead load an
+        # empty pool at import and crash mid-episode with the VM already
+        # billed.
+        # The CONJUNCTION, not the policy alone. ``resolve_proxy_policy``
+        # returns the override verbatim when one is supplied, so gating on it
+        # by itself would refuse every ORDINARY task whenever an operator set
+        # the run-wide OSWORLD_ENABLE_PROXY=true -- for want of a pool that
+        # task never touches. Upstream combines the two the same way
+        # (``desktop_env.py:321``: ``task_use_proxy = task_proxy and
+        # self.enable_proxy``) and so does this package's own requirements
+        # table (``requirements.py``: ``descriptor.proxy and enable_proxy``).
+        # Enforcement that disagrees with the declared requirements is worse
+        # than either rule alone: inspect_requirements would call the input
+        # optional and reset_start would then refuse the episode for missing
+        # it.
+        needs_proxy = bool(self._task.proxy) and provisioning.resolve_proxy_policy(
+            self._infra_values, task_proxy=bool(self._task.proxy)
+        )
+        provisioning.validate_proxy_config_file(self._infra_values, enable_proxy=needs_proxy)
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",

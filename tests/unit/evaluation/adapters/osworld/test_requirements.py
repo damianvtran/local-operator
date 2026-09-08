@@ -53,9 +53,32 @@ def test_plain_task_has_only_the_always_on_set() -> None:
     assert _names(fixtures.PLAIN) == _ALWAYS
 
 
-def test_proxy_task_adds_proxy_requirements() -> None:
-    names = _names(fixtures.PROXY)
-    assert {"OSWORLD_PROXY_CREDENTIALS", "OSWORLD_PROXY_ENDPOINT"} <= names
+def test_proxy_task_requires_the_pool_config_upstream_actually_reads() -> None:
+    """A proxy task must demand PROXY_CONFIG_FILE, and demand it as REQUIRED.
+
+    This is the only proxy input upstream consumes: it loads the pool from that
+    path at import of ``desktop_env.controllers.setup``. An absent pool is not a
+    degraded run, it is a guaranteed crash at ``reset_start`` with the VM
+    already paid for, so 'required' is the honest strength.
+    """
+    fields = _by_name(fixtures.PROXY)
+    assert fields["PROXY_CONFIG_FILE"] == ("infra", True)
+
+
+def test_proxy_task_no_longer_demands_the_credentials_nothing_consumes() -> None:
+    """OSWORLD_PROXY_CREDENTIALS is gone; OSWORLD_PROXY_ENDPOINT is optional.
+
+    Both were declared when no working proxy path existed. Nothing reads
+    CREDENTIALS at any call site, and ENDPOINT only reaches an env allowlist
+    upstream never consults -- upstream takes its endpoints from the pool file.
+    Demanding a secret the apparatus cannot use trains an operator to fabricate
+    one, and a fabricated credential that appears to work is worse than a
+    missing one. ENDPOINT stays declared-but-optional so an existing invocation
+    that still passes it is accepted unchanged.
+    """
+    fields = _by_name(fixtures.PROXY)
+    assert "OSWORLD_PROXY_CREDENTIALS" not in fields
+    assert fields["OSWORLD_PROXY_ENDPOINT"] == ("infra", False)
 
 
 def test_gitlab_task_adds_gitlab_requirements() -> None:

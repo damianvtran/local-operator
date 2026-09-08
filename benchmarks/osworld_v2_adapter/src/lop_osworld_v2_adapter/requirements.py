@@ -212,11 +212,22 @@ def derive_requirements(
     # --- Conditional on the task -------------------------------------------
 
     if descriptor.proxy and enable_proxy:
-        # Legacy declarations retained for compatibility, NOT working setup:
-        # upstream needs a ProxyPool and these inputs do not construct one.
-        # System-disabled mode must not demand credentials it cannot consume.
-        out.append(_requirement("OSWORLD_PROXY_CREDENTIALS", kind="secret", required=True))
-        out.append(_requirement("OSWORLD_PROXY_ENDPOINT", kind="infra", required=True))
+        # PROXY_CONFIG_FILE is what upstream ACTUALLY consumes: it loads the
+        # pool from this path at import of desktop_env.controllers.setup. It is
+        # required here because an absent pool is not a degraded run, it is a
+        # guaranteed crash at reset_start after the VM is paid for.
+        out.append(_requirement("PROXY_CONFIG_FILE", kind="infra", required=True))
+        # OSWORLD_PROXY_CREDENTIALS and OSWORLD_PROXY_ENDPOINT are NO LONGER
+        # required. They were declared when no working proxy path existed, and
+        # they are consumed by nothing: a grep of this package finds
+        # OSWORLD_PROXY_CREDENTIALS at no call site at all, and
+        # OSWORLD_PROXY_ENDPOINT only in the env-injection allowlist -- upstream
+        # reads neither, because it takes its endpoints from the pool file.
+        # Demanding a secret the apparatus cannot consume trains an operator to
+        # fabricate one, and a fabricated credential that "works" is worse than
+        # a missing one. They stay OPTIONAL so an existing invocation that
+        # supplies them is still accepted unchanged.
+        out.append(_requirement("OSWORLD_PROXY_ENDPOINT", kind="infra", required=False))
 
     if _has_config_type(descriptor, "googledrive", "login"):
         out.append(_requirement("GOOGLE_ACCOUNT_CREDENTIALS", kind="secret", required=True))

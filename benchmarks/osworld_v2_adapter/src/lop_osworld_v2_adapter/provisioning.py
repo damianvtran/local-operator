@@ -16,7 +16,10 @@ wrong AMI is a result nobody can reproduce.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
@@ -65,6 +68,14 @@ DEFAULT_REGION = "us-east-1"
 _DEFAULT_REGION = DEFAULT_REGION
 # The only screen geometry the V2 AMI map and the released IMAGE_ID_MAP carry.
 _SCREEN = (1920, 1080)
+
+# A proxy-pool config is a short JSON list of endpoints; anything larger is a
+# mistyped path (a log, a dataset) and is refused before it is parsed. This
+# bounds the READ, not the parse: a file just under the ceiling is still handed
+# to json.loads, and deeply nested JSON inside that budget still costs CPU. The
+# path is operator-supplied and parsed on the operator's own machine before any
+# cloud call, so the residual is self-inflicted rather than a exposure.
+_PROXY_CONFIG_MAX_BYTES = 1 << 20
 
 
 class ProvisioningError(ValueError):
@@ -186,6 +197,97 @@ def resolve_proxy_policy(
             "OSWORLD_ENABLE_PROXY requires benchmark_compute scope and exactly true or false"
         )
     return policies[0].value == "true"
+
+
+def validate_proxy_config_file(
+    infra_values: tuple[ScopedInfraValue, ...], *, enable_proxy: bool = False
+) -> str | None:
+    """Validate the upstream proxy-pool config path, or explain its absence.
+
+    Upstream resolves ``PROXY_CONFIG_FILE`` through ``os.getenv`` with a
+    CWD-RELATIVE default and loads it at module import, swallowing every
+    failure into a log line: a missing or malformed file yields an EMPTY pool
+    and the episode dies at ``reset_start`` with "No proxy available from proxy
+    pool" -- after the VM is allocated and billed. So this validates before
+    allocation, where a failure costs nothing, and requires an ABSOLUTE path:
+    a relative one would be resolved against whatever CWD the ``-I`` worker
+    happens to inherit, which is exactly the bug being fixed.
+
+    NOT a guarantee about the bytes upstream will load. This checks a PATH, and
+    upstream re-reads that path later, so the file can be replaced, truncated,
+    or chmod-ed in between; upstream also loads a MIXED file partially, leaving
+    a silently degraded pool rather than an empty one. Closing that window
+    would mean passing contents rather than a path, which upstream's
+    import-time ``os.getenv`` read gives us no way to do. What this does buy is
+    that the ordinary failures -- wrong path, unreadable file, wrong shape --
+    stop being discovered after the VM is billed.
+
+    Returns the validated path, or None when the input is absent. Absence is
+    only an error when the episode actually needs a proxy; that check belongs
+    to the caller, which knows the task's proxy hint and the policy override.
+    """
+
+    entries = [item for item in infra_values if item.name == "PROXY_CONFIG_FILE"]
+    if not entries:
+        if enable_proxy:
+            raise ProvisioningError(
+                "this task needs a system proxy but PROXY_CONFIG_FILE was not supplied; "
+                "pass an absolute path to an upstream proxy-pool JSON file, or set "
+                "OSWORLD_ENABLE_PROXY=false to select upstream's system-disabled mode"
+            )
+        return None
+    if len({item.value for item in entries}) != 1:
+        raise ProvisioningError("PROXY_CONFIG_FILE was supplied with conflicting values")
+    if any(item.purpose != "benchmark_compute" for item in entries):
+        raise ProvisioningError("PROXY_CONFIG_FILE requires benchmark_compute scope")
+
+    path = entries[0].value
+    if not os.path.isabs(path):
+        # Never echo the value: an operator can mistype a credentialed URL here.
+        raise ProvisioningError("PROXY_CONFIG_FILE must be an absolute path")
+    # Refuse a non-regular file WITHOUT a TOCTOU window, using the same idiom
+    # as ``ecosystem_instructions._read_instruction_file`` and
+    # ``evidence/store.py`` rather than inventing a second one. A plain
+    # ``isfile`` then ``open`` still races: a regular file swapped for a FIFO
+    # in between reaches the blocking open, and an ``O_RDONLY`` open on a FIFO
+    # blocks in the kernel until a writer appears -- so ``prepare`` hangs with
+    # no timeout above it, which is a strictly worse failure than a refusal and
+    # far harder to attribute. ``O_NONBLOCK`` is load-bearing, not tidiness: it
+    # makes the open return a descriptor immediately so ``S_ISREG`` is
+    # reachable at all. Regular files are unaffected by the flag, and it
+    # follows symlinks, so a symlink TO a regular file still works.
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ProvisioningError(
+            f"PROXY_CONFIG_FILE is not readable ({exc.__class__.__name__})"
+        ) from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ProvisioningError("PROXY_CONFIG_FILE must name a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(_PROXY_CONFIG_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ProvisioningError(
+            f"PROXY_CONFIG_FILE is not readable ({exc.__class__.__name__})"
+        ) from None
+    finally:
+        os.close(descriptor)
+    if len(raw) > _PROXY_CONFIG_MAX_BYTES:
+        raise ProvisioningError("PROXY_CONFIG_FILE is larger than the supported ceiling")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProvisioningError("PROXY_CONFIG_FILE is not valid UTF-8 JSON") from None
+    # Mirror ProxyPool.load_proxies_from_file: a list of objects with host+port.
+    # Upstream would accept the file and silently load zero usable proxies; the
+    # whole point of validating here is to refuse what it would swallow.
+    if not isinstance(parsed, list) or not parsed:
+        raise ProvisioningError("PROXY_CONFIG_FILE must be a non-empty JSON list")
+    for entry in parsed:
+        if not isinstance(entry, dict) or "host" not in entry or "port" not in entry:
+            raise ProvisioningError("PROXY_CONFIG_FILE entries need 'host' and 'port'")
+    return path
 
 
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
