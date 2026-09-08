@@ -9840,15 +9840,16 @@ async def test_model_default_on_a_cold_viewer_still_saves(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text("version: 0.0.0\nvalues:\n  hosting: openrouter\n")
     session = _ColdAsyncLabelSession()
+    before_label = session.model_label
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(110, 24)) as pilot:
         await _await_session(app, pilot)
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
-        text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default saved:") in text, text
-    assert _unwrapped("no runtime is running") not in text, text
+        notices = [block.text() for block in app.query(NoticeBlock)]
+    assert session.model_label == before_label
+    assert notices == ["boot default saved: anthropic/claude-fable-5-1 (new sessions)"], notices
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
 
