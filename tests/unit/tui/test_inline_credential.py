@@ -24,8 +24,9 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import CREDENTIAL_PLACEHOLDER, OperatorApp
 from local_operator.tui.widgets.editor import (
+    ASIDE_PLACEHOLDER,
     ATTACHMENT_MARKER,
     CREDENTIAL_KEY_PREFIX,
     Attachment,
@@ -33,14 +34,21 @@ from local_operator.tui.widgets.editor import (
     Marked,
     PastedCredential,
     PastedText,
+    _credential_label,
+    _paste_label,
     credential_payloads,
+    describe_unstored,
     expand_pastes,
     generate_credential_key,
     resolve_markers,
     strip_paste_citations,
     substitute_credentials,
 )
-from local_operator.variables import VariableStore, normalize_credential_key
+from local_operator.variables import (
+    CredentialStoreResult,
+    VariableStore,
+    normalize_credential_key,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_slash_echo import _boot
 
@@ -163,14 +171,23 @@ async def test_an_unarmed_paste_of_the_same_secret_is_left_alone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_mention_of_the_command_earlier_in_the_draft_does_not_arm() -> None:
-    """``/credential`` must be at the CARET, or an ordinary paste is captured."""
+async def test_a_mention_of_the_command_in_text_never_typed_through_the_arm_does_not_arm() -> None:
+    """A draft that ARRIVES holding the word never passed through the gesture.
+
+    Recalled history, a restored draft and a pasted paragraph all land through
+    ``load_text``, and none of them is the operator typing the arming gesture.
+    Arming is still :data:`CREDENTIAL_ARM` at the caret and nothing else — what
+    changed in design round 1 (D2) is how long an arm SURVIVES once taken, not
+    how one is taken.
+    """
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = app.query_one(Editor)
         editor.focus()
-        for char in "fix the /credential command please ":
-            await pilot.press(char)
+        editor.load_text("fix the /credential command please ")
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        assert not editor.credential_armed()
         app.post_message(events.Paste("an ordinary paste"))
         await pilot.pause()
         await pilot.pause()
@@ -593,3 +610,360 @@ async def test_a_session_without_a_store_says_so_instead_of_silently_dropping() 
         sent = " ".join(str(prompt) for prompt in session.prompts)
         assert SECRET not in sent
         assert "NOT stored" in sent, "the model must not be promised a key nothing holds"
+
+
+# -- the degraded store paths (review round 1 R1/R2, QA round 1 Q1-Q3) --------
+class _RefusingStore(VariableStore):
+    """A store that refuses named keys, so a PARTIAL store is reachable in test.
+
+    The shape this doubles is not hypothetical: a draft that spilled to the
+    sidebar's temp JSON comes back with ``value=""`` by design and the real
+    ``store_credential`` refuses a blank. This double reaches the same branch
+    without depending on the spill machinery, so the test pins the CITATION
+    rule rather than one route to it.
+    """
+
+    def __init__(self, *args, refuse: set[str] | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.refuse = refuse or set()
+
+    def store_credential(self, raw_key, value, source="command"):  # type: ignore[override]
+        if raw_key in self.refuse:
+            return CredentialStoreResult(ok=False, reason="empty-value")
+        return super().store_credential(raw_key, value, source)
+
+
+@pytest.mark.asyncio
+async def test_a_partial_store_never_advertises_the_key_that_did_not_land() -> None:
+    """THE regression test: some stored, some refused, each citation its own truth.
+
+    Two independent review streams found this one defect (review round 1 R1,
+    QA round 1 Q1): the guard was ``if not stored`` — the ALL-failed case — so a
+    single success rewrote EVERY citation to the confident "available to bash as
+    $KEY" form, including credentials the store had refused. The model was told
+    a secret was usable that ``credential_env()`` does not contain, and would
+    then debug an auth failure with no cause in the world it can see.
+
+    Asserted per citation, not in aggregate, because an aggregate assertion is
+    exactly the mistake the code made.
+    """
+    session = FakeSession()
+    # Seeded through the double's own lazy slot rather than the read-only
+    # property, so the refusing store IS the session's store everywhere.
+    session._variables = _RefusingStore(cwd="/tmp", env={})
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        await _armed_capture(pilot, editor, "client id ", secret="A" * 45)
+        # The FIRST capture is the one that will be refused, so the test also
+        # pins that the two citations are told apart by identity rather than by
+        # position — the failure mode a "first one wins" fix would still have.
+        first_key = next(
+            payload.key
+            for payload in editor._attachments.values()
+            if isinstance(payload, PastedCredential)
+        )
+        session.variables.refuse = {first_key}
+        for char in " and secret /credential ":
+            await pilot.press(char)
+        app.post_message(events.Paste("B" * 44))
+        await pilot.pause()
+        await pilot.pause()
+        for char in " for the oauth app":
+            await pilot.press(char)
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+
+        stored = session.variables.credential_names()
+        assert len(stored) == 1, "exactly one landed"
+        second_key = stored[0]
+        assert second_key != first_key
+
+        sent = " ".join(str(prompt) for prompt in session.prompts)
+        # The one that LANDED is advertised, with the env var the agent can use.
+        assert f"available to bash and eval as ${second_key}" in sent
+        # The one that did NOT is named as unstored, and its key is never
+        # offered to the agent in the confident form.
+        assert f"available to bash and eval as ${first_key}" not in sent
+        assert "NOT stored" in sent
+        # And the phantom key is not promised anywhere in the outgoing prompt.
+        assert first_key not in sent
+        assert "A" * 45 not in sent
+        assert "B" * 44 not in sent
+        # The operator's own words survive between the two citations.
+        assert "for the oauth app" in sent
+
+
+@pytest.mark.asyncio
+async def test_a_store_refusal_is_reported_to_the_operator_not_only_the_model() -> None:
+    """Q2: the composer clears and the marker vanishes — silence is not an option.
+
+    The viewer branch already emitted a notice; the refusal branch emitted
+    nothing, so an operator whose store said no was left believing they had
+    handed over a credential.
+    """
+    session = FakeSession()
+    # Seeded through the double's own lazy slot rather than the read-only
+    # property, so the refusing store IS the session's store everywhere.
+    session._variables = _RefusingStore(cwd="/tmp", env={})
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        await _armed_capture(pilot, editor, "deploy with ")
+        key = next(
+            payload.key
+            for payload in editor._attachments.values()
+            if isinstance(payload, PastedCredential)
+        )
+        session.variables.refuse = {key}
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+        painted = _painted(app)
+        assert "could not be stored" in painted, "the OPERATOR is told, not just the model"
+        assert key in painted, "…and which credential it was"
+        assert SECRET not in painted
+
+
+def test_the_refusal_phrase_names_the_cause_that_actually_applied() -> None:
+    """Q3: "no session store available" is false when a store refused the write."""
+    assert "no session store available" in describe_unstored(None)
+    # A present store that refused must not blame an absent one.
+    refused = describe_unstored("empty-value")
+    assert "no session store available" not in refused
+    assert "NOT stored" in refused, "the outcome leads, whatever the cause"
+
+
+# -- the armed state is legible and cannot be disarmed by accident (D1/D2) ----
+@pytest.mark.asyncio
+async def test_the_arm_survives_a_newline_and_a_typed_word() -> None:
+    """D2: the two ordinary edits that used to disarm SILENTLY into a plaintext paste.
+
+    The failure is asymmetric — a false negative puts the secret on screen and
+    in scrollback where nothing can recall it, while a false positive costs one
+    backspace — so the arm survives ordinary typing and only a flag ends it.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        assert editor.credential_armed()
+        await pilot.press("shift+enter")
+        assert editor.credential_armed(), "a newline must not disarm"
+        for char in "the prod key ":
+            await pilot.press(char)
+        assert editor.credential_armed(), "typing a description must not disarm"
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text, "the secret must NOT be in the buffer"
+        assert "[Credential #1, 64 chars]" in editor.text
+
+
+@pytest.mark.asyncio
+async def test_a_flag_argument_disarms_so_the_command_verbs_stay_reachable() -> None:
+    """The one continuation that is unambiguously the COMMAND, not a description.
+
+    Credential verbs are flag-shaped precisely so they cannot collide with a
+    key (keys normalize to ``[A-Z0-9_]`` and cannot begin with ``-``), so a
+    leading ``-`` is a safe partition.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential ":
+            await pilot.press(char)
+        assert editor.credential_armed()
+        await pilot.press("-")
+        assert not editor.credential_armed(), "an argument is the command, not an arm"
+
+
+@pytest.mark.asyncio
+async def test_the_armed_token_is_painted_even_mid_line() -> None:
+    """D2: mid-line arming is the headline of the gesture and had NO ink at all.
+
+    ``_compute_slash_runs`` is a leading-command rule, so a mid-line
+    ``/credential`` returned ``None`` and the composer was byte-identical armed
+    and disarmed.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        runs = editor._slash_runs()
+        assert runs is not None, "a mid-line arm must paint"
+        line, spans = runs
+        assert line == 0
+        assert [component for _, _, component in spans] == ["text-area--credential-armed"]
+        start, end, _ = spans[0]
+        assert editor.text[start:end].startswith("/credential")
+
+
+@pytest.mark.asyncio
+async def test_arming_suppresses_the_destructive_argument_rows() -> None:
+    """D1: arm + Enter + Enter used to complete and RUN ``--forget-all``.
+
+    The row was preselected with a ghost under the caret, no confirmation and
+    no undo, and Tab on the same row consumed the arming token so the next
+    paste landed in plaintext. Both keys act on a highlighted row, so removing
+    the rows while armed closes both.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        # Seed a live credential so a wipe would be visible.
+        session.variables.store_credential("LOP_SECRET_LIVEKEY1", "kept", "command")
+        for char in "/credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.credential_armed()
+        assert editor.picker.highlighted_name() is None, "no row is preselected while armed"
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert session.variables.credential_names() == [
+            "LOP_SECRET_LIVEKEY1"
+        ], "the live credential survives the reflex double-Enter"
+
+
+@pytest.mark.asyncio
+async def test_tab_while_armed_cannot_consume_the_token_into_a_plaintext_paste() -> None:
+    """D1(b): Tab accepted the ghost, which disarmed, and the next paste leaked."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("tab")
+        for _ in range(4):
+            await pilot.pause()
+        assert "--forget-all" not in editor.text, "no ghost to accept"
+        assert editor.credential_armed(), "Tab must not silently disarm"
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text
+        assert SECRET not in _painted(app)
+
+
+# -- the small ones (R3, R5, D3, D6) ------------------------------------------
+def test_a_generated_key_avoids_names_the_session_store_already_holds() -> None:
+    """R3: the composer's own map resets each submit, so it cannot be the whole set."""
+    taken = {f"{CREDENTIAL_KEY_PREFIX}{'A' * 8}"}
+    for _ in range(50):
+        assert generate_credential_key(taken) not in taken
+
+
+def test_a_multi_line_secret_reports_characters_not_lines() -> None:
+    """R5: a line count is the weakest integrity check exactly where it matters.
+
+    A PEM block reads ``27 lines`` whether or not its tail arrived; the
+    character count moves for every lost byte, and the length is the operator's
+    only channel for noticing a wrong or truncated capture.
+    """
+    pem = "-----BEGIN KEY-----\n" + "\n".join("x" * 40 for _ in range(6)) + "\n-----END KEY-----"
+    assert "lines" not in _credential_label(pem)
+    assert _credential_label(pem) == f"{len(pem)} chars"
+    # The paste vocabulary is deliberately unchanged for ordinary pastes.
+    assert _paste_label(pem).endswith("lines")
+
+
+@pytest.mark.asyncio
+async def test_a_blank_paste_while_armed_says_so_and_stays_armed() -> None:
+    """D3: the operator who fumbled the copy saw neither "captured" nor "failed"."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "/credential ":
+            await pilot.press(char)
+        app.post_message(events.Paste("   \n  "))
+        for _ in range(6):
+            await pilot.pause()
+        assert not editor._attachments
+        assert editor.credential_armed(), "the arm survives, and the notice says so"
+        assert "still armed" in _painted(app)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_r_on_a_credential_says_why_instead_of_doing_nothing() -> None:
+    """D6: a bare SkipAction left a byte-identical frame, read as a missed key."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        await _armed_capture(pilot, editor, "deploy with ")
+        editor.move_cursor(editor._offset_to_location(editor.text.index("[Credential") + 2))
+        # The ACTION, as its sibling test drives it: `pilot.press("ctrl+r")`
+        # does not reach the binding under this host, and the refusal (a
+        # SkipAction that falls through the binding chain) is the behaviour
+        # being asserted around.
+        with pytest.raises(SkipAction):
+            editor.action_expand_paste()
+        for _ in range(8):
+            await pilot.pause()
+        painted = _painted(app)
+        assert SECRET not in editor.text, "the refusal still holds"
+        assert SECRET not in painted
+        assert "can't be expanded" in painted
+
+
+@pytest.mark.asyncio
+async def test_arming_does_not_relabel_a_composer_another_mode_owns() -> None:
+    """The placeholder is a SHARED channel; the armed copy only borrows it.
+
+    Bang-mode, the aside and the read-only subagent page each own the
+    placeholder in their own mode, so restoring the RESTING copy on disarm
+    would silently relabel a surface this feature has no business touching.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        editor.placeholder = ASIDE_PLACEHOLDER
+        for char in "/credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.credential_armed()
+        assert editor.placeholder == ASIDE_PLACEHOLDER, "the aside keeps its own voice"
+        await pilot.press("-")
+        for _ in range(4):
+            await pilot.pause()
+        assert not editor.credential_armed()
+        assert editor.placeholder == ASIDE_PLACEHOLDER, "…and keeps it on the way out"
+
+        editor.load_text("")
+        editor.placeholder = editor.resting_placeholder
+        await pilot.pause()
+        for char in "/credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.placeholder == CREDENTIAL_PLACEHOLDER, "a resting composer does say it"

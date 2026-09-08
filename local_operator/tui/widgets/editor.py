@@ -520,6 +520,26 @@ def _paste_label(payload: str) -> str:
     return f"{len(payload)} chars"
 
 
+def _credential_label(value: str) -> str:
+    """A credential's receipt tail: ALWAYS ``<n> chars``, never ``<n> lines``.
+
+    Deliberately NOT :func:`_paste_label`, which is the only place this feature
+    departs from the paste vocabulary, and the departure is the point. The two
+    labels answer different questions. A paste's label describes what the user
+    watched scroll off the field, and a line count is the right unit for that.
+    A credential's label is an INTEGRITY CHECK: with the value gone from the
+    buffer and ``ctrl+r`` refusing to put it back, the length is the operator's
+    only opportunity to notice that what got captured is not what they meant to
+    capture (a truncated token, the wrong clipboard).
+
+    A line count is a much weaker check than a character count for exactly the
+    payloads where truncation is hardest to spot — a PEM block or a multi-line
+    service-account key read ``27 lines`` whether or not the tail arrived, while
+    the character count moves for every lost byte (agent review round 1, R5).
+    """
+    return f"{len(value)} chars"
+
+
 #: The arming token, matched case-insensitively at a word boundary anywhere in
 #: the line. The ALIAS is included because ``/cred`` completes to ``credential``
 #: in the picker but a user who typed the alias and pasted without completing
@@ -530,10 +550,43 @@ def _paste_label(payload: str) -> str:
 #: it would glue the marker onto the previous word.
 CREDENTIAL_ARM = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)[ \t]*$", re.IGNORECASE)
 
+#: The same token WITHOUT the end-of-line anchor, used to RE-LOCATE a token
+#: that has already armed. Arming itself still asks :data:`CREDENTIAL_ARM`, so
+#: ``fix the /credential command`` typed as prose never arms; this one only
+#: answers "where did the token I already armed on move to" after the operator
+#: kept typing (design round 1, D2).
+#:
+#: The negative lookahead is the same partition ``CREDENTIAL_ARM``'s ``[ \t]*$``
+#: draws: ``/credential`` and ``/cred`` are the token, ``/credentials`` is not.
+CREDENTIAL_TOKEN = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)(?!\S)", re.IGNORECASE)
+
+#: What DISARMS a latched capture: a flag-shaped argument on the token's own
+#: line. Nothing else does — see :meth:`Editor._sync_credential_arm`.
+#:
+#: The arm has to survive ordinary typing, because the failure it prevents is
+#: ASYMMETRIC: a false negative ("I thought I was armed") puts the secret on
+#: screen and in scrollback and cannot be undone, while a false positive costs
+#: one backspace. Under the original end-of-line rule a newline or one more
+#: typed word silently disarmed and the next paste landed in plaintext, with
+#: nothing on screen having changed (design round 1, D2 — reproduced on the
+#: real app in both forms).
+#:
+#: A LEADING ``-`` is the one continuation that is unambiguously the COMMAND
+#: rather than a description, and it is unambiguous by construction: the
+#: credential verbs are flag-shaped (``--forget``, ``--forget-all``) precisely
+#: so they can never collide with a key, because keys normalize to
+#: ``[A-Z0-9_]`` and cannot begin with ``-`` (see ``variables.py``). So the
+#: operator who wants the destructive verb still reaches it by typing it, and
+#: the operator writing ``deploy with /credential the prod key`` stays armed.
+CREDENTIAL_ARGUMENT = re.compile(r"[ \t]+-", re.IGNORECASE)
+
 #: Random-name alphabet: Crockford-ish base32 WITHOUT the letters that read as
 #: digits. The name is quoted back to the operator in a notice and may be typed
-#: into a shell by hand, so ``0/O`` and ``1/I/L`` confusions are worth the two
-#: bits of entropy they cost. 8 chars over this 32-symbol alphabet is 40 bits.
+#: into a shell by hand, so ``0/O`` and ``1/I/L`` confusions are worth the
+#: entropy they cost. THIRTY symbols, not 32 — the exclusions are ``O``, ``I``,
+#: ``L``, ``U``, ``0`` and ``1`` against base32's own 32 — so 8 characters is
+#: **39.3 bits**, not the 40 an earlier comment claimed by counting the
+#: alphabet it described rather than the one it defines (review round 1, R3).
 _KEY_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
 
 #: Prefix from ``docs/design/secret-store.md`` §11. Env-var-shaped so the name
@@ -547,12 +600,21 @@ def generate_credential_key(taken: Iterable[str] = ()) -> str:
     """A fresh ``LOP_SECRET_XXXXXXXX`` name, avoiding ``taken``.
 
     The operator does not invent a name for an inline capture — that is the
-    point of the gesture — so the store does. 40 bits makes a collision
+    point of the gesture — so the store does. 39.3 bits makes a collision
     negligible, but ``taken`` is still consulted rather than trusted to
     probability: a collision would SILENTLY REPLACE a live credential
     (``store_credential`` overwrites), and a secret the operator handed over
     ten minutes ago disappearing is not a failure mode worth a birthday-paradox
     argument. Bounded retries, then a widened name, so this can never spin.
+
+    ``taken`` MUST include the credentials the session store already holds, not
+    only the ones this composer is carrying. The composer's map resets on every
+    submit (:meth:`Editor.clear_content`), so a set drawn from it alone cannot
+    see the credential the operator handed over ten minutes ago — which is
+    precisely the live credential this guard exists to protect. Passing only
+    the composer's own keys made the guard narrower than the argument above,
+    reducing it to the probability bet the argument declines to make (review
+    round 1, R3). :meth:`Editor._capture_credential` unions both sets.
 
     ``secrets`` rather than ``random``: this names a credential, and a
     predictable name lets anything that can read the model's context guess the
@@ -588,7 +650,42 @@ def credential_payloads(text: str, attachments: Mapping[int, Marked]) -> list[Pa
     return [payload for _, payload in sorted(cited, key=lambda item: item[0])]
 
 
-def substitute_credentials(text: str, attachments: Mapping[int, Marked]) -> str:
+def describe_unstored(reason: str | None) -> str:
+    """The citation a credential gets when its value did NOT reach the store.
+
+    ONE authority for the phrase, because two paths write it — the whole-message
+    degrade (:meth:`OperatorApp._mark_credentials_unstored`) and the
+    per-credential rewrite below — and a model reading two different sentences
+    for one outcome would have to guess whether they mean different things.
+
+    ``reason`` is ``None`` when there is no store on this side at all (a viewer,
+    or a session still starting) and a
+    :data:`~local_operator.variables.CredentialStoreFailure` when a store was
+    present and refused the write. Naming which is not cosmetic: the phrase used
+    to hard-code "no session store available" for both, so a present store
+    refusing an empty value told the model the store was unavailable and sent
+    any diagnosis after the wrong subsystem (QA round 1, Q3).
+
+    In every form the sentence states the OUTCOME the agent must act on — there
+    is no usable credential here — before it explains the cause, because an
+    agent that reads only the first clause must still not go hunting an env var
+    nobody set.
+    """
+    if reason is None:
+        return "[credential NOT stored — no session store available]"
+    if reason == "empty-key":
+        return "[credential NOT stored — the store rejected its name]"
+    # `empty-value`, the reachable one: a draft that spilled to disk comes back
+    # without its bytes by design, and the store refuses a blank rather than
+    # holding an empty env var a tool would silently fall back from.
+    return "[credential NOT stored — its value did not survive; ask the operator to paste it again]"
+
+
+def substitute_credentials(
+    text: str,
+    attachments: Mapping[int, Marked],
+    refused: Mapping[str, str] | None = None,
+) -> str:
     """``text`` with each credential citation rewritten to NAME the credential.
 
     The one transformation a credential marker gets on its way to the model,
@@ -610,6 +707,19 @@ def substitute_credentials(text: str, attachments: Mapping[int, Marked]) -> str:
     :func:`expand_pastes` documents: only the app's OWN citation is rewritten
     (a hand-typed lookalike is prose), and an ascending walk would invalidate
     every later offset.
+
+    ``refused`` maps a key to why the store would not take it. EVERY citation is
+    rewritten either way — leaving one alone would send a composer-local
+    ``[Credential #1, 52 chars]`` the model cannot use — but a refused one gets
+    :func:`describe_unstored` instead of the confident form. Taking the outcome
+    PER PAYLOAD is the fix for the defect two independent review streams found:
+    the caller used to decide once for the whole message, so one refusal among
+    several successes still advertised ``$LOP_SECRET_…`` for a key nothing held
+    (review round 1 R1, QA round 1 Q1).
+
+    Defaulted to ``None`` so the pure-success call site and every existing test
+    read unchanged — an empty map means every citation stored, which is the
+    overwhelmingly common case.
     """
     spans = [
         (span, payload)
@@ -618,10 +728,14 @@ def substitute_credentials(text: str, attachments: Mapping[int, Marked]) -> str:
         and (span := cite(text, index, payload)) is not None
     ]
     for (start, end), payload in sorted(spans, reverse=True):
-        named = (
-            f"[credential {payload.key} ({_paste_label(payload.value)}) — available to "
-            f"bash and eval as ${payload.key}; its value cannot be read]"
-        )
+        reason = (refused or {}).get(payload.key)
+        if reason is not None:
+            named = describe_unstored(reason)
+        else:
+            named = (
+                f"[credential {payload.key} ({_credential_label(payload.value)}) — available to "
+                f"bash and eval as ${payload.key}; its value cannot be read]"
+            )
         text = text[:start] + named + text[end:]
     return text
 
@@ -1132,6 +1246,18 @@ class EditorPasteEmpty(Message):
       user cannot see until they read back what they sent; named rather than
       collapsed into ``"nothing"``, because the clipboard was not empty (code
       round 2, F7).
+    * ``"credential-blank"`` — a paste made while a capture was ARMED carried
+      no value. The one reason on this message that is not about the clipboard
+      being unreadable: the payload arrived and was declined, because a
+      zero-length credential would advertise a key that can never hold
+      anything. It rides here because it is the same shape as every other
+      reason — a gesture the operator performed that produces no visible
+      response — and the notice must also say the arm SURVIVED (design round 1,
+      D3).
+    * ``"credential-sealed"`` — ``ctrl+r`` was pressed on a credential chip.
+      The refusal is a security property (that key is the one gesture that puts
+      a payload back in the visible buffer), but a silent refusal reads as a
+      missed keystroke, so it is stated (design round 1, D6).
     * ``"timeout"`` — the clipboard did not answer inside
       :data:`~local_operator.clipboard.CLIPBOARD_TIMEOUT_S`. Also not a
       statement about what was on it. Split out of ``"nothing"`` because the
@@ -1214,6 +1340,32 @@ class StopRequested(Message):
 
     def __init__(self) -> None:
         super().__init__()
+
+
+class CredentialArmChanged(Message):
+    """Posted when the composer arms (or disarms) an inline credential capture.
+
+    The armed state changes what the next PASTE means, so it owes the operator
+    the same legibility bang-mode owes them for what the next ENTER means — and
+    for a sharper reason: bang-mode's worst misread runs a command the user can
+    see, while a misread arm puts a plaintext secret in scrollback that no
+    keystroke can recall (design round 1, D2).
+
+    The editor owns the STATE (it alone sees the paste and the token) and the
+    app owns the VOICE, the same split :class:`EditorPasteEmpty` and
+    :class:`ShellModeChanged` already draw.
+
+    ``reason`` is why the arm ENDED, and is empty on the arming edge. The app
+    speaks only for a disarm the operator might not expect: ``"captured"``
+    needs no words (the marker is the receipt) and ``"gone"`` was the operator
+    deleting the token, but ``"argument"`` is the one where they typed on and
+    the mode changed under them.
+    """
+
+    def __init__(self, active: bool, *, reason: str = "") -> None:
+        super().__init__()
+        self.active = active
+        self.reason = reason
 
 
 class ShellModeChanged(Message):
@@ -1693,6 +1845,7 @@ class Editor(TextArea):
         "text-area--slash-command",  # recognized /command word
         "text-area--slash-argument",  # recognized team/agent NAME
         "text-area--slash-unknown",  # a leading /word that is NOT a command
+        "text-area--credential-armed",  # a /credential token arming a capture
     }
 
     def __init__(
@@ -1909,6 +2062,15 @@ class Editor(TextArea):
         #: the start of a question. Default on; the main chat is the only
         #: surface that runs commands.
         self._allows_shell = True
+        #: Buffer offsets of the ``/credential`` token that has ARMED the next
+        #: paste, or ``None``. Latched (see :meth:`_arm_credential`) rather
+        #: than re-derived at paste time, because an invisible rule that
+        #: silently stops matching is a safety property that silently stops
+        #: holding: under the derive-per-paste version a newline or one more
+        #: typed word disarmed with the frame unchanged, and the next paste put
+        #: the secret on screen (design round 1, D2). The app follows via
+        #: :class:`CredentialArmChanged`, exactly as it follows bang-mode.
+        self._credential_arm: tuple[int, int] | None = None
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -2390,6 +2552,12 @@ class Editor(TextArea):
         self._attachments.clear()
         self._draft_attachments.clear()
         self._next_marker = 1
+        # The arm belongs to the text that armed it. A submit or a `/clear`
+        # takes that text away, so leaving the latch set would carry "the next
+        # paste is a secret" into a buffer the operator never typed a gesture
+        # into — the false POSITIVE direction, which costs a backspace rather
+        # than a leak, but is still a mode nothing on screen would explain.
+        self._disarm_credential("gone")
 
     def begin_model_query(self) -> None:
         """Put the buffer into the state that shows the model list.
@@ -3656,6 +3824,11 @@ class Editor(TextArea):
             self._picker.mode,
             self._picker.is_open(),
             self._picker.is_pending(),
+            # The armed span is an input to the runs now (see
+            # `_compute_slash_runs`), and it is the one input that can change
+            # while the buffer does not — so it has to be in the key or the
+            # armed ink would lag its own state by a keystroke.
+            self._credential_arm,
         )
         cached = self._slash_runs_cache
         if cached is not None and cached[0] == key:
@@ -3675,6 +3848,29 @@ class Editor(TextArea):
         be sent — EXCEPT while the command picker is still choosing (``/te``),
         where the word is a prefix in progress, not yet a typo.
         """
+        # THE ARMED TOKEN FIRST, and returned on its own, because it is not a
+        # leading-command rule and every rule below is. `/credential` typed
+        # mid-line is the headline of this gesture and got NO ink at all: the
+        # composer looked identical armed and disarmed, which is exactly what
+        # made a silent disarm unreadable (design round 1, D2).
+        #
+        # It also OUTRANKS the leading-command highlight for the same token,
+        # which is a correction rather than a preference. `text-area--slash-
+        # command` says "this is a recognized command that will run", and an
+        # ARMED token is precisely what will NOT run — it is consumed by the
+        # capture (see `_credential_arm_span`). Painting the two states
+        # identically is the false-negative direction: the operator reads
+        # "command recognized" and cannot tell whether the next paste is
+        # captured or lands in plaintext.
+        if self._credential_arm is not None:
+            start, end = self._credential_arm
+            before = self.text[:start]
+            line_index = before.count("\n")
+            line_start = len(before) - len(before.rpartition("\n")[2])
+            return (
+                line_index,
+                [(start - line_start, end - line_start, "text-area--credential-armed")],
+            )
         lines = self.text.split("\n")
         first = next((i for i, line in enumerate(lines) if line.strip()), None)
         if first is None:
@@ -4574,7 +4770,7 @@ class Editor(TextArea):
         neither; the receipt the operator needs is the marker itself, which is
         already in the buffer where they are looking.
         """
-        arm = self._credential_arm_span()
+        arm = self._credential_arm
         if arm is not None:
             captured = self._capture_credential(event.text)
             if captured is not None:
@@ -4600,6 +4796,14 @@ class Editor(TextArea):
             # Empty/whitespace-only while armed: fall through, so the operator
             # gets the characters they actually copied rather than a
             # zero-length credential. See :meth:`_capture_credential`.
+            #
+            # Falling through is still the right DECISION, but it used to be a
+            # SILENT one: the operator who fumbled the copy (took the trailing
+            # selection, not the token) saw a frame that was neither "captured"
+            # nor "failed", and nothing said the arm had survived (design round
+            # 1, D3). Posted before the fall-through so the notice describes the
+            # gesture they made rather than the whitespace that lands.
+            self.post_message(EditorPasteEmpty(reason="credential-blank"))
         if not event.text.strip():
             # A payload with no text in it is the clipboard-image signal. The
             # clipboard is consulted, but the event is consumed ONLY if that
@@ -5016,6 +5220,18 @@ class Editor(TextArea):
             # buffer, and the whole point of the capture is that the secret is
             # out of the buffer. The escape hatch for a credential pasted by
             # mistake is backspace, which forgets it (`_release_uncited`).
+            #
+            # SAID OUT LOUD, unlike the other two refusals this branch serves.
+            # A bare SkipAction leaves the frame byte-unchanged, and every other
+            # marker kind answers this key — so the operator's read is "the
+            # keystroke missed" and the natural next move is to press it again
+            # or hunt the marker with the mouse (design round 1, D6). One
+            # sentence turns a dead key into a statement of the security
+            # property AND advertises the recovery gesture. An image marker
+            # keeps the silent refusal: nothing was ever hidden there, so there
+            # is no property to state and no recovery to point at.
+            if isinstance(pasted, PastedCredential):
+                self.post_message(EditorPasteEmpty(reason="credential-sealed"))
             raise SkipAction()
         # Dropped BEFORE the edit. `edit()` runs `_release_uncited` over the
         # attachments this removal touches, and the entry is gone by then
@@ -5060,6 +5276,150 @@ class Editor(TextArea):
         result = self._replace_via_keyboard(pasted, *self.selection)
         if result is not None:
             self.move_cursor(result.end_location)
+
+    def credential_armed(self) -> bool:
+        """True while the next paste will be captured as a secret.
+
+        The PUBLIC read of the armed state, for the app (which paints the
+        chevron and the placeholder from it) and for tests. A property of the
+        composer, exactly as :attr:`shell_mode` is, and for the same reason:
+        it changes what the next gesture MEANS, so it must be legible without
+        the picker — which Esc dismisses (design round 1, D2).
+        """
+        return self._credential_arm is not None
+
+    def _credential_names_taken(self) -> frozenset[str]:
+        """Every credential name a fresh key must avoid.
+
+        The union of this composer's own captures and the names the SESSION
+        STORE already holds. The composer's map resets on every submit, so it
+        alone cannot see the credential the operator handed over ten minutes
+        ago — the exact live credential a collision would silently replace
+        (review round 1, R3).
+
+        Reached through the app by ``getattr`` rather than an import: this
+        widget is imported BY the app, so it cannot import it back, and the
+        same duck-typed reach is how :meth:`_submit` asks about submission
+        blocking. Any failure degrades to the composer-local set, which is the
+        behaviour before this guard existed — a name generator must never be
+        the thing that fails a capture whose secret is already out of the
+        buffer.
+        """
+        taken = {
+            payload.key
+            for payload in self._attachments.values()
+            if isinstance(payload, PastedCredential)
+        }
+        names = getattr(self.app, "session_credential_names", None)
+        if callable(names):
+            try:
+                # Untyped by construction — the host may be any App (the
+                # widget's own test host has no such method), so the result is
+                # narrowed here rather than trusted.
+                reported = names()
+                if isinstance(reported, (list, tuple, set, frozenset)):
+                    taken.update(str(name) for name in reported)
+            except Exception:  # noqa: BLE001 — an unreadable store is an empty set
+                # Not logged here: the app-side helper already logs the store
+                # read it owns, and this widget has no logger of its own. A
+                # second record of one failure is noise, and the degraded
+                # behaviour (a composer-local `taken` set) is the documented
+                # fallback rather than an error.
+                pass
+        return frozenset(taken)
+
+    def _arm_credential(self, span: tuple[int, int]) -> None:
+        """LATCH the armed state onto the token at ``span``.
+
+        Latched rather than re-derived per paste because the whole defect D2
+        names is that the derivation is invisible: the operator cannot read
+        an end-of-line anchor off the screen, so a rule that quietly stops
+        matching is a rule that quietly drops the safety property. Once
+        latched, only :meth:`_disarm_credential` ends it, and every route
+        through it is either the capture itself or something the operator can
+        see.
+        """
+        if self._credential_arm == span:
+            return
+        self._credential_arm = span
+        self._invalidate_slash_runs()
+        self.post_message(CredentialArmChanged(True))
+
+    def _disarm_credential(self, reason: str) -> None:
+        """End the armed state, saying WHY so the app can speak for it.
+
+        ``reason`` is ``"captured"`` (the secret landed — the marker is the
+        receipt, so nothing more is said), ``"argument"`` (the operator typed a
+        flag, so they are addressing the command rather than arming), or
+        ``"gone"`` (the token itself was deleted). The app decides which of
+        those is worth a word; the editor only reports the transition, the same
+        split :class:`EditorPasteEmpty` draws.
+        """
+        if self._credential_arm is None:
+            return
+        self._credential_arm = None
+        self._invalidate_slash_runs()
+        self.post_message(CredentialArmChanged(False, reason=reason))
+
+    def _invalidate_slash_runs(self) -> None:
+        """Drop the per-render memo so the armed ink repaints this frame.
+
+        :meth:`_slash_runs` keys its cache on every input the computation
+        reads, and the armed state is now one of them — but it is set from
+        outside the buffer edit that would otherwise change the key, so a
+        latch or a disarm on an UNCHANGED buffer (Esc, a completed argument)
+        would repaint from the stale entry and the ink would lag a keystroke.
+        """
+        self._slash_runs_cache = None
+        self.refresh()
+
+    def _sync_credential_arm(self) -> None:
+        """Re-derive the latched arm after a buffer mutation.
+
+        Runs on the same funnel the picker syncs on, so the arm can never be
+        one keystroke behind the text it describes.
+
+        Three questions, in the order that makes each one cheap:
+
+        1. Nothing latched? Ask :data:`CREDENTIAL_ARM` at the caret — the
+           original, unchanged arming rule. This is the ONLY way to arm.
+        2. Latched, but the token is gone from the buffer? Disarm: the
+           operator deleted the gesture, which is the visible way to withdraw
+           it.
+        3. Latched, token still there, and a flag-shaped argument now follows
+           it? Disarm: ``/credential --forget-all`` is the operator addressing
+           the COMMAND, not arming a capture, and the two intents are mutually
+           exclusive (design round 1, D1).
+
+        Everything else KEEPS the arm — a newline, a typed word, a caret move,
+        an Esc that closes the picker. That is the whole point: those are the
+        edits that used to disarm silently and land the secret in plaintext.
+        """
+        if self._credential_arm is None:
+            span = self._credential_arm_span()
+            if span is not None:
+                self._arm_credential(span)
+            return
+        match = CREDENTIAL_TOKEN.search(self.text)
+        if match is None:
+            self._disarm_credential("gone")
+            return
+        # Re-anchored on every sync: the token slides as the operator edits
+        # text before it, and a stale span would splice the wrong range out of
+        # the buffer at capture time.
+        start, end = match.span()
+        line_end = self.text.find("\n", end)
+        tail = self.text[end : line_end if line_end != -1 else len(self.text)]
+        if CREDENTIAL_ARGUMENT.match(tail):
+            self._disarm_credential("argument")
+            return
+        # The span CONSUMES the token's trailing spaces, which is what the
+        # caret-anchored version got for free by ending at the caret. The
+        # marker replaces the whole span and carries its own trailing space, so
+        # stopping at the token would leave the operator's space behind and the
+        # buffer would read `[Credential #1, 64 chars]  ` — two spaces, one of
+        # them theirs and now meaningless.
+        self._credential_arm = (start, end + (len(tail) - len(tail.lstrip(" \t"))))
 
     def _credential_arm_span(self) -> tuple[int, int] | None:
         """Buffer offsets of the ``/credential`` token arming the next paste.
@@ -5132,19 +5492,17 @@ class Editor(TextArea):
         value = pasted.strip()
         if not value:
             return None
+        self._disarm_credential("captured")
         self._sync_next_marker()
         index = self._next_marker
         self._next_marker += 1
-        # `_paste_label` unchanged, so a one-line secret reads `64 chars` in the
-        # same vocabulary an image reads `1568x200` and a paste reads `240
-        # lines`. The LENGTH is the whole receipt: it is what lets the operator
-        # see the paste landed intact without seeing the value.
-        marker = f"[Credential #{index}, {_paste_label(value)}]"
-        key = generate_credential_key(
-            payload.key
-            for payload in self._attachments.values()
-            if isinstance(payload, PastedCredential)
-        )
+        # `_credential_label`, NOT `_paste_label`: always characters. The
+        # LENGTH is the whole receipt — it is what lets the operator see the
+        # paste landed intact without seeing the value — and a line count is
+        # the weakest form of that check exactly where truncation hides best
+        # (R5; see the function's own docstring).
+        marker = f"[Credential #{index}, {_credential_label(value)}]"
+        key = generate_credential_key(self._credential_names_taken())
         self._attachments[index] = PastedCredential(value, key, marker)
         # The trailing space is load-bearing exactly as it is for the other two
         # marker kinds (`_delete_marker_past_spaces`, `action_expand_paste`),
@@ -5496,6 +5854,11 @@ class Editor(TextArea):
             # cue to start a runtime while the user is still typing.
             self.post_message(EditorDraftStarted())
         self._sync_picker()
+        # AFTER the picker, on the same funnel and for the same reason: the arm
+        # is derived from the buffer, so deriving it anywhere but here would
+        # leave it a message-loop tick behind the text — and that tick is the
+        # one in which a paste decides whether it is a secret.
+        self._sync_credential_arm()
         if touched:
             self._release_uncited(touched)
         return result
@@ -5626,6 +5989,14 @@ class Editor(TextArea):
         # the right place is both correct and cheaper.
         if not self._suspend_picker_sync:
             self._sync_picker()
+        # Unconditional, unlike the picker sync above: the suspend flag exists
+        # so ONE sync happens at the final caret position, and the arm is not
+        # caret-anchored once latched (:meth:`_sync_credential_arm` searches the
+        # whole buffer), so there is no second position to wait for. Skipping it
+        # here would carry a stale arm across a whole-buffer replacement —
+        # a history recall, a `/reload` hand-back, a sidebar session switch —
+        # which is the one direction that must not be left to a later keystroke.
+        self._sync_credential_arm()
 
     def _caret_offset(self) -> int:
         """The caret as a whole-buffer offset, for the slash parsers.
