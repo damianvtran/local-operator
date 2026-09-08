@@ -1961,6 +1961,57 @@ async def test_a_credential_frame_with_a_non_string_value_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_push_builds_no_payload_without_projection_recipients() -> None:
+    from unittest.mock import patch
+
+    runtime = RuntimeServer(FakeHandle(), kind="tui")
+    await runtime.start_in_process()
+    writer = daemon_writer = None
+    try:
+        with patch.object(
+            runtime, "_projection_payload", wraps=runtime._projection_payload
+        ) as payload:
+            for _ in range(20):
+                await runtime._push()
+            payload.assert_not_called()
+            record = runtime.record
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", record.control_port, limit=1 << 20
+            )
+            writer.write(
+                json.dumps(
+                    {
+                        "key": record.control_key,
+                        "client": "attach",
+                        "events": True,
+                        "frontend_state": True,
+                    }
+                ).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            assert json.loads(await reader.readline())["op"] == "projection"
+            assert json.loads(await reader.readline())["op"] == "frontend_sync"
+            payload.assert_called_once()  # Identity welcome is never suppressed.
+            payload.reset_mock()
+            for _ in range(20):
+                await runtime._push()
+            payload.assert_not_called()
+            daemon_reader, daemon_writer = await _dial(record)
+            payload.assert_called_once()
+            payload.reset_mock()
+            await runtime._push()
+            assert json.loads(await daemon_reader.readline())["op"] == "projection"
+            payload.assert_called_once()
+    finally:
+        for connection in (writer, daemon_writer):
+            if connection is not None:
+                connection.close()
+                await connection.wait_closed()
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> None:
     """Test 20: ``_push`` skips events+frontend clients; welcome still delivered.
 

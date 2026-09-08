@@ -125,11 +125,19 @@ def copied_interpreter(venv: Path) -> Path:
         # cannot start: a shared libpython the copy resolves relative to
         # itself. Carry it across and try once more; anything else is a real
         # failure and is reported as one.
-        library = _shared_libpython(base)
+        try:
+            library = _shared_libpython(base)
+        except AssertionError as error:
+            # Keep BOTH stages: the copy's loader failure triggered discovery,
+            # but a failed metadata probe is not evidence that no library exists.
+            raise AssertionError(
+                f"{error}; copied interpreter {executable} (from {base}) did not start: "
+                f"{_probe_context(started)}"
+            ) from error
         if library is None:
             raise AssertionError(
-                f"copied interpreter {executable} (from {base}) did not start and the "
-                f"base reports no shared libpython to carry across: {started.stderr[-800:]}"
+                f"copied interpreter {executable} (from {base}) did not start and "
+                f"no shared libpython repair is supported: {started.stderr[-800:]}"
             )
         target = venv / "lib" / library.name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +177,14 @@ def _probe(executable: Path, code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _probe_context(answer: subprocess.CompletedProcess[str]) -> str:
+    """Bound diagnostic output without discarding which subprocess failed."""
+    return (
+        f"rc={answer.returncode}; stdout={(answer.stdout or '')[-800:]!r}; "
+        f"stderr={(answer.stderr or '')[-800:]!r}"
+    )
+
+
 def _shared_libpython(base: Path) -> Path | None:
     """The shared library ``base`` links, if it is built ``--enable-shared``.
 
@@ -186,13 +202,36 @@ def _shared_libpython(base: Path) -> Path | None:
     )
     answer = _probe(base, query)
     if answer.returncode != 0:
+        raise AssertionError(
+            f"shared-libpython metadata query failed for {base}: {_probe_context(answer)}"
+        )
+    # Preserve empty fields: a non-shared build legitimately prints 0 plus two
+    # empty metadata lines. A truncated/malformed answer is a different outcome.
+    lines = (answer.stdout or "").splitlines()
+    if len(lines) != 3 or lines[0].strip() not in {"0", "1"}:
+        raise AssertionError(
+            f"malformed shared-libpython metadata from {base}: {_probe_context(answer)}"
+        )
+    if lines[0].strip() == "0":
         return None
-    lines = answer.stdout.strip().splitlines()
-    if len(lines) != 3 or lines[0].strip() != "1" or not lines[1] or not lines[2]:
-        return None
+    if not lines[1] or not lines[2]:
+        raise AssertionError(
+            f"incomplete shared-libpython metadata from {base}: {_probe_context(answer)}"
+        )
+    if "/" in lines[2]:
+        return None  # Positively unsupported framework/path-style soname.
     library = Path(lines[1]) / lines[2]
     # A framework build's INSTSONAME is ``Python.framework/Versions/X/Python``;
     # its executable resolves it through the framework, not ``@rpath``, so a
     # copy of it started fine and never reaches here. A plain file is the
     # uv/manylinux shape this repair exists for.
-    return library if library.is_file() and "/" not in lines[2] else None
+    context = f"candidate={str(library)[-800:]!r}; {_probe_context(answer)}"
+    try:
+        exists = library.is_file()
+    except OSError as error:
+        raise AssertionError(
+            f"cannot inspect shared libpython advertised by {base}: {context}"
+        ) from error
+    if not exists:
+        raise AssertionError(f"shared libpython advertised by {base} is missing: {context}")
+    return library
