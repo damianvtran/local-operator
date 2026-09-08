@@ -24,6 +24,9 @@ from local_operator.agent_profiles import (
 def profile_detail(registry: Any, name: str, *, detail: bool = True) -> dict[str, Any]:
     # Force an actual registry read before the tolerant runtime resolver. A
     # failed registry must not masquerade as a successful packaged fallback.
+    complete = getattr(registry, "require_complete_metadata", None)
+    if complete is not None:
+        complete()
     registered = registry.list_agents()
     kind, profile, instructions, resolved = resolve_profile_or_specialist(name, registry=registry)
     if kind is None:

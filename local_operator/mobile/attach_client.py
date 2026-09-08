@@ -453,6 +453,11 @@ class AttachClient:
         """Send one op and await its ack detail (or raise its error message)."""
         reply = await self._request_frame(op, **fields)
         if reply.get("op") == "error":
+            from local_operator.session.errors import admission_error
+
+            known = admission_error(str(reply.get("error_code", "")))
+            if known is not None:
+                raise known
             raise RuntimeError(str(reply.get("message", "request failed")))
         return str(reply.get("detail", ""))
 
@@ -469,6 +474,11 @@ class AttachClient:
         """
         reply = await self._request_frame(op, **fields)
         if reply.get("op") == "error":
+            from local_operator.session.errors import admission_error
+
+            known = admission_error(str(reply.get("error_code", "")))
+            if known is not None:
+                raise known
             raise RuntimeError(str(reply.get("message", "request failed")))
         return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
 
@@ -519,6 +529,11 @@ class AttachClient:
         finally:
             self._pending.pop(req, None)
         if reply.get("op") == "error":
+            from local_operator.session.errors import admission_error
+
+            known = admission_error(str(reply.get("error_code", "")))
+            if known is not None:
+                raise known
             raise RuntimeError(str(reply.get("message", "request failed")))
         return reply.get("data")
 

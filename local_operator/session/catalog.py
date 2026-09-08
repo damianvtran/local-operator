@@ -337,7 +337,12 @@ def _row_stat_key(session_dir: Path) -> tuple[float, int] | None:
     return (stat.st_mtime, stat.st_size)
 
 
-def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[SessionRow]:
+def cached_session_rows(
+    directory: Path,
+    limit: int = CATALOG_SCAN_LIMIT,
+    *,
+    candidates: list[tuple[str, float, str]] | None = None,
+) -> list[SessionRow]:
     """:func:`recent_session_rows` for the poll, memoized on transcript stat.
 
     The ``O(directories)`` scan underneath is NOT what this avoids — it still
@@ -361,7 +366,10 @@ def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> lis
 
     rows: list[SessionRow] = []
     fresh: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
-    for session_id, mtime, origin in _recent_sessions_with_origin(directory, limit):
+    selected = (
+        candidates if candidates is not None else _recent_sessions_with_origin(directory, limit)
+    )
+    for session_id, mtime, origin in selected:
         session_dir = directory / "sessions" / session_id
         key = _row_stat_key(session_dir)
         cached = _ROW_CACHE.get(session_dir.resolve())
@@ -388,39 +396,68 @@ def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> lis
 
 
 def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[CatalogEntry]:
-    """One off-loop summary snapshot; never acknowledge or read full histories."""
-    from local_operator.session.attention import AttentionStore, conversation_identity
+    """Rank a shared lightweight candidate snapshot before materializing a page.
 
-    rows = cached_session_rows(directory, limit)
-    known = {row.id for row in rows}
-    # Explicit desktop allocations have no transcript until their first admitted
-    # turn. They are the same user sessions in both viewers, not a UI registry.
+    Discovery already stats the whole namespace. Applying a recency cap before
+    attention lost old unread work; reading names for the entire store would
+    undo the sidebar's bounded I/O. Rank cheap rows first, then hydrate only the
+    requested prefix through the existing transcript-stat cache.
+    """
+    from dataclasses import replace
+
+    from local_operator.resume import _recent_sessions_with_origin
+    from local_operator.session.attention import AttentionStore, conversation_identity
+    from local_operator.session.retention import TRANSCRIPT_FILENAME
+
+    candidates = _recent_sessions_with_origin(directory)
+    source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
+    rows = [SessionRow(session_id, mtime, "") for session_id, mtime, _ in candidates]
     for marker in (directory / "sessions").glob("*/desktop.json"):
-        if marker.parent.name not in known and session_directory_name(marker.parent.name):
-            try:
-                rows.append(SessionRow(marker.parent.name, marker.stat().st_mtime, ""))
-            except OSError:
-                continue
+        if marker.parent.name in source or not session_directory_name(marker.parent.name):
+            continue
+        # A marker is a draft fallback, never a competing source of historical
+        # title/mtime for a transcript that fell beyond a previous page bound.
+        if (marker.parent / TRANSCRIPT_FILENAME).exists():
+            continue
+        try:
+            rows.append(SessionRow(marker.parent.name, marker.stat().st_mtime, ""))
+        except OSError:
+            continue
     rows = decorate_rows(directory, rows, include_live=True)
     identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
     attention: dict[str, dict[str, Any]] = {}
     try:
         attention = AttentionStore(directory / "attention.db").state_many(identities.values())
     except (sqlite3.Error, OSError):
-        # Unavailable read tracking cannot hide histories or manufacture a
-        # viewed outcome. Live state remains readable without the sidecar.
         logger.debug("catalog attention unavailable", exc_info=True)
-    return list(
+    entries = list(
         rank_entries(
             [
                 CatalogEntry(
                     row,
                     bool(attention.get(identities[row.id], {}).get("unseen", False)),
-                    str(attention.get(identities[row.id], {}).get("kind", "") or ""),
-                    str(attention.get(identities[row.id], {}).get("completion_token", "") or ""),
-                    str(attention.get(identities[row.id], {}).get("anchor_id", "") or ""),
+                    str(attention.get(identities[row.id], {}).get("kind") or ""),
+                    str(attention.get(identities[row.id], {}).get("completion_token") or ""),
+                    str(attention.get(identities[row.id], {}).get("anchor_id") or ""),
                 )
                 for row in rows
             ]
         )
-    )
+    )[:limit]
+    named = {
+        row.id: row
+        for row in cached_session_rows(
+            directory, candidates=[source[entry.id] for entry in entries if entry.id in source]
+        )
+    }
+    return [
+        (
+            replace(
+                entry,
+                row=entry.row._replace(name=named[entry.id].name, forked=named[entry.id].forked),
+            )
+            if entry.id in named
+            else entry
+        )
+        for entry in entries
+    ]

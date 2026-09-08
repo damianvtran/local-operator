@@ -1126,6 +1126,24 @@ class OwnedSessionHandle(SessionHandle):
         # different: executing a plain assistant under a stored profile label
         # would silently change the task. Check the owner's resolved state, not
         # just HTTP's earlier preflight (the profile can disappear during boot).
+        from local_operator.session.errors import (
+            AttachmentUnavailable,
+            ProfileRegistryUnavailable,
+        )
+
+        registry = getattr(self._session, "agent_registry", None)
+        complete = getattr(registry, "require_complete_metadata", None)
+        try:
+            if complete is not None and (
+                getattr(self._session, "active_agent", "")
+                or getattr(self._session, "active_team", None)
+                or getattr(self._session, "_unresolved_agent", "")
+                or getattr(self._session, "_unresolved_team", "")
+            ):
+                complete()
+        except ProfileRegistryUnavailable:
+            self._command_reservations.reject(command_id)
+            raise
         unresolved = getattr(self._session, "_unresolved_agent", "") or getattr(
             self._session, "_unresolved_team", ""
         )
@@ -1136,10 +1154,7 @@ class OwnedSessionHandle(SessionHandle):
                 unresolved = team.manager
         if unresolved:
             self._command_reservations.reject(command_id)
-            raise ValueError(
-                "The attached profile or team could not be restored. "
-                "Choose an available profile or detach it before sending."
-            )
+            raise AttachmentUnavailable()
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")

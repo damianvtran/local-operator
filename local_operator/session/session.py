@@ -3857,6 +3857,20 @@ class Session:
             return
         if stored is None:
             return
+        if stored.agent or stored.team:
+            from local_operator.session.errors import ProfileRegistryUnavailable
+
+            complete = getattr(self.agent_registry, "require_complete_metadata", None)
+            try:
+                if complete is not None:
+                    complete()
+            except ProfileRegistryUnavailable as error:
+                # Histories remain readable, but admission must not use a seed
+                # fallback while an installed definition was skipped as corrupt.
+                self._unresolved_agent = stored.agent
+                self._unresolved_team = stored.team
+                self.attachment_restore_notice = str(error)
+                return
 
         self._restoring_attachment = True
         try:

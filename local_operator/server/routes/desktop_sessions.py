@@ -167,8 +167,17 @@ async def errors() -> AsyncIterator[None]:
     try:
         yield
     except KeyError:
-        raise HTTPException(404, "Session or subscription not found") from None
+        raise HTTPException(
+            404, "Requested session, profile, team or subscription not found"
+        ) from None
     except (ReceiptConflict, ValueError) as error:
+        from local_operator.session.errors import (
+            AttachmentUnavailable,
+            ProfileRegistryUnavailable,
+        )
+
+        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error:
         # Contention on the shared receipt store is transient and retryable, so

@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
-from local_operator.agent_profiles import install_seed
+from local_operator.agent_profiles import NameTakenError, install_seed
 from local_operator.agents import AgentRegistry
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -102,7 +102,15 @@ async def profile(name: str, request: Request):
 async def install(body: NamedMutation, request: Request):
     def mutate() -> dict[str, Any]:
         agents, _ = registries(request)
-        installed = install_seed(body.name, registry=agents)
+        agents.require_complete_metadata()
+        try:
+            installed = install_seed(body.name, registry=agents)
+        except NameTakenError:
+            raise HTTPException(
+                409,
+                "That name belongs to another agent. "
+                "Choose a different name to extend the packaged profile.",
+            ) from None
         if installed is None:
             raise HTTPException(404, "Packaged profile not found")
         return profile_detail(agents, installed[0].name)
@@ -128,6 +136,7 @@ async def save_profile(
 
     def mutate() -> dict[str, Any]:
         agents, _ = registries(request)
+        agents.require_complete_metadata()
         resolved, _kind = write_profile(agents, params, creating=creating)
         return profile_detail(agents, resolved)
 

@@ -1729,7 +1729,17 @@ class RuntimeServer:
                 await self._handle.refresh()
                 await self._push()
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
-            await self._send_to(conn, {"op": "error", "req": req, "message": str(exc)[:400]})
+            from local_operator.session.errors import (
+                AttachmentUnavailable,
+                ProfileRegistryUnavailable,
+            )
+
+            frame = {"op": "error", "req": req, "message": str(exc)[:400]}
+            if isinstance(exc, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+                # Category, not arbitrary prose, certifies this as a repairable
+                # admission rejection to older/newer attach clients alike.
+                frame["error_code"] = exc.code
+            await self._send_to(conn, frame)
             await self._push()
 
     def _other_observers(self, leaving: _ClientConn) -> int:

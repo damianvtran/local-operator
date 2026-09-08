@@ -51,6 +51,110 @@ async def api(tmp_path: Path, monkeypatch):
         await app.state.desktop_sessions.close()
 
 
+async def test_corrupt_installed_profile_cannot_fall_back_during_read_or_start(api):
+    from local_operator.agent_profiles import install_seed
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.errors import ProfileRegistryUnavailable
+    from tests.unit.session.test_attachment_persistence import _session
+
+    client, root = api
+    registry = AgentRegistry(root)
+    installed = install_seed("reviewer", registry=registry)
+    assert installed is not None and installed[0].agent_id is not None
+    path = root / "agents" / installed[0].agent_id / "agent.yml"
+    original = path.read_text()
+    path.write_text("invalid: [")
+    result = await client.get("/v1/desktop/profiles/reviewer")
+    assert result.status_code == 409
+    assert result.json()["detail"]["code"] == ProfileRegistryUnavailable.code
+    create = await client.post(
+        "/v1/desktop/sessions",
+        json=mutation(cwd=str(root), target={"kind": "agent", "name": "reviewer"}),
+    )
+    assert create.status_code == 409
+    write_session_attachment(root / "sess", agent="reviewer", team="", goal="")
+    resumed = _session(root, (AgentRegistry(root), TeamRegistry(root)))
+    assert resumed.active_agent == "" and resumed._unresolved_agent == "reviewer"
+    assert "No packaged profile was substituted" in resumed.attachment_restore_notice
+    path.write_text(original)
+    resumed.agent_registry.require_complete_metadata()
+    assert resumed.attach_agent_profile("reviewer") == "reviewer"
+    await resumed.dispose()
+
+
+async def test_ranked_page_prefix_preserves_old_unseen_title_and_mtime(api):
+    from local_operator.harness.types import Message
+    from local_operator.session.attention import AttentionStore
+    from local_operator.session.transcript import Transcript
+
+    client, root = api
+    for number in range(1, 5):
+        path = root / "sessions" / f"{number:012x}"
+        transcript = Transcript(path)
+        await transcript.append_message(Message.user(f"Conversation {number}"))
+        transcript_path = path / "transcript.jsonl"
+        os.utime(transcript_path, (1000 + number, 1000 + number))
+    AttentionStore(root / "attention.db").publish(
+        "session/000000000001", str(uuid.uuid4()), "anchor", "complete"
+    )
+    marker = root / "sessions" / "000000000001" / "desktop.json"
+    marker.write_text('{"cwd":"/tmp","version":1}')
+    os.utime(marker, (100, 100))
+    full = (await client.get("/v1/desktop/sessions")).json()["result"]["sessions"]
+    page = (await client.get("/v1/desktop/sessions?limit=1")).json()["result"]
+    assert page["truncated"] and page["sessions"] == full[:1]
+    assert page["sessions"][0]["id"] == "000000000001"
+    assert page["sessions"][0]["name"] == "Conversation 1"
+    assert page["sessions"][0]["mtime"] == 1001
+
+
+async def test_known_admission_rejection_survives_attach_decoder_and_http_boundary():
+    from fastapi import HTTPException
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.server.routes.desktop_sessions import errors
+    from local_operator.session.errors import AttachmentUnavailable
+
+    client = object.__new__(AttachClient)
+
+    async def frame(*args, **kwargs):
+        return {
+            "op": "error",
+            "error_code": AttachmentUnavailable.code,
+            "message": "never expose owner-supplied prose",
+        }
+
+    client._request_frame = frame
+    with pytest.raises(HTTPException) as caught:
+        async with errors():
+            await client.request_ack_with_duplicate("prompt")
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "code": AttachmentUnavailable.code,
+        "message": str(AttachmentUnavailable()),
+    }
+
+
+async def test_install_specialist_name_collision_is_actionable_conflict(api):
+    client, _ = api
+    result = await client.post(
+        "/v1/desktop/profiles",
+        json=mutation(
+            name="scout",
+            kind="specialist",
+            description="Custom scout",
+            instructions="Keep my instructions.",
+        ),
+    )
+    assert result.status_code == 200
+    conflict = await client.post("/v1/desktop/profiles/install", json=mutation(name="scout"))
+    assert conflict.status_code == 409
+    assert "name belongs to another agent" in conflict.json()["detail"]
+    assert (await client.get("/v1/desktop/profiles/scout")).json()["result"][
+        "instructions"
+    ] == "Keep my instructions."
+
+
 async def test_catalogue_is_authenticated_and_never_allocates(api):
     client, root = api
     denied = await client.get("/v1/desktop/profiles", headers={"Authorization": "Bearer wrong"})
