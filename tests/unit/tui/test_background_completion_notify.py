@@ -38,6 +38,11 @@ class AttachedSession(FakeSession):
         return "current"
 
 
+#: Monotonic birth clock for fixture sessions. Module-level rather than a
+#: function attribute so the type checker can see it.
+_birth_clock: float = 1_700_000_000.0
+
+
 def _make_session(root: Path, session_id: str, name: str) -> Path:
     """A session directory the catalog can actually scan and name.
 
@@ -48,6 +53,14 @@ def _make_session(root: Path, session_id: str, name: str) -> Path:
 
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
+    # Pin the birth date the catalog ranks by. Without it these directories
+    # fall through to the filesystem birthtime, which macOS has and Linux does
+    # not — so every row would tie at 0 on CI and rank by session id instead of
+    # by creation, silently changing which rows land under the announce cap.
+    # Monotonic in creation order, matching what a real store looks like.
+    global _birth_clock
+    _birth_clock += 1.0
+    (directory / "created_at.json").write_text(str(_birth_clock))
     (directory / "transcript.jsonl").write_text(
         '{"id":"e1","ts":1,"type":"message",'
         '"payload":{"kind":"message","role":"user","content":[{"text":"go"}]}}\n'
@@ -1162,10 +1175,10 @@ async def test_the_digest_never_asserts_an_outcome_the_remainder_did_not_have(
 @pytest.mark.parametrize(
     ("announced_kind", "held_kind"),
     [
-        # THE EXACT REPRODUCTION from design round 3: 5 complete held back
-        # behind 3 interrupted, which rendered `8 sessions finished` over
-        # `Complete` while three of those eight were interrupted.
-        ("interrupted", "complete"),
+        # Keep announced and held outcomes different under the category ladder:
+        # errors precede interruptions. Completed outcomes can no longer be
+        # held behind interruptions merely by assigning them older activity.
+        ("error", "interrupted"),
         # The same seam in the other direction, where the held-back set is the
         # alarming one: announcing 3 complete over 5 errors read
         # `8 sessions finished` / `Needs attention` under the old subtitle
@@ -1173,7 +1186,7 @@ async def test_the_digest_never_asserts_an_outcome_the_remainder_did_not_have(
         # described different sets.
         ("complete", "error"),
     ],
-    ids=["interrupted-announced-complete-held", "complete-announced-error-held"],
+    ids=["error-announced-interrupted-held", "complete-announced-error-held"],
 )
 @pytest.mark.asyncio
 async def test_the_digest_title_and_subtitle_describe_the_same_sessions(
@@ -1210,8 +1223,6 @@ async def test_the_digest_title_and_subtitle_describe_the_same_sessions(
     sets are derived from what actually went out and are required to differ in
     kind before any assertion about the digest is trusted.
     """
-    import os
-
     from local_operator.tui.app import _BACKGROUND_NOTIFY_MAX_PER_TICK
     from local_operator.tui.notify import (
         CONTEXT_MIXED,
@@ -1229,16 +1240,14 @@ async def test_the_digest_title_and_subtitle_describe_the_same_sessions(
     store.publish(conversation_identity(seed), seed_token, "old", "complete")
     store.acknowledge(conversation_identity(seed), seed_token)
 
-    # Held back first, announced last, with mtimes PINNED rather than left to
-    # creation order: the catalog ranks unseen rows by `-mtime`, so the newest
-    # rows are the ones that fit under the cap. Pinning is what makes "which
-    # kind gets announced" a property of the test rather than of how fast the
-    # filesystem clock ticks — and the precondition below still checks it.
+    # Each announced category precedes its held category. Pin creation dates
+    # within the groups as well, so filesystem timing cannot affect selection.
+    # The precondition below still proves the two scopes differ in kind.
     held = [held_kind] * 5
     announced = [announced_kind] * _BACKGROUND_NOTIFY_MAX_PER_TICK
     for index, kind in enumerate(held + announced):
         directory = _make_session(store_root, f"bg00000002{index:02d}", f"Overnight {index}")
-        os.utime(directory / "transcript.jsonl", (1_700_000_000 + index, 1_700_000_000 + index))
+        (directory / "created_at.json").write_text(str(1_700_000_000 + index))
         store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", kind)
 
     app = OperatorApp(lambda: _factory(AttachedSession()))

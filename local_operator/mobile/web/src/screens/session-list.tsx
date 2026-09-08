@@ -90,9 +90,9 @@ function SessionCard({
 			: s.pending_kind === "ask"
 				? "question"
 				: null;
-	/* Render ladder: NEEDS DECISION > WORKING > NEW/UNREAD > IDLE — the same
-	   order as the daemon's sort, so what is loudest is also what is
-	   highest. Flags coexist in data; exactly one state renders. A session
+	/* Flags coexist in data; exactly one state renders. The daemon classifies
+	   non-streaming unread outcomes above work in progress, but a resumed
+	   session must show its current work rather than its stale outcome. A session
 	   blocked on a decision must be opened anyway, so the unread mark would
 	   add noise; a streaming session is drawing the eye already, and "new"
 	   marks COMPLETED unviewed activity, never in-flight work. */

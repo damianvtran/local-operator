@@ -233,6 +233,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "mkdtemp upload dir",
         2,
     ),
+    (
+        "local_operator/session/creation.py::ensure_session_created_at",
+        "os.unlink",
+        "Only the fresh NamedTemporaryFile path owned by this call; never a journal or directory",
+    ),
     # -- file-level atomic writes: temp FILE -> its final FILE name ---------
     # These write a file that may live INSIDE a session directory (transcript,
     # roster sidecar, inbox, lease, origin/title sidecars) but never move or

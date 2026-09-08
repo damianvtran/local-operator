@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from local_operator.resume import SessionRow
+from local_operator.session.creation import session_category, session_created_at
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,21 @@ class CatalogEntry:
         return self.row.id
 
     @property
+    def active(self) -> bool:
+        """Section membership is independent of the number of ordering categories."""
+        return bool(self.row.pending or self.unseen or self.row.live_state)
+
+    @property
     def rank(self) -> tuple[int, float, str]:
-        # Gates are independent of completed turns; acknowledging a completion
-        # must never demote a question still waiting for a person.
-        tier = 0 if self.row.pending else 1 if self.unseen else 2 if self.row.live_state else 3
-        return tier, -self.row.mtime, self.id
+        tier = session_category(
+            pending=bool(self.row.pending),
+            busy=self.row.live_state in ("busy", "wedged"),
+            unseen=self.unseen,
+            kind=self.completion_kind,
+            live=bool(self.row.live_state),
+        )
+        # Activity may update ages and badges, but must not move a click target.
+        return tier, -self.row.created_at, self.id
 
     @property
     def shows_completion_mark(self) -> bool:
@@ -104,10 +115,10 @@ class CatalogEntry:
            a latch: the instant the row stops being ``busy`` the ``✗`` and
            "Unseen error" come back, because ``unseen`` stays true until
            somebody actually reads the session.
-        2. The row does not sink. :attr:`rank` does not consult this predicate,
-           so a suppressed row holds its unseen tier and its place near the top
-           of "Active Sessions" for the whole time it is suppressed. It is
-           de-emphasised, never lost.
+        2. The row stays in "Active Sessions": membership is independent of
+           ranking. While busy or wedged it uses the in-progress category, below
+           unviewed completed outcomes; when it stops, its unread outcome earns
+           that outcome's category again. Creation time orders each category.
         3. The alternative IS the reported bug, one class down. Painting an
            error mark over a running session's spinner is the same lie about
            the same row — "this is broken" over a session that is working.
@@ -128,10 +139,8 @@ class CatalogEntry:
         operator. An unseen completion on a now-idle session is exactly the
         information the sidebar exists to keep, so it is kept.
 
-        Note this changes the GLYPH only, never :attr:`rank`: the row stays in
-        its unseen tier and keeps its place in "Active Sessions". Ranking
-        answers "how far up the list", which the completion still earns; this
-        answers "what is it doing", which the spinner owns while it runs.
+        Ranking also suppresses stale completions while busy or wedged, so
+        a row's category agrees with the live state its glyph communicates.
         """
         return (
             self.unseen and not self.row.pending and self.row.live_state not in ("wedged", "busy")
@@ -252,6 +261,7 @@ def decorate_rows(
                         session_id,
                         float(getattr(record, "started_at", 0.0) or 0.0),
                         str(getattr(record, "conversation_name", "") or "Untitled conversation"),
+                        created_at=session_created_at(session_dir),
                     )
                 )
     updated: list[SessionRow] = []
@@ -349,7 +359,7 @@ def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> lis
             # Same transcript bytes as last poll: the name and the fork mark
             # cannot have changed, so neither read is repeated. `mtime` is
             # taken fresh from the scan regardless — it also tracks the inbox
-            # spool, which ranks a row without touching the transcript.
+            # spool. It updates displayed age, never immutable creation order.
             row = cached[1]._replace(mtime=mtime)
         else:
             row = SessionRow(
@@ -357,6 +367,7 @@ def cached_session_rows(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> lis
                 mtime,
                 session_name(session_dir),
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
+                created_at=session_created_at(session_dir),
             )
         rows.append(row)
         if key is not None:

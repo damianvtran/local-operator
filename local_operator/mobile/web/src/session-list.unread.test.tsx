@@ -5,7 +5,7 @@
 // tests render the REAL SessionListScreen so the render ladder, the reserved
 // left dot slot, and the `new` word's classes/aria are asserted against the
 // production card, not a copy of it.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionListScreen } from "./screens/session-list";
 import type { SessionSummary } from "./types";
@@ -243,6 +243,27 @@ describe("SessionCard attention ladder", () => {
 			}
 			expect(title.textContent).toBe(name);
 		}
+	});
+
+	it("retains card identity, focus and tap destination across activity refreshes", () => {
+		sessionList = [
+			summary({ session_id: "a", conversation_name: "Alpha", streaming: true, created_at: 100 }),
+			summary({ session_id: "b", conversation_name: "Beta", streaming: true, created_at: 100 }),
+		];
+		const { rerender } = render(<SessionListScreen />);
+		const beta = cardByName("Beta");
+		beta.focus();
+		for (let tick = 0; tick < 8; tick++) {
+			// The server owns category/birth/id order; activity fields must never
+			// cause a client-side sort or replace the focused DOM target.
+			sessionList = sessionList.map((s, i) => ({ ...s, mtime: tick * 100 + i, todos_open: tick }));
+			rerender(<SessionListScreen />);
+			expect(cardByName("Beta")).toBe(beta);
+			expect(document.activeElement).toBe(beta);
+			expect(beta.previousElementSibling?.textContent).toContain("Alpha");
+		}
+		fireEvent.click(beta);
+		expect(window.location.hash).toBe("#/s/b");
 	});
 
 	it("keeps the reserved dot slot on an idle card", () => {

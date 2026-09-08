@@ -821,7 +821,15 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     latest = entries[-1].payload["details"]
     # Job rows carry the manager's own ``id`` key; comms records carry job_id.
     row = next(r for r in latest["jobs"] if r["id"] == job_id)
+    # The legacy entry is written ONCE, so it must not latch on the persist that
+    # fires at job registration — before ``comms.attach`` supplies the child's
+    # session_dir. An entry holding a job row with no matching record names a
+    # child a legacy reader cannot reach, which is worse than writing none.
+    # Whether that early persist wins is pure scheduling: it is decided by how
+    # many times child construction suspends, so this asserts the invariant
+    # rather than the timing that happened to hold.
     assert any(r["job_id"] == job_id for r in latest["records"])
+    assert {r["id"] for r in latest["jobs"]} <= {r["job_id"] for r in latest["records"]}
     # The snapshot is a SLIM projection: the unbounded fields a heavy child
     # carries (its full reply, its verbatim prompt, its trajectory, its live
     # output tail) must not be written — they are recoverable from the child's

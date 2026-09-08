@@ -293,20 +293,11 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_streaming_outranks_unseen_matching_the_render_ladder(tmp_path, monkeypatch) -> None:
-    """The sort ladder must match the render ladder (A14, and D5's substance).
+async def test_completed_unseen_outranks_work_in_progress(tmp_path, monkeypatch) -> None:
+    """Completed unviewed work is actionable before a still-running turn.
 
-    The client renders NEEDS DECISION > WORKING > UNREAD > IDLE and suppresses
-    the `new` mark on a streaming row, because "new" means COMPLETED unviewed
-    activity. Ranking unseen ABOVE streaming in the daemon therefore hoisted a
-    streaming+unseen row over newer rows while it rendered no mark to explain
-    why it was there — a position the surface contradicts.
-
-    Both rows are LIVE so the comparison lands inside one section and the
-    section term cannot decide it, and the streaming row is the OLDER one so
-    recency cannot either: only the ladder can. Exercises the real
-    ``summaries()`` output rather than a reimplementation of the sort key — a
-    test that re-derives the ordering it checks proves nothing.
+    Both rows are live, so section membership cannot decide their priority.
+    The actual summaries path supplies the shared completion authority.
     """
     import os
     import time
@@ -360,9 +351,7 @@ async def test_streaming_outranks_unseen_matching_the_render_ladder(tmp_path, mo
     # Same section, so the ladder — not the section term — decides.
     assert by_id["unread-live"]["section"] == by_id["streaming-live"]["section"]
     ordered = [row["session_id"] for row in rows]
-    assert ordered.index("streaming-live") < ordered.index(
-        "unread-live"
-    ), "a streaming row must outrank an unread one, matching the render ladder"
+    assert ordered.index("unread-live") < ordered.index("streaming-live")
 
 
 @pytest.mark.asyncio
