@@ -3095,6 +3095,7 @@ class RemoteSession:
                 return
             if not self._gate_reply_is_current(pending, client):
                 return
+            self.preserve_viewer_gate_reply()
             await client.approval_answer(pending.request_id, approved)
             self._gate_answered_key = self._gate_identity(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
@@ -3149,6 +3150,7 @@ class RemoteSession:
                 return
             values = answer.get(pending.request_id) or []
             if values:
+                self.preserve_viewer_gate_reply()
                 await client.ask_answer(
                     pending.request_id,
                     values[0],
@@ -4144,7 +4146,17 @@ class RemoteSession:
         """
         return self._takeover_target is None
 
-    async def detach_viewer_gates(self) -> None:
+    def preserve_viewer_gate_reply(self) -> None:
+        """Latch a user's committed answer before its bridge gets scheduled.
+
+        The UI calls this synchronously when settling its future. Waiting until
+        the wire send starts loses answers when reload arrives on the same tick.
+        Detached unanswered bridges must never be revived by widget cleanup.
+        """
+        if not self._gates_detached and self._gate_task is not None:
+            self._keep_gate_reply = True
+
+    async def detach_viewer_gates(self, *, preserve_answers: bool = False) -> None:
         """Withdraw this UI's waiters without answering the owner's questions.
 
         A fork switch must stop the answer bridge BEFORE the app clears its
@@ -4155,7 +4167,11 @@ class RemoteSession:
         # A sibling frontend may settle Q1 while detach awaits cancellation.
         # Suppress the ensuing Q2 bridge as well, until this viewer is disposed.
         self._background_approval = False
-        self._keep_gate_reply = False
+        if not preserve_answers:
+            self._keep_gate_reply = False
+        # Relaunch drains answers already committed by the user before closing
+        # the socket. Unanswered gates are cancelled, and detached presentation
+        # prevents a successor question from starting during that drain.
         task = self.suspend_viewer_gates()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)

@@ -101,6 +101,7 @@ async def test_relaunch_preserves_owner_turn_and_gate(
             async with app.run_test(size=(120, 36)) as pilot:
                 await wait_for_adoption(app, pilot)
                 app._set_approve_all(not approval)
+                assert app._session is not None
                 await app._session.prompt("Continue original work")
                 if approval:
                     await _pump(pilot, lambda: app._approval is not None)
@@ -116,6 +117,7 @@ async def test_relaunch_preserves_owner_turn_and_gate(
                 await _capture(app, pilot, f"reload-before-{command[1:]}-{approval}")
                 app._run_slash_command(command)
                 await _pump(pilot, lambda: app.return_code == REEXEC_CODE)
+                assert app._restart_plan is not None
                 assert app._restart_plan.resume_id == owner.session_id
             assert not owner._disposed
             assert not cancelled
@@ -126,6 +128,7 @@ async def test_relaunch_preserves_owner_turn_and_gate(
                 await wait_for_adoption(replacement, pilot)
                 replacement._set_approve_all(not approval)
                 assert viewers[-1]._runtime_pid == pid
+                assert replacement._session is not None
                 assert replacement._session.session_id == owner.session_id
                 assert "Saved original context" in transcript_text(replacement)
                 if approval is True:

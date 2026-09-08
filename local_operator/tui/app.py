@@ -13403,6 +13403,8 @@ class OperatorApp(App[None]):
             # otherwise raise InvalidStateError out of Textual's callback.
             if not future.done() and view_generation == source.gate_view_generation:
                 source.gate_draft = None
+                if result:
+                    self._preserve_source_gate_reply(source)
                 future.set_result(result)
 
         # The subagent page hides the transcript and the aside floats over it,
@@ -13814,7 +13816,15 @@ class OperatorApp(App[None]):
             and (key is None or key == self._sidebar_gate_identity(source))
         ):
             source.gate_draft = None
+            self._preserve_source_gate_reply(source)
             self._latch_approval_answer(answer)
+
+    @staticmethod
+    def _preserve_source_gate_reply(source: SessionInteraction) -> None:
+        from local_operator.session.remote import RemoteSession
+
+        if isinstance(source.session, RemoteSession):
+            source.session.preserve_viewer_gate_reply()
 
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
@@ -16091,6 +16101,7 @@ class OperatorApp(App[None]):
         sessions = [source.session for source in self._interactions.values()]
         sessions.append(self._session)
         seen: set[int] = set()
+        pending = []
         for session in sessions:
             if (
                 isinstance(session, RemoteSession)
@@ -16098,7 +16109,10 @@ class OperatorApp(App[None]):
                 and id(session) not in seen
             ):
                 seen.add(id(session))
-                await session.detach_viewer_gates()
+                pending.append(session.detach_viewer_gates(preserve_answers=True))
+        # Suspend every source before waiting on any one reply, so a background
+        # source cannot create a successor gate while another socket drains.
+        await asyncio.gather(*pending)
 
     async def on_unmount(self) -> None:
         from textual.worker import WorkerCancelled, WorkerFailed

@@ -31,6 +31,7 @@ def test_relaunch_admission(tmp_path, monkeypatch, state, ownership):
     else:
         app._loop_running = True
     if ownership == "takeover":
+        assert isinstance(session, RemoteSession)
         session._takeover_target = FakeSession()
     monkeypatch.setattr(
         app, "_resumable_session_id", lambda: "" if ownership == "unsaved" else "reload001"
@@ -56,11 +57,12 @@ async def test_detach_covers_background_sources_once(tmp_path):
     app = OperatorApp(lambda: _factory(FakeSession()))
     visible, background, takeover = [remote(tmp_path) for _ in range(3)]
     takeover._takeover_target = FakeSession()
-    for session in (visible, background, takeover):
-        session.detach_viewer_gates = AsyncMock()
+    mocks = [AsyncMock() for _ in range(3)]
+    for session, mock in zip((visible, background, takeover), mocks):
+        session.detach_viewer_gates = mock
         app._interactions[id(session)] = SessionInteraction(session)
     app._session = visible
     await app._detach_relaunch_gates()
-    visible.detach_viewer_gates.assert_awaited_once()
-    background.detach_viewer_gates.assert_awaited_once()
-    takeover.detach_viewer_gates.assert_not_awaited()
+    mocks[0].assert_awaited_once_with(preserve_answers=True)
+    mocks[1].assert_awaited_once_with(preserve_answers=True)
+    mocks[2].assert_not_awaited()
