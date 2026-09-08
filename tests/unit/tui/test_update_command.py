@@ -318,7 +318,7 @@ async def test_composer_is_not_submittable_during_upgrade() -> None:
 
 
 @pytest.mark.asyncio
-async def test_successful_upgrade_exits_75_even_if_something_looks_live() -> None:
+async def test_successful_upgrade_preserves_new_local_work_and_unlocks_composer() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
 
@@ -348,8 +348,10 @@ async def test_successful_upgrade_exits_75_even_if_something_looks_live() -> Non
                 await pilot.pause()
                 if app.return_code == REEXEC_CODE:
                     break
-            assert app.return_code == REEXEC_CODE
-            assert any("restarting" in text for text in _notices(app))
+            assert app.return_code is None
+            assert any("esc first" in text for text in _notices(app))
+            assert not app._update_in_progress
+            assert not editor.read_only
 
 
 @pytest.mark.asyncio
