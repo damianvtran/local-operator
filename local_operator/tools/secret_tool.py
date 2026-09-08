@@ -61,50 +61,34 @@ class SecretParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     op: Literal["store", "retrieve", "list", "describe", "update", "delete"] = Field(
-        description=(
-            "store: persist a new secret; retrieve: make an existing one usable "
-            "(never returns the value); list: names and descriptions; describe: "
-            "metadata for one; update: replace a value; delete: remove permanently."
-        )
+        description="retrieve makes a secret usable without returning its value."
     )
-    name: str | None = Field(
-        default=None,
-        description="Secret name, e.g. GITHUB_TOKEN. Required for every op except list.",
-    )
+    name: str | None = Field(default=None, description="Secret name; required except for list.")
     value: str | None = Field(
-        default=None,
-        description=(
-            "The secret itself (store/update only). Supply this ONLY when you already "
-            "hold the value legitimately — a token you just minted, or one the user "
-            "handed you. Never invent one, and never read a value out of a file just "
-            "to pass it here."
-        ),
+        default=None, description="The secret (store/update). Only a value you already hold."
     )
     description: str | None = Field(
-        default=None,
-        description="What this secret is for; shown in list/describe. Never secret itself.",
+        default=None, description="What it is for; shown in list. Not secret."
     )
 
 
-#: The tool description IS the interface: it is the only guidance the model
-#: reliably reads, so it states WHEN to reach for this, not just what it does.
+#: The tool description IS the interface — the only guidance a model reliably
+#: reads — so it states WHEN to reach for this, not merely what it does. It is
+#: also schema that ships on EVERY request in every session and subagent (the
+#: footprint ladder), so each clause has to earn its tokens: "store it as soon
+#: as you get one" and "retrieve NEVER returns the value" change behaviour and
+#: stay; the rationale behind them lives in `guide://credentials`, which costs
+#: nothing until it is read.
 _DESCRIPTION = (
-    "Persist and use long-term secrets from the operator's encrypted store "
-    "(the same store as `lop secret`). "
-    "Reach for it the moment you obtain a credential that will be needed again "
-    "after this session — an API token you just created, a key the user pasted, "
-    "a password a setup step produced: `store` it here rather than leaving it in "
-    "a plaintext .env, a note, or only in this conversation. Storing is your "
-    "decision to make. "
-    "`retrieve` before using a secret in a command: it confirms the secret exists "
-    "and tells you how to reach it, but NEVER returns the value — you use secrets "
-    'without reading them, via $(lop secret get NAME) in bash or secrets["NAME"] '
-    "in eval. `list` to see what is already stored before asking the user for "
-    "something they have already given you. "
-    "Do NOT store: anything the user asked you not to keep, a value you only need "
-    "for one command, or provider API keys the harness already manages. "
-    "Read guide://credentials before your first store, and never echo a secret, "
-    "write it to a file, or put it in a commit or a PR."
+    "Store and use long-term secrets in the operator's encrypted store (same store as "
+    "`lop secret`). Store a credential as soon as you get one that outlives this session "
+    "— a token you minted, a key the user pasted — rather than a plaintext .env or only "
+    "this conversation; that is your decision to make. retrieve NEVER returns the value: "
+    "use secrets without reading them, via $(lop secret get NAME) in bash or "
+    'secrets["NAME"] in eval. list before asking the user for something they already '
+    "gave you. Do not store a one-off value or provider keys the harness manages. Never "
+    "echo a secret, write it to a file, or put it in a commit or PR. "
+    "See guide://credentials."
 )
 
 
