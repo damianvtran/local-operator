@@ -765,6 +765,7 @@ lop config create      # scaffold it
 lop config list        # every option, with descriptions
 lop config edit <key> <value>
 lop config open        # open it in your editor
+lop config instructions  # which instruction files a session assembles, in order
 ```
 
 Commonly set values: `hosting` and `model_name` (skip the CLI flags),
@@ -798,6 +799,10 @@ export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=~/.config/AGENTS.md:~/team/AGENTS.m
 # or turn the import off entirely
 export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=
 ```
+
+`lop config instructions` reports which files a session actually assembles, in
+order, with the size each contributed and whether it was collapsed as a
+duplicate — paths and sizes only, never the contents.
 
 Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
 walking up from your working directory, and can be disabled with

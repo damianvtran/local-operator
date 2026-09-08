@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -2377,6 +2378,343 @@ def test_lop_never_writes_the_imported_file(
 
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert system_prompt_file() == tmp_path / "config" / "system_prompt.md"
+
+
+# --- The provenance half of the same assembly (`lop config instructions`) ---
+#
+# `resolve_user_instructions` exists so the report and the prompt cannot
+# disagree; these pin that they come from ONE assembly rather than two that
+# happen to agree today. `test_cli_config_instructions.py` covers the rendered
+# command; here the contract is the records themselves.
+
+
+def test_the_resolver_returns_the_same_text_load_user_instructions_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper is a projection of the resolver, not a parallel path.
+
+    If these ever diverge, every caller of ``load_user_instructions`` — the
+    session factory and every subagent — is running a prompt the report does
+    not describe, which is the defect ``lop config instructions`` exists to
+    make impossible.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED")
+
+    assembled, sources = session_factory.resolve_user_instructions("- PROFILE")
+
+    assert assembled == session_factory.load_user_instructions("- PROFILE")
+    assert [source.label for source in sources] == [
+        "imported",
+        "system_prompt.md",
+        "agent profile",
+    ]
+
+
+def test_the_resolver_reports_no_imported_source_when_there_is_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default install. ``system_prompt.md`` is still reported, with zero
+    characters, because the path is the answer to "where would it go"."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    assert [source.label for source in sources] == ["system_prompt.md"]
+    assert sources[0].chars == 0
+
+
+def test_the_resolver_marks_a_byte_identical_import_as_collapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read but not included: the two numbers together are what let an
+    operator confirm the dedup fired rather than infer it from a total."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Shared rule."
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+    _write_ecosystem_file(tmp_path, shared)
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    imported = sources[0]
+    assert imported.collapsed is True
+    assert (imported.chars, imported.included) == (len(shared), 0)
+    assert assembled.count(shared) == 1
+
+
+def test_the_resolver_does_not_collapse_a_superset_native_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The context cost #822 reports: the digest covers the WHOLE file, so
+    shared-rules-plus-an-overlay pays for both copies on every cached request.
+    Pinned as behaviour so the guide's warning stays true."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Shared rule."
+    (tmp_path / "config" / "system_prompt.md").write_text(
+        f"{shared}\n- lop-only extra.", encoding="utf-8"
+    )
+    _write_ecosystem_file(tmp_path, shared)
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    assert sources[0].collapsed is False
+    assert sources[0].included == len(shared)
+    assert assembled.count(shared) == 2
+
+
+def test_the_resolver_reports_a_truncated_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file over the per-file 64 KiB read cap. ``chars`` is what was read
+    and ``included`` what survived the instructions budget, so the row states
+    the loss rather than reporting the smaller number as the whole file."""
+    from local_operator.ecosystem_instructions import MAX_FILE_BYTES
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ecosystem_file(tmp_path, "z" * (MAX_FILE_BYTES * 3))
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    assert sources[0].truncated is True
+    assert sources[0].chars == MAX_FILE_BYTES
+    assert sources[0].included <= session_factory.MAX_USER_INSTRUCTIONS_CHARS
+
+
+def test_the_resolver_attributes_a_multi_file_cut_to_the_files_that_lost_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget cuts the JOINED imported block from the tail, so a cut larger
+    than the last file also eats the tail of the one before it.
+
+    Charging the whole cut to the last contributor credited earlier files with
+    text that never reached the prompt: rows summing to 107,998 "included"
+    characters inside a 64,000-character total, and the file that actually lost
+    44k carrying no truncation flag. The sum invariant below is the property
+    that makes the report checkable at all — a report whose own rows do not add
+    up to its own total is the defect this surface exists to close.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("N" * 60_000, encoding="utf-8")
+    first = tmp_path / "a.md"
+    first.write_text("A" * 60_000, encoding="utf-8")
+    second = tmp_path / "b.md"
+    second.write_text("B" * 10_000, encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS", f"{first}:{second}")
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    imported = [source for source in sources if source.label == "imported"]
+    assert [source.path for source in imported] == [first, second]
+    # Measured against the prompt itself, not against a model of it. ``included``
+    # is the span this file occupies in the assembled text, so it covers the
+    # truncation marker that replaced its own tail — which is what keeps the sum
+    # invariant below exactly true rather than off by the marker.
+    first_span = assembled[: imported[0].included]
+    assert first_span.count("A") == assembled.count("A") < imported[0].included
+    assert "custom instructions truncated at" in first_span
+    # The second file reached the prompt not at all: the budget was already
+    # spent by the first, which the old accounting credited as whole.
+    assert imported[1].included == assembled.count("B") == 0
+    # Both imported files lost text, so both must say so — the earlier file is
+    # the one the old accounting reported as whole.
+    assert imported[0].truncated is True
+    assert imported[1].truncated is True
+
+    separators = 2 * max(0, sum(1 for source in sources if source.included) - 1)
+    assert sum(source.included for source in sources) + separators == len(assembled)
+
+
+def test_the_resolver_reports_an_existing_but_empty_import_rather_than_omitting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent and present-but-empty are different states with different fixes.
+
+    Omitting the record made the report state that no file exists at a path
+    that has one — the mirror image of the distinction
+    ``InstructionSource.unreadable`` is documented to preserve.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _write_ecosystem_file(tmp_path, "")
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    imported = [source for source in sources if source.label == "imported"]
+    assert [source.path for source in imported] == [path]
+    assert imported[0].chars == 0
+    assert imported[0].included == 0
+    # Empty is not degraded and not a duplicate: the other two states must stay
+    # off, or the operator is sent to fix something that is not wrong.
+    assert imported[0].unreadable is False
+    assert imported[0].collapsed is False
+
+
+def test_the_resolver_names_a_superset_but_not_a_collapsed_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The superset is the arrangement the digest collapse cannot catch, and
+    the only one where the operator pays for the same rules twice on every
+    cached request. The collapsed case already reports itself and costs
+    nothing, so flagging it too would train the operator to ignore the row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    # Over the 200-char floor, so the finding is the containment rather than
+    # the threshold (which has its own test below).
+    shared = "- Shared rule." + "x" * 200
+    _write_ecosystem_file(tmp_path, shared)
+
+    (tmp_path / "config" / "system_prompt.md").write_text(
+        f"{shared}\n\n- lop only.", encoding="utf-8"
+    )
+    assembled, sources = session_factory.resolve_user_instructions()
+    native = next(source for source in sources if source.label == "system_prompt.md")
+    assert native.overlaps_index == 1
+    assert native.overlap_contains is True
+    assert native.overlap_chars == len(shared)
+    # The cost the row is claiming is real: both copies are in the prompt.
+    assert assembled.count(shared) == 2
+
+    # Byte-identical: collapsed, sent once, and NOT flagged as an overlap.
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+    assembled, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+    assert next(source for source in sources if source.label == "imported").collapsed is True
+    assert assembled.count(shared) == 1
+
+    # Two distinct files: healthy, and must stay unflagged.
+    (tmp_path / "config" / "system_prompt.md").write_text("- Entirely other.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+
+def test_the_resolver_names_the_overlap_when_the_earlier_source_is_the_superset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The migration arrangement, and the reason the test is symmetric.
+
+    An operator moves their rules into ``~/.agents/AGENTS.md``, grows them
+    there, and leaves the old ``system_prompt.md`` behind as a subset. Both
+    copies ship in every request, exactly as in the superset case — but a test
+    that only asks "does a LATER source contain an EARLIER one" is silent here,
+    and the guide reads that silence as an all-clear. That is issue #822's own
+    shape: documentation asserting something the code does not do.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Rule that moved to the shared file." + "y" * 200
+    _write_ecosystem_file(tmp_path, f"{shared}\n\n- Grown since the move.")
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    native = next(source for source in sources if source.label == "system_prompt.md")
+    # Reported on the SUBSET, pointing back at the file that holds it, because
+    # the remedy here is to delete this file rather than to trim the other one.
+    assert native.overlaps_index == 1
+    assert native.overlap_contains is False
+    assert native.overlap_chars == len(shared)
+    assert next(source for source in sources if source.label == "imported").overlaps_index is None
+    # The claim is true of the prompt, not just of the arithmetic.
+    assert assembled.count(shared) == 2
+
+
+def test_the_resolver_ignores_an_overlap_too_small_to_be_worth_removing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Containment has no natural floor — a shared ``-`` is literal containment
+    — and a WARNING row advertising a one-character cost is the warning
+    operators learn to ignore, which is what this row exists to avoid. Pinned at
+    the boundary in both directions so the constant cannot drift silently.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    floor = session_factory._OVERLAP_MIN_CHARS
+    native = tmp_path / "config" / "system_prompt.md"
+
+    _write_ecosystem_file(tmp_path, "-")
+    native.write_text("- lop only rule.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+    _write_ecosystem_file(tmp_path, "s" * (floor - 1))
+    native.write_text("s" * (floor - 1) + "\n\n- lop only.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+    _write_ecosystem_file(tmp_path, "s" * floor)
+    native.write_text("s" * floor + "\n\n- lop only.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert sources[1].overlaps_index == 1
+    assert sources[1].overlap_chars == floor
+
+    # The floor applies to the subset direction too, on the span that is
+    # actually duplicated rather than on the size of the containing file.
+    _write_ecosystem_file(tmp_path, "s" * (floor - 1) + "\n\n- Shared only.")
+    native.write_text("s" * (floor - 1), encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+
+def test_the_resolver_flags_a_profile_that_repeats_an_earlier_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dedup collapses IMPORTED files only, so an agent profile whose prompt
+    repeats ``system_prompt.md`` genuinely ships both copies in every request of
+    every session using that agent. Equality is therefore a real overlap here,
+    unlike the imported case where it is collapsed upstream and reported as
+    such — the row must fire on what the prompt actually carries.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Rule the profile repeats." + "z" * 200
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+
+    assembled, sources = session_factory.resolve_user_instructions(shared)
+
+    profile = next(source for source in sources if source.label == "agent profile")
+    assert profile.overlaps_index == 1
+    # Equal-length texts satisfy containment both ways; "contains" is tried
+    # first, so the tie reads as the superset case rather than flipping with
+    # source order.
+    assert profile.overlap_contains is True
+    assert profile.overlap_chars == len(shared)
+    assert assembled.count(shared) == 2
+
+
+def test_the_resolver_can_stay_silent_for_the_provenance_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """``lop config instructions`` prints the provenance itself, so the INFO
+    record would land on stderr immediately above the box repeating it. Every
+    session path keeps the log — it is the only trace a running session leaves
+    of an import it never named."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ecosystem_file(tmp_path, "- Shared rule.")
+
+    with caplog.at_level(logging.INFO, logger="local_operator.ecosystem_instructions"):
+        session_factory.resolve_user_instructions(log_provenance=False)
+    assert not caplog.records
+
+    with caplog.at_level(logging.INFO, logger="local_operator.ecosystem_instructions"):
+        session_factory.load_user_instructions()
+    assert any("loaded ecosystem instructions" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

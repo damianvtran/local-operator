@@ -33,7 +33,7 @@ import logging
 import os
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -44,7 +44,8 @@ from local_operator.ansi import sanitize_prompt_line
 # startup path that ``test_import_graph`` guards.
 from local_operator.ecosystem_instructions import (
     content_digest,
-    load_ecosystem_instructions,
+    log_ecosystem_provenance,
+    read_ecosystem_instructions,
 )
 from local_operator.harness.types import AgentMessage, Message
 
@@ -99,6 +100,18 @@ _AGENT_INSTRUCTIONS_RESERVE = 16_000
 #: knows about. Sized to match the profile's reserve: an imported file is
 #: standing preference of the same kind and the same order of magnitude.
 _ECOSYSTEM_INSTRUCTIONS_RESERVE = 16_000
+
+#: Floor on a shared span before ``Overlaps:`` claims it is worth removing.
+#: The containment test has no natural lower bound — a single ``-`` present in
+#: both files is literal containment — and a WARNING row advertising a one-
+#: character cost is exactly the warning operators learn to ignore, which is
+#: the failure this row was added to avoid. 200 characters is roughly a
+#: paragraph of standing rules: below it the row would cost more attention than
+#: the duplication costs context (200 chars ≈ 50 tokens on the cached prefix,
+#: and 0.3% of the 64,000-character budget), and no realistic shared rule set
+#: is smaller. Deliberately not scaled to file size: the operator is being told
+#: about an absolute cost re-paid on every request, not a ratio.
+_OVERLAP_MIN_CHARS = 200
 
 
 #: Modules whose import dominates :func:`create_session`, measured rather than
@@ -745,6 +758,283 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class InstructionSource:
+    """One contributor to the assembled custom instructions, as assembled.
+
+    The accounting half of :func:`resolve_user_instructions`, and the reason
+    that function exists at all. ``lop config instructions`` answers "what
+    instructions am I actually running" from these records rather than from its
+    own reimplementation of the budget arithmetic below — a report derived from
+    a second copy of that arithmetic would drift from the prompt on the first
+    change to either, which is the same class of divergence (documentation
+    disagreeing with the code in the same install) that issue #822 reported.
+
+    ``chars`` is what the source held; ``included`` is what survived the
+    collapse and the cap, so a row can state the difference rather than
+    reporting the smaller number as the whole truth. ``path`` is ``None`` for
+    the agent profile, whose prompt comes from the registry database and has no
+    file an operator could open.
+    """
+
+    label: str
+    path: Path | None
+    chars: int
+    included: int
+    collapsed: bool
+    truncated: bool
+    #: The file exists but could not be read (permissions, a fifo swapped in).
+    #: Distinct from a zero-length file: one is a mistake to fix, the other is
+    #: the ordinary state of an install that simply has no such file, and
+    #: reporting both as "empty" sends the operator to the wrong one.
+    unreadable: bool = False
+    #: 1-based ASSEMBLY INDEX of an earlier source this one shares text with,
+    #: and how many characters that is. The superset arrangement — shared rules
+    #: plus a lop-only overlay in ``system_prompt.md`` — is the case the digest
+    #: collapse cannot catch, so both copies ride the cached prefix of every
+    #: request. Without this the frame is identical to two genuinely distinct
+    #: files, and "two rows with non-zero Included" is true of every healthy
+    #: multi-source install, so it cannot be the diagnosis.
+    #:
+    #: An index rather than a label because labels are not unique: several
+    #: override paths all render as ``imported``, so a label named a row the
+    #: operator could not pick out of the box, and the remedy (edit one of these
+    #: two files) needs exactly that.
+    #:
+    #: Containment rather than equality, and it does not double-report the
+    #: collapse: an imported file byte-identical to ``system_prompt.md`` is
+    #: dropped upstream and arrives with empty ``text``, so it is excluded from
+    #: the test. An agent PROFILE equal to an earlier source is a different
+    #: matter — profiles are never collapsed — and is flagged, correctly: both
+    #: copies really are in the prompt.
+    overlaps_index: int | None = None
+    overlap_chars: int = 0
+    #: Which way round the containment runs: ``True`` when THIS source holds all
+    #: of the earlier one, ``False`` when this source sits wholly inside it. The
+    #: two arrangements have different remedies — trim the superset, or delete
+    #: the subset — so the row has to say which one the operator is looking at,
+    #: and a single "these overlap" would send half of them to the wrong file.
+    overlap_contains: bool = True
+
+
+def resolve_user_instructions(
+    agent_prompt: str = "",
+    *,
+    log_provenance: bool = True,
+) -> tuple[str, list[InstructionSource]]:
+    """Assemble the custom instructions AND account for where they came from.
+
+    Split out of :func:`load_user_instructions` — whose docstring carries the
+    behavioural contract — so the provenance surface reads the same assembly
+    the prompt does. See :class:`InstructionSource` for why a second
+    implementation of this arithmetic was not acceptable.
+
+    The returned records are in ASSEMBLY order, which is the fact operators get
+    wrong and the reason the report exists at all.
+
+    ``log_provenance=False`` is for the ONE caller whose entire output already
+    IS the provenance (``lop config instructions``): there the INFO record
+    would print the same file and size to stderr immediately above the box
+    reporting it, so the command would contradict nothing and repeat
+    everything. Every session path leaves it on — the log is the only trace a
+    running session leaves of an import it did not name.
+    """
+    parts: list[str] = []
+    # ``is_file()`` follows symlinks deliberately: pointing the file at a
+    # dotfiles checkout is a normal way to version instructions.
+    path = app_config_dir() / "system_prompt.md"
+    try:
+        if path.is_file():
+            parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except OSError:
+        pass
+
+    # Each source is bounded on its OWN budget before joining. Capping only
+    # the joined string let a full-size global file consume the whole budget
+    # and silently discard the selected agent's profile prompt entirely,
+    # inverting the documented layering: the machine-wide file would discard
+    # the profile the operator explicitly chose.
+    #
+    # The split is a FLOOR each way, never a flat tax. Subtracting the
+    # reserve unconditionally cut a 64k global file to 48k even with no agent
+    # selected, handing the 16k to nobody; capping the profile at the reserve
+    # unconditionally did the mirror image to a large profile when the global
+    # file was small. So each source may spend whatever the other leaves,
+    # down to its own guaranteed share.
+    global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
+    agent_raw = agent_prompt.strip()
+    # The digest is handed down so a shared file byte-identical to the native
+    # one is dropped rather than duplicated into every cached request.
+    ecosystem_records = read_ecosystem_instructions(
+        skip_digests=frozenset({content_digest(global_raw)} if global_raw else ())
+    )
+    if log_provenance:
+        log_ecosystem_provenance(ecosystem_records)
+    ecosystem_raw = "\n\n".join(record.text for record in ecosystem_records if record.text).strip()
+
+    # The "\n\n" joins are only emitted between sources that SURVIVE, so the
+    # characters are only withheld then. Keyed off the agent text alone, a
+    # profile that fits the documented cap exactly was truncated by two
+    # characters while a global file of the same size passed whole.
+    present = sum(1 for raw in (ecosystem_raw, global_raw, agent_raw) if raw)
+    separator = 2 * max(0, present - 1)
+    # Bounded in ascending order of ownership: the imported file first, then
+    # the profile, and the operator's own file takes the remainder. Each may
+    # spend what the others leave, down to its own floor — so a lone 64k source
+    # is still whole, and no source is taxed for room the others never use.
+    ecosystem_text = _bound_instructions(
+        ecosystem_raw,
+        "imported user-scope instructions",
+        max(
+            _ECOSYSTEM_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - len(agent_raw) - separator,
+        ),
+    )
+    agent_text = _bound_instructions(
+        agent_raw,
+        "the selected agent's profile",
+        max(
+            _AGENT_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(global_raw) - separator,
+        ),
+    )
+    global_text = _bound_instructions(
+        global_raw,
+        str(path),
+        MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(agent_text) - separator,
+    )
+
+    # The whole-source cap is reported per imported FILE rather than against
+    # the joined block: with several override paths the operator needs to know
+    # which file lost text, and the join is what the budget acts on. The budget
+    # truncates that joined block from the TAIL, so a cut larger than the last
+    # file also eats the tail of the file before it. Charging the whole cut to
+    # the last contributor therefore credited earlier files with text that never
+    # reached the prompt — rows summing to 107,998 "included" characters inside a
+    # 64,000-character total, with the file that actually lost 44k carrying no
+    # truncation flag. Walking the SURVIVING length forward instead reproduces
+    # how the block was actually cut, so each file is credited only what its own
+    # span contributed.
+    #
+    # ``remaining`` is measured against the ASSEMBLED block rather than the raw
+    # one, which means the truncation marker rides with the file whose tail it
+    # replaced. That is deliberate: it keeps ``sum(included) + separators ==
+    # len(assembled)`` exactly true, and a report whose own rows do not add up to
+    # its own total is the defect class this whole surface exists to close.
+    remaining = len(ecosystem_text)
+    emitted = False
+    sources: list[InstructionSource] = []
+    # What each source actually held, positionally parallel to ``sources``, for
+    # the containment test below. Empty for a source that contributed nothing.
+    raw_texts: list[str] = []
+    for record in ecosystem_records:
+        if record.text:
+            if emitted:
+                # The "\n\n" join before this file, charged to neither side.
+                remaining = max(0, remaining - 2)
+            included = min(record.chars, remaining)
+            remaining -= included
+            emitted = emitted or included > 0
+        else:
+            # Collapsed, empty or unreadable: contributed nothing, and consumed
+            # no separator either.
+            included = 0
+        raw_texts.append(record.text)
+        sources.append(
+            InstructionSource(
+                label="imported",
+                path=record.path,
+                chars=record.chars,
+                included=included,
+                collapsed=record.collapsed,
+                # Truncated by the per-FILE 64 KiB read cap, or by the shared
+                # instructions budget landing on this file. Guarded on
+                # ``record.text`` so a collapsed file — which also has
+                # ``included`` 0 against a non-zero ``chars`` — is not reported
+                # as truncated on top of being reported as collapsed.
+                truncated=record.truncated or (bool(record.text) and included < record.chars),
+                unreadable=record.unreadable,
+            )
+        )
+    raw_texts.append(global_raw)
+    sources.append(
+        InstructionSource(
+            label="system_prompt.md",
+            path=path,
+            chars=len(global_raw),
+            included=len(global_text),
+            collapsed=False,
+            truncated=len(global_text) < len(global_raw),
+        )
+    )
+    if agent_raw:
+        raw_texts.append(agent_raw)
+        sources.append(
+            InstructionSource(
+                label="agent profile",
+                path=None,
+                chars=len(agent_raw),
+                included=len(agent_text),
+                collapsed=False,
+                truncated=len(agent_text) < len(agent_raw),
+            )
+        )
+
+    # Duplicate content the collapse cannot catch. The digest collapse is keyed
+    # on the WHOLE file, so a native file that is a superset of the shared one
+    # ships both copies in every cached request — the expensive arrangement, and
+    # the one the frame could not previously distinguish from two healthy
+    # distinct files. A plain containment test on text already in hand: no new
+    # read, no new arithmetic, and CPython's substring search over a handful of
+    # sources bounded at 64,000 characters is not work worth avoiding.
+    #
+    # SYMMETRIC, because the cost is. An earlier version asked only whether a
+    # LATER source contained an EARLIER one, which is silent on the natural
+    # migration: rules move into ``~/.agents/AGENTS.md`` and grow there while the
+    # old ``system_prompt.md`` is left behind as a subset. Both copies ship in
+    # every request and no row fired — and the guide read that silence as an
+    # all-clear, which is issue #822's own shape (a claim the code does not
+    # make). Measured at 41 µs for 64 KiB-in-64 KiB, so the second direction is
+    # free.
+    #
+    # Restricted to sources that survived WHOLE (``included == chars``) so the
+    # row can say both copies are sent without qualification: a source the
+    # budget already cut carries a ``Truncated:`` row, and claiming a verbatim
+    # duplicate of text that was itself partly dropped would be the report
+    # asserting something the prompt does not do.
+    whole = [
+        (index, raw)
+        for index, (source, raw) in enumerate(zip(sources, raw_texts))
+        if raw and source.included == source.chars
+    ]
+    for position, (index, raw) in enumerate(whole):
+        for earlier_index, earlier_raw in whole[:position]:
+            # Equal-length texts satisfy both directions; "contains" is tried
+            # first so an agent profile identical to an earlier source keeps
+            # reading as the superset case rather than flipping on tie order.
+            if len(earlier_raw) >= _OVERLAP_MIN_CHARS and earlier_raw in raw:
+                contains, shared_chars = True, len(earlier_raw)
+            elif len(raw) >= _OVERLAP_MIN_CHARS and raw in earlier_raw:
+                contains, shared_chars = False, len(raw)
+            else:
+                continue
+            sources[index] = replace(
+                sources[index],
+                # 1-based: the box numbers its rows from 1, and an index the
+                # operator cannot match to a printed row is not an answer.
+                overlaps_index=earlier_index + 1,
+                overlap_chars=shared_chars,
+                overlap_contains=contains,
+            )
+            break
+
+    # Imported first, native second, profile last: later text is read as the
+    # more specific instruction, so lop's own file outranks the shared one and
+    # the chosen profile outranks both.
+    assembled = "\n\n".join(part for part in (ecosystem_text, global_text, agent_text) if part)
+    return assembled, sources
+
+
 def load_user_instructions(agent_prompt: str = "") -> str:
     """Read the operator's standing custom instructions for the system prompt.
 
@@ -786,71 +1076,7 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     ``utf-8-sig`` strips a BOM that a Windows editor writes; without it the
     ``\ufeff`` survives into the prompt ahead of the first rule.
     """
-    parts: list[str] = []
-    # ``is_file()`` follows symlinks deliberately: pointing the file at a
-    # dotfiles checkout is a normal way to version instructions.
-    path = app_config_dir() / "system_prompt.md"
-    try:
-        if path.is_file():
-            parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
-    except OSError:
-        pass
-
-    # Each source is bounded on its OWN budget before joining. Capping only
-    # the joined string let a full-size global file consume the whole budget
-    # and silently discard the selected agent's profile prompt entirely,
-    # inverting the documented layering: the machine-wide file would discard
-    # the profile the operator explicitly chose.
-    #
-    # The split is a FLOOR each way, never a flat tax. Subtracting the
-    # reserve unconditionally cut a 64k global file to 48k even with no agent
-    # selected, handing the 16k to nobody; capping the profile at the reserve
-    # unconditionally did the mirror image to a large profile when the global
-    # file was small. So each source may spend whatever the other leaves,
-    # down to its own guaranteed share.
-    global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
-    agent_raw = agent_prompt.strip()
-    # The digest is handed down so a shared file byte-identical to the native
-    # one is dropped rather than duplicated into every cached request.
-    ecosystem_raw = load_ecosystem_instructions(
-        skip_digests=frozenset({content_digest(global_raw)} if global_raw else ())
-    ).strip()
-
-    # The "\n\n" joins are only emitted between sources that SURVIVE, so the
-    # characters are only withheld then. Keyed off the agent text alone, a
-    # profile that fits the documented cap exactly was truncated by two
-    # characters while a global file of the same size passed whole.
-    present = sum(1 for raw in (ecosystem_raw, global_raw, agent_raw) if raw)
-    separator = 2 * max(0, present - 1)
-    # Bounded in ascending order of ownership: the imported file first, then
-    # the profile, and the operator's own file takes the remainder. Each may
-    # spend what the others leave, down to its own floor — so a lone 64k source
-    # is still whole, and no source is taxed for room the others never use.
-    ecosystem_text = _bound_instructions(
-        ecosystem_raw,
-        "imported user-scope instructions",
-        max(
-            _ECOSYSTEM_INSTRUCTIONS_RESERVE,
-            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - len(agent_raw) - separator,
-        ),
-    )
-    agent_text = _bound_instructions(
-        agent_raw,
-        "the selected agent's profile",
-        max(
-            _AGENT_INSTRUCTIONS_RESERVE,
-            MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(global_raw) - separator,
-        ),
-    )
-    global_text = _bound_instructions(
-        global_raw,
-        str(path),
-        MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(agent_text) - separator,
-    )
-    # Imported first, native second, profile last: later text is read as the
-    # more specific instruction, so lop's own file outranks the shared one and
-    # the chosen profile outranks both.
-    return "\n\n".join(part for part in (ecosystem_text, global_text, agent_text) if part)
+    return resolve_user_instructions(agent_prompt)[0]
 
 
 def _bound_instructions(text: str, source: str, limit: int) -> str:
