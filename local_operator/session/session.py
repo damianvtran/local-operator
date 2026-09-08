@@ -132,6 +132,10 @@ from local_operator.incidents import (
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
 )
+from local_operator.prompts_api import (
+    TOOL_INVENTORY_HEADING,
+    render_tool_inventory_block,
+)
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -3152,6 +3156,47 @@ class Session:
             self._blocks_provider_takes_label = False
             return self._system_blocks_provider()
 
+    def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
+        """Re-render the inventory block against the tools being advertised.
+
+        THE INVARIANT: the prompt's "## Available tools" section describes
+        exactly the tools in the request's ``tools`` array. A tool offered to
+        the provider but absent from the prompt is a schema the model has no
+        narrative reason to reach for; one named but not offered is a promise
+        it cannot keep.
+
+        This lives here, and not in the block providers, because the session is
+        the only object that knows what the array will contain. Providers close
+        over the inventory they were BUILT with, which is never the final one:
+        ``__init__`` copies that list and the capability merge,
+        ``set_ask_handler``, the MCP refresh and the role prune each REBIND the
+        copy (they must — ``_context_breakdown`` snapshots the list from a
+        worker thread). Nothing mutated the shared object, so a provider that
+        closed over it stayed frozen at the factory's inventory for the life of
+        the session, and ``ask``/``task``/``wait``/``jobs``/``wake``/``hub``
+        were advertised while being described to nobody. Measured across 1056
+        local transcripts: ``ask`` appeared in 0 of 880 rendered inventories.
+
+        Fixing the two known providers would have left the NEXT provider free
+        to reintroduce the same bug, so the guarantee is enforced at the one
+        point every request passes through instead.
+
+        Identified by heading prefix rather than by index: the block layout is
+        ``build_system_blocks``'s contract, and a provider that emits some
+        other shape (a benchmark's single fixed block, a host's ``lambda``) has
+        no inventory to reconcile and is passed through untouched rather than
+        having block 1 overwritten with a section it never had.
+        """
+        rendered = render_tool_inventory_block(self._tools)
+        for index, block in enumerate(blocks):
+            if block.startswith(TOOL_INVENTORY_HEADING):
+                if block == rendered:
+                    return blocks
+                updated = list(blocks)
+                updated[index] = rendered
+                return updated
+        return blocks
+
     async def _prepare_system_blocks(
         self, model: ModelSpec | None = None, *, commit_state: bool = True
     ) -> list[str]:
@@ -3165,7 +3210,11 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
-        desired = list(desired)
+        # Before the epoch/delta machinery sees them, so a tool installed after
+        # construction is compared, persisted and journalled as the inventory
+        # that will actually be advertised. Reconciling afterwards would make
+        # the frozen prefix and the delta disagree with the request.
+        desired = self._reconcile_tool_inventory(list(desired))
         if not getattr(self._system_blocks_provider, "append_only_state", False):
             return desired
         if self._frozen_system_blocks is None:
@@ -3217,11 +3266,33 @@ class Session:
 
     @staticmethod
     def _system_state_message(changes: dict[str, str]) -> CustomMessage:
+        """One ``[session-state]`` record naming each changed section.
+
+        The label is what makes an anonymous block index legible to the model,
+        so it is prepended — EXCEPT where the block already opens with that
+        exact heading, which is an asymmetry rather than an oversight. Block 1
+        is rendered by :func:`render_tool_inventory_block`, whose output starts
+        with ``TOOL_INVENTORY_HEADING`` because the same string has to head the
+        section in the system prefix, where nothing prepends a label. Blocks 2
+        and 3 carry no heading of their own and would be unlabelled prose
+        without this, so stripping the label unconditionally is not the fix.
+
+        Prepending regardless produced ``## Available tools`` twice, back to
+        back, on the wire. That is latent on ``main`` — a session's inventory
+        never changed mid-run, so this delta was never emitted — and became
+        reachable on every real session once the inventory started reconciling
+        against the live tools array, which is the delivery mechanism for that
+        fix. Matched on the whole first LINE, not ``startswith`` on the
+        heading, so a future section named ``## Available tools and rules``
+        still gets its label rather than silently losing it.
+        """
         labels = {1: "Available tools", 2: "Environment", 3: "Knowledge and session state"}
-        text = "[session-state]\n" + "\n\n".join(
-            f"## {labels.get(int(index), 'Session state')}\n{block or '(empty)'}"
-            for index, block in changes.items()
-        )
+        sections: list[str] = []
+        for index, block in changes.items():
+            body = block or "(empty)"
+            heading = f"## {labels.get(int(index), 'Session state')}"
+            sections.append(body if body.split("\n", 1)[0] == heading else f"{heading}\n{body}")
+        text = "[session-state]\n" + "\n\n".join(sections)
         return CustomMessage(
             custom_type="session_state",
             attribution="system",
@@ -3240,7 +3311,9 @@ class Session:
         desired = self._system_blocks()
         if inspect.isawaitable(desired):
             desired = await desired
-        desired = list(desired)
+        # An aside runs against the same tools as the turn beside it, so it
+        # gets the same reconciled inventory (it just never journals one).
+        desired = self._reconcile_tool_inventory(list(desired))
         history = self._wire_legal_snapshot()
         blocks = list(self._frozen_system_blocks or desired)
         if desired[:1] != blocks[:1]:
@@ -5457,7 +5530,10 @@ class Session:
         blocks = self._system_blocks()
         if inspect.isawaitable(blocks):
             blocks = await blocks
-        resolved = list(blocks)
+        # Reconciled so the estimate counts the prompt that will be SENT: the
+        # inventory the model sees is the live one, and a breakdown measuring a
+        # stale block under-reports the header the user is billed for.
+        resolved = self._reconcile_tool_inventory(list(blocks))
         # Bind the inventory here, not in the thread. ``refresh_tools`` REBINDS
         # ``self._tools`` rather than mutating it, so this reference stays a
         # coherent snapshot even if an MCP refresh swaps the list mid-count.
@@ -9542,14 +9618,22 @@ class Session:
           ``docs/evidence/compaction-advisor/aside-tool-choice-measurement.txt``
           for the numbers.
         """
-        blocks = self._system_blocks()
-        if inspect.isawaitable(blocks):
-            blocks = await blocks
+        # Through the aside's own prompt builder, for the append-only contract
+        # above. This call sends the LIVE tools, so the inventory describing
+        # them must be current — but re-rendering it INTO the prefix diverges
+        # from the frozen blocks the turn sends the moment a tool is installed
+        # after the freeze, which is every real TUI session. Divergence at
+        # block 1 is worse than the appended block the docstring already
+        # forbids: it misses everything from position 1 on. ``_read_only_prompt``
+        # reconciles for the delta and then sends the FROZEN list, so the
+        # current inventory rides the appended ``[session-state]`` record
+        # instead — append-only, and the model is told exactly the same thing.
+        blocks, messages = await self._read_only_prompt(turns)
         request = ChatRequest(
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
-            messages=self._render_history([*self._wire_legal_snapshot(), *turns]),
+            messages=messages,
             # Live tools, same as an aside: the tools block is the FRONT of the
             # provider cache prefix, so sending [] would change position 0 and
             # force a full re-process at write price instead of a cache read.
