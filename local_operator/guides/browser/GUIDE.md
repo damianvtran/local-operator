@@ -93,7 +93,10 @@ running — especially when it is not the user's daily browser (they live in
 Arc, the extension is in Chrome). Check first, silently:
 
 ```sh
+# macOS
 pgrep -x "Google Chrome"
+# Linux — the process is named for the binary, and varies by browser/distro
+pgrep -x chrome || pgrep -x chromium || pgrep -x chromium-browser || pgrep -x brave
 ```
 
 If it is not running, ask the user before starting it the FIRST time (a
@@ -101,12 +104,18 @@ standing "yes, launch Chrome when you need it" is enough forever after),
 then launch it backgrounded:
 
 ```sh
+# macOS
 open -g -a "Google Chrome"
+# Linux — `open` is absent (or unrelated); xdg-open takes no -a/-g, so run
+# the binary directly and detach it so it does not die with the shell.
+setsid google-chrome >/dev/null 2>&1 < /dev/null &
 ```
 
 `open -g` launches it in the background without stealing focus or raising a
 window — the extension connects to the daemon within seconds of the browser
-starting. Never launch with
+starting. On Linux `setsid ... &` is the equivalent detach; the window may
+take focus depending on the window manager, so prefer asking the user to
+open it themselves if focus matters. Never launch with
 `--remote-debugging-port` or developer flags: the extension is the debugger,
 and a debug-port browser on a real logged-in profile is an open door for any
 local process.
@@ -135,7 +144,15 @@ lop browser install
 ```
 
 This installs and starts the loopback daemon (a LaunchAgent on macOS /
-systemd user unit on Linux, so it survives restarts). The daemon binds
+systemd user unit on Linux). On macOS `RunAtLoad` starts it at login. On
+Linux it survives logout and reboot **only if user lingering is enabled** —
+`install` now runs `loginctl enable-linger` best-effort and says so in its
+steps, but if that was refused the daemon is torn down when the user's last
+session ends and does not come back at boot. On a headless or SSH host that
+is the difference between working and silently dead; the remedy is
+`loginctl enable-linger $USER`. `systemctl --user` over plain SSH without
+lingering also fails outright with `Failed to connect to bus: No medium
+found`, which `install` translates to that same remedy. The daemon binds
 **127.0.0.1 only** — never widen it. Once the extension is loaded and connected
 you pair it (step 4); until then `install` just gets the daemon healthy.
 
@@ -364,12 +381,17 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   and don't silently churn — after the first failed check, tell the user
   what's wrong and what you're doing about it:
   1. **Is the paired browser even running?** Check before asking the user
-     anything: `pgrep -x "Google Chrome"` (or the browser they paired). This
+     anything: `pgrep -x "Google Chrome"` on macOS, or
+     `pgrep -x chrome || pgrep -x chromium || pgrep -x brave` on Linux (or
+     whichever browser they paired). This
      matters especially when the paired browser is NOT the user's primary one
      — a user who lives in Arc but paired Chrome will forget Chrome exists.
      If it isn't running, ask the user for permission to start it, then
      launch it BACKGROUNDED so it never steals focus:
-     `open -g -a "Google Chrome"` (macOS). Never add `--remote-debugging-port`
+     `open -g -a "Google Chrome"` (macOS) or
+     `setsid google-chrome >/dev/null 2>&1 </dev/null &` (Linux — there is no
+     `open -a`, and `xdg-open` takes neither `-a` nor `-g`).
+     Never add `--remote-debugging-port`
      or other debug flags — the extension IS the debugger; a debug-port
      browser on a real profile is a security hole. Not headless either: this
      is the user's own browser and they need to be able to see it. `-g` is
@@ -413,6 +435,16 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   automate the Web Store (install other extensions, fill the developer console,
   etc.) through the extension. Drive the user there and have them click, or use
   a separate tab for the rest of the task.
+
+**Reading the daemon's own output**, which several of the above tell you to do.
+`lop browser logs` picks the right source per platform: the log file on macOS,
+and on Linux the log file only when systemd is new enough for
+`StandardOutput=append:` (>= 240) — otherwise the output is in the journal and
+`logs` runs `journalctl --user -u local-operator-browser.service` instead.
+`lop browser status` prints the location it actually reads under `log:`, so
+quote that rather than assuming a path. A daemon that cannot bind its port
+restarts every 5s under `Restart=on-failure`, which is invisible unless you
+read that output.
 
 ## Pages the extension cannot drive
 
