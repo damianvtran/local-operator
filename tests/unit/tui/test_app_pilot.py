@@ -2309,16 +2309,8 @@ async def test_model_opens_the_picker_instead_of_reporting_a_label() -> None:
         await pilot.pause()
         assert editor.text == "/model ", editor.text
         assert editor.model_picker.is_open()
-        # NOTHING was submitted: completing a command whose argument drives its
-        # own list is not running it, so there is no echoed UserBlock. The one
-        # block is the persist-hint notice, which rides the list's OPEN
-        # transition rather than the dispatch (UX review U5) so this keystroke
-        # route — the primary one — names `/model saved` and `/settings` just
-        # as the dispatched `/model` does. A system notice, so the empty state
-        # is intact and the composition has not collapsed.
-        blocks = app.query_one(TranscriptView).blocks()
-        assert [type(b).__name__ for b in blocks] == ["NoticeBlock"], blocks
-        assert _unwrapped(PERSIST_HINT) in _unwrapped(_transcript_text(app))
+        # Completion opens transient UI; guidance belongs to explicit help.
+        assert app.query_one(TranscriptView).blocks() == []
         assert app._welcome_visible is True
     assert session.prompts == []
 
@@ -2326,18 +2318,7 @@ async def test_model_opens_the_picker_instead_of_reporting_a_label() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 30), (80, 24)])
 async def test_the_picker_notice_is_exactly_its_rows_tall(size: tuple[int, int]) -> None:
-    """A notice appended from a message handler must not keep a stale height.
-
-    Found the moment the persist-hint notice moved onto ``ModelQueryOpened``:
-    built before layout at the 80-column fallback, measured at the 75-cell
-    boot column where each fallback row folded once more, and then re-authored
-    at the right width — but the second measurement never replaced the first
-    in the box-model cache, so a three-row notice held five rows and put a
-    scrollbar on a two-block transcript at 80-100 columns. ``NoticeBlock``
-    now pins its authored height like ``UserBlock`` does. Asserted as the
-    invariant (block height equals authored rows; no scrollbar) rather than
-    as a number, so a longer hint does not turn this into a golden.
-    """
+    """Explicit model guidance still has content-sized geometry, without empty rows."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=size) as pilot:
@@ -2345,7 +2326,7 @@ async def test_the_picker_notice_is_exactly_its_rows_tall(size: tuple[int, int])
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
-        await pilot.press("slash", "m", "o", "d", "e", "l", "space")
+        app._run_slash_command("/model")
         for _ in range(6):
             await pilot.pause()
         transcript = app.query_one(TranscriptView)
@@ -2363,24 +2344,10 @@ async def test_the_picker_notice_is_exactly_its_rows_tall(size: tuple[int, int])
 
 @pytest.mark.asyncio
 async def test_escaping_the_model_list_then_editing_prints_no_second_notice() -> None:
-    """Esc-dismissing the list and clearing the line leaves one notice, not a
-    stack (UX review round 2, U8).
-
-    The editor re-derives every list from the buffer on EVERY key before
-    routing, so a bare ``close()`` on Esc was undone by the next keystroke's
-    pre-sync: the list reopened on the unchanged `/model `, posted
-    ``ModelQueryOpened``, and the key's own edit closed it again in the same
-    tick — nothing showed, but the app printed the hint once per cycle. Five
-    cycles left ten identical notices and a transcript scrollbar. Esc is now a
-    ``dismiss`` the picker holds until the query changes. Driven through the
-    exact reported gesture, three times, and asserted on both the count and
-    the scrollbar the stack produced.
-    """
+    """Esc dismissal survives edits; repeated openings never add transcript help."""
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
-    # Counted separately from the notices so the ROOT fix is pinned on its own:
-    # the dedupe guard in `on_model_query_opened` would hide a resync that
-    # still announced a phantom opening, and this is the handler's other call.
+    # Count openings too: silent notices must not hide phantom picker resyncs.
     opens: list[int] = []
     populate = app._populate_model_picker
 
@@ -2415,7 +2382,7 @@ async def test_escaping_the_model_list_then_editing_prints_no_second_notice() ->
             await pilot.pause()
         transcript = app.query_one(TranscriptView)
         notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
-        assert len(notices) == 1, [n.text() for n in notices]
+        assert notices == [], [n.text() for n in notices]
         assert transcript.virtual_size.height <= transcript.size.height, (
             transcript.virtual_size,
             transcript.size,
@@ -2424,11 +2391,8 @@ async def test_escaping_the_model_list_then_editing_prints_no_second_notice() ->
 
 
 @pytest.mark.asyncio
-async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> None:
-    """The control for the U8 fix: Esc then a CHANGED query is a real new
-    opening and prints again. Two openings that show a list are two notices;
-    the dismissal expires the moment the query text moves, so a user who
-    pressed Esc still gets the list back by typing."""
+async def test_escaping_then_retyping_the_model_query_reopens_without_transcript_noise() -> None:
+    """The Esc latch still expires when query text changes; neither opening prints help."""
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -2444,8 +2408,7 @@ async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> 
         for _ in range(3):
             await pilot.pause()
         assert not editor.model_picker.is_open()
-        # A typed character changes the query: the list is back, and so is the
-        # hint — but only this once, not once per keystroke after it.
+        # A changed query brings the list back, without adding transcript help.
         await pilot.press("o")
         for _ in range(4):
             await pilot.pause()
@@ -2456,13 +2419,8 @@ async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> 
             await pilot.pause()
         transcript = app.query_one(TranscriptView)
         notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
-        # ONE, not two: the second open showed the same list under the same
-        # hint, and the ledger's last row already says it (the belt-and-braces
-        # guard in `on_model_query_opened`). The picker's rows were refilled
-        # either way — that is what `is_open` above proves.
-        assert len(notices) == 1, [n.text() for n in notices]
-        # The guard compares TEXT, not "a notice was printed": once a switch
-        # has changed the hint's subject, the next opening prints the new one.
+        assert notices == []
+        # Switching changes the subject, but still must not reprint help.
         editor.clear_content()
         await pilot.pause()
         app._run_slash_command("/model anthropic/claude-opus-5")
@@ -2472,11 +2430,10 @@ async def test_escaping_then_retyping_the_model_query_reopens_and_reprints() -> 
         for _ in range(4):
             await pilot.pause()
         hints = [b.text() or "" for b in app.query(NoticeBlock) if PERSIST_HINT in (b.text() or "")]
-        # The first hint, the switch receipt (it carries PERSIST_HINT too), and
-        # the second hint naming the new model.
-        assert len(hints) == 3, hints
-        assert hints[0].startswith("model: openrouter/"), hints[0]
-        assert hints[-1].startswith("model: anthropic/claude-opus-5"), hints[-1]
+        assert hints == []
+        notices = [b.text() for b in app.query(NoticeBlock)]
+        assert len(notices) == 1, notices
+        assert "→ anthropic/claude-opus-5 (this session)" in (notices[0] or "")
 
 
 @pytest.mark.asyncio
@@ -2527,7 +2484,7 @@ async def test_a_caret_move_does_not_expire_an_escaped_model_list() -> None:
         assert editor.text == "/model ", editor.text
         transcript = app.query_one(TranscriptView)
         notices = [b for b in transcript.blocks() if isinstance(b, NoticeBlock)]
-        assert len(notices) == 1, [n.text() for n in notices]
+        assert notices == [], [n.text() for n in notices]
         # Typing still expires the dismissal — the latch holds an Esc, it does
         # not disable the list.
         await pilot.press("o")
@@ -2719,15 +2676,8 @@ async def test_a_held_model_latch_does_not_swallow_tab_elsewhere_in_the_buffer()
 
 
 @pytest.mark.asyncio
-async def test_the_hint_dedupe_guard_sees_past_a_pinned_working_line() -> None:
-    """R12: the guard reads the last block a caller appended, not the pin.
-
-    A turn in flight pins its working line to the bottom of the transcript and
-    every later append lands BEFORE it, so a guard reading ``blocks()[-1]``
-    matched the working line and never the hint — the deduplication silently
-    stopped applying in exactly the state where re-opening the list mid-turn
-    would stack copies.
-    """
+async def test_model_picker_openings_do_not_disturb_a_pinned_working_line() -> None:
+    """Opening and dismissing a picker while working must not grow the ledger."""
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -2757,29 +2707,16 @@ async def test_the_hint_dedupe_guard_sees_past_a_pinned_working_line() -> None:
         hints = [
             b for b in blocks if isinstance(b, NoticeBlock) and PERSIST_HINT in (b.text() or "")
         ]
-        assert len(hints) == 1, [h.text() for h in hints]
-        # The pin really was in the way: the hint is not the last block, which
-        # is the condition the old guard could not see past.
+        assert hints == []
         assert blocks[-1] is working
-        assert blocks[-1] is not hints[0]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["typed", "pasted"])
-async def test_a_fully_typed_selector_prints_the_hint_once_above_its_receipt(
+async def test_a_fully_typed_selector_prints_only_its_receipt(
     route: str,
 ) -> None:
-    """A selector typed in full (or pasted whole) still gets ONE hint, above the
-    receipt — recorded, not fixed (UX review round 2, U10).
-
-    The list opens on the space after `/model`, before any id exists, so the
-    hint has to decide before it can know the user will type a full selector;
-    the space is the same moment a bare `/model ` opens on, which printed this
-    notice before this PR. What this pins is the bound: one hint for the
-    opening and none for the keystrokes after it, on both routes. The paste
-    goes through the app like a real clipboard drop, since the editor's paste
-    handler re-inserts a payload posted straight to it.
-    """
+    """Typed and pasted switches owe exactly one confirmation, not automatic help."""
     from textual import events
 
     session = _SwitchableSession()
@@ -2804,9 +2741,8 @@ async def test_a_fully_typed_selector_prints_the_hint_once_above_its_receipt(
         for _ in range(6):
             await pilot.pause()
         notices = [b.text() or "" for b in app.query(NoticeBlock)]
-    assert len(notices) == 2, notices
-    assert notices[0].startswith("model: openrouter/deepseek/deepseek-chat — "), notices[0]
-    assert "→ anthropic/claude-opus-5 (this session)" in notices[1], notices[1]
+    assert len(notices) == 1, notices
+    assert "→ anthropic/claude-opus-5 (this session)" in notices[0], notices[0]
     assert session.model_label == "anthropic/claude-opus-5"
 
 
@@ -7731,9 +7667,8 @@ class _SwitchableSession(FakeSession):
 
 
 @pytest.mark.asyncio
-async def test_switching_confirms_access_instead_of_warning_about_it() -> None:
-    """The old line told the user to go and check something the app knew, on every
-    provider change including the ones that were fine."""
+async def test_switching_omits_ordinary_access_confirmation() -> None:
+    """A usable provider needs neither a redundant access confirmation nor a warning."""
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -7743,7 +7678,7 @@ async def test_switching_confirms_access_instead_of_warning_about_it() -> None:
         await pilot.pause()
         text = _transcript_text(app)
     assert "anthropic/claude-opus-5" in text, text
-    assert "anthropic logged in" in text, text
+    assert "anthropic logged in" not in text, text
     assert "make sure you are logged in" not in text, text
 
 
@@ -8702,10 +8637,8 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command() -> None:
-    """A switch that looks permanent and is not is the actual bug: the old
-    "(next turn)" said WHEN it applied and never said for how long, so the next
-    launch coming back on the old model read as the switch having been lost."""
+async def test_a_switch_confirms_session_scope_without_repeating_help() -> None:
+    """The confirmation states what changed and its scope; full help remains explicit."""
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -8715,20 +8648,15 @@ async def test_a_switch_admits_it_is_session_only_and_names_the_persist_command(
         await pilot.pause()
         text = _transcript_text(app)
     assert _unwrapped("this session") in _unwrapped(text), text
-    # The persist breadcrumb names `/model default` again: the `d` affordance
-    # #369 briefly introduced is gone, and the bare command writes.
-    assert _unwrapped(PERSIST_HINT) in _unwrapped(text), text
-    # The access clause is unchanged by the new one sharing the line.
-    assert _unwrapped("anthropic logged in") in _unwrapped(text), text
+    assert _unwrapped(PERSIST_HINT) not in _unwrapped(text), text
+    assert _unwrapped("anthropic logged in") not in _unwrapped(text), text
 
 
 @pytest.mark.asyncio
-async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
+async def test_model_default_confirms_the_pair_and_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bare "saved" is a claim the user cannot check without relaunching.
-    The provider is the half that rides along silently — it is written from the
-    selector's left side and never typed as a setting of its own."""
+    """A concise receipt names the saved pair and both scopes; verify the disk write too."""
     import yaml
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -8746,10 +8674,8 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert written["hosting"] == "anthropic", written
     assert written["model_name"] == "claude-opus-5", written
-    # What it wrote, under the names the config file uses…
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
-    # …and where, so the user can go and read or undo it.
-    assert str(tmp_path / "config.yml") in _unwrapped(text), text
+    assert _unwrapped("boot default saved: anthropic/claude-opus-5") in _unwrapped(text)
+    assert _unwrapped("this session + new sessions") in _unwrapped(text)
 
 
 @pytest.mark.asyncio
@@ -8800,8 +8726,8 @@ async def test_model_default_alone_saves_the_model_the_session_is_on(
     # the persist path's own `set_model` is a no-op re-selection.
     assert label_after == "anthropic/claude-opus-5", label_after
     # Same receipt vocabulary as the explicit spelling — one outcome, one wording.
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
-    assert str(tmp_path / "config.yml") in _unwrapped(text), text
+    assert _unwrapped("boot default saved: anthropic/claude-opus-5") in _unwrapped(text), text
+    assert _unwrapped("(new sessions)") in _unwrapped(text), text
 
 
 @pytest.mark.asyncio
@@ -9016,7 +8942,7 @@ async def test_model_default_alone_is_write_only(
         await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     # The bare form WROTE (its receipt names the pair) without the access note…
-    assert _unwrapped("hosting openrouter, model_name deepseek/deepseek-chat") in bare_receipt
+    assert _unwrapped("boot default saved: openrouter/deepseek/deepseek-chat") in bare_receipt
     assert _unwrapped("openrouter logged in") not in bare_receipt, bare_receipt
     # …and the explicit form with a different model took the switch tail once.
     assert session.set_model_calls == [("anthropic/claude-opus-5", True)], session.set_model_calls
@@ -9496,24 +9422,8 @@ async def test_the_bare_model_notice_does_not_orphan_a_route_token() -> None:
 
 @pytest.mark.asyncio
 async def test_every_model_default_surface_says_it_the_same_way() -> None:
-    """D14. One instruction had four wordings on four surfaces a user meets
-    within two keystrokes. The canonical sentence now names the consequence —
-    future sessions — rather than merely saying an unspecified pair is saved.
-
-    The defect is the divergence, so all four surfaces are checked together.
-    The footer is checked unwrapped and whole because it is the tightest site:
-    an instruction that is consistent only after truncation is not consistent.
-
-    THE `/help` ROW IS THE ONE DOCUMENTED EXCEPTION (design review round 3,
-    D7). It carries the same COMMAND and the same consequence, but not the
-    same sentence: reusing ``PERSIST_HINT`` verbatim there needed a ≤12-cell
-    lead to stay inside the 55-cell description column, and every such lead was
-    a fragment (`Switch;`, `Pick one;`). ``PERSIST_HINT``'s exact length is set
-    by the picker footer's 43-cell budget, which is not a constraint `/help`
-    shares, so the row gets its own carrier and this test asserts the invariant
-    that actually matters — one command, one consequence, no second paraphrase
-    of what is being saved.
-    """
+    """Explicit model/help and the picker footer retain the save command and scope;
+    successful switches do not repeat that guidance."""
     session = _SwitchableSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
@@ -9532,10 +9442,10 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
         await pilot.pause()
         help_text = _transcript_text(app)
 
-    # 1. the notice a bare `/model` prints above the list, 2. the switch receipt,
-    # 3. the picker's own footer, 4. the `/help` row.
+    # Full guidance is explicit; the picker footer retains the save shortcut.
+    # The subsequent switch must not add another copy to the transcript.
     assert _unwrapped(PERSIST_HINT) in _unwrapped(bare_notice), bare_notice
-    assert _unwrapped(PERSIST_HINT) in _unwrapped(receipt), receipt
+    assert _unwrapped(receipt).count(_unwrapped(PERSIST_HINT)) == 1, receipt
     assert PERSIST_HINT in footer, footer
     model_row = next(c for c in SLASH_COMMANDS if c.name == "model")
     # `/help` names the same command and the same consequence in its own words
@@ -9557,13 +9467,11 @@ async def test_every_model_default_surface_says_it_the_same_way() -> None:
     ):
         assert _unwrapped(stale) not in everything, stale
 
-    # The receipt is two clauses now, not a run-on of four separators — and it
-    # still says the two things that made it necessary: the scope, and the access
-    # state of the provider it just switched to.
+    # The receipt confirms scope, not ordinary credential state or repeated help.
     switch_line = next(line for line in _unwrapped(receipt).split("·") if _unwrapped("→") in line)
     assert _unwrapped("(this session)") in switch_line, switch_line
     assert _unwrapped("from the next turn") not in _unwrapped(receipt), receipt
-    assert _unwrapped("anthropic logged in") in _unwrapped(receipt), receipt
+    assert _unwrapped("anthropic logged in") not in _unwrapped(receipt), receipt
 
 
 @pytest.mark.asyncio
@@ -9592,8 +9500,7 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
     # keeps it to two wrapped lines at the widths this app supports. Folding the
     # timing into the scope parenthetical measured three.
     assert _unwrapped("(this session)") in text, text
-    # The persist breadcrumb is PERSIST_HINT, which names `/model default`.
-    assert _unwrapped(PERSIST_HINT) in text, text
+    assert _unwrapped(PERSIST_HINT) not in text, text
     # SAME INK as the receipt it qualifies (design review D3). At `note` the
     # subordinate row measured 8.62:1 against the receipt's 4.55:1 and the eye
     # landed on the qualifier first; the token is asserted rather than the
@@ -9940,7 +9847,7 @@ async def test_model_default_on_a_cold_viewer_still_saves(
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("boot default saved:") in text, text
     assert _unwrapped("no runtime is running") not in text, text
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
@@ -9989,7 +9896,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used by new sessions") in text, text
+    assert _unwrapped("this session + new sessions") in text, text
 
 
 @pytest.mark.asyncio

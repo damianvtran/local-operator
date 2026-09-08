@@ -1845,6 +1845,11 @@ class Session:
         #: EDIT order rather than in whichever-thread-finished-first order
         #: (review round 1, R2).
         self._configured_model_generation = 0
+        # A provider/model save notifies once per key. Defer pinned-session
+        # receipts to the final pair, and remember semantic state rather than
+        # file fingerprints so repeated refreshes cannot repeat the notice.
+        self._configured_model_notice_generation = 0
+        self._configured_model_notice_key: tuple[str, str, str, str] | None = None
         #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
         #: ``web_fetch.enabled`` moved; consumed at the next TURN boundary by
         #: :meth:`_reconcile_web_tools`. Deferred rather than applied on the
@@ -11185,33 +11190,66 @@ class Session:
         if self._job_id is not None:
             return
         if self._model_source != "config" or self._explicit_model_choice:
-            label = self.model_label
-            if self._explicit_model_choice:
-                reason = "chosen with /model"
-            elif self._model_source == "agent":
-                reason = "chosen by an agent profile"
-            else:
-                reason = "chosen by a flag"
+            self._configured_model_notice_generation += 1
             self._spawn_background(
-                self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"keeping {label} — {reason}; config.yml default changed, "
-                            "/model saved adopts it"
-                        ),
-                        kind="info",
-                        # A glance for the boot toast, so it does not fall
-                        # through to a blind cut landing mid-phrase (design
-                        # round 1, D3). See ``NoticeEvent.headline``.
-                        headline="Model unchanged",
-                    )
-                )
+                self._notice_configured_model_kept(values, self._configured_model_notice_generation)
             )
             return
         # Bumped BEFORE the spawn so an adopt already parked on its thread hop
         # sees a generation newer than the one it captured and stands down.
         self._configured_model_generation += 1
         self._spawn_background(self._adopt_configured_model(values))
+
+    async def _notice_configured_model_kept(
+        self, values: Mapping[str, Any], generation: int
+    ) -> None:
+        """Report a divergent default once, never the intermediate half of a save.
+
+        The settings facade writes hosting and model_name synchronously, each
+        with its own watcher notification. By the time this task runs, only
+        the newest pair owns a receipt. This does not debounce model adoption
+        or delay a user's switch; it only coalesces explanatory notices.
+        """
+        if self._disposed or generation != self._configured_model_notice_generation:
+            return
+        hosting = str(values.get("hosting") or "").strip().lower()
+        model_name = str(values.get("model_name") or "").strip()
+        if hosting and not model_name:
+            from local_operator.model.defaults import default_model_for
+
+            model_name = default_model_for(hosting) or ""
+        current = self.effective_model
+        if (
+            not hosting
+            or not model_name
+            or (hosting, model_name)
+            == (
+                current.provider,
+                current.model_id,
+            )
+        ):
+            # Saving the pinned model changes no decision for this session.
+            # Clear the latch so a later return to a divergent default is NEW.
+            self._configured_model_notice_key = None
+            return
+        label = self.effective_model_label
+        if self._explicit_model_choice:
+            reason = "chosen with /model"
+        elif self._model_source == "agent":
+            reason = "chosen by an agent profile"
+        else:
+            reason = "chosen by a flag"
+        key = (hosting, model_name, label, reason)
+        if key == self._configured_model_notice_key:
+            return
+        self._configured_model_notice_key = key
+        await self._emit(
+            NoticeEvent(
+                text=f"keeping {label} — {reason}; /model saved adopts {hosting}/{model_name}",
+                kind="info",
+                headline="Model unchanged",
+            )
+        )
 
     async def _adopt_configured_model(self, values: Mapping[str, Any]) -> None:
         """Switch onto the ``hosting``/``model_name`` pair in ``values``.
