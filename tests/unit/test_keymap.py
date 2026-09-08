@@ -252,10 +252,66 @@ def test_two_actions_may_not_share_one_key() -> None:
     values = {"keymap.new_session": "ctrl+g"}
 
     problem = keymap.group_conflict("keymap.resume", "ctrl+g", values)
-    assert problem is not None and "already uses that key" in problem
+    # The message names the OVERLAPPING key, not "that key": with alternates
+    # a submitted value can have one bad member and one good one.
+    assert problem is not None and "already uses ctrl+g" in problem
     # Normalization is applied before comparing, so an equivalent spelling of
     # the same chord cannot slip past the check.
     assert keymap.group_conflict("keymap.resume", "CTRL+G", values) is not None
     # A free key, and the row keeping its own key, are both allowed.
     assert keymap.group_conflict("keymap.resume", "f5", values) is None
     assert keymap.group_conflict("keymap.new_session", "ctrl+g", values) is None
+
+
+def test_a_shared_alternate_is_a_collision_even_when_the_strings_differ() -> None:
+    """Key strings are comma-separated SETS, so they compare as sets.
+
+    ``"f5,ctrl+g"`` and ``"ctrl+g"`` are different strings and the same
+    binding as far as ``ctrl+g`` is concerned. The first implementation of the
+    group check compared whole strings and let this through, which reopened
+    M2 through the very path §H.1 recommends for a second key — measured on
+    the real app: three presses of ``ctrl+g`` fired ``new_session`` every time
+    and ``resume`` answered to no key at all (review round 2, M4).
+    """
+    # alternate on the LEFT, whole key on the right
+    values = {"keymap.new_session": "f5,ctrl+g"}
+    assert keymap.group_conflict("keymap.resume", "ctrl+g", values) is not None
+    # whole key on the left, alternate on the right
+    values = {"keymap.new_session": "ctrl+g"}
+    assert keymap.group_conflict("keymap.resume", "f5,ctrl+g", values) is not None
+    # alternate on BOTH sides, overlapping in one member only
+    values = {"keymap.new_session": "f5,ctrl+g"}
+    assert keymap.group_conflict("keymap.resume", "ctrl+t,ctrl+g", values) is not None
+    # an alternate that collides with the OTHER row's shipped default, which is
+    # absent from `values` entirely — the case an inverted resolver would miss.
+    assert keymap.group_conflict("keymap.new_session", "f5,ctrl+s", {}) is not None
+
+    # Disjoint alternates are legitimate and must still be allowed.
+    values = {"keymap.new_session": "f5,ctrl+g"}
+    assert keymap.group_conflict("keymap.resume", "f2,ctrl+t", values) is None
+    # A row is never its own victim, including when it keeps its alternates.
+    assert keymap.group_conflict("keymap.new_session", "f5,ctrl+g", values) is None
+
+
+def test_the_refusal_names_the_overlapping_key_not_the_whole_value() -> None:
+    """With alternates in play, "that key" is ambiguous.
+
+    A user who submitted ``"f5,ctrl+g"`` has one bad member and one good one;
+    a refusal that does not say which cannot be acted on.
+    """
+    problem = keymap.group_conflict(
+        "keymap.resume", "ctrl+t,ctrl+g", {"keymap.new_session": "f5,ctrl+g"}
+    )
+    assert problem is not None
+    assert "ctrl+g" in problem
+    assert "ctrl+t" not in problem, f"named a key that does not collide: {problem}"
+
+
+def test_alternates_splits_and_normalizes_every_member() -> None:
+    """The set contract the group check rests on."""
+    assert keymap.alternates("f5,ctrl+g") == frozenset({"f5", "ctrl+g"})
+    assert keymap.alternates("CTRL+G") == frozenset({"ctrl+g"})
+    # Spelling variants cannot appear as distinct members.
+    assert keymap.alternates("ctrl+g,CTRL+G") == frozenset({"ctrl+g"})
+    assert keymap.alternates("") == frozenset()
+    assert keymap.alternates(" f5 , ctrl+g ") == frozenset({"f5", "ctrl+g"})

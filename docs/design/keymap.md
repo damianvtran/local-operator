@@ -1068,3 +1068,24 @@ UI that could warn) and from `_capture_key` (so the page refuses on the press
 rather than at commit — accepting a key that cannot be stored would light the
 footer's `enter confirm` for a gesture that then errors, which is design round
 1's D2 defect in a second place).
+
+**What the check compares, precisely.** It intersects the ALTERNATE SETS of
+the `keymap.*` values — each value split on comma and normalized per element —
+and refuses on any non-empty intersection. The set comparison is the load-
+bearing part, and the first implementation of this fix did NOT have it: it
+compared whole strings, so `"f5,ctrl+g"` and `"ctrl+g"` read as different
+values while the app had both actions live on `ctrl+g`. That reopened M2
+through a path §H.1 itself recommends — alternates are how a user reaches a
+second key, since capture takes exactly one — and it was measured, not
+theorised: three presses of `ctrl+g` fired `new_session` every time and
+`resume` was reachable by **no key at all** (review round 2, M4).
+
+The refusal names the overlapping keys rather than the submitted value,
+because with alternates in play a two-key string has only one bad member and a
+refusal that does not say which cannot be acted on.
+
+What it does NOT cover, stated so the next reader does not assume otherwise:
+conflicts against NON-remappable app bindings (warn-and-allow, `_app_binding_victim`),
+composer keys (warn-and-allow, `COMPOSER_KEYS`), and the reserved set (refused
+separately by `validate_key`). This check is only about two `keymap.*` actions
+colliding with each other.

@@ -2091,7 +2091,7 @@ class SettingsView(Vertical):
             self._error = str(error)
             self._repaint()
             return
-        problem = settings_io.validate(setting, value)
+        problem = settings_io.validate(setting, value, self._config_values())
         if problem is not None:
             self._error = problem
             self._repaint()
@@ -3485,16 +3485,16 @@ class SettingsView(Vertical):
             # The body is hidden: there is no row to explain, and a help
             # string about an invisible setting would repeat #431's lie
             # in words. The constraint is the only useful thing to say.
+            # No capture clause here, deliberately. Round 1's D6 appended
+            # `· esc cancels` for a capture still live behind the hidden body;
+            # round 2's D9 showed that clause being clipped away unmarked at
+            # exactly the widths where it was the only thing on screen. The
+            # state it described is now impossible instead of merely
+            # advertised: `_apply_chrome_ladder` ends the capture on the way
+            # into too-short, so there is never a disarmed app behind this
+            # line. A string that must stay legible at every future width is a
+            # weaker guarantee than a state that cannot occur.
             text.append(_TOO_SHORT, style=faint)
-            if self._capture is not None:
-                # …except when a capture is still live behind the hidden body.
-                # The user is then in a modal state with no visible
-                # representation and every app binding disarmed, and nothing
-                # on screen naming the way out (design round 1, D6). `esc`
-                # does work; it just was not advertised. Appended rather than
-                # ending the capture so that resizing back does not silently
-                # discard a key the user had already pressed.
-                text.append("  ·  esc cancels", style=dim)
         elif self._capture is not None:
             # Above everything but the too-short constraint: while a row is
             # listening, the app has no hotkeys at all, so what this row says
@@ -4376,6 +4376,26 @@ class SettingsView(Vertical):
         self._chrome_pad = show_pad and not too_short
         self._chrome_rule = show_rule and not too_short
         self._chrome_columns = not too_short
+        if too_short and not self._too_short and self._capture is not None:
+            # GOING too-short ENDS a live capture, rather than trying to keep
+            # its escape clause legible.
+            #
+            # Capture disarms every app binding through `check_action`,
+            # ctrl+c included, so it is only safe while the page can SAY so.
+            # Below the body floor it cannot: the row that would name the key
+            # is hidden, the detail line is down to ~42 cells, and at height 10
+            # the detail widget is not painted at all (design round 2, D10) —
+            # so there is no width at which shortening a string is a general
+            # answer. Round 2's D9 was exactly that: `esc cancels` clipped away
+            # with no mark, leaving every binding dead and no stated exit.
+            #
+            # Ending it is also the honest reading of the gesture. A user who
+            # shrinks the terminal mid-capture has abandoned the row — nothing
+            # of theirs is lost, because a capture holds at most one unconfirmed
+            # key that was never written, and the row keeps the value it had.
+            # The alternative trades a guaranteed-safe state for a string that
+            # must stay short enough at every future width.
+            self._end_capture()
         self._too_short = too_short
         self._rule.display = self._chrome_rule
         self._columns.display = self._chrome_columns
@@ -4662,30 +4682,59 @@ class SettingsView(Vertical):
                 break
         plan, esc_label = chosen
         visible = {hint for hint, _label, _lead in plan}
-        for index, (hint, label, lead) in enumerate(plan):
-            # The FIRST hint never draws its `·` seam, whatever its tuple says.
-            # `lead` is declared per hint, but a hint's position is decided by
-            # the rung — and capture reorders them so `enter` leads (design
-            # round 1, D4). Without this, the reordered row opened on a
-            # dangling separator with nothing before it.
+        leading = self._leading_hint(visible)
+        for hint, label, lead in plan:
+            # The seam is suppressed on the hint that is FIRST ON SCREEN, which
+            # is a fact about DOM order and NOT about position in `plan`.
+            # `plan` is the SHED order — capture inverts it so `enter` is the
+            # last lead dropped (design round 1, D4) — while hints always paint
+            # in the order `compose` yielded them. Keying the suppression to
+            # plan position therefore silenced the seam on `enter`, which sits
+            # at plan index 0 but paints second, and the footer rendered
+            # `any keyenter` as one word (design round 2, D8).
             hint.paint(
                 esc_label if hint is self._exit_hint else label,
-                lead=lead and index > 0,
+                lead=lead and hint is not leading,
             )
-        for hint in (
-            self._move_hint,
-            self._enter_hint,
-            self._reset_hint,
-            self._pane_hint,
-            self._tab_hint,
-            self._exit_hint,
-        ):
-            hint.display = hint in visible
+        for hint in self._HINT_DOM_ORDER_ATTRS:
+            getattr(self, hint).display = getattr(self, hint) in visible
+
+    #: The footer hints in the order ``compose`` yields them, which is the
+    #: order they PAINT in. Named once because two separate things need it —
+    #: the seam suppression and the display sweep — and a second hand-written
+    #: copy is how the two would drift apart.
+    _HINT_DOM_ORDER_ATTRS = (
+        "_move_hint",
+        "_tab_hint",
+        "_enter_hint",
+        "_reset_hint",
+        "_pane_hint",
+        "_exit_hint",
+    )
+
+    def _leading_hint(self, visible: set["HintButton"]) -> "HintButton | None":
+        """The visible hint that paints first, in DOM order."""
+        for attr in self._HINT_DOM_ORDER_ATTRS:
+            hint = getattr(self, attr)
+            if hint in visible:
+                return hint
+        return None
 
     def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
+        # Measured with the SAME seam rule paint uses, or the ladder budgets a
+        # row it does not render: the leading hint's ` · ` is 3 cells that will
+        # never be drawn, so an undecremented measure over-reserves and sheds a
+        # rung earlier than it needs to (design round 2, D8's second note).
+        visible = {hint for hint, _label, _lead in plan}
+        leading = self._leading_hint(visible)
         row = Text()
         for hint, label, lead in plan:
-            row.append(hint.preview(esc_label if hint is self._exit_hint else label, lead=lead))
+            row.append(
+                hint.preview(
+                    esc_label if hint is self._exit_hint else label,
+                    lead=lead and hint is not leading,
+                )
+            )
         return cell_len(row.plain)
 
     # -- test hooks ---------------------------------------------------------
