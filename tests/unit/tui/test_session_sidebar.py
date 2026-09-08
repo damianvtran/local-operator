@@ -88,9 +88,9 @@ def _quiesce_sidebar_refresh(app: OperatorApp) -> None:
 
 def test_urgency_ranking_keeps_gates_independent_of_acknowledgement():
     rows = [
-        CatalogEntry(SessionRow("recent", 100, "Recent")),
+        CatalogEntry(SessionRow("recent", 100, "Recent", created_at=100)),
         CatalogEntry(SessionRow("active", 50, "Working", live_state="busy")),
-        CatalogEntry(SessionRow("done", 10, "Completed"), unseen=True),
+        CatalogEntry(SessionRow("done", 10, "Completed", created_at=10), unseen=True),
         CatalogEntry(SessionRow("ask", 1, "Question", pending="ask"), unseen=True),
     ]
     assert [row.id for row in rank_entries(rows)] == ["ask", "done", "active", "recent"]
@@ -201,7 +201,11 @@ async def _focus_settled(pilot, sidebar) -> None:
 def _hover_entries(ids: tuple[str, ...] = ("alpha", "sess", "gamma")) -> list[CatalogEntry]:
     now = time.time()
     return [
-        CatalogEntry(SessionRow(sid, now - 60 * (index + 1), f"Session {sid}"))
+        CatalogEntry(
+            SessionRow(
+                sid, now - 60 * (index + 1), f"Session {sid}", created_at=now - 60 * (index + 1)
+            )
+        )
         for index, sid in enumerate(ids)
     ]
 

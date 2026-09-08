@@ -260,7 +260,7 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not self.entries:
             return 0
-        tiers = {0 if entry.rank[0] <= 2 else 1 for entry in self.entries}
+        tiers = {0 if entry.active else 1 for entry in self.entries}
         # Per section: its heading and the blank beneath it, plus a blank
         # above every heading after the first. The outer "Sessions" title is
         # not counted — it is not drawn at all once any header is (`render`).
@@ -299,7 +299,7 @@ class SessionSidebar(Widget, can_focus=True):
         rows: list[tuple[str, CatalogEntry | None]] = []
         section: str | None = None
         for entry in self.visible_entries:
-            current = "active" if entry.rank[0] <= 2 else "previous"
+            current = "active" if entry.active else "previous"
             if current != section:
                 # A blank ABOVE every heading but the first, and one BELOW
                 # every heading. The ask was "an active sessions header and

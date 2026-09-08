@@ -1,0 +1,139 @@
+[
+  {
+    "case": "unauthorized list",
+    "status": 401,
+    "response": "{\"error\":\"authentication required\"}"
+  },
+  {
+    "case": "synthetic login",
+    "status": 200
+  },
+  {
+    "case": "authenticated list",
+    "status": 200,
+    "rows": [
+      {
+        "session_id": "done-new",
+        "section": "active",
+        "conversation_name": "Completed newest",
+        "cwd": "",
+        "model_label": "",
+        "streaming": false,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 1000.0,
+        "created_at": 1000.0,
+        "completion_kind": "complete",
+        "unseen": true
+      },
+      {
+        "session_id": "done-old",
+        "section": "active",
+        "conversation_name": "Completed older",
+        "cwd": "",
+        "model_label": "",
+        "streaming": false,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 999.0,
+        "created_at": 999.0,
+        "completion_kind": "complete",
+        "unseen": true
+      },
+      {
+        "session_id": "error",
+        "section": "active",
+        "conversation_name": "Failed review",
+        "cwd": "",
+        "model_label": "",
+        "streaming": false,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 998.0,
+        "created_at": 998.0,
+        "completion_kind": "error",
+        "unseen": true
+      },
+      {
+        "session_id": "interrupt",
+        "section": "active",
+        "conversation_name": "Interrupted research",
+        "cwd": "",
+        "model_label": "",
+        "streaming": false,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 997.0,
+        "created_at": 997.0,
+        "completion_kind": "interrupted",
+        "unseen": true
+      },
+      {
+        "session_id": "busy-a",
+        "section": "active",
+        "conversation_name": "Working Alpha",
+        "cwd": "",
+        "model_label": "",
+        "streaming": true,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 1788841297.839276,
+        "created_at": 996.0,
+        "completion_kind": "",
+        "unseen": false
+      },
+      {
+        "session_id": "busy-b",
+        "section": "active",
+        "conversation_name": "Working Beta",
+        "cwd": "",
+        "model_label": "",
+        "streaming": true,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 1788841297.825175,
+        "created_at": 995.0,
+        "completion_kind": "",
+        "unseen": false
+      },
+      {
+        "session_id": "busy-c",
+        "section": "active",
+        "conversation_name": "Working Gamma",
+        "cwd": "",
+        "model_label": "",
+        "streaming": true,
+        "needs_attention": false,
+        "pending_kind": "",
+        "subagents_running": 0,
+        "todos_open": 0,
+        "mtime": 1788841297.8327801,
+        "created_at": 994.0,
+        "completion_kind": "",
+        "unseen": false
+      }
+    ]
+  },
+  {
+    "case": "wrong-origin mutation",
+    "status": 403,
+    "response": "{\"error\":\"same-origin request required\"}"
+  },
+  {
+    "case": "invalid acknowledgement missing token",
+    "status": 422,
+    "response": "{\"error\":\"completion_token is required\"}"
+  }
+]

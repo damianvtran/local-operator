@@ -1,0 +1,126 @@
+{
+  "before": [
+    {
+      "tick": 3,
+      "order": [
+        "busy-b",
+        "busy-a",
+        "busy-c",
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt"
+      ]
+    },
+    {
+      "tick": 4,
+      "order": [
+        "busy-c",
+        "busy-b",
+        "busy-a",
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt"
+      ]
+    },
+    {
+      "tick": 5,
+      "order": [
+        "busy-a",
+        "busy-c",
+        "busy-b",
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt"
+      ]
+    },
+    {
+      "tick": 6,
+      "order": [
+        "busy-b",
+        "busy-a",
+        "busy-c",
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt"
+      ]
+    },
+    {
+      "tick": 7,
+      "order": [
+        "busy-c",
+        "busy-b",
+        "busy-a",
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt"
+      ]
+    }
+  ],
+  "after": [
+    {
+      "tick": 1,
+      "order": [
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt",
+        "busy-a",
+        "busy-b",
+        "busy-c"
+      ]
+    },
+    {
+      "tick": 2,
+      "order": [
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt",
+        "busy-a",
+        "busy-b",
+        "busy-c"
+      ]
+    },
+    {
+      "tick": 3,
+      "order": [
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt",
+        "busy-a",
+        "busy-b",
+        "busy-c"
+      ]
+    },
+    {
+      "tick": 4,
+      "order": [
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt",
+        "busy-a",
+        "busy-b",
+        "busy-c"
+      ]
+    },
+    {
+      "tick": 5,
+      "order": [
+        "done-new",
+        "done-old",
+        "error",
+        "interrupt",
+        "busy-a",
+        "busy-b",
+        "busy-c"
+      ]
+    }
+  ]
+}
