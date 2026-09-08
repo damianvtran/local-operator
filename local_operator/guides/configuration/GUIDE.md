@@ -20,6 +20,7 @@ Use the CLI to avoid guessing:
 local-operator config create
 local-operator config open
 local-operator config list
+local-operator config instructions
 ```
 
 `config create` and `config open` print the resolved backend path. Main files under that root include:
@@ -39,7 +40,7 @@ Standing user preferences — commit conventions, review gates, where projects l
 <config root>/system_prompt.md
 ```
 
-That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `AGENTS.md` mechanism and no `custom_instructions` key in `config.yml`; writing either does nothing.
+That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `custom_instructions` key in `config.yml`; writing one does nothing. A user-scope `AGENTS.md` **is** read, but from the shared agent-tool directory and read-only — see "Imported instructions" below.
 
 To install or update them, write the file directly, resolving the root by the rule at the top of this guide so the commands stay correct under `LOCAL_OPERATOR_CONFIG_DIR`:
 
@@ -68,6 +69,49 @@ How the content is used:
 The content is capped at 64,000 characters, past which it is truncated with an explicit marker and a logged warning, because it is re-sent as the cached prefix of every request. The global file and an agent profile's prompt are bounded separately so neither can crowd the other out: each is guaranteed at least 16,000 characters and may spend whatever the other leaves, so a file under that share costs the other source nothing.
 
 Keep the file free of secrets and of absolute home paths (prefer `~/`) when it may be shared. For task-specific knowledge that should load only when relevant, prefer a skill (`extensions` guide) over adding bulk here: this file is in context for every single turn.
+
+### Imported instructions (`~/.agents/AGENTS.md`)
+
+Local Operator also reads `~/.agents/AGENTS.md`, so one set of standing preferences can serve several harnesses without a second copy under a lop-specific name. There is no standard for *user-scope* agent instructions — the agents.md spec covers repository files only — but the **filename** has converged, and `~/.agents/` is a tool-neutral directory with more than one independent implementation (Cline, Factory droid). Local Operator chose it because it already scans `~/.agents/skills`, so this needs no new relationship with a path it does not already know. `~/.local-operator/AGENTS.md` is deliberately **not** read, since with both it and `system_prompt.md` present there would be no single answer to what `GET /v1/config/system-prompt` returns or where `PATCH` writes.
+
+Other harnesses keep their user-scope instructions elsewhere — Claude Code in `~/.claude/CLAUDE.md`, Codex in `~/.codex/AGENTS.md` — and Local Operator does **not** read those paths. Point it at one with the redirect below if that is where your rules already live.
+
+- **Read-only.** `system_prompt.md` remains the sole write target of Settings → **Instructions** and `GET`/`PATCH /v1/config/system-prompt`. Local Operator never writes an imported file.
+- **Order and precedence**: imported file first, then `system_prompt.md`, then the selected agent profile's prompt. Later text reads as the more specific instruction, so your own `system_prompt.md` wins over the shared file and the profile outranks both.
+- **Redirect or disable** with `LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS`: a colon-separated path list that *replaces* the default set, and an **empty value disables the import entirely**.
+
+```bash
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=~/.config/AGENTS.md:~/team/AGENTS.md
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=   # off
+```
+
+Each imported file is capped at 64 KiB at read; the assembled result is then bounded on the same 64,000-character budget described above. The imported text and the agent profile each hold a **16,000-character floor**; `system_prompt.md` has none and takes whatever remains. So a large imported file — written by another tool, and one you may not know is there — **can** truncate your own `system_prompt.md`, silently dropping its last rules: with a 40,000-character `~/.agents/AGENTS.md`, a 62,000-character `system_prompt.md` is cut to 47,998. `local-operator config instructions` marks the file that lost text with `Truncated:`, and truncation is logged as a warning.
+
+**Watch the duplicate collapse.** Content byte-identical to `system_prompt.md` (whitespace-stripped) is loaded once instead of twice. The collapse is keyed on a digest of the **whole file**, so a `system_prompt.md` that is a *superset* of the shared file — shared rules plus a lop-only overlay, the natural arrangement when maintaining one rule set across harnesses — does **not** collapse, and you pay for both copies in the cached prefix of every request, in every session and every subagent. Check with:
+
+```bash
+local-operator config instructions
+```
+
+It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. A duplicated span is named explicitly, so you do not have to infer it from the counts:
+
+```
+│ 2. system_prompt.md
+│    Path: ~/.local-operator/system_prompt.md
+│    Read: 1,124 chars   Included: 1,124 chars
+│    Overlaps: contains source 1 verbatim (1,079 chars); both copies are sent
+```
+
+The row names the other source by its **row number** in the same box, since several imported paths all print as `imported`. It reads either way round — the migration case, where the rules moved into `~/.agents/AGENTS.md` and grew there while the old `system_prompt.md` was left behind as a subset, prints on the smaller file instead:
+
+```
+│ 2. system_prompt.md
+│    Overlaps: verbatim inside source 1 (1,079 chars); both copies are sent
+```
+
+An `Overlaps:` row means you are paying twice for those characters on every request. Fix it by keeping the shared file and the lop-only file **disjoint** — move the overlapping rules out of whichever file is the copy — or, when one is wholly inside the other, by deleting the subset or making the two byte-identical, which collapses instead.
+
+Two rows with no `Overlaps:` line are not a certificate of no duplication: the check is whole-source containment with a 200-character floor, so it does not catch two files that share a paragraph while each holding rules the other does not, and it does not report spans under 200 characters. It also stays silent for a source the size cap already cut — that row carries `Truncated:` instead, and a claim that both copies are sent whole would be untrue of text the prompt partly dropped.
 
 ## Set the default provider and model
 

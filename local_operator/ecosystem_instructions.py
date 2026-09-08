@@ -66,6 +66,7 @@ import hashlib
 import logging
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("local_operator.ecosystem_instructions")
@@ -87,6 +88,32 @@ ECOSYSTEM_INSTRUCTIONS_ENV = "LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS"
 #: budget by the caller; this one exists so a single pathological file is never
 #: read into memory whole just to be discarded a moment later.
 MAX_FILE_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class EcosystemFile:
+    """What one imported file contributed, or why it contributed nothing.
+
+    Exists because the INFO log below is not an answer an operator can ask a
+    question of: it is emitted once at session construction, lands in the
+    rotating log file under the TUI, and says nothing at all about a file that
+    was collapsed or truncated. ``lop config instructions`` renders these
+    records, so the same read that feeds the prompt is the one reported —
+    a second implementation of "what is lop reading" would be free to drift
+    from the first, which is the exact class of divergence this type exists to
+    close.
+
+    ``text`` is empty for every non-contributing outcome; ``chars`` still
+    reports what was READ, so a collapsed duplicate can be shown with its size
+    rather than as a blank row.
+    """
+
+    path: Path
+    text: str
+    chars: int
+    collapsed: bool
+    truncated: bool
+    unreadable: bool
 
 
 def content_digest(text: str) -> str:
@@ -115,8 +142,14 @@ def ecosystem_instruction_files() -> list[Path]:
     return [candidate for candidate in candidates if candidate.is_file()]
 
 
-def _read_bounded(path: Path) -> str:
+def _read_bounded(path: Path) -> tuple[str, bool]:
     """Read one regular file, following links, without exceeding the cap.
+
+    Returns the text and whether the cap CUT it. The flag is returned rather
+    than left to the warning below because the provenance report has to state
+    truncation as a fact about the file, and re-deriving it from the returned
+    length would be wrong for multi-byte content: a 64 KiB read can decode to
+    fewer than ``MAX_FILE_BYTES`` characters and look untouched.
 
     Symlinks are followed (see the module docstring), but a non-regular target
     is still refused: this runs on the synchronous session-construction path
@@ -145,7 +178,8 @@ def _read_bounded(path: Path) -> str:
             probe = stream.read(MAX_FILE_BYTES + 1)
     finally:
         os.close(descriptor)
-    if len(probe) > MAX_FILE_BYTES:
+    truncated = len(probe) > MAX_FILE_BYTES
+    if truncated:
         logger.warning(
             "ecosystem instructions at %s exceed %d bytes; reading the first %d",
             path,
@@ -154,11 +188,19 @@ def _read_bounded(path: Path) -> str:
         )
     # ``utf-8-sig`` for the same reason the native loader uses it: a BOM from a
     # Windows editor would otherwise survive into the prompt ahead of rule one.
-    return probe[:MAX_FILE_BYTES].decode("utf-8-sig", errors="replace")
+    return probe[:MAX_FILE_BYTES].decode("utf-8-sig", errors="replace"), truncated
 
 
-def load_ecosystem_instructions(skip_digests: frozenset[str] = frozenset()) -> str:
-    """Imported user-scope instructions, joined in order. ``""`` when there are none.
+def read_ecosystem_instructions(
+    skip_digests: frozenset[str] = frozenset(),
+) -> list[EcosystemFile]:
+    """Read every imported file in order, recording what each one contributed.
+
+    The single read that both the prompt and the provenance report are built
+    from. It is deliberately SILENT — :func:`log_ecosystem_provenance` emits the
+    records — so that a caller whose entire output is the provenance (``lop
+    config instructions``) does not print the same fact twice, once as a log
+    line on stderr and once inside its own box.
 
     ``skip_digests`` carries the digests of content the caller has ALREADY
     taken — in practice ``system_prompt.md`` — so an operator who generates the
@@ -166,35 +208,93 @@ def load_ecosystem_instructions(skip_digests: frozenset[str] = frozenset()) -> s
     cached request.
 
     Failures degrade rather than breaking startup, matching
-    ``load_user_instructions``: an unreadable file is skipped and undecodable
-    bytes are replaced, because a bad byte in a shared instructions file should
-    cost one glyph, never a session.
+    ``load_user_instructions``: an unreadable file is recorded and skipped and
+    undecodable bytes are replaced, because a bad byte in a shared instructions
+    file should cost one glyph, never a session.
     """
-    parts: list[str] = []
+    records: list[EcosystemFile] = []
     seen = set(skip_digests)
     for path in ecosystem_instruction_files():
         try:
-            text = _read_bounded(path)
+            text, truncated = _read_bounded(path)
         except OSError:
+            records.append(
+                EcosystemFile(
+                    path=path,
+                    text="",
+                    chars=0,
+                    collapsed=False,
+                    truncated=False,
+                    unreadable=True,
+                )
+            )
             continue
         stripped = text.strip()
         if not stripped:
+            # A record, not a ``continue``: the file EXISTS. Dropping it here made
+            # the report say "no imported file exists at those paths" about a
+            # path that has a file on it, which is the mirror image of the
+            # mistake ``InstructionSource.unreadable`` exists to prevent — an
+            # operator who truncated their shared file while debugging would be
+            # sent looking for a missing file instead of at the empty one they
+            # have. Its digest is deliberately NOT added to ``seen``: nothing
+            # was contributed, so it cannot collapse a later file.
+            records.append(
+                EcosystemFile(
+                    path=path,
+                    text="",
+                    chars=0,
+                    collapsed=False,
+                    truncated=truncated,
+                    unreadable=False,
+                )
+            )
             continue
         digest = content_digest(stripped)
-        if digest in seen:
-            logger.debug("skipping %s: identical to instructions already loaded", path)
-            continue
+        collapsed = digest in seen
         seen.add(digest)
-        # INFO, not DEBUG: this file is written by another tool and named in no
-        # lop-owned setting, yet it changes the system prompt of every session
-        # and every subagent — the one import whose provenance an operator
-        # cannot otherwise recover. It is not startup chatter: the record is
-        # emitted only when a file actually EXISTS and actually contributed, so
-        # the default install (no ``~/.agents/AGENTS.md``) stays silent, and on
-        # the TUI it lands in the rotating log file rather than on screen
-        # because ``file_logging`` detaches the console handlers. The dedup
-        # skip above stays at DEBUG: nothing reached the prompt, so there is
-        # nothing to account for.
-        logger.info("loaded ecosystem instructions from %s (%d chars)", path, len(stripped))
-        parts.append(stripped)
-    return "\n\n".join(parts)
+        records.append(
+            EcosystemFile(
+                path=path,
+                text="" if collapsed else stripped,
+                chars=len(stripped),
+                collapsed=collapsed,
+                truncated=truncated,
+                unreadable=False,
+            )
+        )
+    return records
+
+
+def log_ecosystem_provenance(records: list[EcosystemFile]) -> None:
+    """Record which imported files reached the prompt.
+
+    INFO, not DEBUG: these files are written by another tool and named in no
+    lop-owned setting, yet they change the system prompt of every session and
+    every subagent — the one import whose provenance an operator cannot
+    otherwise recover. It is not startup chatter: a record is emitted only when
+    a file actually EXISTS and actually contributed, so the default install (no
+    ``~/.agents/AGENTS.md``) stays silent, and on the TUI it lands in the
+    rotating log file rather than on screen because ``file_logging`` detaches
+    the console handlers. The dedup skip stays at DEBUG: nothing reached the
+    prompt, so there is nothing to account for.
+    """
+    for record in records:
+        if record.collapsed:
+            logger.debug("skipping %s: identical to instructions already loaded", record.path)
+        elif record.text:
+            logger.info(
+                "loaded ecosystem instructions from %s (%d chars)", record.path, record.chars
+            )
+
+
+def load_ecosystem_instructions(skip_digests: frozenset[str] = frozenset()) -> str:
+    """Imported user-scope instructions, joined in order. ``""`` when there are none.
+
+    The joining half of :func:`read_ecosystem_instructions`, kept as the plain
+    text-returning entry point for callers that want the content and not the
+    accounting.
+    """
+    records = read_ecosystem_instructions(skip_digests)
+    log_ecosystem_provenance(records)
+    return "\n\n".join(record.text for record in records if record.text)

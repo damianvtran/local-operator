@@ -271,6 +271,23 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "create", help="Create a new configuration file", parents=[parent_parser]
     )
 
+    # Instructions command. Takes ``--agent`` from ``parent_parser``, which is
+    # what lets it report the profile layer a session with that agent would
+    # actually assemble rather than only the two global sources.
+    config_subparsers.add_parser(
+        "instructions",
+        help="Show which custom-instruction files a session assembles, in order "
+        "(paths and sizes only, never their contents)",
+        # ``description=`` as well as ``help=``: the latter renders only on the
+        # PARENT ``config --help`` page, so without this the command's own
+        # ``--help`` is blank above the options list.
+        description="Show which custom-instruction files a session assembles, in "
+        "order, with the size each contributed and whether it was collapsed as a "
+        "duplicate, truncated, or overlaps an earlier source. Paths and sizes "
+        "only, never the contents.",
+        parents=[parent_parser],
+    )
+
     # Agents command
     agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
@@ -1345,6 +1362,247 @@ def config_list_command() -> int:
         print(f"\033[1;32m│ {key}: {config.values[key]}\033[0m")
         print("\033[1;32m│   Description: not a recognised key; nothing reads it\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def config_instructions_command(args: argparse.Namespace) -> int:
+    """Report which instruction files a session would actually assemble.
+
+    Answers "what instructions am I running", which before this command was
+    only recoverable by importing ``ecosystem_instructions`` by hand or by
+    reading an INFO log line the TUI writes to a rotating file (#822). The
+    imported ``~/.agents/AGENTS.md`` is the case that needs it: it is written
+    by another tool, named in no lop-owned setting, and silently reshapes the
+    system prompt of every session and every subagent.
+
+    Deliberately PROVENANCE and not content. These files are the operator's
+    standing rules and routinely run to thousands of lines; dumping them here
+    would bury the one thing being asked about (which files, in what order, at
+    what cost) and make the command unusable in a pipe. ``config open`` and an
+    editor already show the text.
+
+    Read-only by construction: the whole report is derived from
+    ``resolve_user_instructions``, which is the same call the session factory
+    makes, so this command cannot report a prompt different from the one that
+    ships \u2014 the divergence #822 is about.
+    """
+    # ``paint`` rather than the raw ``\033[1;32m`` literals ``config_list_command``
+    # still carries: this output is routinely piped into an issue or a review
+    # comment, and cli_style is the module that keeps the escapes out of a
+    # non-tty capture and honours NO_COLOR.
+    from local_operator.cli_style import CYAN, ERROR, SUCCESS, WARNING, paint
+    from local_operator.ecosystem_instructions import (
+        ECOSYSTEM_INSTRUCTION_PATHS,
+        ECOSYSTEM_INSTRUCTIONS_ENV,
+    )
+    from local_operator.session_factory import (
+        MAX_USER_INSTRUCTIONS_CHARS,
+        resolve_user_instructions,
+    )
+
+    # The profile prompt is resolved the way a session resolves it, so
+    # ``--agent NAME`` reports what that agent would actually run rather than
+    # the no-profile case. A name with no agent behind it is NOT created here:
+    # this command must never write, and the interactive path's
+    # create-on-missing behaviour would do exactly that.
+    agent_prompt = ""
+    agent_note = ""
+    agent_name = getattr(args, "agent_name", None)
+    if agent_name:
+        from local_operator.agents import AgentRegistry
+
+        # Guarded because ``AgentRegistry.__init__`` mkdirs both ``config_dir``
+        # and ``config_dir/agents`` — so on a machine with no config root at
+        # all, asking this read-only command about an agent materialised one.
+        # Read-only was a stated deliverable, and there is nothing to report
+        # anyway: a config dir that does not exist holds no agents.
+        root = config_dir()
+        if not root.exists():
+            print(
+                paint(f"Error: No agent found with name: {agent_name}", ERROR, stream=sys.stderr),
+                file=sys.stderr,
+            )
+            return 1
+        registry = AgentRegistry(root)
+        agent = registry.get_agent_by_name(agent_name)
+        if agent is None:
+            print(
+                paint(f"Error: No agent found with name: {agent_name}", ERROR, stream=sys.stderr),
+                file=sys.stderr,
+            )
+            return 1
+        agent_prompt = registry.get_agent_system_prompt(str(agent.id)) or ""
+        agent_note = agent_name
+
+    assembled, sources = resolve_user_instructions(agent_prompt, log_provenance=False)
+
+    override = os.environ.get(ECOSYSTEM_INSTRUCTIONS_ENV)
+    # Both counts right-aligned in one field so the ``Included`` column does not
+    # move between rows: comparing ``Read`` against ``Included``, and rows
+    # against each other, is the whole reason both numbers are printed, and a
+    # column that shifts with the digit count defeats scanning down it. Sized
+    # from the data rather than a constant so the common small-number case
+    # stays tight.
+    count_width = max(
+        (len(f"{value:,}") for source in sources for value in (source.chars, source.included)),
+        default=1,
+    )
+    print(paint("\n╭─ Custom instructions, in assembly order ──────", SUCCESS))
+    for index, source in enumerate(sources, start=1):
+        label = source.label
+        if label == "agent profile" and agent_note:
+            label = f"agent profile ({agent_note})"
+        print(paint(f"│ {index}. {label}", SUCCESS))
+        print(paint(f"│    Path: {source.path if source.path else '(agent registry)'}", SUCCESS))
+        # Both numbers, always: "read 6,960 / included 0" is the collapse an
+        # operator is trying to confirm, and a single figure cannot express it.
+        print(
+            paint(
+                f"│    Read: {source.chars:>{count_width},} chars"
+                f"   Included: {source.included:>{count_width},} chars",
+                SUCCESS,
+            )
+        )
+        if source.unreadable:
+            # Degraded, not absent: the session started anyway with this file's
+            # rules missing, which is a state the operator has to be told about
+            # rather than left to read as "no such file".
+            print(paint("│    Unreadable: skipped; the session ran without it", WARNING))
+        elif source.chars == 0:
+            # A path with no bytes behind it reads as a file that exists and is
+            # being used. Saying so keeps the default install (no
+            # system_prompt.md) from looking like a configured-but-broken one.
+            #
+            # Imported rows state the stronger fact: the loader only lists paths
+            # that resolve to a real file, so an imported row with zero
+            # characters is a file that EXISTS and is blank — not a path that
+            # might be empty. Reporting the disjunction there would repeat, one
+            # level down, the "no imported file exists" claim about a path that
+            # has one.
+            #
+            # CYAN, not SUCCESS: every other line in the box — chrome, headers,
+            # counts — is green, so a green annotation carries no signal at all,
+            # and this is the row the DEFAULT install shows. The ladder is green
+            # = normal contribution, cyan = present but contributed nothing,
+            # yellow = degraded.
+            empty_note = (
+                "Empty: the file is there but holds no instructions"
+                if source.label == "imported"
+                else "Empty: no file at that path, or nothing in it"
+            )
+            print(paint(f"│    {empty_note}", CYAN))
+        if source.collapsed:
+            print(
+                paint(
+                    "│    Collapsed: identical to instructions already loaded; sent once",
+                    CYAN,
+                )
+            )
+        if source.truncated:
+            print(paint("│    Truncated: hit the size cap; the tail was dropped", WARNING))
+        if source.overlaps_index:
+            # The superset arrangement, which the digest collapse cannot catch
+            # and which two rows of non-zero "Included" cannot distinguish from
+            # two genuinely distinct files. WARNING, matching ``Truncated:``:
+            # this is a cost the operator is paying on every cached request and
+            # can remove. The overlapping TEXT is never printed — the count and
+            # the other source's row number are the whole answer.
+            #
+            # Kept within 80 columns in every reachable state: 79 for a
+            # two-digit row number at 64,000 characters, and still 80 at three
+            # digits, which a source list bounded by the override paths plus two
+            # cannot reach. The box has no wrapping of its own, so a longer row
+            # soft-wraps in an 80-column terminal and the overflow lands outside
+            # the "│" gutter — the same reason the footer below is two lines
+            # rather than one. The source is named by ROW NUMBER, not label:
+            # several imported files all render as "imported", so a label could
+            # not identify which file to edit.
+            direction = (
+                f"contains source {source.overlaps_index} verbatim"
+                if source.overlap_contains
+                else f"verbatim inside source {source.overlaps_index}"
+            )
+            print(
+                paint(
+                    f"│    Overlaps: {direction} "
+                    f"({source.overlap_chars:,} chars); both copies are sent",
+                    WARNING,
+                )
+            )
+    if not sources:
+        print(paint("│ (none — no instruction sources resolved)", SUCCESS))
+    # The recurrence, not just the headroom: without it the counts read as file
+    # sizes rather than as a cost paid again on every request, which is the
+    # framing the guide uses and the reason the numbers are worth showing.
+    print(
+        paint(
+            f"│ Total assembled: {len(assembled):,} of {MAX_USER_INSTRUCTIONS_CHARS:,} chars",
+            SUCCESS,
+        )
+    )
+    print(
+        paint(
+            "│ Re-sent with every request, in every session and subagent",
+            SUCCESS,
+        )
+    )
+    print(paint("╰──────────────────────────────────────────────", SUCCESS))
+
+    # The imported half gets its own box because its state is the question:
+    # "none" here is a real answer (the default install has no
+    # ~/.agents/AGENTS.md) and must not read as an empty listing, and the
+    # override has three distinct states an operator can be in by accident.
+    print(paint("\n╭─ Imported user-scope instructions ────────────", SUCCESS))
+    if override is None:
+        default_paths = ", ".join(f"~/{relative}" for relative in ECOSYSTEM_INSTRUCTION_PATHS)
+        print(paint(f"│ Source: default ({default_paths})", SUCCESS))
+    elif not override.strip():
+        print(
+            paint(
+                f"│ Source: DISABLED — {ECOSYSTEM_INSTRUCTIONS_ENV} is set and empty",
+                WARNING,
+            )
+        )
+    else:
+        print(paint(f"│ Source: {ECOSYSTEM_INSTRUCTIONS_ENV}={override}", CYAN))
+    imported = [source for source in sources if source.label == "imported"]
+    if not imported:
+        # "Nothing was imported" has two causes with opposite fixes — the
+        # feature is off, or it is on and the file is simply not there — and an
+        # operator who reads the wrong one goes looking in the wrong place.
+        reason = (
+            "the feature is disabled"
+            if override is not None and not override.strip()
+            else "no imported file exists at those paths"
+        )
+        print(paint(f"│ Files read: none — {reason}", SUCCESS))
+    else:
+        # "Files read" is plural and reads as a heading, so repeating it per row
+        # made a two-file install read as two separate answers to one question.
+        # Printed once with the entries indented beneath, matching the
+        # four-space continuation the first box already uses — but only in the
+        # multi-row case, since a lone "Files read: <path>" is correct as one
+        # line and splitting it would cost a row for nothing.
+        if len(imported) > 1:
+            print(paint("│ Files read:", SUCCESS))
+        for source in imported:
+            if source.unreadable:
+                state = "unreadable; skipped"
+            elif source.collapsed:
+                state = "collapsed"
+            elif source.chars == 0:
+                state = "empty"
+            else:
+                state = f"{source.included:,} chars"
+            prefix = "│    " if len(imported) > 1 else "│ Files read: "
+            print(paint(f"{prefix}{source.path} ({state})", SUCCESS))
+    print(
+        paint(
+            "│ Read-only: system_prompt.md stays the only file lop writes",
+            SUCCESS,
+        )
+    )
+    print(paint("╰──────────────────────────────────────────────", SUCCESS))
     return 0
 
 
@@ -4266,6 +4524,8 @@ def main() -> int:
                 return config_edit_command(args)
             elif args.config_command == "list":
                 return config_list_command()
+            elif args.config_command == "instructions":
+                return config_instructions_command(args)
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
         elif args.subcommand == "search":
