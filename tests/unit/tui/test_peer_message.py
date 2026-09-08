@@ -855,12 +855,21 @@ class TestPeerCardSeamAndExpansionHeader:
         from local_operator.tui.glyphs import tool_icon
 
         block = PeerMessageBlock(LONG_BODY, LONG_SENDER)
-        for width in (1, 3, 5, 6, 8):
+        icon = tool_icon("peer")
+        for width in range(1, 12):
             row = block._build_row(width).plain
             assert len(row.splitlines()) == 1, width
-            assert row.startswith(tool_icon("peer")), (width, row)
+            assert row.startswith(icon), (width, row)
             # Honest about what it dropped rather than silently cutting.
             assert row.endswith("…"), (width, row)
+            # PINS the source comment's unreachability claim rather than
+            # restating it in prose: the degenerate branch emits the icon and
+            # nothing else, so a row carrying the name column proves the branch
+            # was not taken. If the `max(width - 2, 10)` clamp above the budget
+            # ever moves, this fails instead of the comment quietly becoming a
+            # lie.
+            assert row.strip() != icon, (width, row)
+            assert "peer" in row, (width, row)
         # And it comes back: the degradation is a function of width, not a
         # latched state.
         assert "lo-release-window" in block._build_row(100).plain
@@ -874,9 +883,23 @@ class TestPeerCardSeamAndExpansionHeader:
         block.toggle_expanded()
         counts = [len(block._build_content(w).plain.splitlines()) for w in (1, 3, 5, 8, 12)]
         assert max(counts) <= 12, counts
-        # Monotonic in the right direction: narrower never yields fewer rows,
-        # and no width explodes relative to its neighbour.
-        assert counts == sorted(counts, reverse=True), counts
+
+        # The PROPERTY, swept rather than sampled: widening a pane must never
+        # make the card taller. This file's history is about exactly that —
+        # the model-label fit test was once keyed on a fixed column threshold,
+        # so dragging a pane from 70 to 80 columns re-attached a label that
+        # cost more than the columns it gained and the card GREW. A handful of
+        # sampled widths cannot see a single non-monotonic step between them.
+        heights = [len(block._build_content(w).plain.split("\n")) for w in range(1, 201)]
+        regressions = [
+            (width, heights[width - 1], heights[width])
+            for width in range(1, len(heights))
+            if heights[width] > heights[width - 1]
+        ]
+        assert regressions == [], f"widening made the card taller: {regressions}"
+        # And the collapsed row is exactly one at every one of those widths.
+        collapsed = PeerMessageBlock(LONG_BODY, LONG_SENDER)
+        assert {len(collapsed._build_row(w).plain.split("\n")) for w in range(1, 201)} == {1}
 
     def test_an_empty_body_expands_to_its_identity_and_no_whitespace(self) -> None:
         """The expand affordance must not promise detail and deliver blanks.
@@ -889,10 +912,20 @@ class TestPeerCardSeamAndExpansionHeader:
         for body in ("", "   ", "\n\n"):
             block = PeerMessageBlock(body, {"pid": 9, "conversation_name": "lo-empty"})
             block.toggle_expanded()
-            rows = block._build_content(96).plain.splitlines()
+            plain = block._build_content(96).plain
+            rows = plain.splitlines()
             assert rows[-1].strip(), (body, rows)
             assert "pid 9" in rows[-1]
-            assert block._row_count == len(rows)
+            # `split("\n")`, NOT `splitlines()`. `_row_count` is itself
+            # `len(plain.splitlines())`, so asserting against a second
+            # `splitlines()` compares the measurement to itself and is true for
+            # every possible content — including content ending in a dangling
+            # newline, which is exactly the row Rich paints and `splitlines()`
+            # cannot see. This assertion was satisfiable without the property
+            # being true, and it shipped green over a card that painted 3 rows
+            # while reporting 2.
+            assert not plain.endswith("\n"), (body, repr(plain))
+            assert block._row_count == len(plain.split("\n")), (body, repr(plain))
             # No dangling seam on the collapsed row either, when there is no
             # snippet to put after it.
             assert not block._build_row(96).plain.rstrip().endswith("·"), body
@@ -909,3 +942,124 @@ class TestPeerCardSeamAndExpansionHeader:
         rows = block._build_content(96).plain.splitlines()
         body = rows[block._chrome_rows :]
         assert [row.strip() for row in body] == ["para one here.", "", "para two here."]
+
+
+@pytest.mark.asyncio
+async def test_the_card_paints_exactly_as_many_rows_as_it_reports() -> None:
+    """The property the empty-body guard could not see: painted == reported.
+
+    `_row_count` is derived from `splitlines()`, so any assertion written in
+    terms of `splitlines()` compares the measurement to itself and is true for
+    all content. Textual lays the widget out from the RENDERED content, which
+    counts a trailing newline that `splitlines()` discards — so the only honest
+    instrument is the painted frame under a real pilot.
+
+    That gap shipped once: a separator appended before the empty-body early
+    return left a dangling `\\n`, and the card painted 3 rows while reporting
+    2, with `_chrome_rows` (3) exceeding `_row_count` (2). Every consumer of
+    `settled_rows()` (`project_settled_rows`, the resume/reconnect replay)
+    reasons about that number, and `copy_row_is_chrome` indexes rows the count
+    said did not exist.
+
+    Every payload class the card renders is swept, because the defect lived in
+    exactly the one branch the ordinary body never takes.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle_for_session(pilot, app)
+        cases = {
+            "empty": "",
+            "whitespace": "   \n\n  ",
+            "one-line": "alpha.",
+            "paragraphs": "first para.\n\nsecond para.",
+            "trailing-newlines": "text\n\n\n\n",
+            "long": LONG_BODY,
+        }
+        for label, body in cases.items():
+            block = PeerMessageBlock(body, LONG_SENDER)
+            app._append_block(block)
+            await pilot.pause()
+            await pilot.pause()
+            assert block.size.height == block._row_count == block.settled_rows(), label
+
+            block.toggle_expanded()
+            await pilot.pause()
+            await pilot.pause()
+            # The painted height is the ground truth; the reported count and
+            # the settled count must both equal it.
+            assert block.size.height == block._row_count, (label, "expanded")
+            assert block.settled_rows() == block.size.height, (label, "settled")
+            # The furniture count indexes into the rows that exist, so it can
+            # never exceed them — `_chrome_rows > _row_count` is the incoherent
+            # state that made `copy_row_is_chrome` answer about a phantom row.
+            assert block._chrome_rows <= block._row_count, (label, "chrome")
+
+            block.toggle_expanded()
+            await pilot.pause()
+            await pilot.pause()
+            assert block.size.height == block._row_count == 1, (label, "recollapse")
+
+
+@pytest.mark.asyncio
+async def test_a_repaint_does_not_rescan_the_whole_body() -> None:
+    """The snippet is sanitized once at construction, not per repaint.
+
+    `_refresh_row` runs on hover, focus, expand, retheme, resize and — through
+    `_invalidate_name_col` — on every ledger block when the shared name column
+    moves. The strip is a regex plus a per-character `unicodedata.category`
+    scan; run over a body at the 256 KiB wire cap it measured 23.9 ms of
+    loop-thread CPU *per repaint*, so one card taxed the whole ledger.
+
+    Asserted structurally rather than with a time bound, per AGENTS.md: a
+    threshold calibrated on this machine is not a threshold on CI, and the
+    property is "the scan happens once", which is a fact about call counts
+    rather than about duration.
+    """
+    import local_operator.tui.widgets.transcript as transcript_mod
+
+    calls: list[int] = []
+    original = transcript_mod._sanitize_line
+
+    def counting(value: object) -> str:
+        calls.append(len(str(value or "")))
+        return original(value)
+
+    body = "word " * 4000
+    transcript_mod._sanitize_line = counting  # type: ignore[assignment]
+    try:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _settle_for_session(pilot, app)
+            block = PeerMessageBlock(body, LONG_SENDER)
+            app._append_block(block)
+            await pilot.pause()
+            await pilot.pause()
+            after_construction = len(calls)
+
+            # Every repaint path, none of which may re-scan the body.
+            block._set_hovered(True)
+            block._set_hovered(False)
+            block._set_focused(True)
+            block.toggle_expanded()
+            block.toggle_expanded()
+            block.retheme()
+            for width in range(60, 120, 10):
+                block._build_content(width)
+            await pilot.pause()
+
+            body_scans = [n for n in calls[after_construction:] if n > 100]
+            assert body_scans == [], f"body re-scanned on repaint: {body_scans}"
+    finally:
+        transcript_mod._sanitize_line = original  # type: ignore[assignment]
+
+    # And the work is bounded even on the one pass that does run, so a body at
+    # the wire cap cannot make construction the expensive thing instead.
+    huge = "word " * 60_000
+    calls.clear()
+    transcript_mod._sanitize_line = counting  # type: ignore[assignment]
+    try:
+        PeerMessageBlock(huge, LONG_SENDER)
+    finally:
+        transcript_mod._sanitize_line = original  # type: ignore[assignment]
+    assert calls, "construction did not sanitize at all"
+    assert max(calls) <= transcript_mod._SNIPPET_SOURCE_MAX_CHARS, calls

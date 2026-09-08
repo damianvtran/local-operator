@@ -12,6 +12,13 @@ failure the other frame does not show:
 
     collapsed  (default)  every receipt closed: the ONE-ROW guarantee
     expanded              the long receipt opened: sender detail + full body
+    empty                 an EMPTY-body receipt, opened — the degenerate case
+
+The ``empty`` shape exists because that branch is the one an ordinary body
+never takes, and it has now carried two defects in a row: first a dangling
+blank row the expansion promised detail and delivered whitespace for, then a
+separator with nothing under it that made the card paint one more row than it
+reported. A frame is the only instrument that shows either.
 
 ``ICONS`` is ``nerd`` (default) or ``plain``. The gate reads the environment at
 row-build time and this capture runs under an isolated HOME, so a marker has to
@@ -154,6 +161,36 @@ def _seed(app: OperatorApp) -> list[PeerMessageBlock]:
     return [long_block, short_block]
 
 
+def _seed_empty(app: OperatorApp) -> list[PeerMessageBlock]:
+    """Three degenerate bodies between ordinary ledger rows.
+
+    Empty, whitespace-only and a body that is nothing but blank lines all reach
+    the same branch by different routes, and the frame has to show that each
+    ends on its identity line rather than on painted whitespace.
+    """
+    app._append_block(UserBlock("did anything come in while I was away?"))
+    _tool(app, "t1", "bash", {"command": "lop sessions"}, "3 live")
+    blocks = [
+        PeerMessageBlock(body, sender)
+        for body, sender in (
+            (
+                "",
+                {
+                    "pid": 9,
+                    "conversation_name": "lo-empty",
+                    "model_label": "anthropic/claude-opus-5",
+                },
+            ),
+            ("   \n\n  ", {"pid": 11, "conversation_name": "lo-whitespace"}),
+            ("\n\n\n", {"pid": 13, "cwd": "/Users/x/lo-newlines"}),
+        )
+    ]
+    for block in blocks:
+        app._append_block(block)
+    app._append_block(_answer("Three peers reached in with nothing to say."))
+    return blocks
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -165,10 +202,18 @@ async def main() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        blocks = _seed(app)
+        blocks = _seed_empty(app) if shape == "empty" else _seed(app)
         await pilot.pause()
 
-        if shape == "expanded":
+        if shape == "empty":
+            # Every degenerate card opened at once: the point of the frame is
+            # that none of them ends on a painted blank row.
+            for block in blocks:
+                toggle = getattr(block, "toggle_expanded", None)
+                if callable(toggle):
+                    toggle()
+            await pilot.pause()
+        elif shape == "expanded":
             # `toggle_expanded` exists only once the receipt is a ledger card.
             # Tolerating its absence is what lets the SAME script take the
             # before-frame from a checkout that predates the card.
