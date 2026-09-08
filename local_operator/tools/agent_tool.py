@@ -964,21 +964,19 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-async def _op_write(
-    context: ToolContext | None,
-    tool_call_id: str,
-    params: AgentParams,
-    *,
-    creating: bool,
-) -> ToolResult:
+def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str]:
+    """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
+
+    Returning structured identity keeps transport adapters out of tool prose.
+    The registry remains the only storage authority.
+    """
     from local_operator.agents import AgentEditFields
 
-    registry = _registry(context)
     if registry is None:
-        return _error(
-            tool_call_id, "agent", "no agent registry attached to this session; cannot save roles."
-        )
+        raise ValueError("no agent registry attached to this session; cannot save roles.")
     name = (params.name or "").strip()
+    if not name or (creating and any(char.isspace() or char in "/\\" for char in name)):
+        raise ValueError("Profile names cannot contain spaces or path separators")
     try:
         existing = registry.get_agent_by_name(name)
     except Exception:  # noqa: BLE001
@@ -993,49 +991,35 @@ async def _op_write(
         kind = params.kind or "role"
         if existing is not None:
             if kind == "role" and not is_role(existing):
-                return _error(tool_call_id, "agent", _name_taken_message(name))
-            return _error(
-                tool_call_id,
-                "agent",
+                raise ValueError(_name_taken_message(name))
+            raise ValueError(
                 f"{'role' if is_role(existing) else 'agent'} {name!r} already "
-                "exists; use op='update' to change it.",
+                "exists; use op='update' to change it."
             )
     else:
         if existing is None:
-            return _error(
-                tool_call_id,
-                "agent",
-                f"no registered profile named {name!r} to update.",
-            )
+            raise ValueError(f"no registered profile named {name!r} to update.")
         if is_role(existing):
             kind = "role"
             if params.kind == "specialist":
-                return _error(
-                    tool_call_id,
-                    "agent",
-                    f"{name!r} is a role; do not pass kind='specialist' to update it.",
-                )
+                raise ValueError(f"{name!r} is a role; do not pass kind='specialist' to update it.")
         elif is_specialist(existing):
             kind = "specialist"
             if params.kind == "role":
-                return _error(tool_call_id, "agent", _name_taken_message(name))
+                raise ValueError(_name_taken_message(name))
         else:
             # An ordinary conversational agent is neither a role nor a
             # specialist we authored. Converting it is the fail-open hijack
             # the role tag exists to stop.
-            return _error(tool_call_id, "agent", _name_taken_message(name))
+            raise ValueError(_name_taken_message(name))
 
     instructions = (params.instructions or "").strip()
     if creating and not instructions:
-        return _error(
-            tool_call_id, "agent", "create needs 'instructions' — the profile's guidance."
-        )
+        raise ValueError("create needs 'instructions' — the profile's guidance.")
     if len(instructions) > MAX_INSTRUCTIONS_CHARS:
-        return _error(
-            tool_call_id,
-            "agent",
+        raise ValueError(
             f"instructions exceed {MAX_INSTRUCTIONS_CHARS} chars; they ride in front of every "
-            "run of this profile, so they must stay short.",
+            "run of this profile, so they must stay short."
         )
 
     # An UPDATE merges onto the stored profile; only a CREATE starts from
@@ -1143,7 +1127,21 @@ async def _op_write(
         registry.update_agent(agent.id, _fields(**overrides))
     if instructions:
         registry.set_agent_system_prompt(agent.id, instructions)
-    verb = "created" if existing is None else "updated"
+    return name, kind
+
+
+async def _op_write(
+    context: ToolContext | None,
+    tool_call_id: str,
+    params: AgentParams,
+    *,
+    creating: bool,
+) -> ToolResult:
+    try:
+        name, kind = write_profile(_registry(context), params, creating=creating)
+    except ValueError as error:
+        return _error(tool_call_id, "agent", str(error))
+    verb = "created" if creating else "updated"
     if kind == "role":
         how = f"launch with task(agent={name!r})"
     else:

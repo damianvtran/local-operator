@@ -25,6 +25,9 @@ async def capabilities():
                 "settings": 1,
                 "commands": 1,
                 "catalogues": 1,
+                "profile_catalogue": 1,
+                "team_catalogue": 1,
+                "session_catalogue": 2,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
                 # Named for this map's convention (`<subsystem>: <version>`); the

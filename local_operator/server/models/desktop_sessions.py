@@ -29,9 +29,12 @@ class SessionRow(BaseModel):
 
 class SessionList(BaseModel):
     sessions: list[SessionRow]
+    truncated: bool = False
+    limit: int = 100
 
 
 class CreatedSession(BaseModel):
+    binding: dict[str, str | None] = Field(default_factory=dict)
     session_id: str
     replayed: bool = False
 
