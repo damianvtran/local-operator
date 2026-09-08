@@ -2,8 +2,13 @@
 #
 # Built as a wheel and installed into a dedicated uv-managed venv. The wheel
 # must declare NO console scripts (discovery._record_rows refuses ``../`` RECORD
-# paths, which is where scripts land) and must never be installed editable
-# (discovery refuses unhashed RECORD rows). ``local-operator`` is a runtime
+# paths, which is where scripts land) and must never be installed editable: an
+# editable install's RECORD covers only the ``.pth`` shim and metadata, with no
+# rows under the package source, so ``_resolve_module_artifact`` finds no
+# artifact for the entry module and discovery raises "adapter entry module is
+# not uniquely RECORD-covered". (It is NOT that unhashed rows are refused --
+# measured on this package's own editable install, there are none, so that gate
+# never fires.) ``local-operator`` is a runtime
 # dependency because the adapter's ``create()`` imports
 # ``local_operator.evaluation.adapters.api`` to build its ``AdapterMetadata``.
 

@@ -538,16 +538,17 @@ The pieces, and what each guarantees:
   (upstream `desktop_env` and its ~380-package dependency tree; the committed
   lock resolves 424 packages in total).
 
-  Two construction details are load-bearing and cost about twenty minutes to
-  rediscover, because each fails *after* the previous gate passes:
+  Three construction details are load-bearing and cost about twenty minutes
+  to rediscover, because each fails *after* the previous gate passes:
 
   - **`uv venv` cannot build this venv, at any flag combination.** It always
     writes `bin/python3.12` as a symlink to `bin/python` (and that to the
     managed toolchain), so discovery rejects the launch path with
     `AdapterDiscoveryError: adapter launch path has a symlink or lexical
-    alias` before any spend. `--link-mode copy` and
-    `--python-preference only-managed` do not change this; they govern the
-    *package* store, not the interpreter shims. Use
+    alias` before any spend. `--link-mode copy` does not change it (that
+    governs the *package* store, not the interpreter shims), nor do
+    `--managed-python` or `--relocatable`; `--python-preference` is not a
+    `uv venv` flag at all. Use
     `<base-python> -m venv --copies --without-pip <venv>`.
   - **`venv --copies` copies the interpreter but not its runtime library.**
     On the uv-managed macOS toolchain the copied binary resolves
