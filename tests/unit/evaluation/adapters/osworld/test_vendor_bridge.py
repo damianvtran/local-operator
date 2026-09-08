@@ -92,13 +92,15 @@ def _stub_task_base(monkeypatch):
         yield
         return
     package = types.ModuleType("desktop_env")
-    package.__path__ = []  # a package, so the submodule import resolves
+    setattr(package, "__path__", [])  # a package, so the submodule import resolves
     task_base = types.ModuleType("desktop_env.task_base")
 
     class BaseTask:  # noqa: D401 - stands in for the upstream marker class
         """Stand-in for the upstream base class used only by an issubclass check."""
 
-    task_base.BaseTask = BaseTask
+    # setattr, not attribute assignment: ModuleType has no declared
+    # 'BaseTask' slot, so pyright rejects the direct form.
+    setattr(task_base, "BaseTask", BaseTask)
     monkeypatch.setitem(sys.modules, "desktop_env", package)
     monkeypatch.setitem(sys.modules, "desktop_env.task_base", task_base)
     yield
