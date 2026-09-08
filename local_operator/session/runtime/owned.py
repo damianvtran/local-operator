@@ -28,6 +28,7 @@ import time
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
@@ -127,6 +128,22 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
+
+
+def _already_bounded(images: Any) -> bool:
+    """Whether ``images`` are decoded ``ImageContent`` rather than wire dicts.
+
+    The wire carries ``[{"data_b64": ..., "mime_type": ...}]``; in-process
+    callers that have already run the bound pass ``ImageContent`` blocks. Both
+    reach ``prompt``/``steer``, and telling them apart is what lets an
+    already-bounded caller keep the prelude await-free (see ``prompt``).
+
+    An EMPTY list is "already bounded" -- there is nothing to decode, and the
+    hop would only cost a suspension point.
+    """
+    if not images:
+        return True
+    return not isinstance(images[0], Mapping)
 
 
 @dataclass
@@ -1116,7 +1133,7 @@ class OwnedSessionHandle(SessionHandle):
     async def prompt(
         self,
         text: str,
-        images: list[dict[str, str]] | None = None,
+        images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
         *,
         wait_complete: bool = False,
@@ -1137,7 +1154,24 @@ class OwnedSessionHandle(SessionHandle):
         # span await-free. The cost of bounding an image for a prompt that is
         # then rejected is a duplicate submission's worth of CPU, which is the
         # cheaper side of that trade.
-        blocks = await _image_blocks_async(images)
+        #
+        # ALREADY-DECODED blocks pass straight through, and that is not a
+        # convenience: ``_admit_without_waiting_for_the_turn`` budgets a few
+        # LOOP TURNS for this method's synchronous prelude to raise its
+        # reportable refusals, and a thread hop does not resolve inside that
+        # budget (measured: not done at 2 sleep(0)s, done by 20) no matter how
+        # warm the pool is, because ``to_thread`` always yields at least once.
+        # A caller that has already bounded therefore keeps the prelude
+        # await-free, which is the premise ``_ADMISSION_PRELUDE_TURNS``
+        # documents. Without this, an image-carrying admission reached the
+        # budget with its prelude unrun and its refusals were logged to a
+        # detached callback instead of reaching the user -- the silent drop
+        # that method exists to repair.
+        blocks = (
+            cast(list["ImageContent"], images)
+            if _already_bounded(images)
+            else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
+        )
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -1494,7 +1528,7 @@ class OwnedSessionHandle(SessionHandle):
     async def steer(
         self,
         text: str,
-        images: list[dict[str, str]] | None = None,
+        images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
     ) -> str:
         self._check_loop_thread()
@@ -1503,7 +1537,14 @@ class OwnedSessionHandle(SessionHandle):
         # hop, and awaiting between reserving a producer identity and handing
         # the steer to the session would open a suspension point inside that
         # window. Decoding first keeps the reserve-to-mutate span await-free.
-        blocks = await _image_blocks_async(images)
+        # Already-decoded blocks pass through for the reason ``prompt``
+        # documents: an in-process caller that bounded already must not be
+        # made to yield again.
+        blocks = (
+            cast(list["ImageContent"], images)
+            if _already_bounded(images)
+            else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
+        )
         if not self._command_reservations.reserve(
             command_id,
             kind="steer",
@@ -2520,8 +2561,22 @@ class OwnedSessionHandle(SessionHandle):
         its synchronous prelude" is a fact about scheduling that holds under any
         contention (AGENTS.md, "Wait on the event, never on the clock").
         """
+        # Bounded HERE and handed on DECODED, so ``prompt``'s prelude stays
+        # await-free and the loop-turn budget below measures what it claims to.
+        #
+        # The budget gives ``prompt`` a few turns to raise its reportable
+        # refusals, on the documented premise that it raises them before its
+        # first await. Bounding images inside ``prompt`` broke that premise: a
+        # thread hop does not resolve within the budget however warm the pool
+        # is, because ``to_thread`` always yields at least once. An
+        # image-carrying admission then reached the budget with its prelude
+        # unrun, was judged "genuinely queued behind a running turn", and its
+        # refusals went to the detached log instead of the warning receipt --
+        # the silent drop this method exists to repair, back for requests with
+        # attachments.
+        blocks = await _image_blocks_async(images)
         task = asyncio.ensure_future(
-            self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+            self.prompt(request, images=blocks, command_id=str(uuid.uuid4()))
         )
         # One turn is enough today — nothing before ``prompt``'s first suspension
         # point yields — but a couple of extra turns costs nothing and keeps this
