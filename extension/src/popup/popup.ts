@@ -628,6 +628,12 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     error.textContent = "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
+    // Unlock BEFORE selecting, for the same reason as the rejected-code branch
+    // above: a disabled input refuses focus, and `setPairBusy(false)` in
+    // `finally` runs only after this handler returns — so a select() placed
+    // ahead of it sets a range on an unfocused element and focus stays on the
+    // body. (The finally re-call is idempotent.)
+    setPairBusy(false);
     // Same recovery as the rejected-code branch above: the typed digits are
     // still in the field with the caret at 6, where maxlength is satisfied, so
     // without this the retry after a transport failure silently swallows every

@@ -70,7 +70,15 @@ function installDomStub() {
         (node._handlers[event] ||= []).push(handler);
       },
       // Real focus bookkeeping: this is what J2 is about.
+      //
+      // A DISABLED element refuses focus — the actual DOM rule, and the one the
+      // pairing form's unlock ordering depends on. Modelling it matters: with
+      // focus granted unconditionally, a `select()` called while the input is
+      // still disabled looks identical to one called after the unlock, and the
+      // U8 defect (select() before setPairBusy(false) in the catch branch, so
+      // the corrected code is still swallowed) is invisible to every assertion.
       focus: () => {
+        if (node.disabled) return;
         doc.activeElement = node;
         node.focusCount++;
       },
@@ -79,12 +87,16 @@ function installDomStub() {
         node.selectionStart = s;
         node.selectionEnd = e;
       },
-      // A real input's select() focuses and selects the whole value.
+      // A real input's select() focuses and selects the whole value — and, like
+      // focus(), gets nothing on a disabled element: the range is set on
+      // something that is not focused, so the next keystroke goes to the body.
+      // That asymmetry IS U8, so it has to be modelled rather than assumed.
       select: () => {
-        doc.activeElement = node;
-        node.focusCount++;
         node.selectionStart = 0;
         node.selectionEnd = node._value.length;
+        if (node.disabled) return;
+        doc.activeElement = node;
+        node.focusCount++;
       },
       // popup.ts uses form.contains(document.activeElement) to avoid stealing a
       // focus the user placed inside the form themselves.
@@ -843,6 +855,17 @@ test("a rejected code is selected so the next keystroke replaces it (U1)", async
     input._value = "707770";
     input.setSelectionRange(6, 6);
 
+    // Same spy as the U8 test on the sibling branch: the unlock must precede
+    // the selection here too. Without this the identical ordering defect could
+    // be introduced on THIS branch and every assertion below would still pass,
+    // because `finally` re-enables the input before they run.
+    let enabledWhenSelected = null;
+    const realSelect = input.select;
+    input.select = () => {
+      enabledWhenSelected = !input.disabled;
+      realSelect();
+    };
+
     // The daemon rejects it over the popup's own socket.
     nodes.get("pair-form").dispatch("submit");
     await tick(120);
@@ -853,9 +876,112 @@ test("a rejected code is selected so the next keystroke replaces it (U1)", async
       "precondition: the attempt was rejected",
     );
     assert.equal(
+      enabledWhenSelected,
+      true,
+      "the input must already be re-enabled when the rejected code is selected",
+    );
+    assert.equal(
       input.selectionStart === 0 && input.selectionEnd === input.value.length,
       true,
       `the rejected code must be selected so typing replaces it (got ${input.selectionStart}-${input.selectionEnd} of "${input.value}")`,
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a failed socket upgrade leaves the field usable for the retry (U8)", async () => {
+  // The transport-failure branch, which is NOT reached by killing the daemon:
+  // an unreachable daemon renders the `disconnected` card, where this copy and
+  // this recovery are off screen entirely. It is live only when /health is
+  // REACHABLE but the WebSocket upgrade fails — a refused upgrade, a daemon
+  // mid-restart still serving HTTP, a stale worker. So the fetch stub stays
+  // healthy and only the socket fails.
+  //
+  // The assertions are on the OPERATIVE facts — the input is enabled, it is
+  // focused, and a subsequently typed code actually reaches the field. Checking
+  // that `select()` was called would pass on the broken ordering, which is this
+  // PR's recurring failure mode: the guard names the right behaviour and
+  // measures the wrong quantity.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installFetchStub(() => false);
+  // Reachable daemon, refused upgrade: the socket errors after construction
+  // rather than opening, which is what lands the handler in `catch`.
+  globalThis.WebSocket = class {
+    constructor() {
+      queueMicrotask(() => this.onerror?.({}));
+    }
+    send() {}
+    close() {}
+  };
+
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(30);
+
+    const input = nodes.get("pair-code");
+    input._value = "707770";
+    input.setSelectionRange(6, 6);
+
+    // Record the input's state AT THE MOMENT the recovery runs. Sampling after
+    // the handler returns cannot see this defect: `finally` re-enables the
+    // input, so by then `disabled` is false either way. The ordering is the
+    // whole finding, so it has to be observed while it is happening.
+    //
+    // The browser refuses focus to a disabled element, so the observable
+    // consequence is that the selection is applied to something the user is not
+    // typing into. This spy records enablement at the instant of selection.
+    let enabledWhenSelected = null;
+    const realSelect = input.select;
+    input.select = () => {
+      enabledWhenSelected = !input.disabled;
+      realSelect();
+    };
+
+    nodes.get("pair-form").dispatch("submit");
+    await tick(150);
+
+    assert.equal(
+      nodes.get("pair-error").classList.contains("hidden"),
+      false,
+      "precondition: the transport failure surfaced an error",
+    );
+    assert.match(
+      nodes.get("pair-error").textContent,
+      /Could not reach/,
+      "precondition: this is the catch branch, not the mismatch branch",
+    );
+
+    // The ordering defect, stated directly: `setPairBusy(false)` runs in
+    // `finally`, i.e. AFTER the catch body, so a select() placed before it acts
+    // on a disabled input and the range lands on an element that cannot be
+    // typed into.
+    assert.equal(
+      enabledWhenSelected,
+      true,
+      "the input must already be re-enabled when the recovery selects it; " +
+        "select() on a disabled input sets a range the user cannot type over",
+    );
+    assert.equal(input.disabled, false, "the input must end the handler enabled");
+    assert.equal(document.activeElement, input, "the input must hold focus for the retry");
+    assert.equal(input.selectionStart, 0, "the typed code must be selected");
+    assert.equal(input.selectionEnd, 6, "the typed code must be selected");
+
+    // The consequence the user feels. maxlength="6" is already satisfied by the
+    // digits in the field, so unless the selection is live the corrected code
+    // is silently discarded — the exact defect U6 was filed for.
+    const typed = "707776";
+    if (document.activeElement === input && input.selectionEnd > input.selectionStart) {
+      input._value = typed; // the selection is replaced by what the user types
+      input.setSelectionRange(typed.length, typed.length);
+    }
+    assert.equal(
+      input.value,
+      typed,
+      "a corrected code typed over the selection must land, not be swallowed by maxlength",
     );
   } finally {
     await bundle.close();
