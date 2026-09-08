@@ -198,6 +198,11 @@ test("a transport failure is named as one, not reported as an HTTP status", asyn
   assert.doesNotMatch(output, /returned HTTP/);
 });
 
+// Mirrors BODY_PRINT_LIMIT in chrome-web-store.sh. The straddle test below has
+// to know where the cut falls, which is the one thing about the bound a test
+// cannot discover from the outside.
+const BODY_PRINT_LIMIT = 4000;
+
 test("an oversized error body is bounded and its truncation is disclosed", async () => {
   // An unbounded echo floods the run log -- a single 400 was measured at
   // 3,000,626 bytes of step output -- which works against the readability this
@@ -216,6 +221,54 @@ test("an oversized error body is bounded and its truncation is disclosed", async
   assert.match(output, /INVALID_ARGUMENT/);
   // Truncating the body must not cost the remedy that follows it.
   assert.match(output, /cancelSubmission/);
+});
+
+test("a token straddling the truncation boundary is redacted, not cut in half", async () => {
+  // Pins the ORDER of the redact and truncate blocks, which a comment argues
+  // for and nothing enforced: reversing them left the suite 30/30 green while
+  // leaking up to 28 characters of the token. Truncating first cuts the token
+  // in half, and the surviving prefix no longer matches the substitution
+  // pattern, so it prints verbatim -- a partial credential is still a leak.
+  const token = "ya29.a0AfB_STRADDLE-SECRET-TOKEN-VALUE";
+  const body = (pad) => ({
+    error: { code: 400, status: "INVALID_ARGUMENT", message: "P".repeat(pad) + token + "Q".repeat(400) },
+  });
+  // DERIVE the padding that puts the cut inside the token rather than hardcode
+  // it: jq's pretty-printing decides the offset, so a hardcoded pad would stop
+  // straddling the moment the envelope changed and the test would keep passing
+  // while measuring nothing. Half the token either side of the limit gives the
+  // reversed order its longest surviving prefix.
+  const envelope = JSON.stringify(body(0), null, 2).indexOf(token);
+  const pad = BODY_PRINT_LIMIT - envelope - Math.floor(token.length / 2);
+  const rendered = JSON.stringify(body(pad), null, 2);
+  const start = rendered.indexOf(token);
+  assert.ok(
+    start < BODY_PRINT_LIMIT && start + token.length > BODY_PRINT_LIMIT,
+    `the token must straddle the cut to measure anything (start ${start}, limit ${BODY_PRINT_LIMIT})`,
+  );
+
+  const error = await runRelease(
+    ["stage", "local-operator-extension.zip", VERSION],
+    [() => rejectWith(400, body(pad))],
+    { token, expectFailure: true },
+  );
+  const output = error.stdout + error.stderr;
+  // No prefix of the credential may survive -- not the whole token, and not the
+  // leading fragment the cut would otherwise leave behind. Report the surviving
+  // prefix itself on failure: the length is the finding, and a slice of the
+  // output at a fixed offset would show padding rather than the leak. Safe to
+  // print because this token is synthetic and local to the test.
+  assert.ok(!output.includes(token), "the whole token must never reach the log");
+  let survived = "";
+  for (let n = token.length; n >= 1; n -= 1) {
+    if (output.includes(token.slice(0, n))) { survived = token.slice(0, n); break; }
+  }
+  assert.ok(
+    !output.includes(token.slice(0, 8)),
+    `${survived.length} characters of the token survived truncation: ${JSON.stringify(survived)}`,
+  );
+  // The body really was cut here; otherwise the assertions above are vacuous.
+  assert.match(output, /\(truncated to \d+ of \d+ characters\)/);
 });
 
 test("a rejected call does not echo the access token, even if the body carries it", async () => {
