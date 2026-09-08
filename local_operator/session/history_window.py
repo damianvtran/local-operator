@@ -200,6 +200,11 @@ def display_window(
         max_wire_bytes=max_wire_bytes,
         durable_seed_tools=durable_seed_tools,
     )
+    # Replay creates fresh models, but nested JSON-ish tool/provider payloads
+    # may still share children with journal dictionaries. The mutable display
+    # response must own those children even on a cold or non-admitted request.
+    # Copy only the selected page, never the whole canonical history.
+    page = page.model_copy(deep=True)
     if page.status != "reset":
         cache.put(key, page)
     return page

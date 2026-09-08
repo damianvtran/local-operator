@@ -91,6 +91,34 @@ async def test_repeated_tail_older_anchor_and_limits_do_not_replay(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retain", [True, False])
+async def test_cold_nested_display_payload_cannot_mutate_journal(
+    tmp_path: Path, monkeypatch, retain
+):
+    if not retain:
+        monkeypatch.setattr("local_operator.session.history_window.DISPLAY_PAGE_CACHE_BYTES", 1)
+    transcript = Transcript(tmp_path / "session")
+    await transcript.append_message(
+        Message.assistant(
+            "call",
+            tool_calls=[ToolCall(name="bash", arguments={"nested": {"values": [1]}})],
+            provider_payload={"details": {"tags": ["original"]}},
+        )
+    )
+    first = page(transcript).messages[0]
+    assert isinstance(first, Message)
+    first.tool_calls[0].arguments["nested"]["values"].append(2)
+    assert first.provider_payload is not None
+    first.provider_payload["details"]["tags"].append("changed")
+    for fresh in (transcript.build_llm_history()[0], page(transcript).messages[0]):
+        assert isinstance(fresh, Message)
+        assert fresh.tool_calls[0].arguments["nested"]["values"] == [1]
+        assert fresh.provider_payload == {"details": {"tags": ["original"]}}
+    assert transcript._display_window_cache is not None
+    assert bool(transcript._display_window_cache.entries) is retain
+
+
+@pytest.mark.asyncio
 async def test_old_cut_hits_after_append_and_regenerates_after_eviction(tmp_path: Path) -> None:
     transcript = Transcript(tmp_path / "session")
     await transcript.append_messages([Message.user(str(i)) for i in range(140)])
