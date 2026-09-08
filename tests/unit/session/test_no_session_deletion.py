@@ -404,6 +404,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the plaintext master.key, after the wrapped copy is written",
     ),
+    # The hardened tier's counterparts of the three staging calls above (QA
+    # Q10). Every path is built the same way and carries the same argument:
+    # `secrets_dir()` joined with a fixed basename plus this process's own
+    # pid/random suffix, so no caller input and no session id reaches any of
+    # them and none can name a path under sessions/.
+    (
+        "local_operator/secrets/keys.py::stage_wrapped_master_key",
+        "os.replace",
+        "temp FILE -> master.wrapped.incoming.<pid>.<random>, both under config_dir()/secrets",
+    ),
+    (
+        "local_operator/secrets/keys.py::stage_wrapped_master_key",
+        "<path>.unlink",
+        "the master.stage.<pid>.<random>.wrapped.tmp temp FILE this call just wrote",
+    ),
+    (
+        "local_operator/secrets/keys.py::install_staged_wrapped_key",
+        "os.replace",
+        "staged wrapped FILE -> master.key.wrapped, both under config_dir()/secrets",
+    ),
+    # The same §2.3 removal `wrap_master_key` performs, at the other place a
+    # hardened store's key of record is replaced: a rotation must not leave the
+    # plaintext key a pre-fix rotate had written.
+    (
+        "local_operator/secrets/keys.py::install_staged_wrapped_key",
+        "<path>.unlink",
+        "the plaintext master.key, after the new wrapped key is in place",
+    ),
+    (
+        "local_operator/secrets/keys.py::discard_staged_wrapped_key",
+        "<path>.unlink",
+        "master.wrapped.incoming* under config_dir()/secrets, staged by this call",
+    ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
         "os.unlink",

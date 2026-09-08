@@ -91,10 +91,54 @@ def key_mode(base: Path | None = None) -> str:
     unwrap through the broker — which is the only process that ever holds the
     unwrapped copy. Reported by ``lop secret status`` so the operator can see
     which tier is live.
+
+    **A plaintext ``master.key`` means ``keyfile``, whatever else is on disk,
+    and that precedence is the whole point of this function (QA Q10).** It used
+    to answer purely on the presence of ``master.key.wrapped``, so a store
+    carrying BOTH files reported ``passphrase`` while the unwrapped key sat in
+    the clear beside the database — the store advertised the one guarantee the
+    hardened tier is sold on (§2.3: nothing on disk decrypts the store on its
+    own) while not providing it. A tier is defined by what is absent from disk,
+    so it has to be decided by looking for that file rather than for the other
+    one.
+
+    Answering ``keyfile`` there is also what makes the damage REPAIRABLE from
+    the CLI. ``harden`` refuses a store already in ``passphrase`` mode, so the
+    old answer left an operator whose rotation had written a plaintext key with
+    no way to re-wrap it; with the honest answer, ``harden`` sees the tier it
+    can act on and re-wraps the live key. :func:`key_of_record_inconsistency`
+    names the state so ``status`` can point at it rather than leaving the
+    operator to notice a mode line that silently changed.
     """
-    if wrapped_key_path(base).exists():
+    if wrapped_key_path(base).exists() and not key_path(base).exists():
         return "passphrase"
     return "keyfile"
+
+
+def key_of_record_inconsistency(base: Path | None = None) -> str | None:
+    """Describe a store whose key files contradict each other, or ``None``.
+
+    There is exactly one such state, and it is the one QA Q10 produced: both a
+    plaintext ``master.key`` and a ``master.key.wrapped`` on disk. It means a
+    hardening was undone — by a rotation that was not tier-aware, or by a crash
+    inside :func:`wrap_master_key` between writing the wrapped file and
+    removing the plain one. Either way the operator believes their master key
+    is only on disk scrypt-wrapped and it is not.
+
+    Reported rather than repaired here. Which of the two files holds the key
+    the DATABASE is sealed under cannot be decided without opening the database
+    (and, for the wrapped one, without the passphrase), so the repair belongs
+    to ``harden``, which has both. This function exists so ``status`` can say
+    the words out loud instead of printing a tier line that is now false.
+    """
+    if key_path(base).exists() and wrapped_key_path(base).exists():
+        return (
+            f"a plaintext master key is present at {key_path(base)} alongside the "
+            f"scrypt-wrapped one, so this store is NOT protected at rest the way "
+            f"passphrase mode claims. Re-run `lop secret harden` to re-wrap the live "
+            f"key and remove the plaintext copy."
+        )
+    return None
 
 
 def ensure_secrets_dir(base: Path | None = None) -> Path:
@@ -328,6 +372,14 @@ STAGED_KEY_PREFIX = "master.key.incoming"
 #: has to be invisible to that glob until the rename makes it complete.
 _STAGING_TEMP_PREFIX = "master.stage"
 
+#: Prefix of a staged WRAPPED key, written by a rotation of a hardened store.
+#: Deliberately not under :data:`STAGED_KEY_PREFIX`, and checked as disjoint by
+#: `test_staged_key_globs_do_not_overlap`: the two staging sets hold different
+#: FORMATS (32 raw key bytes against a scrypt-wrapped blob), so a glob that
+#: collected both would hand `resolve_master_key` a wrapped blob to fingerprint
+#: as though it were a key.
+STAGED_WRAPPED_PREFIX = "master.wrapped.incoming"
+
 
 def staged_key_paths(base: Path | None = None) -> list[Path]:
     """Every key staged by a rotation that has not yet installed it.
@@ -520,17 +572,145 @@ def wrap_master_key(base: Path | None, key: bytes, passphrase: str) -> None:
     :func:`key_mode` then reports ``passphrase`` while the stale plain key is
     removed on the next successful call.
     """
+    write_private_file(wrapped_key_path(base), _wrap_blob(key, passphrase))
+    key_path(base).unlink(missing_ok=True)
+
+
+def _wrap_blob(key: bytes, passphrase: str) -> bytes:
+    """The on-disk representation of ``key`` wrapped under ``passphrase``.
+
+    Split out of :func:`wrap_master_key` because ``rotate`` on a hardened store
+    needs the same bytes written to a STAGING path rather than to the key of
+    record. Two spellings of this format would be two things to keep in step,
+    and the header is bound as AAD, so a drift between them is a store that
+    cannot be unwrapped.
+    """
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     salt = os.urandom(SCRYPT_SALT_BYTES)
     nonce = os.urandom(12)
-    wrapping_key = _derive_wrapping_key(passphrase, salt)
     # The header is bound as AAD so the parameters cannot be edited down to a
     # cheaper KDF cost by an attacker holding the file.
     header = _WRAP_MAGIC + bytes([_WRAP_VERSION]) + salt + nonce
-    blob = header + AESGCM(wrapping_key).encrypt(nonce, key, header)
-    write_private_file(wrapped_key_path(base), blob)
+    return header + AESGCM(_derive_wrapping_key(passphrase, salt)).encrypt(nonce, key, header)
+
+
+def staged_wrapped_key_paths(base: Path | None = None) -> list[Path]:
+    """Every WRAPPED key staged by a rotation of a hardened store.
+
+    The hardened-tier counterpart of :func:`staged_key_paths`, and separate from
+    it for a reason that is the whole point of QA Q10: the keyfile tier stages
+    the raw 32 key bytes, and doing that on a hardened store would put a
+    plaintext master key on disk for the duration of every rotation — defeating
+    the one property §2.3 sells the tier on, just for a narrower window than the
+    bug QA found. So the staged copy is wrapped under the same passphrase as the
+    key of record, and the two staging sets never mix.
+    """
+    try:
+        return sorted(secrets_dir(base).glob(f"{STAGED_WRAPPED_PREFIX}*"))
+    except OSError:
+        return []
+
+
+def stage_wrapped_master_key(base: Path | None, key: bytes, passphrase: str) -> Path:
+    """Persist a hardened rotation's new key, wrapped, BEFORE the re-seal commits.
+
+    Same crash-safety contract as :func:`stage_master_key` — at every instant a
+    key that opens the store exists on disk — with the difference that what is
+    written is the wrapped blob, so the invariant holds without ever putting an
+    unwrapped key beside the database.
+
+    Recovery differs accordingly and is worth stating: a plaintext staged key
+    can be matched against the database's fingerprint by anyone, so
+    :func:`~local_operator.secrets.access.resolve_master_key` repairs an
+    interrupted keyfile rotation with no operator involvement. A wrapped one
+    cannot be opened without the passphrase, so the equivalent repair happens
+    at ``unlock``, which is the moment the passphrase is available — see
+    :func:`unwrap_master_key_matching`.
+    """
+    ensure_secrets_dir(base)
+    directory = secrets_dir(base)
+    unique = f"{os.getpid()}.{os.urandom(6).hex()}"
+    path = directory / f"{STAGED_WRAPPED_PREFIX}.{unique}"
+    temporary = directory / f"{_STAGING_TEMP_PREFIX}.{unique}.wrapped.tmp"
+    try:
+        write_private_file(temporary, _wrap_blob(key, passphrase))
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def install_staged_wrapped_key(base: Path | None, staged: Path) -> None:
+    """Promote a staged wrapped key to the key of record, atomically.
+
+    ``os.replace`` within the same directory, so a reader sees the old wrapping
+    or the new one and never a truncated file — a crash mid-write here would
+    leave the only on-disk copy of the store's key a partial ciphertext, which
+    is unrecoverable loss of every secret.
+
+    The plaintext unlink afterwards is not defensive clutter: it is the tier's
+    defining property (§2.3), enforced at the one place a hardened store's key
+    of record is replaced. A store that arrives here carrying a plaintext key
+    was damaged by the pre-fix ``rotate``, and finishing the install without
+    removing it would preserve exactly the silent downgrade Q10 reported.
+    """
+    os.replace(staged, wrapped_key_path(base))
+    os.chmod(wrapped_key_path(base), FILE_MODE)
     key_path(base).unlink(missing_ok=True)
+
+
+def discard_staged_wrapped_key(base: Path | None, staged: Path) -> None:
+    """Remove a staged wrapped key this caller owns.
+
+    Identified by PATH, not by content as :func:`discard_staged_master_key`
+    does: a wrapped blob carries a fresh random salt and nonce per write, so
+    two wrappings of the same key are different bytes and content comparison
+    cannot recognise ownership. The path is unique per rotation and the caller
+    holds the one it created, which identifies the owner exactly as well.
+    """
+    try:
+        staged.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - raced with a reader; not ours to insist on
+        pass
+
+
+def assert_key_of_record_invariant(base: Path | None, mode: str) -> None:
+    """Fail loudly if the on-disk key files contradict the tier just written.
+
+    The one invariant this feature cannot afford to get wrong, stated once and
+    checked wherever a key is installed: **in the hardened tier no plaintext
+    ``master.key`` exists, and in the keyfile tier no wrapped key pretends the
+    store is hardened.** QA Q10 was a single verb (``rotate``) writing the wrong
+    file for the tier, which silently downgraded the hardened store to plaintext
+    at rest while ``status`` kept reporting ``passphrase``.
+
+    A silent downgrade is the worst available failure because nothing surfaces
+    it — the operator keeps trusting a guarantee that has stopped holding. So a
+    violation raises here, at the moment the offending write happens, rather
+    than being discovered later by an audit. It is a post-condition on the
+    writer, not a validation of operator input: reaching it means this code
+    installed the wrong file, which is a bug in the caller.
+    """
+    plain = key_path(base).exists()
+    wrapped = wrapped_key_path(base).exists()
+    if mode == "passphrase" and plain:
+        raise SecretStoreError(
+            f"Internal error: a plaintext master key was left at {key_path(base)} on a "
+            "store hardened with a passphrase. Refusing to leave the store's key readable "
+            "beside it; please report this."
+        )
+    if mode == "keyfile" and not plain:
+        raise SecretStoreError(
+            f"Internal error: no master key was installed at {key_path(base)} for a store "
+            "in keyfile mode."
+        )
+    if mode == "keyfile" and wrapped:
+        raise SecretStoreError(
+            f"Internal error: {wrapped_key_path(base)} still claims this store is hardened "
+            "while a plaintext master key sits beside it."
+        )
 
 
 def unwrap_master_key(base: Path | None, passphrase: str) -> bytes:
@@ -541,14 +721,22 @@ def unwrap_master_key(base: Path | None, passphrase: str) -> bytes:
     per boot, and a traceback would be a poor way to say "that was the wrong
     passphrase".
     """
-    from cryptography.exceptions import InvalidTag
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
     path = wrapped_key_path(base)
     if not path.exists():
         raise SecretStoreError(f"No hardened key at {path}; this store is not in passphrase mode.")
     check_mode(path)
-    blob = path.read_bytes()
+    return _unwrap_blob(path.read_bytes(), passphrase, path)
+
+
+def _unwrap_blob(blob: bytes, passphrase: str, path: Path) -> bytes:
+    """Decode and decrypt a wrapped-key blob. ``path`` only names it in errors.
+
+    Shared by the key of record and by the staged copies a hardened rotation
+    leaves behind, so the format is parsed in exactly one place.
+    """
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
     prefix = len(_WRAP_MAGIC) + 1 + SCRYPT_SALT_BYTES + 12
     if len(blob) <= prefix or not blob.startswith(_WRAP_MAGIC):
         raise SecretStoreError(f"{path} is not a valid wrapped master key.")
@@ -567,4 +755,55 @@ def unwrap_master_key(base: Path | None, passphrase: str) -> bytes:
     if len(key) != KEY_BYTES:
         raise SecretStoreError("The wrapped key is damaged; it did not contain a master key.")
     return key
-    discard_staged_master_key(base, key)
+
+
+def unwrap_master_key_matching(base: Path | None, passphrase: str) -> bytes:
+    """Unwrap the key that actually opens this store, finishing a broken rotation.
+
+    The hardened-tier counterpart of
+    :func:`~local_operator.secrets.access.resolve_master_key`, and it has to be
+    a separate function for one reason: that one repairs an interrupted
+    rotation by fingerprinting STAGED PLAINTEXT keys, which a hardened store
+    deliberately does not have. Here the staged copies are wrapped, so they can
+    only be tested at the single moment the passphrase exists — ``unlock``.
+
+    Without this, a power cut in ``rotate``'s commit-to-install window left a
+    hardened store permanently unreadable: the wrapped key of record still
+    wraps the superseded key while the database has moved on. The keyfile tier
+    has recovered from that window since round 1; this gives the hardened tier
+    the same guarantee rather than a weaker one hidden behind the same verb.
+
+    Ordinary case first and unconditionally: when the key of record opens the
+    store — or when there is no store or no fingerprint row to compare against
+    — nothing else is read and no staged file is touched.
+    """
+    from local_operator.secrets.crypto import key_fingerprint
+    from local_operator.secrets.store import recorded_key_fingerprint
+
+    key = unwrap_master_key(base, passphrase)
+    expected = recorded_key_fingerprint(base)
+    if expected is None or key_fingerprint(key) == expected:
+        return key
+
+    for staged in staged_wrapped_key_paths(base):
+        try:
+            candidate = _unwrap_blob(staged.read_bytes(), passphrase, staged)
+        except (SecretStoreError, OSError):
+            # A blob wrapped under a DIFFERENT passphrase, or a file that
+            # vanished under a concurrent rotation's install. Neither is this
+            # caller's to repair, and neither is a reason to fail the unlock.
+            continue
+        if key_fingerprint(candidate) != expected:
+            continue
+        # The re-seal committed under this key and only the install is
+        # outstanding, exactly as `resolve_master_key` establishes before it
+        # completes a keyfile rotation. Finishing it here means the next crash
+        # does not find the same half-done state.
+        install_staged_wrapped_key(base, staged)
+        return candidate
+
+    raise SecretStoreError(
+        "This secret store is sealed under a master key that the passphrase-wrapped key "
+        "on disk does not contain. A key rotation appears to have been interrupted, and "
+        "no staged wrapped key matching this store was found beside it."
+    )

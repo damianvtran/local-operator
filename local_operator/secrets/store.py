@@ -30,7 +30,7 @@ import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from local_operator.secrets import audit
 from local_operator.secrets.crypto import (
@@ -313,9 +313,30 @@ def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
     anything, so the install proceeds unconditionally; that is the same
     "cannot tell, do not guess" fallback :func:`recorded_key_fingerprint` uses.
     """
+    return install_key_of_record_if_current(key, base, lambda: replace_master_key(base, key))
+
+
+def install_key_of_record_if_current(
+    key: bytes, base: Path | None, install: Callable[[], None]
+) -> bool:
+    """The compare-and-swap above, over whichever file IS the key of record.
+
+    Both at-rest tiers need the identical guard and differ only in what
+    installing MEANS — ``master.key`` in the keyfile tier,
+    ``master.key.wrapped`` in the hardened one — so the guard lives here once
+    and the tier supplies ``install``. Not having it in both places is what
+    produced QA Q10's concurrency exposure: the hardened rotation path had no
+    compare-and-swap at all, and every argument in
+    :func:`install_master_key_if_current`'s docstring about a superseded
+    rotation clobbering the winner's key applies to it word for word.
+
+    ``install`` runs INSIDE the write lock this transaction holds, so it must
+    do nothing but move the key into place — no prompting, no database access,
+    no work that could block, since every other writer waits behind it.
+    """
     path = store_path(base)
     if not path.exists():
-        replace_master_key(base, key)
+        install()
         return True
 
     with closing(_connect(path)) as connection:
@@ -325,7 +346,7 @@ def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
             if recorded is not None and recorded != key_fingerprint(key):
                 # Superseded. Refusing is what keeps the winner's key installed.
                 return False
-            replace_master_key(base, key)
+            install()
             return True
         finally:
             # Read-only throughout: the transaction exists solely to hold the

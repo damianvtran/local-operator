@@ -12,15 +12,23 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.secrets.crypto import generate_master_key
 from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.keys import (
+    assert_key_of_record_invariant,
+    install_staged_wrapped_key,
     key_mode,
+    key_of_record_inconsistency,
     key_path,
     load_master_key,
+    stage_wrapped_master_key,
+    staged_key_paths,
     unwrap_master_key,
+    unwrap_master_key_matching,
     wrap_master_key,
     wrapped_key_path,
 )
+from local_operator.secrets.store import SecretStore
 
 PASSPHRASE = "correct horse battery staple"
 
@@ -105,3 +113,103 @@ def test_loading_a_hardened_store_from_disk_directs_the_operator_to_unlock(
     wrap_master_key(config_root, original, PASSPHRASE)
     with pytest.raises(SecretStoreError, match="unlock"):
         load_master_key(config_root)
+
+
+# --- the key of record must match the tier (QA Q10) ---------------------------
+
+
+def test_a_plaintext_key_beside_a_wrapped_one_is_not_reported_as_hardened(
+    config_root: Path,
+) -> None:
+    """The tier is decided by what is ABSENT from disk, not by what is present.
+
+    `key_mode` answered on the presence of the wrapped file alone, so the state
+    the pre-fix `rotate` produced — both files — reported `passphrase` while the
+    live key sat unwrapped beside the database. A store advertising the one
+    guarantee §2.3 sells the tier on while not providing it is the worst of the
+    available failures, because nothing surfaces it.
+    """
+    original = load_master_key(config_root, create=True)
+    wrap_master_key(config_root, original, PASSPHRASE)
+    assert key_mode(config_root) == "passphrase"
+
+    key_path(config_root).write_bytes(original)  # what the broken rotate did
+    assert key_mode(config_root) == "keyfile"
+    assert "plaintext master key" in (key_of_record_inconsistency(config_root) or "")
+
+
+def test_a_healthy_store_reports_no_inconsistency(config_root: Path) -> None:
+    """The warning must not cry wolf on either tier in its normal state."""
+    original = load_master_key(config_root, create=True)
+    assert key_of_record_inconsistency(config_root) is None
+    wrap_master_key(config_root, original, PASSPHRASE)
+    assert key_of_record_inconsistency(config_root) is None
+
+
+def test_the_invariant_refuses_a_plaintext_key_in_the_hardened_tier(
+    config_root: Path,
+) -> None:
+    """The post-condition every key install is checked against.
+
+    Asserted at the moment of the offending write rather than discovered later,
+    because the failure it guards is silent by nature.
+    """
+    original = load_master_key(config_root, create=True)
+    wrap_master_key(config_root, original, PASSPHRASE)
+    assert_key_of_record_invariant(config_root, "passphrase")  # clean: no raise
+
+    key_path(config_root).write_bytes(original)
+    with pytest.raises(SecretStoreError, match="plaintext master key"):
+        assert_key_of_record_invariant(config_root, "passphrase")
+
+
+def test_rewrapping_replaces_the_key_of_record_without_a_plaintext_window(
+    config_root: Path,
+) -> None:
+    """A hardened rotation stages WRAPPED, so no unwrapped key ever touches disk."""
+    original = load_master_key(config_root, create=True)
+    wrap_master_key(config_root, original, PASSPHRASE)
+
+    incoming = generate_master_key()
+    staged = stage_wrapped_master_key(config_root, incoming, PASSPHRASE)
+    assert not key_path(config_root).exists(), "staging wrote a plaintext key"
+    assert staged.read_bytes() != incoming, "the staged key was not wrapped"
+    # The staging sets are disjoint: a wrapped blob must never be collected by
+    # the glob that feeds `resolve_master_key`, which fingerprints raw keys.
+    assert staged not in staged_key_paths(config_root)
+
+    install_staged_wrapped_key(config_root, staged)
+    assert unwrap_master_key(config_root, PASSPHRASE) == incoming
+    assert not key_path(config_root).exists()
+    assert key_mode(config_root) == "passphrase"
+
+
+def test_unlock_finishes_a_hardened_rotation_that_died_before_installing(
+    config_root: Path,
+) -> None:
+    """The crash window the keyfile tier has recovered from since round 1.
+
+    A power cut between `rotate`'s COMMIT and its install leaves the wrapped key
+    of record wrapping the SUPERSEDED key while the database has moved on. The
+    keyfile tier repairs this unattended by fingerprinting staged plaintext
+    keys; a wrapped staged key can only be tested when the passphrase exists,
+    so the equivalent repair happens at `unlock`.
+    """
+    original = load_master_key(config_root, create=True)
+    store = SecretStore(original, base=config_root)
+    store.initialize()
+    store.set("API_KEY", b"hunter2")
+    wrap_master_key(config_root, original, PASSPHRASE)
+
+    incoming = generate_master_key()
+    stage_wrapped_master_key(config_root, incoming, PASSPHRASE)
+    store.rotate(incoming)  # committed; the process dies before installing
+
+    # The key of record no longer opens the store...
+    assert unwrap_master_key(config_root, PASSPHRASE) == original
+    # ...and the recovery-aware unwrap finds the staged one and installs it.
+    recovered = unwrap_master_key_matching(config_root, PASSPHRASE)
+    assert recovered == incoming
+    assert SecretStore(recovered, base=config_root).get("API_KEY") == b"hunter2"
+    assert unwrap_master_key(config_root, PASSPHRASE) == incoming
+    assert not key_path(config_root).exists()

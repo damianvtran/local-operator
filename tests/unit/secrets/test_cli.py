@@ -587,5 +587,151 @@ def test_harden_restart_unlock_get_round_trip(cli) -> None:
         assert cli("rm", "JOURNEY_TWO", "--yes").returncode == 0
         assert cli("get", "JOURNEY_TWO").returncode == 2
         assert b"JOURNEY_TWO" not in cli("list").stdout
+
+        # **`rotate`, and then the whole store again after it (QA Q10).** The
+        # journey stopped short of the one verb that REPLACES the key, and that
+        # is exactly the verb that was not tier-aware: it installed a plaintext
+        # `master.key` while `unlock` kept unwrapping the old one, so a single
+        # rotation made every secret undecryptable AND silently undid the
+        # hardening, with `status` still reporting `passphrase`. Any verb that
+        # can run on a hardened store belongs in this sequence.
+        code, output = _typed_cli(config, ["rotate"], [passphrase, passphrase])
+        assert code == 0, output
+        assert "rotated 1 secret(s)" in output
+
+        # The tier's defining property (design §2.3) survives the rotation.
+        assert not (config / "secrets" / "master.key").exists(), "plaintext key after rotate"
+        assert (config / "secrets" / "master.key.wrapped").exists()
+
+        # A reboot after the rotation: the NEW key must be the one the wrapped
+        # file yields, which is what the pre-fix code got wrong.
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+
+        survived = cli("get", "JOURNEY")
+        assert survived.returncode == 0, survived.stderr
+        assert survived.stdout == b"journey-value"
+
+        status = cli("status")
+        assert b"passphrase" in status.stdout
+        assert b"WARNING" not in status.stdout
+    finally:
+        cli("broker", "stop")
+
+
+def test_rotate_on_a_hardened_store_keeps_every_secret(cli) -> None:
+    """QA Q10, as reported: one rotation, exit 0, and the store was destroyed.
+
+    The repro verbatim — set, harden, stop the broker (a reboot), unlock,
+    rotate — after which `get` returned "No secret named 'API_KEY'" and
+    `status` reported `secrets 0 / damaged 1`. Two assertions, because the bug
+    had two independent consequences and either one alone would have let it
+    ship: the value must survive, AND no plaintext master key may exist
+    afterwards. The second is the tier's whole claim (design §2.3) and it
+    failed silently — `key_mode` answered `passphrase` from the stale wrapped
+    file while the live key sat unwrapped beside the database.
+    """
+    config: Path = cli.config
+    passphrase = "rotate-passphrase"
+
+    assert cli("set", "API_KEY", stdin=b"hunter2").returncode == 0
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+
+    try:
+        assert cli("broker", "stop").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        assert cli("get", "API_KEY").stdout == b"hunter2"
+
+        code, output = _typed_cli(config, ["rotate"], [passphrase, passphrase])
+        assert code == 0, output
+
+        # Assertion 1: the data survives a rotation on a hardened store. The
+        # broker restart stands in for the reboot the operator would next do,
+        # and proves the WRAPPED file now yields the post-rotation key.
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        served = cli("get", "API_KEY")
+        assert served.returncode == 0, served.stderr
+        assert served.stdout == b"hunter2"
+
+        # Assertion 2: no plaintext master key on disk, ever, in this tier.
+        assert not (config / "secrets" / "master.key").exists()
+        assert cli("status").stdout.count(b"damaged") == 0
+    finally:
+        cli("broker", "stop")
+
+
+def test_harden_repairs_a_store_a_pre_fix_rotate_damaged(cli) -> None:
+    """An operator who already hit Q10 has a CLI way out (QA Q10, recovery).
+
+    The damaged state is a plaintext `master.key` beside a STALE
+    `master.key.wrapped`. Before this fix there was no exit: `unlock` still
+    returned 0 while decrypting nothing, and `harden` refused with "already
+    hardened" because it saw the stale wrapped file. `key_mode` now answers on
+    the file that decides the tier — a plaintext key means `keyfile` — so
+    `harden` reaches the store and re-wraps the LIVE key.
+
+    The damage is recreated through the real key primitives rather than by
+    hand-writing files, so this stays a test of the recovery path and not of
+    the fixture's idea of what the bug looked like.
+    """
+    config: Path = cli.config
+    passphrase = "repair-passphrase"
+
+    assert cli("set", "API_KEY", stdin=b"hunter2").returncode == 0
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+
+    try:
+        assert cli("broker", "stop").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+
+        damage = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from local_operator.secrets.access import open_store\n"
+            "from local_operator.secrets.crypto import generate_master_key\n"
+            "from local_operator.secrets.keys import stage_master_key\n"
+            "from local_operator.secrets.store import install_master_key_if_current\n"
+            "store = open_store(); key = generate_master_key()\n"
+            "stage_master_key(None, key)\n"
+            "store.rotate(key); install_master_key_if_current(key)\n" % str(REPO_ROOT)
+        )
+        environment = {
+            key: value for key, value in os.environ.items() if not key.startswith("CMUX_")
+        }
+        environment.update(
+            HOME=str(config.parent / "home"),
+            LOCAL_OPERATOR_CONFIG_DIR=str(config),
+            PYTHONPATH=str(REPO_ROOT),
+        )
+        broken = subprocess.run(
+            [sys.executable, "-c", damage], capture_output=True, env=environment, timeout=120
+        )
+        assert broken.returncode == 0, broken.stderr
+        assert (config / "secrets" / "master.key").exists(), "failed to recreate the damage"
+
+        # `status` must NAME the inconsistency rather than reporting a tier it
+        # is no longer providing.
+        status = cli("status")
+        assert status.returncode == 0, status.stderr
+        assert b"WARNING" in status.stdout
+        assert b"plaintext master key" in status.stdout
+
+        # And `harden` is the way out: it re-wraps the live key.
+        code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+        assert code == 0, output
+        assert not (config / "secrets" / "master.key").exists()
+
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        recovered = cli("get", "API_KEY")
+        assert recovered.returncode == 0, recovered.stderr
+        assert recovered.stdout == b"hunter2"
     finally:
         cli("broker", "stop")

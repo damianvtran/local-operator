@@ -348,6 +348,36 @@ class SecretBroker:
         self._key = key
 
     def _master_key(self) -> bytes:
+        """The key this store is CURRENTLY sealed under, never a stale cache.
+
+        **The cache is validated against the database on every use, and that is
+        the point of this method (sibling of QA Q10).** The broker holds the key
+        in memory for a whole boot while ``rotate`` runs in a different process
+        and re-seals the store under a new one. Nothing invalidated this copy,
+        so after any rotation the broker kept serving the superseded key: the
+        blind index is derived from the master key, so every lookup came back
+        "No secret named X" \u2014 the store intact and reported empty. Measured
+        directly against a live broker, and the CLI only escaped it because
+        `access.py` falls back to reading the key file when the broker's answer
+        does not work out.
+
+        The check is a fingerprint comparison, not a re-read of the key: the
+        fingerprint is a public column of the store readable WITHOUT a key
+        (that is why it exists), so this costs one small SQLite read and never
+        needs the plaintext key file \u2014 which in the hardened tier does not
+        exist. On a mismatch the cached key is dropped and the tier decides
+        what happens next: ``keyfile`` re-reads the new key from disk through
+        the provider, while a hardened broker has no way to unwrap the new key
+        and must say so, because the passphrase is not held here.
+        """
+        if self._key is not None and not self._key_opens_store(self._key):
+            self._key = None
+            if self._key_provider is None:
+                raise BrokerError(
+                    "the secret store's master key was rotated after this broker was "
+                    "unlocked, so the key it holds no longer opens the store. Run "
+                    "`lop secret unlock` again to unlock it with the new key."
+                )
         if self._key is None:
             if self._key_provider is None:
                 raise BrokerError(
@@ -356,6 +386,24 @@ class SecretBroker:
                 )
             self._key = self._key_provider()
         return self._key
+
+    def _key_opens_store(self, key: bytes) -> bool:
+        """Does ``key`` match the fingerprint the store records for itself?
+
+        ``True`` whenever the question cannot be answered — no store yet, no
+        fingerprint row, an unreadable database — for the same "cannot tell, do
+        not guess" reason :func:`recorded_key_fingerprint` returns ``None``
+        there. Guessing the other way would make the broker refuse to serve a
+        perfectly good key because the database was momentarily unreadable.
+        """
+        from local_operator.secrets.crypto import key_fingerprint
+        from local_operator.secrets.store import recorded_key_fingerprint
+
+        try:
+            recorded = recorded_key_fingerprint(self._base)
+        except OSError:  # pragma: no cover - unreadable dir; cannot tell
+            return True
+        return recorded is None or recorded == key_fingerprint(key)
 
     # --- accept / dispatch --------------------------------------------------
 
@@ -848,7 +896,14 @@ class SecretBroker:
         their own store — the failure mode that matters when the alternative is
         an unreachable credential set.
         """
-        from local_operator.secrets.keys import unwrap_master_key
+        # The recovery-aware variant: it unwraps the key of record and, when
+        # that key no longer opens the store, finishes a rotation of a hardened
+        # store that was interrupted between its COMMIT and its install. This
+        # is the only moment the passphrase exists, so it is the only place a
+        # STAGED WRAPPED key can be tested — the keyfile tier's equivalent
+        # repair runs unattended in `resolve_master_key`, which can fingerprint
+        # plaintext staged keys without one.
+        from local_operator.secrets.keys import unwrap_master_key_matching
 
         passphrase = request.get("passphrase")
         if not isinstance(passphrase, str) or not passphrase:
@@ -862,7 +917,7 @@ class SecretBroker:
             # human retry never looks hung.
             time.sleep(min(UNLOCK_BACKOFF_BASE_S * (2 ** (failures - 1)), UNLOCK_BACKOFF_MAX_S))
         try:
-            key = unwrap_master_key(self._base, passphrase)
+            key = unwrap_master_key_matching(self._base, passphrase)
         except SecretStoreError as exc:
             with self._lock:
                 self._unlock_failures += 1

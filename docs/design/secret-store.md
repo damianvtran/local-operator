@@ -990,6 +990,57 @@ lifeline — it is consulted per retrieval. So:
 > `set` → `get` → `harden` → broker restart (a reboot) → `get` refused, 0 bytes
 > on stdout → `unlock` → `get` serves the value → `status` reports
 > `passphrase`.
+
+> **Amended again during PR 2 (QA round 3): the key of record is TIER-SPECIFIC,
+> and `rotate` did not know it.** §3's rotation paragraph says the new key is
+> generated, every record re-sealed, and the new key installed — without ever
+> saying WHICH FILE "installed" means, and the implementation resolved that
+> ambiguity the same way in both tiers: it wrote the plaintext `master.key`.
+> On a hardened store the key of record is `master.key.wrapped`, so a single
+> `lop secret rotate` re-sealed the database under a new key while `unlock`
+> kept unwrapping the old one. Every secret became undecryptable, exit code 0,
+> `status` reporting `secrets 0 / damaged 1`.
+>
+> The second consequence is the worse one and is the reason this is recorded
+> here rather than only in a commit message. `key_mode()` answered
+> `passphrase` on the mere presence of the wrapped file, so the store kept
+> reporting the hardened tier while the live master key sat UNWRAPPED on disk
+> beside the database — the exact property §2.3 sells this tier on, silently
+> not provided. A tier is defined by what is ABSENT from disk, so it is now
+> decided by looking for the plaintext key: a store carrying both files
+> reports `keyfile`, which is the truth, and `status` names the inconsistency
+> outright.
+>
+> That honest answer is also the recovery path. `harden` refuses a store
+> already in `passphrase` mode, so under the old answer an operator whose
+> rotation had produced this state had no CLI way out at all; with it, `harden`
+> sees a tier it can act on and re-wraps the live key. No `--force` flag was
+> added — the condition it would guard is precisely "this store is not hardened
+> right now", which is what the verb already means.
+>
+> Three structural consequences, so the class is closed rather than the
+> instance:
+>
+> - **One choke point.** `install_key_of_record_if_current` holds the
+>   compare-and-swap both tiers need and takes the install as a callback, so
+>   the hardened path cannot acquire the concurrency exposure the keyfile path
+>   was fixed for in round 1. `assert_key_of_record_invariant` is a
+>   post-condition on every key install: no plaintext `master.key` in the
+>   hardened tier, ever.
+> - **Hardened rotation stages WRAPPED.** Staging the raw key would have put a
+>   plaintext master key on disk for the duration of every rotation — the same
+>   defeat of §2.3, in a narrower window. Recovery from the commit-to-install
+>   crash window therefore moves to `unlock`, the only moment the passphrase
+>   exists; the keyfile tier keeps its unattended repair.
+> - **The broker validates its cached key on every use.** Found by the same
+>   sweep: the broker holds the key for a whole boot while `rotate` runs in
+>   another process, and nothing invalidated it. Because the blind index is
+>   derived from the master key, a stale key does not fail loudly — every
+>   lookup returned "No secret named X", so an intact store read as empty.
+>
+> Verified through the real CLI at a pty: `set` → `harden` → broker stop (a
+> reboot) → `unlock` → `rotate` → no plaintext `master.key` on disk → broker
+> restart → `unlock` → `get` returns the original value.
 - A `launchd` agent (`com.damian.lop-secretd.plist`) is the tidier long-term
   answer, but it is **out of scope for these PRs**: it changes machine state
   outside the repo, and the flock-guarded lazy start is sufficient and testable.

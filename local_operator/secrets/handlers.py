@@ -416,10 +416,31 @@ def _rotate(args: argparse.Namespace) -> int:
     "another rotation completed first, run it again if you still want one".
     Reporting success would be the actual defect — it is what the unguarded
     install did while destroying the store.
+
+    **Every step above is TIER-AWARE, and it was not (QA Q10).** The three steps
+    are the same in both tiers, but "the key" names a different file in each:
+    ``master.key`` in the keyfile tier, ``master.key.wrapped`` in the hardened
+    one. This function staged and installed the plaintext file unconditionally,
+    so a single rotation of a hardened store re-sealed the database under a new
+    key while ``unlock`` kept unwrapping the OLD one — every secret
+    undecryptable, exit code 0, and a plaintext master key left sitting beside
+    the database while ``status`` still reported ``passphrase``. That second
+    consequence is the worse one: the tier's entire claim (§2.3) is that
+    nothing on disk decrypts the store on its own.
+
+    The hardened path is therefore delegated to :func:`_rotate_hardened`, which
+    keeps the identical stage → commit → install ordering over the wrapped file.
     """
     from local_operator.secrets.crypto import generate_master_key
-    from local_operator.secrets.keys import discard_staged_master_key, stage_master_key
+    from local_operator.secrets.keys import (
+        assert_key_of_record_invariant,
+        discard_staged_master_key,
+        stage_master_key,
+    )
     from local_operator.secrets.store import install_master_key_if_current
+
+    if key_mode() == "passphrase":
+        return _rotate_hardened()
 
     store = open_store()
     new_key = generate_master_key()
@@ -448,7 +469,88 @@ def _rotate(args: argparse.Namespace) -> int:
             "still want a fresh key."
         )
         return 2
+    assert_key_of_record_invariant(None, "keyfile")
     _err(f"rotated {moved} secret(s) to key generation {store.key_generation()}")
+    return 0
+
+
+def _rotate_hardened() -> int:
+    """``rotate`` on a passphrase-hardened store (QA Q10).
+
+    Same three steps and same ordering as :func:`_rotate`, over the wrapped file
+    instead of the plaintext one, so the crash-safety argument carries over
+    unchanged: at every instant a key that opens the store exists on disk, and
+    the window between the COMMIT and the install is recovered — here by
+    :func:`~local_operator.secrets.keys.unwrap_master_key_matching` at the next
+    ``unlock``, because a wrapped staged key can only be tested when the
+    passphrase is present.
+
+    **The passphrase is re-typed rather than taken from the broker, and that is
+    deliberate.** The broker holds the unwrapped KEY, never the passphrase that
+    wraps it — by design, since the passphrase is the one secret §2.3 keeps off
+    disk and out of every process but the one the operator typed it into. So
+    there is nothing to reuse: re-wrapping needs the passphrase itself. Asking
+    for it also means a rotation cannot be performed by something that merely
+    inherited this terminal's standing, which is a narrower authority than the
+    unlock grant — appropriate for the verb that replaces the key of record.
+
+    Confirmed rather than assumed once, because a mistyped new passphrase here
+    would seal the store under a key the operator cannot unwrap, which is the
+    same unrecoverable loss by another route.
+    """
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.keys import (
+        assert_key_of_record_invariant,
+        discard_staged_wrapped_key,
+        install_staged_wrapped_key,
+        stage_wrapped_master_key,
+    )
+    from local_operator.secrets.store import install_key_of_record_if_current
+
+    # Open the store BEFORE prompting: a locked or unreadable store must fail
+    # before the operator types a passphrase they then learn was pointless.
+    store = open_store()
+    passphrase = _read_passphrase("Passphrase for the secret store: ")
+    if not passphrase:
+        _err("Empty passphrase; nothing changed.")
+        return 2
+    if passphrase != _read_passphrase("Repeat the passphrase: "):
+        _err("The passphrases did not match; nothing changed.")
+        return 2
+
+    new_key = generate_master_key()
+    staged = stage_wrapped_master_key(None, new_key, passphrase)
+    try:
+        moved = store.rotate(new_key, session_id=session_id())
+    except BaseException:
+        # Nothing committed, so this staged blob wraps a key no database needs.
+        discard_staged_wrapped_key(None, staged)
+        raise
+
+    # The compare-and-swap `install_master_key_if_current` performs for the
+    # keyfile tier, over the wrapped file. A rotation that was superseded
+    # between its COMMIT and this point must NOT install, for the reason that
+    # function documents at length: the winner's key would be replaced by a
+    # stale one and the store sealed under a key held nowhere.
+    installed = install_key_of_record_if_current(
+        new_key, None, lambda: install_staged_wrapped_key(None, staged)
+    )
+    if not installed:
+        discard_staged_wrapped_key(None, staged)
+        _err(
+            "Another key rotation completed first, so this one was not installed. "
+            "Your secrets are intact and readable under the key that rotation "
+            "installed; nothing was lost. Run `lop secret rotate` again if you "
+            "still want a fresh key."
+        )
+        return 2
+
+    assert_key_of_record_invariant(None, "passphrase")
+    _err(f"rotated {moved} secret(s) to key generation {store.key_generation()}")
+    _err(
+        "The broker still holds the previous key, so run `lop secret broker restart` "
+        "and `lop secret unlock` to serve the new one."
+    )
     return 0
 
 
@@ -463,10 +565,18 @@ def _status(args: argparse.Namespace) -> int:
     implying a vault.
     """
     from local_operator.secrets.client import broker_status
+    from local_operator.secrets.keys import key_of_record_inconsistency
 
     directory = secrets_dir()
     mode = key_mode()
     exists = (directory / "store.db").exists()
+    # A store carrying BOTH key files reports its tier honestly above
+    # (``keyfile``, because a plaintext key IS on disk), but the operator
+    # hardened it and has no reason to look. Naming the state is the difference
+    # between a silent downgrade and an actionable one — QA Q10's second and
+    # worse consequence, where `status` kept printing `key mode passphrase`
+    # while the live key sat unwrapped beside the database.
+    inconsistency = key_of_record_inconsistency()
     # Open the store FIRST when there is one, then sample the broker (QA Q3).
     # `open_store` lazily starts a broker, so sampling first reported "not
     # running" while this very command was starting one — wrong precisely on
@@ -496,6 +606,7 @@ def _status(args: argparse.Namespace) -> int:
         "broker_running": broker is not None,
         "broker_pid": (broker or {}).get("pid"),
         "broker_locked": (broker or {}).get("locked"),
+        "key_inconsistency": inconsistency,
     }
     if store is not None:
         payload["secrets"] = len(store.list())
@@ -514,6 +625,8 @@ def _status(args: argparse.Namespace) -> int:
 
     print(f"directory   {payload['directory']}")
     print(f"key mode    {mode}")
+    if inconsistency is not None:
+        print(f"WARNING     {inconsistency}")
     if broker is None:
         print("broker      not running (it starts on demand)")
     else:
@@ -696,16 +809,41 @@ def _harden(args: argparse.Namespace) -> int:
     screen". It does NOT protect a store while it is unlocked and in use
     (design §9.4), and this is the one prompt the operator accepted: once per
     boot, never per access.
+
+    **This is also the REPAIR path for a store damaged by the pre-fix ``rotate``
+    (QA Q10).** That bug left a plaintext ``master.key`` beside a stale
+    ``master.key.wrapped``; :func:`~local_operator.secrets.keys.key_mode` now
+    reports such a store as ``keyfile`` — truthfully, since a plaintext key is
+    on disk — so it reaches this verb instead of being turned away with
+    "already hardened", which was the state with no CLI way out. Re-running
+    ``harden`` re-wraps the LIVE key and removes the plaintext copy, which is
+    exactly the repair. No separate ``--force`` flag is introduced: the
+    condition it would guard is precisely "this store is not hardened right
+    now", which is what this verb already means.
+
+    The key is taken from :func:`resolve_master_key` rather than read straight
+    off disk, so the one that actually opens the DATABASE is the one wrapped.
+    On a damaged store the plaintext file is the live key and a stale wrapping
+    sits beside it; wrapping the file blindly would be right by luck there and
+    wrong after an interrupted rotation, where the live key is a staged one.
     """
+    from local_operator.secrets.access import resolve_master_key
+    from local_operator.secrets.keys import assert_key_of_record_invariant
     from local_operator.secrets.keys import key_mode as current_mode
-    from local_operator.secrets.keys import load_master_key, wrap_master_key
+    from local_operator.secrets.keys import key_of_record_inconsistency, wrap_master_key
 
     if current_mode() == "passphrase":
         _err("This store is already hardened. Use `lop secret unlock` to unlock it.")
         return 2
+    repairing = key_of_record_inconsistency() is not None
+    if repairing:
+        _err(
+            "This store has a plaintext master key beside a stale wrapped one — an "
+            "earlier rotation undid its hardening. Re-wrapping the live key now."
+        )
     # Read the key BEFORE prompting: a store that cannot be opened should fail
     # before the operator types a passphrase they then discover was pointless.
-    key = load_master_key()
+    key = resolve_master_key()
     passphrase = _read_passphrase("New passphrase for the secret store: ")
     if not passphrase:
         _err("Empty passphrase; nothing changed.")
@@ -714,6 +852,7 @@ def _harden(args: argparse.Namespace) -> int:
         _err("The passphrases did not match; nothing changed.")
         return 2
     wrap_master_key(None, key, passphrase)
+    assert_key_of_record_invariant(None, "passphrase")
     _err(
         "Store hardened. The master key is now wrapped with your passphrase and the "
         "plaintext key file is gone.\n"

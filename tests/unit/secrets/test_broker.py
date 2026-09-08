@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.secrets import client
-from local_operator.secrets.broker import SecretBroker
+from local_operator.secrets.broker import BrokerError, SecretBroker
 from local_operator.secrets.errors import BrokerUnavailable
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
@@ -990,3 +990,55 @@ def test_a_peer_is_not_its_own_authorizing_ancestor() -> None:
     impostor = replace(me, unique_id=(me.unique_id or 0) + 1, start_time=me.start_time + 1)
     allowed, reason = authorize(me, {me.pid: impostor})
     assert not allowed, reason
+
+
+# --- the broker must never serve a key the store has moved past (QA Q10 sibling)
+
+
+def test_the_broker_stops_serving_a_key_a_rotation_superseded(
+    config_root: Path, master_key: bytes, broker_store: SecretStore
+) -> None:
+    """A cached key is validated against the store on every use, not trusted.
+
+    Found by the Q10 sibling sweep. The broker holds the master key in memory
+    for a whole boot while `rotate` runs in a DIFFERENT process and re-seals the
+    store under a new one; nothing invalidated this copy. Because the blind
+    index is derived from the master key, the stale key does not fail loudly —
+    every lookup returns "No secret named X", so an intact store reads as empty.
+
+    The keyfile tier re-reads the new key through its provider; the hardened
+    tier cannot (the passphrase is not held here) and must say so instead.
+    """
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.keys import (
+        load_master_key,
+        replace_master_key,
+        stage_master_key,
+    )
+    from local_operator.secrets.store import install_master_key_if_current
+
+    broker_store.set("API_KEY", b"hunter2")
+    # The fixture's key exists only in memory; the keyfile tier reads it from
+    # disk, so install it as the key of record before the broker looks.
+    replace_master_key(config_root, master_key)
+    broker = SecretBroker(config_root, key_provider=lambda: load_master_key(config_root))
+    assert broker._master_key() == master_key
+
+    incoming = generate_master_key()
+    stage_master_key(config_root, incoming)
+    broker_store.rotate(incoming)
+    assert install_master_key_if_current(incoming, config_root)
+
+    # keyfile tier: the provider supplies the rotated key rather than the cache.
+    assert broker._master_key() == incoming
+
+    # hardened tier: no provider, so a superseded cache is a clear refusal.
+    locked = SecretBroker(config_root)
+    locked.unlock_with_key(master_key)
+    superseded = generate_master_key()
+    stage_master_key(config_root, superseded)
+    broker_store_two = SecretStore(incoming, base=config_root)
+    broker_store_two.rotate(superseded)
+    assert install_master_key_if_current(superseded, config_root)
+    with pytest.raises(BrokerError, match="rotated"):
+        locked._master_key()
