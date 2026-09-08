@@ -84,16 +84,19 @@ record the last local `create`, `connect`, or `configure` stored, so changing a
 harness port in the console alone stops the connector until you re-approve it
 locally. That keeps a console session from silently repointing a harness at an
 unrelated loopback service and handing it this device's relay credentials. The
-connector writes the reason and the remedy to `service.log` in the tunnel
-configuration directory:
+connector writes the reason and the remedy to
+`~/.local-operator/tunnel/service.log`:
 
 ```
 Tunnel connector stopped: Harness port for local-operator changed in the console. Run lop tunnel connect again.
 Tunnel connector stopped: Harness opencode is not approved on this device. Run lop tunnel connect again.
 ```
 
-Run `lop tunnel connect` to accept the console's current ports on this device;
-the connector restarts on its own once the record matches. Harnesses run
+`lop tunnel status` reports the cloud's own view and does not show harness
+ports, so it still reads `Status: active` while the connector is refusing to
+start — that log is where this state is visible. Run `lop tunnel connect` to
+accept the console's current ports on this device; the connector restarts on
+its own once the record matches. Harnesses run
 separately; the tunnel does not install OpenCode or change its server's bind
 address.
 
