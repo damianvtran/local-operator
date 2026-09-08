@@ -93,7 +93,7 @@ PARSER.add_argument(
     "--retained",
     type=int,
     default=0,
-    help="override RETAINED_PRESENTATIONS (0 = leave the shipped value of 4)",
+    help="override RETAINED_PRESENTATIONS (0 = leave the shipped value of 12)",
 )
 PARSER.add_argument("--tracemalloc", action="store_true")
 PARSER.add_argument("--profile", action="store_true")
