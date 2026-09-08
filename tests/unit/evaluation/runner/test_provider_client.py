@@ -2420,6 +2420,66 @@ async def test_byte_trigger_rebuilds_once_when_frames_outgrow_the_wire_trigger(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("window", [0, 24_000], ids=["unknown-window", "known-window"])
+async def test_a_byte_only_trigger_never_fits_to_a_token_band(tmp_path: Path, window: int) -> None:
+    """A pass fired by BYTES alone must not be finished as a TOKEN pass.
+
+    Round 1, F1: ``threshold_due`` was token-OR-bytes, and everything after it
+    treated a true answer as "the token threshold was crossed": it resolved a
+    token band and shed stale turns to it. On a byte-only trigger that band was
+    never crossed, so turns were shed for no reason; with an UNKNOWN window
+    (``context_window == 0``, the exact case the byte term exists to cover) the
+    band resolved to 0 and the first byte pass raised
+    ``ContextUnrecoverableError`` -- killing the episode the guard was meant
+    to save. Both windows are pinned: 0 for the raise, and 24k for the phantom
+    shed. 24k is chosen so the token threshold (19,200) sits ABOVE the priced
+    context on the byte-trigger turn (~17,250; the token trigger never fires)
+    while its 0.8 band (15,360) sits BELOW it -- the one arrangement where the
+    OR'd flag sheds turns that no token trigger asked for.
+    """
+    from local_operator.compaction.pruning import count_stale_observations
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=window)
+    trigger, budget = 350_000, 500_000
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(
+            keep_recent_tokens=20_000,
+            wire_bytes_trigger=trigger,
+            wire_bytes_budget=budget,
+        ),
+        keep_recent_frames=6,
+        rebuild_every_frames=64,
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(6):
+        current = _fat_framed_observation(tmp_path, sequence, pixels=60_000)
+        history.append(EpisodeTurn(observation=current))
+        # Must not raise on the unknown window.
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    # The byte pass replaced FRAMES with notices; it did not shed whole turns.
+    # A stale observation turn is one whose frame was pruned -- those are
+    # expected. What must NOT happen is the token-band shed, which REMOVES
+    # observation turns from the prefix: every observation sent still has a
+    # user message in the final request.
+    final = stream.requests[-1].messages
+    user_turns = sum(1 for m in final if m.role == "user")
+    assert user_turns >= 6, (
+        f"a byte-only pass shed observation turns to a token band: "
+        f"{user_turns} user messages for 6 observations "
+        f"(stale={count_stale_observations(final)})"
+    )
+
+
+@pytest.mark.asyncio
 async def test_byte_trigger_does_not_fire_under_the_trigger(tmp_path: Path) -> None:
     """Under the trigger, the prefix is append-only and message identity holds.
 

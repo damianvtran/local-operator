@@ -1221,12 +1221,24 @@ class ProviderModelClient:
         )
         window = int(getattr(self._model_spec, "context_window", 0) or 0)
         wire_before = estimate_wire_bytes(messages)
-        threshold_due = should_compact(
+        # Two questions, asked of the ONE resolver (its docstring forbids a
+        # second predicate): "does the context fit the window?" and "will the
+        # request be accepted?". They are asked separately here because their
+        # answers are consumed separately below. ``token_due`` alone decides
+        # whether the pass must FIT a token band afterwards; the byte answer
+        # only fires the pass and is fitted by ``_enforce_wire_fit``. Folding
+        # both into one flag made a byte-only trigger shed stale turns to a
+        # token band it never crossed, and with an unknown window (``window ==
+        # 0``) resolved that band to 0 and raised ``ContextUnrecoverableError``
+        # on the first byte pass -- the exact case the byte term exists to
+        # save (review round 1, F1).
+        token_due = should_compact(tokens_before, window, self._compaction)
+        threshold_due = token_due or should_compact(
             tokens_before, window, self._compaction, wire_bytes=wire_before
         )
         if not (frame_due or threshold_due):
             return None, None, 0
-        threshold = resolve_threshold_tokens(window, self._compaction) if threshold_due else None
+        threshold = resolve_threshold_tokens(window, self._compaction) if token_due else None
 
         summary_usage: ModelUsage | None = None
         summary_cost = 0
