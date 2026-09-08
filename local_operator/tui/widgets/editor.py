@@ -552,9 +552,25 @@ CREDENTIAL_ARM = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)[ \t]*$", re.IGNO
 
 #: The same token WITHOUT the end-of-line anchor, used to RE-LOCATE a token
 #: that has already armed. Arming itself still asks :data:`CREDENTIAL_ARM`, so
-#: ``fix the /credential command`` typed as prose never arms; this one only
-#: answers "where did the token I already armed on move to" after the operator
-#: kept typing (design round 1, D2).
+#: a token that merely ARRIVES in the buffer — a recalled prompt, a restored
+#: draft, a completion — never arms; this one only answers "where did the token
+#: I already armed on move to" after the operator kept typing (design round 1,
+#: D2).
+#:
+#: It is matched against a WINDOW around the latched offset rather than the
+#: whole buffer (see :meth:`Editor._sync_credential_arm`). A whole-buffer
+#: ``search`` returns the FIRST token in the text, which is unrelated to the
+#: one that armed: a buffer replaced while armed re-anchored the latch onto a
+#: token the operator never typed, and the next ordinary paste was swallowed as
+#: a secret (review round 2, R6b/R6c; QA round 2, Q4).
+#:
+#: NOTE the token typed as prose — ``fix the /credential command`` — DOES arm,
+#: and deliberately so: it passes through ``/credential`` at end-of-line while
+#: being typed, which is the arming gesture, and the latch is what makes the
+#: arm survive the words typed after it. That is the same keystroke shape as
+#: ``deploy with /credential the prod key``, which MUST stay armed (design
+#: round 1, D2), so no rule keyed on the buffer can separate the two. See
+#: :meth:`Editor._sync_credential_arm` for why the latch is kept anyway.
 #:
 #: The negative lookahead is the same partition ``CREDENTIAL_ARM``'s ``[ \t]*$``
 #: draws: ``/credential`` and ``/cred`` are the token, ``/credentials`` is not.
@@ -579,6 +595,20 @@ CREDENTIAL_TOKEN = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)(?!\S)", re.IGN
 #: operator who wants the destructive verb still reaches it by typing it, and
 #: the operator writing ``deploy with /credential the prod key`` stays armed.
 CREDENTIAL_ARGUMENT = re.compile(r"[ \t]+-", re.IGNORECASE)
+
+#: How far the latched token may have MOVED between two syncs and still be
+#: recognised as the same occurrence (:meth:`Editor._relocate_armed_token`).
+#:
+#: Every buffer edit re-syncs, so ordinary typing before the token moves it by
+#: one character; the slack is for the edits that move it further in one step
+#: (a completion, a pasted word, a deleted line). It is a DRIFT tolerance, not
+#: a search radius: its job is only to separate "the token I armed on, nudged"
+#: from "a different token in a buffer that was wholly replaced", and a
+#: replacement moves the token by much more than this or puts it in text that
+#: has none. Erring generous is the safe direction — too tight disarms
+#: mid-typing and lands the secret in plaintext (design round 1, D2), which is
+#: unrecoverable, while too loose costs a swallowed paste (review round 2, R6).
+_ARM_DRIFT = 64
 
 #: Random-name alphabet: Crockford-ish base32 WITHOUT the letters that read as
 #: digits. The name is quoted back to the operator in a notice and may be typed
@@ -5394,20 +5424,32 @@ class Editor(TextArea):
         Everything else KEEPS the arm — a newline, a typed word, a caret move,
         an Esc that closes the picker. That is the whole point: those are the
         edits that used to disarm silently and land the secret in plaintext.
+
+        Question 2 asks about THE TOKEN THAT ARMED, not about any token. The
+        re-anchor used to be ``CREDENTIAL_TOKEN.search(self.text)`` — the first
+        match in the whole buffer, which has no relation to the latched one. A
+        buffer replaced while armed (a recalled prompt, a restored draft) then
+        MIGRATED the arm onto a token the operator never typed, and the next
+        ordinary paste was swallowed as a secret: unrecoverable, because
+        ``ctrl+o`` refuses to expand a credential and a submit stores the blob
+        (review round 2, R6b/R6c; QA round 2, Q4). Matching within a window
+        around the latched offset keeps the "token slides as you type before
+        it" case working while making an arriving token unable to inherit the
+        arm.
         """
         if self._credential_arm is None:
             span = self._credential_arm_span()
             if span is not None:
                 self._arm_credential(span)
             return
-        match = CREDENTIAL_TOKEN.search(self.text)
+        match = self._relocate_armed_token()
         if match is None:
             self._disarm_credential("gone")
             return
         # Re-anchored on every sync: the token slides as the operator edits
         # text before it, and a stale span would splice the wrong range out of
         # the buffer at capture time.
-        start, end = match.span()
+        start, end = match
         line_end = self.text.find("\n", end)
         tail = self.text[end : line_end if line_end != -1 else len(self.text)]
         if CREDENTIAL_ARGUMENT.match(tail):
@@ -5420,6 +5462,46 @@ class Editor(TextArea):
         # buffer would read `[Credential #1, 64 chars]  ` — two spaces, one of
         # them theirs and now meaningless.
         self._credential_arm = (start, end + (len(tail) - len(tail.lstrip(" \t"))))
+
+    def _relocate_armed_token(self) -> tuple[int, int] | None:
+        """Where the LATCHED token is now, or ``None`` if it is gone.
+
+        The identity the arm owns. ``_credential_arm`` holds the span the token
+        occupied at the last sync, and the token moves only as the operator
+        edits the text BEFORE it — one keystroke at a time, since every edit
+        re-syncs. So the token that armed is the ``CREDENTIAL_TOKEN`` match
+        nearest the latched offset, and a match far from it is a DIFFERENT
+        token that happens to share the spelling.
+
+        That distinction is the fix for R6b/R6c (QA Q4): the old whole-buffer
+        ``search`` took the first token in the text, so replacing the buffer
+        while armed — history recall, a restored draft — handed the arm to a
+        token the operator never typed, and the next ordinary paste was
+        swallowed as a secret with no way to get it back.
+
+        The window is deliberately generous rather than exact. A single edit
+        can legitimately move the token by more than one character (an
+        autocomplete before it, a pasted word, a deleted line), and being too
+        strict fails the SAFE way only for the migration case — in the ordinary
+        case it would disarm mid-typing and put the secret in plaintext, which
+        is the unrecoverable direction D2 exists to prevent. So it admits any
+        match whose start is within :data:`_ARM_DRIFT` of where the latch left
+        it, and rejects the wholesale replacements that move a token much
+        further or introduce one in unrelated prose.
+        """
+        anchor = self._credential_arm[0] if self._credential_arm is not None else 0
+        nearest: tuple[int, int] | None = None
+        best = _ARM_DRIFT + 1
+        for match in CREDENTIAL_TOKEN.finditer(self.text):
+            distance = abs(match.start() - anchor)
+            if distance < best:
+                best = distance
+                nearest = match.span()
+            elif nearest is not None:
+                # `finditer` walks left to right, so once the distance stops
+                # shrinking every later match is further away still.
+                break
+        return nearest
 
     def _credential_arm_span(self) -> tuple[int, int] | None:
         """Buffer offsets of the ``/credential`` token arming the next paste.
@@ -5989,14 +6071,27 @@ class Editor(TextArea):
         # the right place is both correct and cheaper.
         if not self._suspend_picker_sync:
             self._sync_picker()
-        # Unconditional, unlike the picker sync above: the suspend flag exists
-        # so ONE sync happens at the final caret position, and the arm is not
-        # caret-anchored once latched (:meth:`_sync_credential_arm` searches the
-        # whole buffer), so there is no second position to wait for. Skipping it
-        # here would carry a stale arm across a whole-buffer replacement —
-        # a history recall, a `/reload` hand-back, a sidebar session switch —
-        # which is the one direction that must not be left to a later keystroke.
-        self._sync_credential_arm()
+        # A whole-buffer replacement ENDS an arm, it never carries or moves
+        # one. This funnel is precisely "text that did not come from the
+        # operator's keystrokes" — a history recall, a restored draft, a
+        # `/reload` hand-back, a sidebar session switch — and the arming
+        # gesture is something the operator TYPES. Re-syncing here instead let
+        # a latched arm re-anchor onto whatever `/credential` the arriving text
+        # happened to contain, so a recalled prompt that merely MENTIONED the
+        # command swallowed the next ordinary paste as a secret, unrecoverably
+        # (review round 2, R6b/R6c; QA round 2, Q4).
+        #
+        # Disarming rather than syncing is also the conservative half of the
+        # pair: it fails toward "not armed", where a paste lands as ordinary
+        # text the operator can see and re-do. `clear_content` already draws
+        # this exact line for submit and `/clear`, and the reason is the same —
+        # the arm belongs to the text that armed it.
+        #
+        # `_set_text_and_caret` is NOT exempted. It funnels the completions,
+        # which replace the buffer for `/team`, `/model` and friends; a
+        # completion is not the arming gesture either, and letting one preserve
+        # an arm would reopen the migration route through a second door.
+        self._disarm_credential("gone")
 
     def _caret_offset(self) -> int:
         """The caret as a whole-buffer offset, for the slash parsers.

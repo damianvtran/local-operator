@@ -24,7 +24,11 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 
-from local_operator.tui.app import CREDENTIAL_PLACEHOLDER, OperatorApp
+from local_operator.tui.app import (
+    CREDENTIAL_ARMED_NOTICE,
+    CREDENTIAL_PLACEHOLDER,
+    OperatorApp,
+)
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     ATTACHMENT_MARKER,
@@ -170,8 +174,11 @@ async def test_an_unarmed_paste_of_the_same_secret_is_left_alone() -> None:
         assert not editor._attachments
 
 
+@pytest.mark.parametrize("start_armed", [False, True], ids=["cold", "armed"])
 @pytest.mark.asyncio
-async def test_a_mention_of_the_command_in_text_never_typed_through_the_arm_does_not_arm() -> None:
+async def test_a_mention_of_the_command_in_text_never_typed_through_the_arm_does_not_arm(
+    start_armed: bool,
+) -> None:
     """A draft that ARRIVES holding the word never passed through the gesture.
 
     Recalled history, a restored draft and a pasted paragraph all land through
@@ -179,11 +186,24 @@ async def test_a_mention_of_the_command_in_text_never_typed_through_the_arm_does
     Arming is still :data:`CREDENTIAL_ARM` at the caret and nothing else — what
     changed in design round 1 (D2) is how long an arm SURVIVES once taken, not
     how one is taken.
+
+    PARAMETERISED OVER BOTH STARTING STATES because the single cold case could
+    not fail. ``_sync_credential_arm`` has two branches and the cold editor only
+    ever reaches the first ("should this arm?"); every way this property has
+    actually broken lives in the second ("where did the armed token go?"), where
+    a latched arm re-anchored onto a token in text that merely ARRIVED. The test
+    asserted the right property against the one path that could not violate it
+    (review round 2, R6; QA round 2, Q4).
     """
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
         editor = app.query_one(Editor)
         editor.focus()
+        if start_armed:
+            for char in "/credential ":
+                await pilot.press(char)
+            await pilot.pause()
+            assert editor.credential_armed(), "precondition: the gesture armed"
         editor.load_text("fix the /credential command please ")
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
@@ -195,6 +215,168 @@ async def test_a_mention_of_the_command_in_text_never_typed_through_the_arm_does
         assert not any(
             isinstance(value, PastedCredential) for value in editor._attachments.values()
         )
+
+
+@pytest.mark.asyncio
+async def test_an_arm_does_not_migrate_to_another_token_when_the_buffer_is_replaced() -> None:
+    """R6b: the latch tracks THE token that armed, not the first one in the text.
+
+    The re-anchor used to be a whole-buffer ``search``, so replacing the buffer
+    while armed handed the arm to whatever ``/credential`` the new text happened
+    to contain — and the operator's next ordinary paste was swallowed as a
+    secret they can neither expand nor recover (review round 2, R6b).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed()
+        editor.load_text("unrelated draft that says /cred somewhere in it")
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        assert not editor.credential_armed(), "the arm did not survive onto another token"
+        app.post_message(events.Paste("ordinary pasted text"))
+        await pilot.pause()
+        await pilot.pause()
+        assert editor.text.endswith("ordinary pasted text"), "the paste is visible, not stashed"
+        assert not editor._attachments
+
+
+@pytest.mark.asyncio
+async def test_an_arm_is_not_inherited_across_history_recall() -> None:
+    """R6c: recalling a prompt that MENTIONS the command must not stay armed.
+
+    The route an operator reaches without doing anything unusual: arm, press Up
+    to check what they sent last time, paste. The recalled text arrives through
+    ``load_text`` and is not a gesture, so the arm ends with it.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor._history.append("how do I use /cred to store a token")
+        for char in "/credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed()
+        await pilot.press("up")
+        await pilot.pause()
+        assert editor.text == "how do I use /cred to store a token"
+        assert not editor.credential_armed(), "the recalled prompt did not inherit the arm"
+        app.post_message(events.Paste("ordinary pasted text"))
+        await pilot.pause()
+        await pilot.pause()
+        assert editor.text.endswith("ordinary pasted text")
+        assert not any(
+            isinstance(value, PastedCredential) for value in editor._attachments.values()
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_restored_draft_does_not_inherit_a_live_arm() -> None:
+    """R6c/Q4: parking a draft over an armed composer must not carry the arm.
+
+    ``_load_editor_draft`` restores a parked draft straight into the composer
+    with no empty-buffer guard, so this is reachable in the product rather than
+    only through the widget — and a draft that merely mentions the command
+    would otherwise swallow the operator's next paste.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed()
+        # Exactly what `_load_editor_draft` does with a parked draft.
+        editor.load_text("ask about /credential rotation before the release")
+        await pilot.pause()
+        assert not editor.credential_armed()
+        app.post_message(events.Paste("a 200-line deploy log"))
+        await pilot.pause()
+        await pilot.pause()
+        assert "a 200-line deploy log" in editor.text
+        assert not any(
+            isinstance(value, PastedCredential) for value in editor._attachments.values()
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_arm_stays_on_its_own_token_when_an_earlier_one_is_typed_in() -> None:
+    """R6b by TYPING — the route ``load_text`` disarming does not cover.
+
+    The operator arms mid-line, then goes back to the front of the draft and
+    types a sentence that also mentions the command. Under a whole-buffer
+    ``search`` the arm jumped to that EARLIER token, and the capture then spliced
+    the marker into the wrong half of the sentence — rewriting the operator's
+    words where they were not pasting, while the token they actually armed sat
+    untouched. This is the case that makes the re-anchor an identity question
+    rather than a text-arrival question (review round 2, R6b).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "deploy /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        armed_at = editor._credential_arm
+        assert armed_at is not None
+        editor.move_cursor((0, 0))
+        for char in "ask about /cred later ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.text == "ask about /cred later deploy /credential "
+        assert editor._credential_arm is not None
+        # The span carries the token's trailing whitespace too (see
+        # `_arm_credential`), which is what the capture splices out.
+        armed_text = editor.text[slice(*editor._credential_arm)]
+        assert armed_text.strip() == "/credential", f"arm stayed on its token: {armed_text!r}"
+        assert editor._credential_arm[0] == editor.text.index("deploy ") + len("deploy ")
+
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text
+        # The marker replaced the ARMED token; the earlier mention is untouched.
+        assert editor.text.startswith("ask about /cred later deploy [Credential #1,")
+
+
+@pytest.mark.asyncio
+async def test_the_armed_token_is_still_tracked_while_text_before_it_is_edited() -> None:
+    """The case the whole-buffer search was written for still works.
+
+    Anchoring to the armed occurrence must not break the reason the re-anchor
+    exists: the token SLIDES as the operator edits text before it, and a stale
+    span would splice the wrong range out of the buffer at capture time.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "deploy /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        armed_at = editor._credential_arm
+        assert armed_at is not None
+        editor.move_cursor((0, 0))
+        for char in "please ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed(), "typing before the token keeps the arm"
+        assert editor._credential_arm is not None
+        assert editor._credential_arm[0] == armed_at[0] + len("please "), "it tracked the slide"
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text, "still captures at the tracked span"
+        assert editor.text.startswith("please deploy [Credential #1,")
 
 
 # -- the edge cases the gesture has to decide ---------------------------------
@@ -967,3 +1149,71 @@ async def test_arming_does_not_relabel_a_composer_another_mode_owns() -> None:
         for _ in range(4):
             await pilot.pause()
         assert editor.placeholder == CREDENTIAL_PLACEHOLDER, "a resting composer does say it"
+
+
+@pytest.mark.asyncio
+async def test_the_armed_placeholder_is_state_only_and_never_paints() -> None:
+    """D8: the placeholder cannot render, so nothing may count it as a channel.
+
+    A placeholder needs an EMPTY buffer and arming needs the token IN it, so the
+    two conditions are mutually exclusive. The old assertion checked the
+    ATTRIBUTE — which is set correctly — and so passed while the channel was
+    invisible. This pins what is PAINTED, in both arming forms, so the comment
+    claiming two live channels cannot silently become false.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for form in ("/credential ", "deploy with /credential "):
+            editor.load_text("")
+            editor.placeholder = editor.resting_placeholder
+            await pilot.pause()
+            for char in form:
+                await pilot.press(char)
+            for _ in range(4):
+                await pilot.pause()
+            assert editor.credential_armed(), f"{form!r} arms"
+            assert editor.placeholder == CREDENTIAL_PLACEHOLDER, "the state is set"
+            assert CREDENTIAL_PLACEHOLDER not in _painted(app), "but it does not paint"
+            assert editor.text, "because an armed buffer is never empty"
+
+
+@pytest.mark.asyncio
+async def test_a_flag_disarm_clears_the_pickers_armed_notice() -> None:
+    """D7: the row promising capture must not outlive the capture.
+
+    ``CREDENTIAL_ARMED_NOTICE`` was written only when the argument list OPENED,
+    so a disarm while it was already open left it on screen. The flag disarm is
+    the reachable case — deleting the token closes the list, a capture replaces
+    the buffer — and it is the disarm the operator is least likely to expect.
+    The stale row then sat NEARER the caret than the transcript's warning and
+    contradicted it, promising "never shown" directly above a plaintext paste.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.credential_armed()
+        assert CREDENTIAL_ARMED_NOTICE in _painted(app), "precondition: the row is up"
+
+        await pilot.press("-")
+        for _ in range(8):
+            await pilot.pause()
+        assert not editor.credential_armed()
+        assert CREDENTIAL_ARMED_NOTICE not in _painted(app), "the promise went with the state"
+
+        # And it STAYS cleared: the operator pastes into the disarmed composer,
+        # which is the moment the stale row would have lied about.
+        app.post_message(events.Paste("an ordinary paste"))
+        for _ in range(4):
+            await pilot.pause()
+        assert CREDENTIAL_ARMED_NOTICE not in _painted(app)

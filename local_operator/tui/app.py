@@ -1416,9 +1416,28 @@ CREDENTIAL_CHEVRON = "•"
 #: green, so three composer modes are three distinct marks.
 COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
 
-#: The composer's placeholder while armed. States what the next paste will do
-#: and how to leave, in the same voice and shape as
+#: The composer's placeholder while armed, in the same voice and shape as
 #: :data:`~local_operator.tui.widgets.editor.SHELL_PLACEHOLDER`.
+#:
+#: IT DOES NOT RENDER, and cannot: ``Editor`` paints a placeholder only on an
+#: EMPTY buffer, while arming requires the ``/credential`` token to be IN the
+#: buffer — mutually exclusive conditions. Bang-mode's placeholder works
+#: because ``!`` is consumed out of the buffer; ``/credential`` is not, and
+#: every armed intermediate state (``/cred``, ``/credential``) is non-empty
+#: (design round 2, D8; QA round 2 measured the same).
+#:
+#: Kept, rather than deleted, because the armed STATE is what it belongs to and
+#: the swap is what keeps that state consistent with bang-mode's — including
+#: restoring whatever placeholder it replaced, which is load-bearing for the
+#: aside (see ``on_credential_arm_changed``). It would begin rendering the day
+#: an arming form leaves the buffer empty, and until then it is a state field,
+#: NOT a signalling channel.
+#:
+#: So the armed state has TWO channels an operator can actually see, not the
+#: three an earlier remediation claimed: the ``⚿`` chevron (colour-independent)
+#: and the amber ink on the token itself, plus the picker's own notice row
+#: while its list is open. Anything counting channels here must count what
+#: PAINTS — the attribute being set correctly is not the same claim.
 CREDENTIAL_PLACEHOLDER = "Paste the secret… — it is captured, not shown"
 
 #: Shown where ``/credential``'s argument rows would be while a capture is
@@ -12539,10 +12558,16 @@ class OperatorApp(App[None]):
     def on_credential_arm_changed(self, message: CredentialArmChanged) -> None:
         """Follow the composer's ARMED state onto the dock class, glyph and copy.
 
-        The same three-channel treatment bang-mode gets, for a state whose
-        misread is worse: the class is the colour cue, the glyph is the
-        colour-independent one, and the placeholder says it in words for the
-        empty composer. All three flip on one message so they cannot drift.
+        The same treatment bang-mode gets, for a state whose misread is worse:
+        the class is the colour cue, the glyph the colour-independent one, and
+        the picker's notice row says it in words while its list is open. They
+        flip on one message so they cannot drift.
+
+        The placeholder is written too, but it does NOT paint here — a
+        placeholder needs an empty buffer and arming needs the token in it (see
+        :data:`CREDENTIAL_PLACEHOLDER`, design round 2, D8). It is kept in sync
+        as state, and the restore branch below is load-bearing for the aside
+        regardless of whether anything is drawn.
 
         Bang-mode's class is left to outrank this one in the stylesheet — the
         two are mutually reachable (``!`` then ``/credential``) and Enter
@@ -12585,6 +12610,22 @@ class OperatorApp(App[None]):
                 editor.placeholder = CREDENTIAL_PLACEHOLDER
             elif not message.active and editor.placeholder == CREDENTIAL_PLACEHOLDER:
                 editor.placeholder = editor.resting_placeholder
+        # THE PICKER'S OWN ROW, when the list is open. `CREDENTIAL_ARMED_NOTICE`
+        # is written on `ArgumentQueryOpened`, which fires when the list OPENS —
+        # so a disarm that happens while it is already open never revised it,
+        # and the row went on promising "armed — paste the secret; it is
+        # captured, never shown" after the state had ended. The flag disarm is
+        # the reachable case: deleting the token closes the list and a capture
+        # replaces the buffer, but typing `-` leaves the list open, and it is
+        # exactly the disarm the operator is least likely to expect (design
+        # round 2, D7).
+        #
+        # Worse than a stale hint: it sat NEARER the caret than the transcript
+        # notice below, so the two channels contradicted each other and the row
+        # the operator was looking at was the false one — a promise that the
+        # next paste is never shown, immediately above the plaintext paste.
+        if editor.argument_command in ("credential", "cred"):
+            editor.picker.set_notice(CREDENTIAL_ARMED_NOTICE if message.active else "")
         if not message.active and message.reason == "argument":
             self._notice(
                 "credential capture disarmed — that is an argument to "
