@@ -3155,7 +3155,18 @@ class TranscriptView(ScrollableContainer):
                 # changed its gap. A closed-over pre-insert gap would undo the
                 # reader's newer movement in this last callback.
                 held, self._insert_anchor = self._insert_anchor, None
-                if self._tail_anchor.following:
+                # An EXPLICIT `anchor_offset` outranks the tail state. The
+                # caller measured the offset it wants held before requesting
+                # the page, and its scroll may not have landed yet when the
+                # rows arrive — a subagent Home whose page returns before the
+                # jump applies is still following the tail at arming time, so
+                # no anchor is armed and the tail branch below would strand
+                # the reader on the newest row instead of the page they asked
+                # for. Falling back to the anchor computed above restores the
+                # pre-change behaviour for exactly that race.
+                if held is None and anchor_offset is not None and anchor_block is not None:
+                    held = (anchor_block, anchor_gap)
+                if held is None and self._tail_anchor.following:
                     self._scroll_to_tail()
                 elif held is not None:
                     block, gap = held
