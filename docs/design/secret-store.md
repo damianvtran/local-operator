@@ -140,6 +140,45 @@ runs as a child of some process that is itself a descendant of a lop session,
 inherits that ancestry and is allowed. Ancestry authenticates *lineage*, not
 *intent*. See §9.
 
+> **Amended during PR 2 (review round 1): becoming a session must itself be
+> authenticated, and `register` was not.** The decision procedure above assumes
+> the set of registered sessions is trustworthy. As first implemented it was
+> not: `register` was dispatched *before* the authorization gate, and because
+> the ancestry walk yields the peer as the first element of its own chain, any
+> process that registered itself became its own authorizing ancestor.
+> Reproduced from a double-forked `setsid` process reparented to launchd —
+> the shape this section marks DENIED — against an *unlocked passphrase-tier*
+> broker: one 60-byte frame yielded both the plaintext secret and the 32-byte
+> master key. Two fixes, each sufficient alone and both kept:
+>
+> 1. **`register` presents a ticket** — 32 bytes from the CSPRNG in the 0700
+>    secrets directory, compared with `compare_digest`. Note honestly what this
+>    is worth per tier: in `keyfile` mode the ticket sits beside `master.key`,
+>    so it stops nobody who could not already decrypt the store, and §8 says so.
+>    In `passphrase` mode the ticket is the only thing on disk, and holding it
+>    grants standing to *ask* — not to decrypt.
+> 2. **A peer is never its own authorizing ancestor.** A registered session is
+>    authorized *as itself*, with its connect-time pin verified; an
+>    unregistered peer gains nothing from heading its own chain.
+>
+> **No process-shape check was available as an alternative, and this was
+> measured rather than assumed.** The obvious repairs — require the registrant
+> to be a session leader, to have a controlling tty, to have a particular ppid
+> — all fail against a same-uid attacker, which is the entire threat model
+> here: a detached script reparents to launchd (`ppid=1`, exactly like a real
+> detached session), calls `setsid()` to lead its own session, and can allocate
+> its own pty with `pty.fork()`. Code-signature verification is unavailable
+> (`csops` denied, above). A secret the attacker must *read from a 0700
+> directory* is the only discriminator this design has.
+>
+> **In `passphrase` mode the ticket alone is deliberately not enough.** An
+> attacker that can reach the socket can read the ticket file too, so
+> registering there additionally requires lineage from a live session or from
+> the terminal that proved knowledge of the passphrase by unlocking the broker
+> (see §13's amendment). Caught by an adversarial test written for this fix,
+> not by review — the first version of the fix was ticket-only and the detached
+> attacker still walked in.
+
 > **Amended during PR 2 (implementation).** Three corrections, each from
 > executed measurement rather than review:
 >
@@ -538,6 +577,34 @@ replying to the retrieving child**. That makes the ordering an invariant rather
 than a hope, at the cost of one extra round trip on retrieval (sub-millisecond
 on a unix socket). Take that cost.
 
+> **Amended during PR 2 (implementation): the invariant only became one when it
+> started failing CLOSED.** As first written the broker waited 2 s for the ack
+> and then **served the value anyway**, which made the word "invariant" false —
+> a session that never acked (a wedged UI, or an attacker who simply chose not
+> to ack) got the value into the transcript with nothing downstream able to
+> scrub it, since the whole premise of this section is that a `$( )` value
+> passes through no filter. Measured: `CHILD GOT VALUE … after 2.00s WITHOUT
+> the session ever acking`.
+>
+> A descendant's retrieval is now **denied** when the owning session does not
+> acknowledge within the timeout, with an error naming the wedged session. The
+> availability objection that motivated serving-anyway is real but much
+> narrower than it looks, and is answered by scope rather than by weakening the
+> rule:
+>
+> - A session retrieving **its own** value never waits for an ack — that is
+>   case (1) above, where the value lands in the session's own memory and it
+>   registers the redaction directly. Requiring an ack from the process blocked
+>   on the reply would deadlock the operator's own terminal, so it is excluded
+>   by construction, not by timeout.
+> - `lop secret get` typed at a prompt has no owning session, so there is no
+>   notice to wait for and nothing to deny.
+>
+> What remains deniable is exactly the case the ordering exists for: an agent's
+> child fetching a secret through a session that has stopped answering. A
+> failed command there is recoverable and visible; a leaked credential in a
+> transcript is neither.
+
 **(3) Value in a subprocess the filter never sees at all** — e.g. the agent
 pipes it to a file, or a background job started before registration. Not
 solvable in general, and the guidance (§10) must say so: `lop secret get` is
@@ -581,22 +648,45 @@ and an attacker sampling the filesystem during that window finds it.
 
 Measured against today's plaintext `~/.minerva/credentials/.env` (58 keys).
 
+> **Corrected during PR 2 (implementation), and this correction matters more
+> than the rest of the table.** Two cells previously read "**Stopped**" for the
+> default tier. Both were false, and a reviewer and QA independently *measured*
+> them false: a detached `setsid` script is denied at the socket and then
+> **served anyway** from the key file, `rc=0`, value on stdout. The rule that
+> residual risk is never overclaimed applies to this table above all, because
+> it is the comparison an operator reads to choose a tier.
+>
+> Stated plainly, replacing the two claims: **the default `keyfile` tier
+> enforces no ancestry at all.** A denial there is a fallback, not a refusal —
+> `access.py` reads the key file instead, deliberately (see §13's amendment),
+> because a caller the broker just refused could read that file directly and
+> refusing would only break the operator's own terminal. The broker's
+> contribution in that tier is the audit trail and the §6 redaction notice,
+> **not access control**. `lop secret harden` is the only tier where the
+> ancestry boundary is load-bearing.
+
 | Attacker behaviour | Today | Encrypted DB + key file (default) | Broker + passphrase (opt-in) |
 |---|---|---|---|
 | `grep -r` / "find .env files" opportunistic malware | **Loses everything** | **Stopped** — ciphertext, names blind-indexed | **Stopped** |
 | Script reading a known key file path | n/a | **Not stopped** — reads key + DB, decrypts | **Stopped** — key is not on disk unwrapped |
-| Script camping on the socket | n/a | **Stopped** — 0600 enforced (spike 7), ancestry check (spike 9) | **Stopped** |
-| Detached script (`setsid`, reparented to launchd) | Loses everything | **Stopped** at the socket | **Stopped** |
+| Script camping on the socket | n/a | **Not stopped** — 0600 excludes other *uids* (spike 7), but a same-uid denial falls back to the key file | **Stopped** — denial is enforced; no key on disk to fall back to |
+| Detached script (`setsid`, reparented to launchd) | Loses everything | **Not stopped** — denied at the socket, then served from the key file (measured: `rc=0`, value on stdout) | **Stopped** — denied at the socket and there is no fallback (measured) |
 | Script dumping the broker's memory | n/a | Needs `task_for_pid` → **denied, rc=5**; `lldb` → **SecurityAgent prompt** (spikes 3, 5) | Same |
-| Script that runs `lop secret get` itself | n/a | **Not stopped** (§9) | **Not stopped** |
+| Script that self-registers as a session over the socket | n/a | **Not stopped** — but irrelevant, it can read the key file anyway | **Stopped** — `register` needs the 0700 ticket *and*, in this tier, lineage from an unlocked terminal or a live session (PR-2 review R1) |
+| Script that runs `lop secret get` itself | n/a | **Not stopped** (§9) | **Not stopped** while unlocked (§9.1, §9.4) |
 | Script that rewrites the lop code it can write (`~/.local/bin/lop` is 0755 **writable**, spike 10) | n/a | **Not stopped** | **Not stopped** |
 | Attacker with a backup copy of the store only | n/a | Stopped if the key file was not in the backup | **Stopped** |
 
 The honest summary: **the default mode's real win is against opportunistic and
 automated theft, which is the overwhelming majority of what "clicked a bad link"
-produces.** The passphrase mode is what converts "targeted attacker wins" into
-"targeted attacker must run code that impersonates a lop session while the
-broker is unlocked, or trip a visible authorization prompt".
+produces** — it turns 58 plaintext keys at a predictable path into ciphertext
+with blind-indexed names. What it does **not** do is stop a script that looks
+for the key file, and it does not stop one at the socket either.
+
+The passphrase mode is what converts "targeted attacker wins" into "targeted
+attacker must run code that impersonates a lop session *while the broker is
+unlocked*, or trip a visible authorization prompt". Between reboot and the
+first `lop secret unlock`, an attacker with the whole disk gets nothing.
 
 ---
 
@@ -804,6 +894,46 @@ lifeline — it is consulted per retrieval. So:
 > against an unlocked hardened store, and a SIGKILLed broker leaves an
 > in-flight retrieval with `BrokerUnavailable` in ~5 ms rather than a hang, a
 > stale value, or a wrong one.
+
+> **Amended again during PR 2 (QA round 1): the hardened tier could not be
+> entered, and the fix is the unlock grant.** Two defects compounded. `unlock`
+> was dispatched *behind* the ancestry gate, so unlocking required already
+> descending from a registered session — while **nothing in shipping code ever
+> registered one** (only tests did). After `harden` the correct passphrase was
+> refused and even `status` failed, with the plaintext key already deleted. The
+> tier had therefore never worked end to end in either direction: unreachable
+> for its owner, and bypassable by anyone else (§2.1's amendment).
+>
+> Three changes, which have to land together:
+>
+> - **`unlock` is authenticated by the passphrase, so it is dispatched before
+>   the ancestry gate.** The passphrase is a stronger credential than ancestry
+>   and the only one never written to disk in any form. Wrong guesses are
+>   audited and cost a geometric backoff (0.25 s → 8 s), since this verb is now
+>   reachable without lineage and scrypt's ~180 ms alone is a thin defence
+>   against an online oracle.
+> - **Interactive sessions register themselves** (`local_operator/secrets/
+>   session.py`, wired into `run_tui`). Without this, authenticating `register`
+>   would have converted the bypass into a permanent lockout. Closing the
+>   channel deregisters, which is what revokes descendants promptly.
+> - **Unlocking grants the operator's terminal standing for this boot.** `lop
+>   secret get` typed at a prompt has no lop session among its ancestors and is
+>   denied by construction — in `keyfile` mode the key-file fallback hides
+>   that, but in `passphrase` mode there is no fallback, so the operator's own
+>   store stayed unreachable even after a successful unlock. The parent of the
+>   process that proved knowledge of the passphrase — the shell it was typed
+>   into — is recorded as an authorizing ancestor, pinned by identity like any
+>   session. The detached attacker does not descend from that shell and remains
+>   denied, verified as real processes against an unlocked broker.
+>
+> The residual risk is §9.1 and §9.4 unchanged, and is not widened: anything
+> the operator runs *in that terminal* while the broker is unlocked can read
+> secrets, exactly as anything that runs `lop` itself can.
+>
+> Verified end to end through the real CLI with the passphrase typed at a pty:
+> `set` → `get` → `harden` → broker restart (a reboot) → `get` refused, 0 bytes
+> on stdout → `unlock` → `get` serves the value → `status` reports
+> `passphrase`.
 - A `launchd` agent (`com.damian.lop-secretd.plist`) is the tidier long-term
   answer, but it is **out of scope for these PRs**: it changes machine state
   outside the repo, and the flock-guarded lazy start is sufficient and testable.
