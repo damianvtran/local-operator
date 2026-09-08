@@ -129,3 +129,65 @@ def test_parallel_processes_write_atomically(tmp_path):
     assert agg.calls == 4 * n
     assert len(agg.by_session) == 4
     store.close()
+
+
+def test_tool_calls_ride_the_same_queue_and_writer_thread(tmp_path):
+    """One writer, never two.
+
+    ``AGENTS.md`` is explicit that a second thread writing to the store is
+    forbidden: two threads opening their first connection to a fresh database
+    race in a way that leaves the writer unable to see its own commits. Tool
+    calls therefore share the queue, the thread and the connection that call
+    samples and name upserts already use \u2014 asserted here by counting the
+    recorder's threads, not by trusting the implementation.
+    """
+    import threading
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    before = {t.name for t in threading.enumerate()}
+    rec.record(_snap(session_id="s1"))
+    for i in range(10):
+        rec.record_tool_call("s1", "read", "model", "" if i % 2 else "execution", 12.0)
+    rec.note_session_name("s1", "named")
+    rec.flush_for_test()
+    writers = {t.name for t in threading.enumerate()} - before
+    assert writers == {"lo-analytics-writer"}, f"expected ONE writer thread, got {writers}"
+
+    stats = store.session_report("s1").tool_calls
+    assert stats is not None
+    assert stats.total == 10 and stats.ok == 5
+    assert stats.faults == {"execution": 5}
+    rec.close()
+
+
+def test_record_tool_call_never_raises(tmp_path):
+    """It runs on the event loop inside a live turn; it may not throw or block."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    rec.close()
+    # Closed recorder, empty session id, absurd values: all silent no-ops.
+    rec.record_tool_call("s1", "read", "model", "", 1.0)
+    rec.record_tool_call("", "read", "model", "", 1.0)
+
+
+def test_record_tool_call_is_put_nowait_only(tmp_path):
+    """A full queue DROPS the sample rather than blocking the turn.
+
+    Same contract as ``record``: accuracy matters, but never at the cost of a
+    stalled session. Measured here by filling the queue and timing the call \u2014
+    a blocking implementation would sit on the queue's put instead.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    # Fill the queue without letting the writer drain it.
+    rec._closed = False
+    while not rec._queue.full():
+        try:
+            rec._queue.put_nowait(_snap())
+        except Exception:  # noqa: BLE001
+            break
+    started = time.monotonic()
+    rec.record_tool_call("s1", "read", "model", "", 1.0)
+    assert time.monotonic() - started < 0.5, "record_tool_call blocked on a full queue"
+    rec.close()

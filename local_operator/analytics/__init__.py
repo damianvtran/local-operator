@@ -40,6 +40,7 @@ from local_operator.analytics.model import (
     COMPONENT_KEYS,
     COMPONENT_LABELS,
     CallSnapshot,
+    ToolCallStats,
     UsageAggregate,
     UsagePeriod,
     apportion_components,
@@ -51,6 +52,7 @@ from local_operator.analytics.recorder import (
     AnalyticsRecorder,
     get_recorder,
     record_call,
+    record_tool_call,
     reset_recorder_for_test,
 )
 from local_operator.analytics.store import AnalyticsStore, default_db_path
@@ -59,6 +61,7 @@ __all__ = [
     "COMPONENT_KEYS",
     "COMPONENT_LABELS",
     "CallSnapshot",
+    "ToolCallStats",
     "UsageAggregate",
     "UsagePeriod",
     "apportion_components",
@@ -68,6 +71,7 @@ __all__ = [
     "AnalyticsRecorder",
     "get_recorder",
     "record_call",
+    "record_tool_call",
     "reset_recorder_for_test",
     "AnalyticsStore",
     "default_db_path",

@@ -915,8 +915,18 @@ class TestABrokenApprovalGateIsNotAUserRefusal:
 
         failed, _ = await self._run(broken)
         refused, _ = await self._run(deny)
-        assert failed.details == {"__synthetic": True, "__approval_gate_failed": True}
-        assert refused.details == {"__synthetic": True}
+        # Both now also carry ``__fault``, which the tool-call analytics hook
+        # reads to classify the call at its SOURCE. It reinforces this test's
+        # point rather than diluting it: the two cases were already
+        # distinguishable by ``__approval_gate_failed``, and are now
+        # distinguishable by a second, positively-named marker on each side —
+        # a refusal says ``denied`` instead of merely lacking a flag.
+        assert failed.details == {
+            "__synthetic": True,
+            "__approval_gate_failed": True,
+            "__fault": "gate_failed",
+        }
+        assert refused.details == {"__synthetic": True, "__fault": "denied"}
 
     @pytest.mark.asyncio
     async def test_the_exception_is_findable_in_the_log_with_its_stack(
