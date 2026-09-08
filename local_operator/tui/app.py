@@ -3107,6 +3107,28 @@ class OperatorApp(App[None]):
         self._session_sidebar = SessionSidebar()
         self._sidebar_settings = SidebarSettings()
         self._sidebar_timer: Timer | None = None
+        #: The live tick of the startup-cleanup recheck chain, so re-seeding
+        #: it REPLACES the chain rather than starting another beside it.
+        #:
+        #: `_report_startup_cleanup` self-schedules a 1 s tick for up to
+        #: `STARTUP_CLEANUP_RECHECK_WINDOW_S`, and `_adopt_session` seeds a
+        #: fresh chain on EVERY adoption — including the sidebar switch that
+        #: re-adopts a conversation the user just left. Without a handle the
+        #: chains could not see each other and simply overlapped: measured on
+        #: the assembled app, live timers grew 9 → 60 over 50 switches and the
+        #: callback ran 6462 times over 150, each one a disk read of
+        #: `sessions/last-cleanup.json` on the event loop. Every timer is also
+        #: a live asyncio task, so this was unbounded in switch count with no
+        #: release site at all — the exact shape `/reload` cures by accident.
+        #:
+        #: A handle rather than a once-per-process latch, deliberately: the
+        #: announce path defers to the removing runtime's own viewer while that
+        #: runtime lives (`cleanup.take_unannounced_cleanup`), so a viewer that
+        #: attaches before its runtime's pass finishes NEEDS the recheck window
+        #: on that adoption, and a latch that skipped it would lose the notice.
+        #: Stopping the previous chain keeps every timing property of the
+        #: window; it only removes the overlap.
+        self._startup_cleanup_timer: Timer | None = None
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
         self._sidebar_prefetch: Any = None
@@ -10896,6 +10918,14 @@ class OperatorApp(App[None]):
             take_unannounced_cleanup,
         )
 
+        # Exactly one chain per app. A seed from `_adopt_session` (every
+        # sidebar switch re-adopts) stops the chain still ticking from the
+        # previous adoption; a tick arriving here stops its own, already-fired
+        # one-shot, which is a no-op. See `_startup_cleanup_timer` for the
+        # measured growth this prevents and why it is not a latch.
+        if self._startup_cleanup_timer is not None:
+            self._startup_cleanup_timer.stop()
+            self._startup_cleanup_timer = None
         # The FORMAT is inside the try too: a hand-edited or newer-schema
         # record (`"removed": "many"`) crashed the first frame when only the
         # read was guarded (review round 3, R3-2). The formatter is total on
@@ -10915,7 +10945,7 @@ class OperatorApp(App[None]):
             return
         if rechecks_left > 0:
             remaining = rechecks_left - STARTUP_CLEANUP_RECHECK_S
-            self.set_timer(
+            self._startup_cleanup_timer = self.set_timer(
                 STARTUP_CLEANUP_RECHECK_S,
                 lambda: self._report_startup_cleanup(rechecks_left=remaining),
             )
