@@ -150,7 +150,12 @@ def _already_bounded(images: Any) -> bool:
 class _PromptCommand:
     command_id: str
     text: str
-    images: list["ImageContent"]
+    # ``None`` at runtime on an image-less prompt: ``_already_bounded`` treats
+    # None as "already bounded" (nothing to decode) and passes it through, so
+    # the cast that feeds this field can legitimately hand over None. Declared
+    # here because pyright trusts the cast and would not catch a consumer
+    # that assumed a list.
+    images: list["ImageContent"] | None
     admitted: asyncio.Future[None]
     completed: asyncio.Future[bool] | None = None
 
