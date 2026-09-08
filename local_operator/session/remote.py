@@ -108,6 +108,18 @@ logger = logging.getLogger(__name__)
 #: race the gap says the same thing — never the transport's ``not attached``.
 _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
 
+#: The id :meth:`RemoteSession.queued_steering` substitutes when a wire item
+#: carries none — an owner too old to put ``id`` on its queued-steer rows.
+#:
+#: EXPORTED rather than inlined because it is not an identity, and consumers
+#: have to be able to say so. The TUI's Esc-recall matches the queue by id
+#: (``OperatorApp._recall_queued_steers``), and this one value names EVERY
+#: id-less entry — so a consumer that cannot tell the placeholder from a real
+#: id could unsend one message while handing the composer another's text. A
+#: hard-coded copy of the string on the far side is one rename away from
+#: silently not matching, which is the same defect with no symptom.
+UNIDENTIFIED_STEER_ID = "remote-steer"
+
 #: How long a VIEWER chases a vanished runtime before unbinding and going cold.
 #: A runtime exits by design when it has nothing left to do, so owner loss is
 #: usually not a crash at all — but a restart after a `kill -9` publishes a new
@@ -616,6 +628,21 @@ class RemoteSession:
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
+        # Esc-recall's twin of the pair above: the synchronous protocol method
+        # answers optimistically from local state and the owner's REJECTION —
+        # the steer was already drained — comes back through this callback, so
+        # the app can warn instead of leaving the user to press Enter on a
+        # composer whose text is still queued (a silent double-send).
+        self._recall_resolution: Callable[[str], None] | None = None
+        #: Held ONLY to keep a strong reference — asyncio does not, and a
+        #: garbage-collected task would drop the refusal the app is waiting
+        #: for. Deliberately not awaited or cancelled in `dispose`, matching
+        #: `_cancel_task` beside it: both are one short request whose whole
+        #: purpose is the callback at its end, and cancelling that at teardown
+        #: would suppress the warning in exactly the disconnect case it exists
+        #: for. The app's own session check is what stops a late refusal
+        #: painting on a conversation that has since been swapped away.
+        self._recall_task: asyncio.Task[None] | None = None
         # Teams and agent profiles are LOCAL CONFIG, not runtime state: they
         # live in `<config_dir>/teams` and `<config_dir>/agents`, the same
         # files `lop team`/`lop agents` read with no session at all. So a
@@ -4625,19 +4652,71 @@ class RemoteSession:
         return [
             Message.user(
                 str(item.get("text", "") or ""),
-                id=str(item.get("id", "") or "remote-steer"),
+                id=str(item.get("id", "") or UNIDENTIFIED_STEER_ID),
             )
             for item in self.frontend_state.queued_steering
         ]
 
     def recall_steering(self, message: Any) -> bool:
+        """Optimistic unsend: True means the op was ISSUED, not that it landed.
+
+        ``SessionProtocol.recall_steering`` is synchronous — the Esc handler
+        reads its answer inline — but the authoritative queue lives on the
+        owner across a socket, so the real outcome arrives later. The follower
+        answers from the state it holds and reports the owner's verdict through
+        the ``_recall_resolution`` callback the app installs, exactly as
+        ``cancel_subagents`` does for its count.
+
+        The verdict matters because a REJECTION strands the user. By the time
+        the owner answers ``that steering message is no longer queued`` the app
+        has already put the text in the composer and removed the steer's rows,
+        so the message is both still queued on the owner AND sitting in the
+        composer ready for Enter — press it and the same message is delivered
+        twice. That is the double-send this seam exists to report rather than
+        swallow: previously the rejection surfaced only as an unretrieved task
+        exception in the log.
+        """
         ids = {str(item.get("id", "") or "") for item in self.frontend_state.queued_steering}
         if str(getattr(message, "id", "") or "") not in ids:
             return False
         client = self._client
-        if client is not None:
-            asyncio.create_task(client.recall_steer(str(message.id)))
+        if client is None:
+            # NO CLIENT, NO RECALL. ``True`` is what makes the app commit
+            # irreversibly — the composer takes the text and the steer's rows
+            # leave the transcript — so answering it while issuing no op at all
+            # is the exact silent double-send this seam exists to remove,
+            # reached through a different door: the message is still queued on
+            # the owner, the text is in the composer, and the rejection
+            # callback never fires because there is no request to fail.
+            # ``_client`` is None after ``dispose`` and for the whole window
+            # between a dropped socket and a reattach, which is precisely the
+            # disconnect-mid-recall case. Declining leaves the steer queued to
+            # ride the next boundary — what the press would have done anyway.
+            return False
+        self._recall_task = asyncio.ensure_future(self._resolve_recall(client, str(message.id)))
         return True
+
+    async def _resolve_recall(self, client: AttachClient, command_id: str) -> None:
+        """Tell the app whether the owner actually unsent the steer."""
+        try:
+            await client.recall_steer(command_id)
+        except Exception:
+            # Every failure shape is the same fact to the user: the composer
+            # holds text the owner may still deliver. A lost socket cannot be
+            # told apart from an explicit rejection here, and guessing wrong
+            # in the quiet direction is what produces a silent double-send.
+            resolver = self._recall_resolution
+            if resolver is not None:
+                resolver(command_id)
+
+    def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
+        """Install the app's handler for a recall the owner did NOT honour.
+
+        Called with the recalled message's command id when the op failed, so
+        the app can warn that the steer may still be delivered. ``None``
+        disarms it.
+        """
+        self._recall_resolution = resolver
 
     def abort(self, reason: str = "interrupted") -> None:
         client = self._client
