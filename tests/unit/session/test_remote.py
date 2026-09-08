@@ -15,7 +15,7 @@ from local_operator.harness.types import (
 )
 from local_operator.mobile.types import AskOptionWire, PendingRequest
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
-from local_operator.session.remote import RemoteSession
+from local_operator.session.remote import FRONTEND_SYNC_FOREGROUND_S, RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -372,7 +372,7 @@ async def test_a_refused_sync_leaves_the_viewer_cold_and_holds_no_connection(
         )
         try:
             with pytest.raises(ConnectionError, match="belongs to another session"):
-                await viewer._bind_to(record)
+                await viewer._bind_to(record, sync_timeout=FRONTEND_SYNC_FOREGROUND_S)
             assert viewer.is_cold is True, "a refused bind must not leave the facade bound"
             # Two refusals, zero leaked sockets: give the server a few ticks
             # to observe the closes.

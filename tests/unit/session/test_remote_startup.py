@@ -50,8 +50,8 @@ async def test_initial_sync_blocks_mutations_and_replays_new_epoch_updates(
     original_sync = viewer._await_frontend
     original_update = viewer._on_frontend_update
 
-    async def held_sync():
-        sync = await original_sync()
+    async def held_sync(future, **kwargs):
+        sync = await original_sync(future, **kwargs)
         reached.set()
         await release.wait()
         return sync
@@ -219,8 +219,8 @@ async def test_recovery_sync_is_the_only_binding_for_waiting_turns(
             assert first_client is not None
             original_sync = viewer._await_frontend
 
-            async def held_recovery_sync():
-                sync = await original_sync()
+            async def held_recovery_sync(future, **kwargs):
+                sync = await original_sync(future, **kwargs)
                 clients.append(viewer._client)
                 reached.set()
                 await release.wait()

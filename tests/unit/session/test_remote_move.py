@@ -85,7 +85,9 @@ async def test_a_move_during_the_mount_engage_spawns_in_the_NEW_directory(
     spawns: list[str] = []
     engage_started = asyncio.Event()
 
-    async def slow_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):
+    async def slow_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):
         engage_started.set()
         await asyncio.sleep(0.05)  # the spawn window the move must not lose
         spawns.append(str(cwd))
