@@ -73,7 +73,38 @@ def test_ordinary_injectable_names_still_reach_the_environment() -> None:
     assert os.environ["AWS_REGION"] == "us-east-1"
 
 
-def test_a_task_module_is_registered_before_execution(tmp_path) -> None:
+@pytest.fixture
+def _stub_task_base(monkeypatch):
+    """Make ``instantiate_task`` importable without the upstream package.
+
+    ``instantiate_task`` imports ``desktop_env.task_base`` for the final
+    ``issubclass(BaseTask)`` fallback in its class search. ``desktop_env`` is
+    installed only in the evaluation venv, never in CI -- so guarding these
+    tests with ``importorskip`` meant the whole ``sys.modules`` registration
+    could be deleted with the suite green, which is exactly the regression
+    they exist to catch. Neither probe reaches the fallback (both define
+    ``get_task``), so a two-line stub buys real CI coverage of the fix.
+    """
+    import sys
+    import types
+
+    if "desktop_env.task_base" in sys.modules:  # the evaluation venv: use the real one
+        yield
+        return
+    package = types.ModuleType("desktop_env")
+    package.__path__ = []  # a package, so the submodule import resolves
+    task_base = types.ModuleType("desktop_env.task_base")
+
+    class BaseTask:  # noqa: D401 - stands in for the upstream marker class
+        """Stand-in for the upstream base class used only by an issubclass check."""
+
+    task_base.BaseTask = BaseTask
+    monkeypatch.setitem(sys.modules, "desktop_env", package)
+    monkeypatch.setitem(sys.modules, "desktop_env.task_base", task_base)
+    yield
+
+
+def test_a_task_module_is_registered_before_execution(tmp_path, _stub_task_base) -> None:
     """A task combining future annotations with @dataclass must import.
 
     ``module_from_spec`` does NOT register in ``sys.modules``; the import
@@ -88,9 +119,6 @@ def test_a_task_module_is_registered_before_execution(tmp_path) -> None:
     """
     import sys as _sys
 
-    # instantiate_task imports BaseTask for the class search; the upstream
-    # package is only present in the evaluation venv.
-    pytest.importorskip("desktop_env.task_base")
     from lop_osworld_v2_adapter import vendor_bridge as bridge
 
     module_path = tmp_path / "task_probe.py"
@@ -112,11 +140,12 @@ def test_a_task_module_is_registered_before_execution(tmp_path) -> None:
         _sys.modules.pop("osworld_task_probe", None)
 
 
-def test_a_task_module_that_fails_to_import_is_not_left_registered(tmp_path) -> None:
+def test_a_task_module_that_fails_to_import_is_not_left_registered(
+    tmp_path, _stub_task_base
+) -> None:
     """A half-initialised module must not stay visible to the next episode."""
     import sys as _sys
 
-    pytest.importorskip("desktop_env.task_base")
     from lop_osworld_v2_adapter import vendor_bridge as bridge
 
     module_path = tmp_path / "task_broken.py"

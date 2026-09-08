@@ -186,9 +186,17 @@ def instantiate_task(module_path: str, task_id: str) -> Any:
     # at reset_start, with the VM already allocated. Reproduced exactly:
     # unregistered raises, registered imports cleanly.
     #
-    # Cleaned up in a finally so a failed task import cannot leave a
-    # half-initialised module visible to a later one, and so the process does
-    # not accumulate one entry per episode.
+    # A SUCCESSFUL import stays registered -- that is the fix, not an
+    # oversight, and a module whose annotations are resolved lazily would break
+    # again if it were popped afterwards. Only a FAILED import is removed, so a
+    # half-initialised module is not left visible.
+    #
+    # Note what that removal actually does when the same task_id is imported
+    # twice: the assignment below has already displaced any earlier module
+    # object of this name, so a failed re-import unregisters the previously
+    # good one too. Harmless in the current one-episode-per-worker model (a
+    # live task object holds its own reference), but the pop is not a pure
+    # rollback and should not be read as one.
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
