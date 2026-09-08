@@ -494,8 +494,33 @@ RECALL_DECLINE_NOTICE = "queued steer kept — clear the composer, esc again to 
 #: and drafted here. Pressing Enter then sends it twice, which is exactly the
 #: double-send this whole change exists to remove, so the row names the state
 #: rather than letting the user discover it from the agent answering twice.
-#: 56 cells: inside the set's 61-column one-line budget (design round 2, D5).
-RECALL_UNCONFIRMED_NOTICE = "recall did not land — that steer was sent; do not resend"
+#:
+#: It names the RESOLVING ACTION, not a prohibition. "do not resend" (the
+#: round-1 wording) forbids one keystroke and leaves the duplicate sitting in
+#: the composer indefinitely, with no row to say when the ban lifts; clearing
+#: the composer is what actually ends the state, and it is the recovery clause
+#: `RECALL_DECLINE_NOTICE` already uses — so the two Esc-failure rows advise in
+#: one grammar (design round 1, D3).
+#:
+#: Holds ONE LINE FROM 60 COLUMNS, measured on a mounted `NoticeBlock` across
+#: 40-100 columns rather than counted: at 50 characters it is the narrowest row
+#: in this set, where the round-1 string needed 66. Character count is not the
+#: instrument here — `scripts/steer_receipt_candidates.py` says why — and the
+#: "61-column budget" the round-1 comment claimed was true of nothing in the
+#: set, this row included.
+RECALL_UNCONFIRMED_NOTICE = "too late — that steer was sent; clear the composer"
+#: The row an UNNAMEABLE queue prints. Esc matches the queue by message id, and
+#: an id that names two entries — or `UNIDENTIFIED_STEER_ID`, which names every
+#: id-less one — is not an identity, so the newest steer cannot be picked out
+#: and the press recalls nothing (see `_recall_queued_steers`).
+#:
+#: Its own row rather than `RECALL_DECLINE_NOTICE`, which is the other Esc
+#: failure: that one names the COMPOSER as the obstacle and offers "esc again",
+#: and both are false here — the composer is empty and a second press meets the
+#: same queue. A row that advertises a recovery that does not work is worse
+#: than the silence it replaces. What the user needs is that the steer is still
+#: coming, which is also the one piece of good news in the state.
+RECALL_AMBIGUOUS_NOTICE = "could not identify that steer — it is still queued"
 
 
 #: Rows a `.band-slot` spends on itself beyond its content: the rhythm row it
@@ -3681,6 +3706,7 @@ class OperatorApp(App[None]):
             queued_steer_notices=self._queued_steer_notices,
             deferred_steer_notices=self._deferred_steer_notices,
             held_steer_blocks=self._held_steer_blocks,
+            own_interrupt_notice=self._own_interrupt_notice,
             welcome=self._welcome,
             welcome_visible=self._welcome_visible,
         )
@@ -3708,6 +3734,12 @@ class OperatorApp(App[None]):
         self._queued_steer_notices = presentation.queued_steer_notices
         self._deferred_steer_notices = presentation.deferred_steer_notices
         self._held_steer_blocks = presentation.held_steer_blocks
+        # Restored WITH the transcript it names a row in — unlike `_stop_notice`
+        # below, which is cleared because the Esc ladder is a property of the
+        # abandoned viewport. This row is a property of the CONVERSATION: its
+        # outcome anchor is still coming, and an app that forgot it would let
+        # the poller print a second `Interrupted` under the live row on return.
+        self._own_interrupt_notice = presentation.own_interrupt_notice
         self._welcome = presentation.welcome
         self._welcome_visible = None
         # Gesture tasks belong to the abandoned viewport, not its history.
@@ -5599,6 +5631,19 @@ class OperatorApp(App[None]):
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):
             self._sidebar_sources[session.session_id] = source
+        # DISARM THE OUTGOING session's recall resolver before the binding
+        # moves — this is the last moment the old session is reachable. The
+        # incoming one is armed at the foot of this method, so the pair is
+        # symmetric with the cancel resolver above it, which is likewise
+        # cleared on adopt and re-installed per use. `_on_recall_rejected`
+        # also checks the session it was bound to, but that guard only stops
+        # the ROW; releasing the callback here is what stops a retired facade
+        # holding the app alive for the length of its ack timeout.
+        outgoing = self._session
+        if outgoing is not None and outgoing is not session:
+            disarm_recall = getattr(outgoing, "set_recall_resolution", None)
+            if callable(disarm_recall):
+                disarm_recall(None)
         self._session = session
         # The id of the session this VIEWER is looking at, kept beside the
         # binding rather than derived from it. `self._session` is dropped by
@@ -5699,9 +5744,18 @@ class OperatorApp(App[None]):
             # already returned — there is no synchronous moment to install it
             # in, and a recall whose warning had nowhere to land would be the
             # silent double-send again.
+            #
+            # BOUND TO THIS SESSION, and the previous one is disarmed on the
+            # line above's own reasoning: the refusal can arrive up to
+            # `ACK_TIMEOUT_S` later, by which time the adopt may already have
+            # put another conversation on screen. Passing the session as an
+            # argument is what lets `_on_recall_rejected` drop a refusal that
+            # is no longer about what the user is looking at — a warning
+            # painted on the wrong conversation is the double-send row aimed
+            # at text that was never sent.
             set_recall_resolution = getattr(session, "set_recall_resolution", None)
             if callable(set_recall_resolution):
-                set_recall_resolution(self._on_recall_rejected)
+                set_recall_resolution(partial(self._on_recall_rejected, session))
         # Before the band is painted below: the freshly built spec carries the
         # MODEL's default effort, and a `/reload` or `/new` that dropped the
         # user's chosen level would repaint the band with a level they did not
@@ -15179,9 +15233,19 @@ class OperatorApp(App[None]):
         block = self._own_interrupt_notice
         if kind != "interrupted" or block is None:
             return False
-        self._own_interrupt_notice = None
         if block not in self._transcript_view().blocks():
+            # NOT consumed. Clearing the reference before this test burnt it on
+            # a failure that is routinely transient: a sidebar switch parks the
+            # row in the other conversation's `TranscriptView`, so this poll
+            # legitimately cannot see it — and dropping it there meant that on
+            # switching back the poller appended its `Interrupted` under the
+            # live `interrupted`, restoring the very duplicate this method
+            # exists to remove. The row is still the announcement of this
+            # outcome; only this view is wrong.
             return False
+        # Consumed only once it has actually been stamped: one outcome, one
+        # adoption, and a later publication must get its own row.
+        self._own_interrupt_notice = None
         block.completion_anchor_id = anchor
         return True
 
@@ -30732,14 +30796,29 @@ class OperatorApp(App[None]):
         the fast path so the in-process session, where the objects genuinely
         are shared, never depends on the id round trip at all.
 
-        Only a NON-EMPTY id may match, and only an id that is UNIQUE in the
-        snapshot. `RemoteSession.queued_steering` substitutes the literal
-        `"remote-steer"` for a wire item carrying no id, so two such entries
-        arrive sharing one id — matching on it would let a recall lift the
-        wrong row's text into the composer while unsending a different
-        message. An ambiguous id is therefore treated as no match at all: the
-        steer stays queued and rides the next boundary, which is what would
-        have happened without the press, and the decline row below says so.
+        An id only counts as an identity when it NAMES ONE ENTRY. Two things
+        break that, and both are the same hazard: a snapshot carrying the id
+        twice, and `UNIDENTIFIED_STEER_ID` — the placeholder
+        `RemoteSession.queued_steering` substitutes for a wire item with no id
+        of its own, which by construction names every id-less entry rather
+        than any one of them. Matching either would let a recall unsend one
+        message while handing the composer another's text, so neither is an
+        identity here and an entry keyed on one is UNRECALLABLE.
+
+        AN UNRECALLABLE NEWEST ENTRY ENDS THE SCAN — it does not fall through
+        to an older one. Skipping to the next entry looks like graceful
+        degradation and is the worst available outcome: the press unsends and
+        lifts a steer the user did not point at, while the one they did stays
+        queued and is delivered. "Only the NEWEST" is the contract above, so
+        an unrecallable newest means NO recall, never a substitute.
+
+        And it SAYS SO, with `RECALL_AMBIGUOUS_NOTICE`. A press that changes
+        nothing on screen is indistinguishable from a dropped keystroke, which
+        is the failure design round 1 (D1) filed the decline row to remove —
+        and that row cannot serve here, because it names the composer as the
+        obstacle and the composer is not the obstacle. The steer stays queued
+        and rides the next boundary either way; the row is what makes that a
+        stated outcome rather than a silence.
 
         A recall that cannot finish — no session, a composer the app has put
         read-only (the subagent view owns it), or a half-typed draft it would
@@ -30749,6 +30828,11 @@ class OperatorApp(App[None]):
         not happened. The message then rides the next boundary, which is the
         behaviour the user had before they pressed Esc.
         """
+        # Function-local like every other `session.remote` import in this file:
+        # the module imports the TUI's own types, so a top-level import here is
+        # a cycle.
+        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+
         session = self._session
         if session is None or not self._held_steer_blocks:
             return
@@ -30759,20 +30843,53 @@ class OperatorApp(App[None]):
         # press: the membership scan below would otherwise drain-and-rebuild
         # the queue once per held entry on the cancel key's hot path.
         queued_now = session.queued_steering()
-        # Ids that appear MORE THAN ONCE in the snapshot are unusable as a key
-        # — see the docstring on `"remote-steer"`. Counted once per press
-        # rather than per held entry, on the same reasoning as the single
-        # snapshot above: this is the cancel key's hot path.
+        # Ids that name more than one snapshot entry are unusable as a key —
+        # see the docstring. Counted once per press rather than per held
+        # entry, on the same reasoning as the single snapshot above: this is
+        # the cancel key's hot path.
         id_counts: dict[str, int] = {}
         for item in queued_now:
             item_id = str(getattr(item, "id", "") or "")
             if item_id:
                 id_counts[item_id] = id_counts.get(item_id, 0) + 1
-        for entry in reversed(self._held_steer_blocks):
-            held_id = str(getattr(entry[0], "id", "") or "")
-            if any(item is entry[0] for item in queued_now) or id_counts.get(held_id) == 1:
+        # Whether the queue is carrying entries this app cannot name at all.
+        # An id-less wire item reaches the snapshot as `UNIDENTIFIED_STEER_ID`
+        # while the held message keeps the uuid this app minted, so the two
+        # can never be compared — and any held entry might BE that item. One
+        # such entry therefore makes every by-id match a guess.
+        unnameable = id_counts.get(UNIDENTIFIED_STEER_ID, 0) > 0
+        entry = None
+        ambiguous = False
+        for candidate in reversed(self._held_steer_blocks):
+            held_id = str(getattr(candidate[0], "id", "") or "")
+            # Identity first: on the in-process `Session` the snapshot holds
+            # the very objects this app queued, so that path never depends on
+            # the id round trip, and an id-less sibling cannot spoil it.
+            if any(item is candidate[0] for item in queued_now):
+                entry = candidate
                 break
-        else:
+            if held_id and id_counts.get(held_id) == 1 and not unnameable:
+                entry = candidate
+                break
+            if (held_id and held_id in id_counts) or unnameable:
+                # The entry is in the queue (or may be, as an unnameable one)
+                # but cannot be named uniquely. The scan STOPS here rather
+                # than trying the next-older entry: recalling a message the
+                # user did not point at is the one outcome worse than
+                # declining, and "only the NEWEST" is the contract.
+                ambiguous = True
+                break
+            # Genuinely not in the queue: delivered at a boundary. Skipping is
+            # correct — `on_steering_delivered` removes these when their
+            # receipt lands, so only ones still in flight are seen here.
+        if ambiguous:
+            # Not `RECALL_DECLINE_NOTICE`: that row names the composer as the
+            # obstacle and offers "esc again", neither of which is true here —
+            # a second press hits the same unnameable queue. Its own row says
+            # what actually happened and what the user still has.
+            self._replace_stop_notice(RECALL_AMBIGUOUS_NOTICE, "note")
+            return
+        if entry is None:
             return
         message, user_block, image_blocks, notice, attachments = entry
         editor = self._editor()
@@ -30798,8 +30915,13 @@ class OperatorApp(App[None]):
         # the obstacle. The recovery is one line, replaced on repeat like the
         # ladder's own rows.
         if editor.text.strip():
-            # 59 cells: inside the set's 61-column one-line budget (design
-            # round 2, D5).
+            # 59 characters, and it holds ONE LINE FROM 69 COLUMNS — measured
+            # on a mounted `NoticeBlock`, not counted. The "inside the set's
+            # 61-column budget" this comment used to claim was wrong: at 61
+            # columns this row wraps to two lines, and no row in the set holds
+            # one there. Corrected rather than deleted because the next person
+            # editing the string will look here for the number (design round 1,
+            # D3); `scripts/steer_receipt_candidates.py` is the instrument.
             self._replace_stop_notice(RECALL_DECLINE_NOTICE, "note")
             return
         # The row's text, NOT ``message.text``. For every ordinary steer the
@@ -30831,13 +30953,24 @@ class OperatorApp(App[None]):
         editor.move_cursor(editor._end_of_buffer())
         # Only now is the recall irreversible: the composer holds the text.
         if not session.recall_steering(message):
-            # Defence, not a live race: this handler runs synchronously on the
-            # session's own loop, so nothing drains the queue between the
-            # snapshot above and here. Kept for a future host that runs the
-            # session off this loop; if it ever fires, the composer has the
-            # text and the queue delivered it too — the user sees both and can
-            # delete the draft, and putting the message back would double-send.
-            logger.debug("recall raced a steering delivery; composer keeps the text")
+            # REACHABLE, and no longer merely defensive. That claim held while
+            # the only host was the in-process `Session`, where this handler
+            # runs on the session's own loop and nothing can drain the queue
+            # between the snapshot above and here. A `RemoteSession` reads a
+            # REPLICATED `frontend_state` that the socket pump may have last
+            # written arbitrarily long ago, so a False here is an ordinary
+            # stale-snapshot outcome — and it is also how a viewer with no
+            # client declines rather than claiming a recall it cannot issue.
+            #
+            # The composer keeps the text either way: putting the message back
+            # is not available (it was never taken off the owner's queue) and
+            # discarding the draft is the loss `action_stop` forbids. So this
+            # is the same state the owner's own refusal produces, reached
+            # locally, and it gets the same row — silently removing the steer's
+            # rows here would leave the user holding a duplicate with nothing
+            # on screen having said so.
+            logger.debug("recall did not reach the queue; composer keeps the text")
+            self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
         # `entry`, not the list's tail: the tail can be a delivered entry the
         # receipt has not yet removed, and the recall must take exactly the
         # one it loaded into the composer.
@@ -30872,7 +31005,7 @@ class OperatorApp(App[None]):
                 break
         editor.focus()
 
-    def _on_recall_rejected(self, command_id: str) -> None:
+    def _on_recall_rejected(self, session: Any, command_id: str) -> None:
         """The owner did not honour a recall this app already committed.
 
         A follower's recall is optimistic (`RemoteSession.recall_steering`):
@@ -30890,12 +31023,32 @@ class OperatorApp(App[None]):
         `action_stop` forbids. So the honest behaviour is to warn and leave
         the draft under the user's control.
 
-        Through `_replace_stop_notice` because this is the Esc ladder's own
-        row: a press that produced a decline row a moment ago must not stack a
-        second contradicting line under it.
+        APPENDED as its own row, NOT written into the Esc ladder's single slot
+        (`_replace_stop_notice`). That slot holds mutually-exclusive ladder
+        STATES, each describing a settled outcome, and replace-don't-stack is
+        right for them. This row is not one of them: it carries an UNRESOLVED
+        risk — a composer holding text the owner already sent — so it has to
+        outlive the next press. It did not. With two steers queued, a second
+        Esc took the decline path and overwrote this warning with `queued
+        steer kept — clear the composer, esc again to recall`, which invites
+        the user to recall a steer that was already delivered, over a composer
+        whose contents are the duplicate. Pressing Esc again after reading
+        that something went wrong is the reflex, not an edge case (design
+        round 1, D1).
+
+        SCOPED TO THE SESSION THAT ISSUED THE RECALL. The refusal crosses a
+        socket with a 15 s ack timeout (`ACK_TIMEOUT_S`), so `/clear`, `/new`,
+        `/resume`, a sidebar switch or a takeover can all land first — and a
+        row telling the user "that steer was sent" about a conversation that
+        never sent it is worse than silence, because it is the double-send
+        warning aimed at the wrong text. A late ack for a conversation that is
+        no longer on screen is dropped.
         """
+        if session is not self._session:
+            logger.debug("dropped a recall refusal for a session that is no longer current")
+            return
         logger.debug("session owner refused the recall of steer %s", command_id)
-        self._replace_stop_notice(RECALL_UNCONFIRMED_NOTICE, "warning")
+        self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
     def _settle_queued_steer_notices_unsent(self) -> None:
         """Retire queued-steer rows the turn that just ended did not deliver.

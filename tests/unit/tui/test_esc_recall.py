@@ -32,6 +32,8 @@ from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
+    RECALL_AMBIGUOUS_NOTICE,
+    RECALL_DECLINE_NOTICE,
     RECALL_UNCONFIRMED_NOTICE,
     SENT_STEER_NOTICE,
     OperatorApp,
@@ -438,6 +440,34 @@ class _RemoteLikeStreaming(_Streaming):
         return False
 
 
+class _IdLessStreaming(_Streaming):
+    """A follower whose OWNER is too old to put ``id`` on its queued-steer rows.
+
+    ``RemoteSession.queued_steering`` substitutes ``UNIDENTIFIED_STEER_ID`` for
+    such an item, so every id-less entry arrives under one key. Modelled with
+    the real substitution rather than a hand-written literal, so a rename of
+    the constant moves this fake with it.
+    """
+
+    def steer_message(self, message: Any) -> None:
+        self._steering_queue.append({"text": message.text})  # no id on the wire
+
+    def queued_steering(self) -> list[Any]:
+        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+
+        return [
+            Message.user(
+                str(item.get("text", "") or ""),
+                id=str(item.get("id", "") or UNIDENTIFIED_STEER_ID),
+            )
+            for item in self._steering_queue
+        ]
+
+    def recall_steering(self, message: Any) -> bool:
+        ids = {str(item.get("id", "") or "") for item in self._steering_queue}
+        return str(getattr(message, "id", "") or "") in ids
+
+
 @pytest.mark.asyncio
 async def test_esc_recalls_a_steer_from_a_session_that_rebuilds_its_queue() -> None:
     """The daemon case: equal-but-distinct messages must still be recallable.
@@ -507,6 +537,11 @@ async def test_an_ambiguous_queue_id_declines_instead_of_guessing() -> None:
         assert editor.text == ""
         assert [m.text for m in session.queued_steering()] == ["older steer", "newer steer"]
         assert _user_texts(app) == ["older steer", "newer steer"]
+        # ...and it SAYS so. A press that changes nothing on screen is the
+        # dropped-keystroke reading D1 filed the decline row against; this case
+        # needs its own row because the composer is not the obstacle.
+        assert RECALL_AMBIGUOUS_NOTICE in _notice_texts(app)
+        assert RECALL_DECLINE_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -532,10 +567,145 @@ async def test_a_rejected_remote_recall_warns_instead_of_double_sending() -> Non
         assert editor.text == "use 0.75 for the direct API"
 
         # The owner's rejection arrives after the press has already returned.
-        app._on_recall_rejected(message_id)
+        app._on_recall_rejected(session, message_id)
         await pilot.pause()
 
         assert RECALL_UNCONFIRMED_NOTICE in _notice_texts(app)
         # The draft is NOT thrown away: discarding what the user may want to
         # edit is the loss `action_stop` forbids. The row warns; the user decides.
+        assert editor.text == "use 0.75 for the direct API"
+
+
+@pytest.mark.asyncio
+async def test_an_unrecallable_newest_steer_never_falls_back_to_an_older_one() -> None:
+    """The scan STOPS at an unnameable newest entry; it does not substitute.
+
+    Round-1 review BLOCKER-1. The guard refused the ambiguous newest candidate
+    but let the `for` keep walking backwards, so the next-older entry — whose
+    id happened to be unique — was recalled instead: the press unsent and
+    lifted a message the user never pointed at, while the one they did mean to
+    take back stayed queued and was delivered. That is strictly worse than the
+    silent no-op it replaced, and it is the precise harm the guard was written
+    to prevent, one entry over.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "OLD: use the staging bucket")
+        await _submit(pilot, editor, "NEW: actually stop and revert")
+        # A third queue entry duplicates the NEWEST id, so the newest held
+        # entry is unnameable while the OLDER one is still perfectly unique.
+        newest_id = app._held_steer_blocks[-1][0].id
+        session._steering_queue.append({"id": newest_id, "text": "wake delivery"})
+        older_id = app._held_steer_blocks[0][0].id
+        assert [m.id for m in session.queued_steering()].count(older_id) == 1
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # The OLDER steer is what a fallback would have taken. It must not.
+        assert editor.text == "", "no message may be lifted when the newest is unnameable"
+        assert [m.text for m in session.queued_steering()] == [
+            "OLD: use the staging bucket",
+            "NEW: actually stop and revert",
+            "wake delivery",
+        ], "nothing may be unsent"
+        assert _user_texts(app) == ["OLD: use the staging bucket", "NEW: actually stop and revert"]
+        assert RECALL_AMBIGUOUS_NOTICE in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_an_id_less_queue_entry_is_answered_rather_than_ignored() -> None:
+    """`UNIDENTIFIED_STEER_ID` names every id-less entry, so it names none.
+
+    Round-1 review MAJOR-3. The guard keyed on the HELD id — always an
+    app-minted uuid4 — which can never equal the placeholder a `RemoteSession`
+    substitutes for a wire item with no id. So the case the guard's own
+    docstring was written around never reached it, and the press was a silent
+    dropped keystroke: exactly the D1 failure the PR claimed to have closed.
+    """
+    session = _IdLessStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "please stop")
+        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+
+        assert [m.id for m in session.queued_steering()] == [UNIDENTIFIED_STEER_ID]
+        assert app._held_steer_blocks[-1][0].id != UNIDENTIFIED_STEER_ID, "ids cannot be compared"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Declining is right; being SILENT about it is the defect.
+        assert editor.text == ""
+        assert [m.text for m in session.queued_steering()] == ["please stop"]
+        assert RECALL_AMBIGUOUS_NOTICE in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_a_stale_recall_refusal_never_paints_on_another_conversation() -> None:
+    """A late ack belongs to the conversation that issued it, or to nothing.
+
+    Round-1 review BLOCKER-2. The refusal crosses a socket with a 15 s ack
+    timeout, so `/clear`, `/new`, `/resume`, a sidebar switch or a takeover can
+    all land first. A row reading "that steer was sent" on a conversation that
+    never sent it is worse than silence: it is the double-send warning aimed at
+    text the user never queued.
+    """
+    first = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "use 0.75 for the direct API")
+        message_id = app._held_steer_blocks[-1][0].id
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # The user moves to a DIFFERENT conversation before the owner answers.
+        second = _RemoteLikeStreaming()
+        app._adopt_session(second, replay_history=False)
+        await pilot.pause()
+        assert app._session is second
+
+        # The first conversation's refusal finally arrives.
+        app._on_recall_rejected(first, message_id)
+        await pilot.pause()
+
+        assert RECALL_UNCONFIRMED_NOTICE not in _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_the_double_send_warning_survives_the_next_escape() -> None:
+    """The warning outlives the reflex press, because its risk is unresolved.
+
+    Design round 1, D1. Written through the Esc ladder's single slot, the
+    warning was replaced by the NEXT press's decline row — and that row invites
+    the exact wrong action ("esc again to recall") over a composer holding the
+    duplicate. Pressing Esc again after reading that something went wrong is
+    the reflex; the row has to be a transcript fact, not a ladder state.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        # TWO steers: with only one queued the second press finds nothing and
+        # returns before touching the slot, which is why this hid in testing.
+        await _submit(pilot, editor, "first steer")
+        await _submit(pilot, editor, "use 0.75 for the direct API")
+        message_id = app._held_steer_blocks[-1][0].id
+
+        await pilot.press("escape")
+        await pilot.pause()
+        app._on_recall_rejected(session, message_id)
+        await pilot.pause()
+        assert RECALL_UNCONFIRMED_NOTICE in _notice_texts(app)
+
+        # The reflex press. The composer is dirty, so this is the DECLINE path.
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert RECALL_DECLINE_NOTICE in _notice_texts(app), "the decline still speaks"
+        assert RECALL_UNCONFIRMED_NOTICE in _notice_texts(app), "and the warning survives it"
         assert editor.text == "use 0.75 for the direct API"

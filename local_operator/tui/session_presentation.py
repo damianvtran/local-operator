@@ -302,6 +302,15 @@ class SessionPresentation:
     queued_steer_notices: list[Any] = field(default_factory=list)
     deferred_steer_notices: list[Any] = field(default_factory=list)
     held_steer_blocks: list[Any] = field(default_factory=list)
+    #: The `interrupted` row the app painted for this conversation's own turn,
+    #: still waiting for the anchor its session publishes for that outcome.
+    #:
+    #: Carried for the same reason `held_steer_blocks` is: it names a widget in
+    #: THIS presentation's transcript, so it belongs to the conversation rather
+    #: than to the app. Left behind, a switch away and back let the attention
+    #: poller append a second `Interrupted` under the live `interrupted` — the
+    #: duplicate row `OperatorApp._adopt_own_interrupt_notice` exists to remove.
+    own_interrupt_notice: Any = None
     welcome: Any = None
     welcome_visible: bool | None = False
 

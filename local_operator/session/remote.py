@@ -108,6 +108,18 @@ logger = logging.getLogger(__name__)
 #: race the gap says the same thing — never the transport's ``not attached``.
 _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
 
+#: The id :meth:`RemoteSession.queued_steering` substitutes when a wire item
+#: carries none — an owner too old to put ``id`` on its queued-steer rows.
+#:
+#: EXPORTED rather than inlined because it is not an identity, and consumers
+#: have to be able to say so. The TUI's Esc-recall matches the queue by id
+#: (``OperatorApp._recall_queued_steers``), and this one value names EVERY
+#: id-less entry — so a consumer that cannot tell the placeholder from a real
+#: id could unsend one message while handing the composer another's text. A
+#: hard-coded copy of the string on the far side is one rename away from
+#: silently not matching, which is the same defect with no symptom.
+UNIDENTIFIED_STEER_ID = "remote-steer"
+
 #: How long a VIEWER chases a vanished runtime before unbinding and going cold.
 #: A runtime exits by design when it has nothing left to do, so owner loss is
 #: usually not a crash at all — but a restart after a `kill -9` publishes a new
@@ -622,6 +634,14 @@ class RemoteSession:
         # the app can warn instead of leaving the user to press Enter on a
         # composer whose text is still queued (a silent double-send).
         self._recall_resolution: Callable[[str], None] | None = None
+        #: Held ONLY to keep a strong reference — asyncio does not, and a
+        #: garbage-collected task would drop the refusal the app is waiting
+        #: for. Deliberately not awaited or cancelled in `dispose`, matching
+        #: `_cancel_task` beside it: both are one short request whose whole
+        #: purpose is the callback at its end, and cancelling that at teardown
+        #: would suppress the warning in exactly the disconnect case it exists
+        #: for. The app's own session check is what stops a late refusal
+        #: painting on a conversation that has since been swapped away.
         self._recall_task: asyncio.Task[None] | None = None
         # Teams and agent profiles are LOCAL CONFIG, not runtime state: they
         # live in `<config_dir>/teams` and `<config_dir>/agents`, the same
@@ -4632,7 +4652,7 @@ class RemoteSession:
         return [
             Message.user(
                 str(item.get("text", "") or ""),
-                id=str(item.get("id", "") or "remote-steer"),
+                id=str(item.get("id", "") or UNIDENTIFIED_STEER_ID),
             )
             for item in self.frontend_state.queued_steering
         ]
@@ -4660,8 +4680,20 @@ class RemoteSession:
         if str(getattr(message, "id", "") or "") not in ids:
             return False
         client = self._client
-        if client is not None:
-            self._recall_task = asyncio.ensure_future(self._resolve_recall(client, str(message.id)))
+        if client is None:
+            # NO CLIENT, NO RECALL. ``True`` is what makes the app commit
+            # irreversibly — the composer takes the text and the steer's rows
+            # leave the transcript — so answering it while issuing no op at all
+            # is the exact silent double-send this seam exists to remove,
+            # reached through a different door: the message is still queued on
+            # the owner, the text is in the composer, and the rejection
+            # callback never fires because there is no request to fail.
+            # ``_client`` is None after ``dispose`` and for the whole window
+            # between a dropped socket and a reattach, which is precisely the
+            # disconnect-mid-recall case. Declining leaves the steer queued to
+            # ride the next boundary — what the press would have done anyway.
+            return False
+        self._recall_task = asyncio.ensure_future(self._resolve_recall(client, str(message.id)))
         return True
 
     async def _resolve_recall(self, client: AttachClient, command_id: str) -> None:

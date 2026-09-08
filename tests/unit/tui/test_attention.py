@@ -357,3 +357,64 @@ async def test_the_adopted_row_can_be_acknowledged(tmp_path, monkeypatch) -> Non
             if not session.store.state(session.identity)["unseen"]:
                 break
         assert not session.store.state(session.identity)["unseen"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_adoption_does_not_burn_the_held_row(tmp_path) -> None:
+    """A poll that cannot see the row must not consume the reference.
+
+    Round-1 review MAJOR-2. `self._own_interrupt_notice = None` ran BEFORE the
+    mounted-membership test, so a poll that legitimately could not adopt —
+    a sidebar switch parks the row in the other conversation's
+    `TranscriptView` — destroyed the reference anyway. On switching back the
+    poller then appended its `Interrupted` under the live `interrupted`,
+    restoring the duplicate row the adoption exists to remove.
+    """
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _interrupt_a_turn(app, pilot)
+        held = app._own_interrupt_notice
+        assert held is not None
+
+        # The row leaves the CURRENT view — what a sidebar switch does to it,
+        # and what `/clear` does permanently. Either way this poll cannot see
+        # it, and the question is whether the reference survives that.
+        app._transcript_view().remove_block(held)
+        await pilot.pause()
+        session.publish_interrupted()
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert app._adopt_own_interrupt_notice("interrupted", anchor) is False
+
+        assert app._own_interrupt_notice is held, "the reference survives a failed adoption"
+        assert not held.completion_anchor_id, "and nothing was stamped onto it"
+
+
+@pytest.mark.asyncio
+async def test_the_held_interrupt_row_rides_a_sidebar_switch(tmp_path) -> None:
+    """The row belongs to its conversation, so the presentation carries it.
+
+    Round-1 review MAJOR-2, second half. `SessionPresentation` did not carry
+    `own_interrupt_notice` at all, so a switch away dropped it even once the
+    burn above was fixed.
+    """
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _interrupt_a_turn(app, pilot)
+        held = app._own_interrupt_notice
+        assert held is not None
+
+        captured = app._capture_sidebar_presentation()
+        assert captured.own_interrupt_notice is held, "the switch carries it out"
+
+        # Whatever the app does while away, coming back restores the row.
+        app._own_interrupt_notice = None
+        app._apply_sidebar_presentation(captured)
+        assert app._own_interrupt_notice is held, "and back in"
+
+        # ...and it still adopts, so the duplicate never returns.
+        session.publish_interrupted()
+        await app._poll_completion_attention()
+        await pilot.pause()
+        assert _notice_texts(app) == ["interrupted"]

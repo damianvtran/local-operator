@@ -395,3 +395,41 @@ async def test_a_same_live_turn_rebind_still_seeds_what_the_gap_produced(
     ), f"re-seeding the start clears _started_tools and orphans the card: {types}"
     assert [event for event in received if isinstance(event, AgentEndEvent)] == []
     assert remote.is_streaming is True
+
+
+@pytest.mark.asyncio
+async def test_a_recall_with_no_client_declines_instead_of_claiming_success(
+    tmp_path, monkeypatch
+) -> None:
+    """``True`` is a promise the app commits to irreversibly.
+
+    Round-1 review MAJOR-1. ``recall_steering`` skipped issuing the op when
+    ``_client`` was None but still answered True — and True is what makes the
+    TUI put the text in the composer and remove the steer's rows. So the
+    message stayed queued on the owner, the composer held a copy, and no
+    rejection was ever reported because there was no request to fail: the
+    silent double-send this seam exists to remove, through another door.
+
+    ``_client`` is None after ``dispose`` and for the whole window between a
+    dropped socket and a reattach, which is the disconnect-mid-recall case
+    this file is about.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.harness.types import Message
+
+    remote = _facade(tmp_path, monkeypatch)
+    message = Message.user("use 0.75 for the direct API")
+    # The queue this follower BELIEVES the owner holds — the same replicated
+    # frontend state the real recall reads (`test_remote_refresh.py` stubs the
+    # store the same way).
+    remote._frontend_store = SimpleNamespace(  # type: ignore[assignment]
+        state=SimpleNamespace(queued_steering=[{"id": message.id, "text": message.text}])
+    )
+    refusals: list[str] = []
+    remote.set_recall_resolution(refusals.append)
+    assert remote._client is None, "the premise: this viewer has no socket"
+
+    assert remote.recall_steering(message) is False, "no client means no recall"
+    assert remote._recall_task is None, "and no op was issued"
+    await _cancel_recovery(remote)
