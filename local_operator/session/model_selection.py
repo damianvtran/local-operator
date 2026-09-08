@@ -26,13 +26,16 @@ class StoredModelSelection:
     effort: str | None = None
     authoritative: bool = False
     recovered: bool = False
+    # This is the conversation's birth selector, not the pair configured while
+    # constructing a resumed owner. Existing /effort journalling depends on it.
+    boot_selector: str | None = None
 
     @property
     def selector(self) -> str:
         return f"{self.provider}/{self.model_id}"
 
 
-def _selection(selector: Any, effort: Any, *, authoritative: bool = False):
+def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot: Any = None):
     if not isinstance(selector, str) or "/" not in selector:
         return None
     provider, model_id = selector.split("/", 1)
@@ -43,11 +46,18 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False):
     if get_provider_definition(provider) is None:
         return None
     return StoredModelSelection(
-        provider, model_id, effort if isinstance(effort, str) and effort else None, authoritative
+        provider,
+        model_id,
+        effort if isinstance(effort, str) and effort else None,
+        authoritative,
+        boot_selector=(
+            boot if isinstance(boot, str) and "/" in boot and all(boot.split("/", 1)) else None
+        ),
     )
 
 
 def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSelection | None:
+    """Resolve CUSTOM-entry payloads; both callers enforce the envelope first."""
     authoritative = None
     legacy = None
     unusable = False
@@ -62,6 +72,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 details.get("selector"),
                 details.get("effort"),
                 authoritative=version == SELECTION_VERSION,
+                boot=details.get("boot"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -80,6 +91,11 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                     model.get("reasoning_effort"),
                 )
                 if selected is not None:
+                    # A checkpoint refreshes the observed primary, not its
+                    # birth. Retain known provenance only for the SAME primary;
+                    # an abandoned old switch cannot lend its birth to a new one.
+                    if legacy is not None and legacy.selector == selected.selector:
+                        selected = replace(selected, boot_selector=legacy.boot_selector)
                     legacy = selected
     selected = authoritative or legacy
     return replace(selected, recovered=unusable) if selected is not None else None
@@ -100,7 +116,11 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
                         row = json.loads(line)
                     except (ValueError, TypeError):
                         continue
-                    if isinstance(row, dict) and isinstance(row.get("payload"), dict):
+                    if (
+                        isinstance(row, dict)
+                        and row.get("type") == "custom"
+                        and isinstance(row.get("payload"), dict)
+                    ):
                         yield row["payload"]
         except (OSError, UnicodeError):
             return

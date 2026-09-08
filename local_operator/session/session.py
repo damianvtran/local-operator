@@ -146,7 +146,7 @@ from local_operator.session.naming import (
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import CompactionOutcome
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
     open_todos,
@@ -1800,9 +1800,10 @@ class Session:
         #: is never tagged; ``_load_conversation_name`` sets it from the
         #: ``_is_unnamed_fork()`` verdict it already computes at construction.
         self._wears_inherited_title = False
-        # Birth provenance is diagnostic only. Shared defaults never own a
-        # running conversation; explicit resume flags are separately identified
-        # by the factory so synthesized bootstrap pairs cannot erase history.
+        # The birth selector also governs the existing effort-journalling
+        # policy. Restore its historical value on resume: the factory now
+        # configures the saved primary before construction, not today's default.
+        # Only deliberate flags, never synthesized pairs, may override history.
         self._boot_selector = f"{model.provider}/{model.model_id}"
         self._model_source = model_source
         self._explicit_model_choice = False
@@ -10707,13 +10708,17 @@ class Session:
         """Restore conversation identity independently of today's defaults."""
         from local_operator.session.model_selection import selection_from_payloads
 
-        saved = selection_from_payloads(row.payload for row in self._transcript.entries())
+        saved = selection_from_payloads(
+            row.payload for row in self._transcript.entries() if row.type == ENTRY_CUSTOM
+        )
         if self._model_source == "flag":
             return
         if saved is None:
             self._model_migration_notice = bool(self._transcript.entries())
             return
         selector, effort = saved.selector, saved.effort
+        if saved.boot_selector is not None:
+            self._boot_selector = saved.boot_selector
         self._selection_needs_initial_write = not saved.authoritative or saved.recovered
         self._model_migration_notice = saved.recovered
         if selector == self.model_label and effort == self._model.reasoning_effort:

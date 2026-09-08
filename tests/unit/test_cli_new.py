@@ -819,6 +819,57 @@ def test_main_exception_banner(tmp_home: Path, quiet_env: None, capsys) -> None:
     assert "Stack Trace" in err
 
 
+def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard the real nested viewer factory, not a free-standing helper."""
+    import threading
+
+    from local_operator import session_factory as factory_module
+
+    seen: dict[str, Any] = {"active": False, "config_threads": [], "model_threads": []}
+    original_resolve = factory_module.resolve_hosting_model
+
+    def config_manager(*args, **kwargs):
+        if seen["active"]:
+            seen["config_threads"].append(threading.get_ident())
+        return _fake_config_manager(*args, **kwargs)
+
+    def resolve_model(*args, **kwargs):
+        if seen["active"]:
+            seen["model_threads"].append(threading.get_ident())
+        return original_resolve(*args, **kwargs)
+
+    async def fake_cold(*args, **kwargs):
+        return object()
+
+    async def run_tui(session_factory, session_registry=None, **kwargs):
+        seen["loop_thread"] = threading.get_ident()
+        seen["active"] = True
+        try:
+            await session_factory()
+        finally:
+            seen["active"] = False
+        return 0
+
+    fake_tui = _fake_tui_module()
+    setattr(fake_tui, "run_tui", run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(factory_module, "resolve_hosting_model", resolve_model)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    with patch("sys.argv", ["program", "--hosting", "test", "--model", "captured-a"]):
+        assert main() == 0
+    for key in ("config_threads", "model_threads"):
+        assert seen[key], key
+        assert all(thread != seen["loop_thread"] for thread in seen[key]), key
+
+
 def test_main_interactive_tty_uses_tui(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

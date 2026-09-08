@@ -1609,10 +1609,17 @@ async def _prepare(
     provider; raises ``ValueError`` when hosting/model config is missing.
     ``cwd`` (default: process cwd) is the single working-directory source for
     the tool context, the session and MCP discovery."""
-    agent = resolve_agent(args, agent_registry)
-    hosting, model_name, model_source = resolve_hosting_model_with_source(
-        agent, args, config_manager
-    )
+    # Resolving a saved model now reads its journal, which can be large. Keep
+    # agent/profile I/O and identity resolution off the loop together, before
+    # the contiguous lease/claim critical section below. Snapshot the command
+    # first so /new or /resume cannot retarget an in-flight factory at the await.
+    args = argparse.Namespace(**vars(args))
+
+    def resolve_birth():
+        agent = resolve_agent(args, agent_registry)
+        return agent, resolve_hosting_model_with_source(agent, args, config_manager)
+
+    agent, (hosting, model_name, model_source) = await asyncio.to_thread(resolve_birth)
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)

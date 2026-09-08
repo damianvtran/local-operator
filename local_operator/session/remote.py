@@ -1704,10 +1704,20 @@ class RemoteSession:
         # Recovery already owns its dial/sync and signals _owner_ready. A
         # prompt or steer must wait on that promise, not start a competing
         # initial attachment merely because its connected socket is not ready.
-        if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
+        if not self._can_go_cold or self._disposed:
+            return
+        if self._recovering:
+            if self._model_selection_override:
+                raise ConnectionError("explicit model selection is waiting for its owner")
+            return
+        if not self.is_cold and not self._model_selection_override:
             return
         async with self._bind_lock_for(foreground=foreground):
             await self._bind_under_lock(foreground=foreground)
+            # Cover every winning-owner path, including another attach/recovery
+            # completing during an await. A failed model RPC is not a failed
+            # socket bind and must remain a visible, retryable pending intent.
+            await self._consume_model_override()
 
     @asynccontextmanager
     async def _bind_lock_for(self, *, foreground: bool) -> AsyncIterator[None]:
@@ -1756,7 +1766,9 @@ class RemoteSession:
         statement and cannot drift from the `finally` that clears it. Not a
         public seam: the guards below assume the lock is held.
         """
-        if not self.is_cold or self._disposed or self._recovering:
+        if self._disposed or self._recovering:
+            return
+        if not self.is_cold:
             return
         from local_operator.mobile.attach_client import find_owner_record
         from local_operator.session.runtime.launch import (
@@ -1792,9 +1804,6 @@ class RemoteSession:
                 preempt=preempt,
                 preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
             )
-            # The owner has now consumed startup intent. A later recovery must
-            # prefer its journal, including explicit switches made after boot.
-            self._model_selection_override = False
         except TimeoutError as error:
             # The engage ran out of deadline — either its own 30 s or, when a
             # foreground caller arrived, the yield budget above. Both mean the
@@ -1933,6 +1942,22 @@ class RemoteSession:
                 delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
         if last_error is not None:
             raise last_error
+
+    async def _consume_model_override(self) -> None:
+        """A warm engagement proves ownership exists, not that intent landed.
+
+        Another cold viewer may have started the winning owner with a different
+        selection. Only the existing model RPC's success acknowledgement means
+        this viewer's deliberate override was consumed. Keep it across failed
+        acknowledgements, and never promote an ordinary birth seed to a switch.
+        """
+        if not self._model_selection_override:
+            return
+        client, requested = self._client, self._birth_model
+        if client is None or requested is None or self._recovering or self.is_cold:
+            raise ConnectionError("explicit model selection is waiting for its owner")
+        await client.set_model(requested.provider, requested.model_id)
+        self._model_selection_override = False
 
     async def _bind_to(
         self,
@@ -2971,6 +2996,9 @@ class RemoteSession:
         if (
             selected is not None
             and selected.model_id
+            # The first winning-owner snapshot may still name another model;
+            # it must not overwrite explicit intent before the RPC consumes it.
+            and not self._model_selection_override
             and (
                 self._birth_model is None
                 or (self._birth_model.provider, self._birth_model.model_id)

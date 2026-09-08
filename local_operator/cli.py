@@ -4437,10 +4437,18 @@ def main() -> int:
                     birth_args.model = None
                 viewer_started = True
                 initial_model = None
-                try:
-                    provider, model_id = resolve_hosting_model(
-                        current_agent, birth_args, ConfigManager(config_directory)
+                birth_agent = current_agent
+
+                def resolve_birth():
+                    # Both the config and saved selection can require disk I/O.
+                    # The captured arguments above fix WHICH conversation this
+                    # read belongs to before yielding to the worker.
+                    return resolve_hosting_model(
+                        birth_agent, birth_args, ConfigManager(config_directory)
                     )
+
+                try:
+                    provider, model_id = await asyncio.to_thread(resolve_birth)
                     initial_model = ModelSpec(provider=provider, model_id=model_id)
                 except ValueError:
                     # Setup mode must still open without a configured model.

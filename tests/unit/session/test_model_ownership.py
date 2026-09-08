@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -62,6 +62,156 @@ async def test_unusable_legacy_selection_recovers_visibly_once(tmp_path):
         assert resumed.model.model_id == A.model_id
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_only_bookkeeping_envelopes_can_select_a_model(tmp_path):
+    from local_operator.harness.types import CustomMessage
+
+    directory = tmp_path / "sessions" / "envelopes"
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        "selected_model",
+        {
+            "version": 2,
+            "selector": "test/legitimate-a",
+        },
+    )
+    # A context message is valid, but its similarly named payload is not a
+    # bookkeeping entry. Disk and in-memory readers must enforce that boundary.
+    await transcript.append_message(
+        CustomMessage(
+            custom_type="selected_model",
+            details={"version": 2, "selector": "test/not-bookkeeping-b"},
+        )
+    )
+    indexed = transcript.latest_custom("selected_model")
+    saved = read_model_selection(directory)
+    assert indexed is not None and saved is not None
+    assert indexed["selector"] == saved.selector == "test/legitimate-a"
+    owner, stream = session(directory)
+    try:
+        await owner.prompt("use the real selection")
+        assert stream.requests[-1].model.model_id == "legitimate-a"
+    finally:
+        await owner.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_intent_survives_rpc_errors_and_owner_snapshots(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    async def no_takeover():
+        raise AssertionError("viewer cannot take ownership")
+
+    viewer = await RemoteSession.cold(
+        "intent",
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+        initial_model=B,
+        model_selection_override=True,
+    )
+    client = SimpleNamespace(
+        connected=True, set_model=AsyncMock(side_effect=[RuntimeError("refused"), "selected"])
+    )
+    viewer._client = cast(Any, client)
+    viewer._ready_for_events = True
+    viewer._install_frontend(
+        viewer.frontend_state.model_copy(
+            update={
+                "epoch": "winning-owner",
+                "selected_model": FrontendModelSpec(**A.model_dump()),
+            }
+        )
+    )
+    try:
+        with pytest.raises(RuntimeError, match="refused"):
+            await viewer._ensure_bound(foreground=True)
+        assert viewer._model_selection_override is True
+        assert viewer._birth_model is not None and viewer._birth_model.model_id == B.model_id
+        await viewer._ensure_bound(foreground=True)
+        assert viewer._model_selection_override is False
+        assert client.set_model.call_args_list[0].args == (B.provider, B.model_id)
+        assert client.set_model.call_args_list[1].args == (B.provider, B.model_id)
+    finally:
+        viewer._client = None
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_factory_resolves_birth_off_loop_with_arguments_captured_before_hop(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    import threading
+
+    from local_operator import session_factory
+    from local_operator.agents import AgentRegistry
+    from local_operator.credentials import CredentialManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config = ConfigManager(tmp_path)
+    config.update_config({"hosting": "test", "model_name": "default"})
+    args = argparse.Namespace(
+        hosting="test",
+        model="captured-a",
+        agent_id=None,
+        agent_name=None,
+        train=False,
+        yolo=True,
+        resume=None,
+    )
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered, release = asyncio.Event(), threading.Event()
+    observed = []
+    original_agent = session_factory.resolve_agent
+    original_model = session_factory.resolve_hosting_model_with_source
+
+    def resolve_agent(captured, registry):
+        loop.call_soon_threadsafe(entered.set)
+        assert threading.get_ident() != loop_thread, "agent I/O ran on the event loop"
+        observed.append(("agent", threading.get_ident()))
+        assert release.wait(20), "test did not release the resolver"
+        return original_agent(captured, registry)
+
+    def resolve_model(agent, captured, manager):
+        assert threading.get_ident() != loop_thread, "journal I/O ran on the event loop"
+        observed.append(("model", threading.get_ident()))
+        assert captured.model == "captured-a" and captured.resume is None
+        return original_model(agent, captured, manager)
+
+    monkeypatch.setattr(session_factory, "resolve_agent", resolve_agent)
+    monkeypatch.setattr(session_factory, "resolve_hosting_model_with_source", resolve_model)
+    task = asyncio.create_task(
+        session_factory.create_session(
+            args,
+            config,
+            CredentialManager(tmp_path),
+            AgentRegistry(tmp_path),
+            has_ui=False,
+            cwd=str(tmp_path),
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 20)
+        args.model, args.resume = "retargeted-b", "another-conversation"
+        release.set()
+        owner = await task
+        try:
+            assert owner.model.model_id == "captured-a"
+            assert [name for name, _ in observed] == ["agent", "model"]
+            assert len({thread for _, thread in observed}) == 1
+        finally:
+            await owner.dispose()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 A = ModelSpec(provider="test", model_id="conversation-a", context_window=100_000)

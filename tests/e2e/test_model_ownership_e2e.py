@@ -26,6 +26,122 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.asyncio
+async def test_competing_cold_resumes_acknowledge_explicit_model_on_winning_owner(headless_tui_env):
+    import asyncio
+
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.remote import RemoteSession
+    from tests.e2e.watchdog import bounded
+    from tests.unit.session.test_model_ownership import session
+
+    config = headless_tui_env
+    ConfigManager(config).update_config({"hosting": "test", "model_name": "default-c"})
+    sid = "competingmodel01"
+    saved, _ = session(
+        config / "sessions" / sid, model=ModelSpec(provider="test", model_id="original-a")
+    )
+    await saved.prompt("seed saved conversation")
+    await saved.dispose()
+
+    async def no_takeover():
+        raise AssertionError("viewer must not become the owner")
+
+    first = await RemoteSession.cold(
+        sid, config_dir=config, cwd=str(config), takeover_factory=no_takeover
+    )
+    second = await RemoteSession.cold(
+        sid,
+        config_dir=config,
+        cwd=str(config),
+        takeover_factory=no_takeover,
+        initial_model=ModelSpec(provider="test", model_id="explicit-b"),
+        model_selection_override=True,
+    )
+    calls, ended = [], asyncio.Event()
+
+    def observe(event):
+        if event.type == "provider_turn_start":
+            calls.append((event.provider, event.model_id))
+        if event.type == "agent_end":
+            ended.set()
+
+    second.subscribe(observe)
+    try:
+        with bounded(60, "competing cold model override"):
+            await first._ensure_bound(foreground=True)
+            await second._ensure_bound(foreground=True)
+            await second.prompt("use the deliberately selected model")
+            await ended.wait()
+        assert calls == [("test", "explicit-b")]
+        assert first.model.model_id == second.model.model_id == "explicit-b"
+        assert second._model_selection_override is False
+    finally:
+        if second._client is not None:
+            await second._client.request_stop()
+        await second.dispose()
+        await first.dispose()
+
+
+@pytest.mark.asyncio
+async def test_factory_resume_preserves_effort_journalling_for_explicit_selection(
+    headless_tui_env,
+    monkeypatch,
+):
+    from local_operator.model.configure import build_model_spec
+
+    config = headless_tui_env
+    ConfigManager(config).update_config({"hosting": "test", "model_name": "initial-a"})
+    calls = []
+    original_stream = MockClient.stream
+
+    async def recording(self, request, api_key, oauth_access=None):
+        calls.append(request.model.reasoning_effort)
+        async for event in original_stream(self, request, api_key, oauth_access):
+            yield event
+
+    monkeypatch.setattr(MockClient, "stream", recording)
+
+    async def build(resume=None):
+        return await create_session(
+            argparse.Namespace(
+                hosting=None,
+                model=None,
+                agent_name=None,
+                agent_id=None,
+                yolo=True,
+                train=False,
+                resume=resume,
+            ),
+            ConfigManager(config),
+            CredentialManager(config),
+            AgentRegistry(config),
+            has_ui=False,
+            cwd=str(config),
+        )
+
+    first = await build()
+    sid = first.session_id
+    try:
+        await first.prompt("birth")
+        first.set_model(build_model_spec("test", "claude-opus-5"), explicit=True)
+        await first.prompt("explicit selection")
+    finally:
+        await first.dispose()
+    resumed = await build(sid)
+    try:
+        resumed.set_model(resumed.model.model_copy(update={"reasoning_effort": "low"}))
+        await resumed.prompt("use low effort")
+    finally:
+        await resumed.dispose()
+    again = await build(sid)
+    try:
+        await again.prompt("resume low effort")
+        assert calls == [None, "high", "low", "low"]
+    finally:
+        await again.dispose()
+
+
+@pytest.mark.asyncio
 async def test_persisted_server_adapters_do_not_treat_defaults_as_explicit_flags(
     headless_tui_env: Path,
     monkeypatch: pytest.MonkeyPatch,
