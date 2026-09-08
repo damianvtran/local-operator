@@ -219,20 +219,16 @@ async def test_an_animated_page_up_mounts_exactly_one_page() -> None:
         await _press_and_settle(pilot, view, "pageup")
         assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
         assert len(view.blocks()) > before_blocks
-        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        assert view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS
 
 
 @pytest.mark.asyncio
 async def test_an_animated_home_mounts_one_page_and_lands_at_the_top() -> None:
-    """One animated Home mounts ONE page and lands at the TOP of it.
+    """Home requests one older rendered buffer without replacing the reading row.
 
-    The cascade this guards against was worst for Home: the whole remaining
-    conversation mounted in one keypress and the viewport landed
-    mid-conversation (y=146 of 270 on a 150-message session), because the Home
-    animation and the mount's anchor restore fought for the offset. The
-    gesture must be fast, mount one page, and leave the reader at the start
-    of what is rendered — not in the middle, and not needing a second press.
-    """
+    The retained content moves down the virtual canvas, and the scroll offset
+    must move with it. Pinning the fixed notice at zero was the old jitter bug.
+    A second Home is fresh input, not an automatic history-exhaustion loop."""
     session = FakeSession()
     session._history = _history(50)  # 150 messages; ~70 deferred
     app = OperatorApp(lambda: _factory(session))
@@ -247,7 +243,7 @@ async def test_an_animated_home_mounts_one_page_and_lands_at_the_top() -> None:
         # Exactly one page: the head shrank by one page, not to zero.
         assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
         # The reader landed AT THE TOP of what is rendered, not mid-page.
-        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        assert view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS
         first_users = [t for t in _user_texts(app)][:1]
         assert first_users, "a page mounted"
         # A second Home mounts the NEXT page (the gesture re-arms), and still
@@ -262,7 +258,7 @@ async def test_an_animated_home_mounts_one_page_and_lands_at_the_top() -> None:
             <= len(app._resume_pending_head)
             < (before_pending - RESUME_PAGE_MESSAGES)
         )
-        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        assert view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS
 
 
 @pytest.mark.asyncio
@@ -287,7 +283,7 @@ async def test_the_composer_pages_the_transcript_by_keyboard() -> None:
         assert composer_focused is not view
         await _press_and_settle(pilot, view, "ctrl+home")
         assert len(app._resume_pending_head) == before_pending - RESUME_PAGE_MESSAGES
-        assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+        assert view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS
         # Focus never left the composer — the reader can type immediately.
         assert app.focused is composer_focused
         await _press_and_settle(pilot, view, "ctrl+end")
@@ -388,32 +384,12 @@ async def test_scrolling_up_a_long_resume_reveals_older_rows_in_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
-    """Arriving at the top loads ONE page — and nothing more until the reader
-    actually travels away from the top rows and comes back.
+async def test_arriving_at_the_top_mounts_one_page_then_stops(monkeypatch) -> None:
+    """A held wheel can request more buffers, but resting never drains history.
 
-    The pre-fix trigger was LEVEL-triggered: after a page prepended, the
-    anchor restore parked the viewport back inside the trigger rows, the gate
-    released while the reader was still at the top, and the next watch firing
-    — the settle frames of the mount itself, or a wheel notch clamped against
-    the top — mounted another page, and another. To the reader that is "I
-    scroll to the top and it loads chunks one after another without me
-    scrolling up again". The trigger must be an EDGE, and the property that
-    makes it one is that NO page mounts without the reader having travelled
-    out of the trigger zone since the previous one.
-
-    Driven with real wheel events as a CONTINUED drag that does not stop at
-    the first mount (review round 1, M1: stopping there ends the gesture
-    exactly where a cascade would begin, so that shape passed pre-fix). The
-    drag runs in the rhythm a trackpad delivers — several notches per frame —
-    and then holds the wheel against the clamped top, where the offset cannot
-    move at all. On this view the violation is deterministic: a 40-row
-    viewport against a ~120-row page means the reader reaches the clamped top
-    long before the head is anywhere near exhausted, so pre-fix every mount
-    after the first happened with no travel at all (8 of 9 on a 600-message
-    session, 3/3 runs). Every mount is audited against the offset's peak
-    since the previous one.
-    """
+    Clamped upward notches are real input; no artificial down/up re-arm is
+    required. Once input stops, passive offset/layout callbacks cannot earn
+    another buffer."""
     session = FakeSession()
     session._history = _history(200)  # 600 messages; many pages available
     app = OperatorApp(lambda: _factory(session))
@@ -427,15 +403,15 @@ async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
         mounts = {"n": 0, "no_travel": 0, "first": True, "peak": 0.0}
         real_mount = OperatorApp._mount_older_resume_page
 
-        def auditing_mount(self: OperatorApp) -> None:
+        def auditing_mount(self: OperatorApp, *args: Any, **kwargs: Any) -> None:
             if not mounts["first"] and mounts["peak"] <= RESUME_PAGE_TRIGGER_ROWS:
                 mounts["no_travel"] += 1
             mounts["first"] = False
             mounts["n"] += 1
             mounts["peak"] = 0.0
-            real_mount(self)
+            real_mount(self, *args, **kwargs)
 
-        OperatorApp._mount_older_resume_page = auditing_mount  # type: ignore[method-assign]
+        monkeypatch.setattr(OperatorApp, "_mount_older_resume_page", auditing_mount)
 
         def notch() -> None:
             view.post_message(
@@ -471,13 +447,8 @@ async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
             await pilot.pause()
         OperatorApp._mount_older_resume_page = real_mount  # type: ignore[method-assign]
 
-        # The contract: a long drag may mount several pages (each genuine
-        # re-arrival at the top earns one), but NEVER without travel away
-        # from the zone since the previous page.
-        assert mounts["no_travel"] == 0, (
-            f"{mounts['no_travel']} of {mounts['n']} pages mounted with no "
-            "travel away from the trigger zone — the level-trigger cascade"
-        )
+        # Real upward notches may earn another page even when clamped.
+        # The invariant is that observations alone cannot continue loading.
         assert mounts["n"] >= 1, "the drag reached the top and mounted a page"
         # And once the gesture is over, parked wherever it left them, no
         # further page mounts however long the view idles.
@@ -495,7 +466,7 @@ async def test_arriving_at_the_top_mounts_one_page_then_stops() -> None:
             before = len(app._resume_pending_head)
             await _press_and_settle(pilot, view, "home")
             assert len(app._resume_pending_head) < before
-            assert view.scroll_offset.y <= RESUME_PAGE_TRIGGER_ROWS
+            assert view.scroll_offset.y > RESUME_PAGE_TRIGGER_ROWS
             for _ in range(60):
                 await pilot.pause()
             assert len(app._resume_pending_head) == before - RESUME_PAGE_MESSAGES
@@ -596,7 +567,7 @@ def test_resume_page_size_is_smaller_than_the_initial_bound() -> None:
     first-frame budget. The constants are the contract the measurements
     justified; drifting them silently would undo the 7× render win."""
     assert RESUME_RENDER_MESSAGES == 80
-    assert RESUME_PAGE_MESSAGES == 60
+    assert RESUME_PAGE_MESSAGES == 24
     assert RESUME_PAGE_MESSAGES < RESUME_RENDER_MESSAGES
 
 
@@ -732,21 +703,10 @@ async def test_a_resumed_long_single_turn_transcript_is_scrollable() -> None:
 
 @pytest.mark.asyncio
 async def test_the_fill_does_not_arm_or_consume_the_page_back_latch() -> None:
-    """The scrollability fill is not a gesture and must not spend one.
+    """Automatic rendered fill creates no user demand.
 
-    It runs outside the page-back latch by construction. If it armed
-    ``_resume_in_zone`` the reader's first scroll would collect a free extra
-    page; if it consumed one, that scroll's legitimate page would be swallowed.
-    Either way the hard-won "ONE page per user gesture" contract breaks, so it
-    is pinned rather than trusted.
-
-    PINNED AT 120x170, NOT 120x40, and that is the whole value of this test.
-    At 40 rows the frame is already scrollable, the fill returns at its
-    scrollable-exit having mounted NOTHING, and the assertion below reads back
-    a value no code touched — it passed while the latch was in fact being
-    consumed on every taller frame. A guard that cannot go red is worse than
-    no guard, so the size is chosen to be one where the fill really mounts.
-    """
+    The fill is independent of the input latch; a subsequent actual wheel
+    notch can arm demand even at a clamped top."""
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -776,34 +736,29 @@ async def test_the_fill_does_not_arm_or_consume_the_page_back_latch() -> None:
             "the fill mounted no pages at this size, so the latch assertion "
             "below would pin a value nothing touched"
         )
-        # The latch is still armed: the fill is not a gesture, so the reader's
-        # first arrival at the top is still owed a page.
-        assert app._resume_in_zone is True
+        # Automatic fill creates no demand; the next real input earns one.
+        assert app._resume_in_zone is False
         assert app._resume_paging is False
 
-        # And that first gesture mounts exactly ONE page, not the cascade.
+        # One requested rendered buffer may need several small raw slices.
         before = len(app._resume_pending_head)
         assert before
         await _press_and_settle(pilot, view, "ctrl+home")
-        assert len(app._resume_pending_head) == before - RESUME_PAGE_MESSAGES
+        remaining = len(app._resume_pending_head)
+        assert 0 < remaining < before
+        assert view.scroll_y >= view.container_size.height
+        for _ in range(8):
+            app._transcript_scrolled(None)
+            await pilot.pause()
+        assert len(app._resume_pending_head) == remaining
 
 
 @pytest.mark.asyncio
 async def test_a_wheel_reader_at_the_top_can_still_page_after_the_fill() -> None:
-    """The latch guarantee, from the READER's side rather than the flag's.
+    """A clamped wheel notch after fill is fresh upward demand.
 
-    The flag assertion above says the fill left the latch armed. This says what
-    that is FOR, through the only input that cannot re-arm it: a wheel notch
-    arriving while the viewport is already clamped at the top moves nothing, so
-    it is not evidence the reader left and came back, so it never re-arms. If
-    the fill spends the latch, such a reader is stuck forever — measured before
-    the fix as 60 settled notches at y=0 mounting exactly nothing, while the
-    first row of that transcript told them to scroll up.
-
-    A wheel gesture rather than a keypress on purpose: `pageup`, `home` and
-    `ctrl+home` are discrete acts and re-arm unconditionally, so they cannot
-    observe this defect at all.
-    """
+    It must not require an artificial downward movement before history can
+    continue loading."""
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -814,6 +769,8 @@ async def test_a_wheel_reader_at_the_top_can_still_page_after_the_fill() -> None
             await pilot.pause()
         before = len(app._resume_pending_head)
         assert before, "no deferred head to page"
+        # Start clamped: the amount of initial reserve is geometry-dependent.
+        view.scroll_to(y=0, animate=False, immediate=True)
 
         # Real wheel events through the widget's own input surface, which is
         # what routes through `note_user_scroll` and the latch. Enough notches
@@ -913,7 +870,7 @@ async def test_mounting_an_older_page_never_moves_the_rows_under_the_reader() ->
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_head_never_says_scroll_up_to_load() -> None:
+async def test_an_unreachable_head_never_says_scroll_up_to_load(monkeypatch) -> None:
     """The head notice is an instruction; it must only appear when it works.
 
     "older messages above — scroll up to load" is what the operator's frame
@@ -929,6 +886,15 @@ async def test_an_unreachable_head_never_says_scroll_up_to_load() -> None:
     still fit inside the viewport, so this reaches the state the same way a
     reader on a large display at a small font does.
     """
+    # Exercise notice fallback without the automatic post-projection fill.
+    original_start = OperatorApp._start_resume_fill
+    monkeypatch.setattr(
+        OperatorApp,
+        "_start_resume_fill",
+        lambda self, *, target=None: (
+            original_start(self, target=target) if target is not None else None
+        ),
+    )
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -969,7 +935,7 @@ async def test_an_unreachable_head_never_says_scroll_up_to_load() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_head_notice_stops_saying_unreachable_once_it_is_reachable() -> None:
+async def test_the_head_notice_stops_saying_unreachable_once_it_is_reachable(monkeypatch) -> None:
     """The notice must restate BOTH ways, not latch on its darkest state.
 
     ``_reconcile_head_notice`` only ever demoted: there was no path from
@@ -979,8 +945,17 @@ async def test_the_head_notice_stops_saying_unreachable_once_it_is_reachable() -
     the stale-copy failure `NoticeBlock.restate` exists to prevent, one state
     over from the one this file fixes.
     """
+    # Exercise notice fallback without the automatic post-projection fill.
+    original_start = OperatorApp._start_resume_fill
+    monkeypatch.setattr(
+        OperatorApp,
+        "_start_resume_fill",
+        lambda self, *, target=None: (
+            original_start(self, target=target) if target is not None else None
+        ),
+    )
     session = FakeSession()
-    session._history = _agentic_history(200, followups=1)
+    session._history = _agentic_history(600, followups=1)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 600)) as pilot:
         await _wait_for_resume(pilot, app)
@@ -1097,15 +1072,16 @@ async def test_the_fill_pages_a_remote_session_through_its_fetch_worker() -> Non
     app = OperatorApp(lambda: _factory(session))
     fetches = 0
 
-    async def fake_fetch(source: Any) -> None:
+    async def fake_fetch(source: Any, lease: Any = None, on_settled=None) -> None:
         # Stands in for the round trip: prepend a page's worth of history and
-        # release the gate, exactly as the real fetch does on success.
+        # hand the transaction's lease to the mount, exactly as the real fetch
+        # does on success.
         nonlocal fetches
         fetches += 1
         app._resume_pending_head = _agentic_history(30) + app._resume_pending_head
         if fetches >= 2:
             session.history_before_token = None
-        app._resume_paging = False
+        app._mount_older_resume_page(on_settled=on_settled, lease=lease)
 
     async with app.run_test(size=(120, 600)) as pilot:
         await _wait_for_resume(pilot, app)
@@ -1125,7 +1101,7 @@ async def test_the_fill_pages_a_remote_session_through_its_fetch_worker() -> Non
     # And it leaves the gate open, so a real gesture is not locked out.
     assert app._resume_paging is False
     # The latch is untouched by the fetch's own mount, same as the local path.
-    assert app._resume_in_zone is True
+    assert app._resume_in_zone is False
 
 
 @pytest.mark.asyncio
@@ -1241,7 +1217,7 @@ async def test_the_head_notice_tracks_a_resize_in_both_directions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_head_notice_tracks_content_growth_without_a_resize() -> None:
+async def test_the_head_notice_tracks_content_growth_without_a_resize(monkeypatch) -> None:
     """The general case the resize is one instance of (QA Q5).
 
     A live turn appending rows makes an unscrollable frame scrollable without
@@ -1250,6 +1226,15 @@ async def test_the_head_notice_tracks_content_growth_without_a_resize() -> None:
     the same reasoning ``TranscriptView._size_updated`` gives for the tail
     anchor: a rule keyed on the measurement holds for growth nobody enumerated.
     """
+    # Exercise notice fallback without the automatic post-projection fill.
+    original_start = OperatorApp._start_resume_fill
+    monkeypatch.setattr(
+        OperatorApp,
+        "_start_resume_fill",
+        lambda self, *, target=None: (
+            original_start(self, target=target) if target is not None else None
+        ),
+    )
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -1267,7 +1252,7 @@ async def test_the_head_notice_tracks_content_growth_without_a_resize() -> None:
         assert app_module.RESUME_UNREACHABLE_NOTICE in notices()
 
         # A turn's worth of output, appended the way live output arrives.
-        for i in range(400):
+        for i in range(viewport + 1):
             view.append_block(NoticeBlock(f"live row {i}", "info"))
         for _ in range(80):
             await pilot.pause()
@@ -1282,7 +1267,7 @@ async def test_the_head_notice_tracks_content_growth_without_a_resize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_head_notice_stops_being_a_control_once_it_is_inert() -> None:
+async def test_the_head_notice_stops_being_a_control_once_it_is_inert(monkeypatch) -> None:
     """A focus stop must not answer Enter with silence (design round 2, D7).
 
     The head notice restates rather than removing itself when the history runs
@@ -1295,6 +1280,15 @@ async def test_the_head_notice_stops_being_a_control_once_it_is_inert() -> None:
     what makes the row a control is `can_focus` and the class; the paint is
     downstream of both.
     """
+    # Exercise notice fallback without the automatic post-projection fill.
+    original_start = OperatorApp._start_resume_fill
+    monkeypatch.setattr(
+        OperatorApp,
+        "_start_resume_fill",
+        lambda self, *, target=None: (
+            original_start(self, target=target) if target is not None else None
+        ),
+    )
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -1330,7 +1324,9 @@ async def test_the_head_notice_stops_being_a_control_once_it_is_inert() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exhausting_the_focused_notice_lands_focus_on_the_visible_transcript() -> None:
+async def test_exhausting_the_focused_notice_lands_focus_on_the_visible_transcript(
+    monkeypatch,
+) -> None:
     """Say WHERE focus goes when the control retires, not merely that it left.
 
     The sibling guard above asserts the NEGATIVE — the exhausted row is no
@@ -1352,6 +1348,15 @@ async def test_exhausting_the_focused_notice_lands_focus_on_the_visible_transcri
     Drained through the control WITH FOCUS ON IT, which is the mouse route
     (focus-then-activate) and the only state in which the blur runs at all.
     """
+    # Exercise notice fallback without the automatic post-projection fill.
+    original_start = OperatorApp._start_resume_fill
+    monkeypatch.setattr(
+        OperatorApp,
+        "_start_resume_fill",
+        lambda self, *, target=None: (
+            original_start(self, target=target) if target is not None else None
+        ),
+    )
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)
     app = OperatorApp(lambda: _factory(session))
@@ -1446,9 +1451,10 @@ async def test_a_raising_fill_does_not_leave_the_pessimistic_copy_suppressed() -
             container_size=SimpleNamespace(height=40),
             size=SimpleNamespace(height=40),
             virtual_size=SimpleNamespace(height=10),
+            scroll_y=0,
         )
         app._transcript_view = lambda: unscrollable  # type: ignore[assignment]
-        app._resume_paging = False
+        app._paging_leases.clear()
         app._resume_pending_head = list(_history(4))
         app._resume_fill_active = True
 
