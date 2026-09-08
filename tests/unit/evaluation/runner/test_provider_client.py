@@ -2521,12 +2521,23 @@ async def test_a_byte_only_pass_whose_prune_fixes_the_bytes_buys_no_summary(tmp_
     )
 
     history: list[EpisodeTurn] = []
+    compactions = []
     for sequence in range(8):
         current = _fat_framed_observation(tmp_path, sequence, pixels=60_000)
         history.append(EpisodeTurn(observation=current))
         decision = await client.decide(current, tuple(history))
+        if decision.compaction is not None:
+            compactions.append(decision.compaction)
         history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
 
+    # The negative below is vacuous unless the byte trigger actually fired:
+    # pin that a pass RAN, pruned frames, and refused to summarise (round 3,
+    # F6). "prune" is what the record says when the gate refused after the
+    # frame prune stood.
+    assert compactions, "the byte trigger never fired; the assertions below prove nothing"
+    assert all(c.strategy == "prune" and c.frames_dropped > 0 for c in compactions), [
+        (c.strategy, c.frames_dropped) for c in compactions
+    ]
     final = stream.requests[-1].messages
     assert stream.summary_requests == [], (
         f"a byte-only pass bought {len(stream.summary_requests)} summary call(s) "
