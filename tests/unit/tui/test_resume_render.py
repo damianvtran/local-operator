@@ -1072,16 +1072,16 @@ async def test_the_fill_pages_a_remote_session_through_its_fetch_worker() -> Non
     app = OperatorApp(lambda: _factory(session))
     fetches = 0
 
-    async def fake_fetch(source: Any, on_settled=None) -> None:
+    async def fake_fetch(source: Any, lease: Any = None, on_settled=None) -> None:
         # Stands in for the round trip: prepend a page's worth of history and
-        # release the gate, exactly as the real fetch does on success.
+        # hand the transaction's lease to the mount, exactly as the real fetch
+        # does on success.
         nonlocal fetches
         fetches += 1
         app._resume_pending_head = _agentic_history(30) + app._resume_pending_head
         if fetches >= 2:
             session.history_before_token = None
-        app._resume_paging = False
-        app._mount_older_resume_page(on_settled=on_settled)
+        app._mount_older_resume_page(on_settled=on_settled, lease=lease)
 
     async with app.run_test(size=(120, 600)) as pilot:
         await _wait_for_resume(pilot, app)
@@ -1454,7 +1454,7 @@ async def test_a_raising_fill_does_not_leave_the_pessimistic_copy_suppressed() -
             scroll_y=0,
         )
         app._transcript_view = lambda: unscrollable  # type: ignore[assignment]
-        app._resume_paging = False
+        app._paging_leases.clear()
         app._resume_pending_head = list(_history(4))
         app._resume_fill_active = True
 

@@ -17,9 +17,10 @@ from local_operator.harness.types import Message, TextContent
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
+from local_operator.tui.widgets.transcript import GAP_CLASS
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -547,3 +548,186 @@ async def test_early_pageup_during_insert_keeps_native_animation_target() -> Non
         assert not app.animator.is_being_animated(view, "scroll_y")
         assert view.scroll_y == view.scroll_target_y
         assert not app._resume_paging and not app._resume_check_pending
+
+
+@pytest.mark.asyncio
+async def test_revisiting_a_cached_view_never_duplicates_or_retires_its_paging(tmp_path) -> None:
+    """A → B → cached A while a real RPC is held: one request, one owner.
+
+    The reviewer's F1: re-entry used to reset an app-global paging flag and
+    start a second fetch against the same cursor, and the FIRST completion
+    then cleared the newer transaction's gate and surfaced `history changed
+    while paging` to the reader.
+    """
+    async with (
+        remote_session(tmp_path, history()) as remote,
+        remote_session(tmp_path, history(count=1), name="target") as target,
+    ):
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            while app._resume_pending_head:
+                app._mount_older_resume_page()
+                await settled(app, pilot)
+
+            requests = 0
+            fetched = asyncio.Event()
+            release = asyncio.Event()
+            returned = asyncio.Event()
+            real_fetch = remote.load_older_display_page
+
+            async def delayed_completion():
+                nonlocal requests
+                requests += 1
+                rows = await real_fetch()
+                fetched.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    # Owner-side completion may resist viewer cancellation.
+                    await release.wait()
+                returned.set()
+                return rows
+
+            remote.load_older_display_page = delayed_completion
+            notices: list[str] = []
+            app._notice = lambda text, kind="info": notices.append(str(text))  # type: ignore
+
+            home = app._interaction
+            assert isinstance(app._resume_head_notice, OlderHistoryNotice)
+            app._resume_head_notice.action_older()
+            await asyncio.wait_for(fetched.wait(), 5)
+            assert app._resume_paging
+
+            # Away to B, then BACK to the cached A presentation.
+            away = SessionInteraction(target)
+            app._sidebar_sources[target.session_id] = away
+            sources = {target.session_id: away, remote.session_id: home}
+
+            async def lease(session_id, *, speculative=False):
+                chosen = sources[session_id]
+                chosen.preparations += 1
+                return chosen
+
+            app._lease_sidebar_source = lease
+            for session_id in (target.session_id, remote.session_id):
+                prepared = await app._prepare_sidebar_session(session_id)
+                ready = app._commit_sidebar_session(
+                    session_id, prepared, app._sidebar_navigation.generation
+                )
+                # Not `settled()`: that waits for the paging gate to clear, and
+                # this test is deliberately holding it across the round trip.
+                for _ in range(12):
+                    await pilot.pause()
+                if ready is not None and not ready.done():
+                    ready.cancel()
+
+            assert app._interaction is home
+            # The transaction survived the round trip, so the revisit neither
+            # started a second request nor found an open gate to spend.
+            assert requests == 1
+            assert app._resume_paging
+            view = app._transcript_view()
+            view.scroll_to(y=0, animate=False, immediate=True)
+            app._transcript_scrolled(True)
+            for _ in range(6):
+                await pilot.pause()
+            assert requests == 1
+
+            # The held completion now lands: it owns the gate, so it releases
+            # it exactly once, with no error surfaced to the reader.
+            before = len(app._resume_pending_head)
+            release.set()
+            await asyncio.wait_for(returned.wait(), 5)
+            await settled(app, pilot)
+            for _ in range(6):
+                await pilot.pause()
+            assert requests == 1
+            assert not app._resume_paging
+            assert len(app._resume_pending_head) >= before
+            assert not any("history changed while paging" in text for text in notices)
+            assert not notices, notices
+
+            # And a stale completion from that retired transaction cannot
+            # retire whatever the reader started afterwards.
+            stale = _PagingLease(source_token=home.token)
+            fresh = app._acquire_paging_lease(home)
+            assert fresh is not None
+            assert not app._release_paging_lease(stale)
+            assert app._resume_paging
+            assert app._release_paging_lease(fresh)
+            assert not app._resume_paging
+
+
+@pytest.mark.asyncio
+async def test_inserted_rows_never_paint_with_provisional_spacing() -> None:
+    """U1: newcomers carry their final gap on the frame they first appear.
+
+    Spacing used to be decided in `_settle_gaps`, one painted refresh after
+    the mount, so a reader whose upward scroll reached the new rows saw them
+    paint flush and then spread apart under an upward-moving finger.
+
+    Asserted on the newcomers themselves, not only on the retained anchor: the
+    y offset of every inserted block is compared across each compositor frame
+    of the insertion, and the gap class each one carries on its first visible
+    frame must equal the one it settles with.
+    """
+    session = FakeSession()
+    session._history = history()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await settled(app, pilot)
+        view = app._transcript_view()
+        view.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+
+        known = set(view.blocks())
+        frames: list[dict[int, tuple[int, bool]]] = []
+        refresh = app.screen._compositor_refresh
+
+        def capture() -> None:
+            refresh()
+            # Only rows actually inside the viewport: a block parked off screen
+            # has no painted position for a reader to see move.
+            frames.append(
+                {
+                    id(block): (
+                        block.region.y - view.content_region.y,
+                        block.has_class(GAP_CLASS),
+                    )
+                    for block in view.blocks()
+                    if block not in known
+                    and block.region.bottom > view.content_region.y
+                    and block.region.y < view.content_region.bottom
+                }
+            )
+
+        app.screen._compositor_refresh = capture
+        try:
+            app._mount_older_resume_page()
+            await settled(app, pilot)
+        finally:
+            app.screen._compositor_refresh = refresh
+
+        newcomers = [block for block in view.blocks() if block not in known]
+        assert newcomers, "no rows were inserted"
+        final = {id(block): block.has_class(GAP_CLASS) for block in newcomers}
+
+        seen: dict[int, tuple[int, bool]] = {}
+        for frame in frames:
+            for key, (y, gap) in frame.items():
+                assert gap == final[key], (
+                    "a newly inserted row painted with provisional spacing "
+                    "before its gap settled (U1)"
+                )
+                if key in seen:
+                    assert seen[key][0] == y, (
+                        f"visible inserted row moved {seen[key][0]} -> {y} "
+                        "between painted frames"
+                    )
+                seen[key] = (y, gap)
+        assert seen, "no inserted row was ever visible during the insertion"

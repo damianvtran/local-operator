@@ -3094,6 +3094,34 @@ class TranscriptView(ScrollableContainer):
         # causes is already corrected; `_size_updated` fires during mount.
         if anchor_block is not None and not following_tail:
             self._insert_anchor = (anchor_block, anchor_gap)
+        # Spacing is decided BEFORE the mount, not after a painted refresh.
+        # `_settle_gaps` alone runs one refresh late, so a reader whose
+        # uninterrupted upward scroll reached the newcomers saw them paint
+        # flush and then spread apart under a finger moving the other way
+        # (UX round 1, U1: rows 0727..0731 at y=0,1,2,3,4 becoming 0,2,4,6,8
+        # between two consecutive compositor frames, MouseScrollUp only).
+        #
+        # The width these blocks will be given is known here — they are
+        # about to become children of this container — so the hint lets
+        # `spans_multiple_rows` fold at the real width instead of the 80-column
+        # fallback an unparented block measures against. Without it a wrapping
+        # block answers for the wrong terminal and the pre-decided gap is the
+        # wrong one, which would trade a late gap for a wrong gap.
+        fold = self.scrollable_content_region.width
+        for block in additions:
+            if fold:
+                block.set_fold_hint(fold)
+            block.invalidate_row_measurements()
+        previous = self._anchor_before(index)
+        for block in additions:
+            self._apply_gap(previous, block)
+            if not block.SPACING_TRANSIENT:
+                previous = block
+        # The block that FOLLOWED the seam now has a different neighbour above
+        # it, and it is on screen — so its gap is settled in the same pass
+        # rather than one refresh later.
+        if index < len(self._blocks):
+            self._apply_gap(previous, self._blocks[index])
         before = self._blocks[index] if index < len(self._blocks) else None
         if before is None:
             self.mount(*additions)
@@ -3111,6 +3139,14 @@ class TranscriptView(ScrollableContainer):
             self._scroll_to_tail()
 
         def settle_then_restore() -> None:
+            # The pre-mount pass above already gave every newcomer its gap, so
+            # this is a CONFIRMATION against real laid-out widths rather than
+            # the first decision: `spans_multiple_rows` is re-answered now that
+            # each block has its own size, and `_settle_gaps` is idempotent
+            # (it re-applies the same class and nothing repaints) whenever the
+            # hinted width and the assigned width agree, which is the common
+            # case. Keeping it is what makes an unhinted or re-wrapped block
+            # converge instead of keeping a guess.
             self._settle_gaps(additions)
             self._remeasure_empty_state()
 
@@ -3859,7 +3895,16 @@ class TranscriptView(ScrollableContainer):
         was pressed, and a stream that grows during the glide lands the reader
         short of the new end — where ``watch_scroll_y`` correctly concludes they
         are not at the bottom and releases the anchor they had just asked for.
+
+        Announced as DOWNWARD input, through the same provenance every other
+        key uses. `end` is the most explicit downward gesture there is, and a
+        tail request that stayed silent left a delayed anchor restore free to
+        pull the reader back off the end they had just asked for. Reporting it
+        as `upward=False` also retires any older upward demand, exactly as a
+        `pagedown` does: the reader travelling to the newest content is not
+        asking for older history.
         """
+        self.note_user_scroll(upward=False)
         if self._on_tail_requested is not None:
             self._on_tail_requested()
         self.follow_tail()

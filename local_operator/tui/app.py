@@ -1050,6 +1050,28 @@ RESUME_START_NOTICE = "start of conversation"
 RESUME_UNREACHABLE_NOTICE = "older messages above — select to load"
 
 
+@dataclass(frozen=True)
+class _PagingLease:
+    """Ownership of ONE backward-paging transaction, request through settle.
+
+    The gate used to be an app-global boolean, which cannot answer "whose
+    fetch is this?" once a reader leaves a conversation and comes back to its
+    CACHED presentation: re-entry reset the flag, a second fetch started for
+    the same source, and the first fetch's completion then cleared the newer
+    transaction's gate and reported `history changed while paging` to the user
+    (review round 1, F1).
+
+    So ownership is a per-source object identity that survives presentation
+    changes. It deliberately does NOT carry the view or the navigation
+    generation: those fence PUBLICATION (may this completion touch the screen)
+    and are checked separately. Ownership answers a different question — may
+    this completion open the gate — and the honest answer is "only if the gate
+    is still the one it took", which is object identity and nothing else.
+    """
+
+    source_token: str
+
+
 def _resume_tail_start(history: list[Any], bound: int) -> int:
     """Index of the first message the initial resume frame should paint.
 
@@ -2525,7 +2547,12 @@ class OperatorApp(App[None]):
         #: the entire deferred head (522 messages on a 600-message probe), the
         #: unbounded render cost this bound exists to remove. Cleared by the
         #: settle callback `insert_blocks` schedules, never synchronously.
-        self._resume_paging = False
+        #:
+        #: Keyed by SOURCE TOKEN rather than held as one app-global flag, so an
+        #: outstanding transaction survives switching away and back to a cached
+        #: presentation: `_resume_paging` reads the current source's entry, and
+        #: only the transaction holding an entry may remove it (F1).
+        self._paging_leases: dict[str, _PagingLease] = {}
         #: Whether the INITIAL fill still has an attempt to make. Distinct from
         #: `_resume_paging`, which is a mutex over the mount seam: this asks
         #: "is the geometry on screen still provisional?", and it stays set
@@ -3603,7 +3630,9 @@ class OperatorApp(App[None]):
         self._welcome = presentation.welcome
         self._welcome_visible = None
         # Gesture tasks belong to the abandoned viewport, not its history.
-        self._resume_paging = False
+        # The paging LEASE is deliberately not touched: it belongs to the
+        # source, not to the presentation, and clearing it here is what let a
+        # revisit start a second fetch that the first one then retired (F1).
         self._resume_fill_active = False
         self._resume_check_pending = False
         self._resume_in_zone = False
@@ -6399,7 +6428,9 @@ class OperatorApp(App[None]):
         self._resume_results = {}
         self._resume_head_notice = None
         self._resume_mounted_ids.clear()
-        self._resume_paging = False
+        # This source's history is being rebuilt from scratch, so any page it
+        # still owes is about a transcript that no longer exists.
+        self._paging_leases.pop(self._interaction.token, None)
         # A check queued for the OLD conversation must not fire against the
         # new one; a fresh head has no gesture in flight worth answering.
         self._resume_check_pending = False
@@ -6520,9 +6551,15 @@ class OperatorApp(App[None]):
         if self._resume_pending_head:
             self._mount_older_resume_page(on_settled=settled)
         elif self._session is not None and getattr(self._session, "history_before_token", None):
-            self._resume_paging = True
+            lease = self._acquire_paging_lease(source)
+            if lease is None:
+                # A prior transaction for this source is still outstanding —
+                # including one started before a switch away and back. Filling
+                # resumes from that transaction's own settle callback rather
+                # than sending a second request against the same cursor (F1).
+                return
             self.run_worker(
-                self._fetch_older_display_page(source, on_settled=settled),
+                self._fetch_older_display_page(source, lease, on_settled=settled),
                 group=source.worker_group("history-page"),
             )
         else:
@@ -6753,14 +6790,25 @@ class OperatorApp(App[None]):
             self._resume_tail_notice = None
 
     async def _fetch_older_display_page(
-        self, source: SessionInteraction, on_settled: Callable[[], None] | None = None
+        self,
+        source: SessionInteraction,
+        lease: _PagingLease,
+        on_settled: Callable[[], None] | None = None,
     ) -> None:
-        """Keep the same single-flight lease from remote request through paint.
+        """Hold ONE transaction's lease from remote request through paint.
 
         Network completion is not insertion completion. Releasing in finally
         after scheduling an insert admitted a second page into unsettled DOM
-        and let the fill measure provisional heights. Transfer the lease to
-        the mount callback instead, fenced by source, navigation and view.
+        and let the fill measure provisional heights, so the lease is instead
+        transferred to the mount callback.
+
+        Two distinct questions are asked separately, and conflating them is
+        what F1 reported. PUBLICATION — may these rows touch the screen — is
+        answered by source, view and navigation generation. OWNERSHIP — may
+        this completion open the gate or retire the fill — is answered only by
+        `_release_paging_lease`, which compares identity: after a switch away
+        and back to the cached presentation, a stale completion matches the
+        source and the view yet must not retire the newer transaction.
         """
         session = source.session
         view = self._transcript_view()
@@ -6774,6 +6822,9 @@ class OperatorApp(App[None]):
                 and self._transcript is view
                 and self._sidebar_navigation.generation == generation
             )
+
+        def owns() -> bool:
+            return self._paging_leases.get(lease.source_token) is lease
 
         try:
             from local_operator.session.remote import RemoteSession
@@ -6794,22 +6845,31 @@ class OperatorApp(App[None]):
                     message, "tool_call_id", None
                 ):
                     self._resume_results[message.tool_call_id] = message
-            if current() and self._resume_pending_head:
-                self._mount_older_resume_page(on_settled=on_settled, gate_held=True)
+            if current() and owns() and self._resume_pending_head:
+                self._mount_older_resume_page(on_settled=on_settled, lease=lease)
                 transferred = True
         except Exception as exc:
-            if current():
+            if current() and owns():
                 self._resume_fill_active = False
                 self._notice(f"Could not load earlier messages: {exc}", "error")
         finally:
-            if self._is_current(source) and self._transcript is view and not transferred:
-                self._resume_paging = False
+            # `transferred` means the mount now carries the lease to its settle.
+            # Otherwise this transaction ends here, and only it may end itself.
+            if not transferred and self._release_paging_lease(lease):
                 if current() and completed and on_settled is not None:
                     on_settled()
                 else:
                     self._resume_fill_active = False
-                self._reconcile_head_notice()
-                self._transcript_scrolled(None)
+                # `view.parent` as well as identity: a transaction can settle
+                # while Textual is tearing this surface down, and re-deriving
+                # the transcript from the DOM there raises `NoMatches`.
+                if (
+                    self._is_current(source)
+                    and self._transcript is view
+                    and view.parent is not None
+                ):
+                    self._reconcile_head_notice()
+                    self._transcript_scrolled(None)
 
     def _transcript_extent_changed(self) -> None:
         """Re-decide the head notice whenever the geometry it describes moves.
@@ -6841,6 +6901,40 @@ class OperatorApp(App[None]):
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
+
+    @property
+    def _resume_paging(self) -> bool:
+        """Whether the CURRENT source owes a page it has not finished painting."""
+        return self._interaction.token in self._paging_leases
+
+    def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
+        """Take the backward-paging gate for ``source``, or refuse.
+
+        Refusing rather than queueing is the whole single-flight contract: a
+        second request for a source whose fetch is still outstanding is the
+        duplicate RPC F1 reported, and the cursor it would send is the one the
+        first request is already consuming (`history changed while paging`).
+        """
+        if source.token in self._paging_leases:
+            return None
+        lease = _PagingLease(source_token=source.token)
+        self._paging_leases[source.token] = lease
+        return lease
+
+    def _release_paging_lease(self, lease: _PagingLease | None) -> bool:
+        """Drop ``lease`` only if it is still the holder. Returns whether it was.
+
+        Identity, not source equality: a stale completion arriving after a
+        revisit names the same source as the transaction now in flight, and
+        letting it release on that basis is exactly the bug — the newer fetch
+        loses its gate while it is still running.
+        """
+        if lease is None:
+            return False
+        if self._paging_leases.get(lease.source_token) is not lease:
+            return False
+        del self._paging_leases[lease.source_token]
+        return True
 
     def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
         """Coalesce real upward input, never infer demand from layout motion.
@@ -6915,7 +7009,7 @@ class OperatorApp(App[None]):
             self._fill_resume_until_scrollable(target=view.scroll_y + viewport)
 
     def _mount_older_resume_page(
-        self, on_settled: Callable[[], None] | None = None, *, gate_held: bool = False
+        self, on_settled: Callable[[], None] | None = None, *, lease: _PagingLease | None = None
     ) -> None:
         """Mount the next older page of a bounded resume, at the top.
 
@@ -6949,9 +7043,16 @@ class OperatorApp(App[None]):
         the unbounded render cost this bound exists to remove, paid
         mid-interaction on the very sessions it targets.
         """
-        if (self._resume_paging and not gate_held) or not self._resume_pending_head:
+        if not self._resume_pending_head:
             return
-        self._resume_paging = True
+        source = self._interaction
+        if lease is None:
+            # A gesture-driven mount opens its own transaction; a fetch hands
+            # over the one it already holds so the gate is never briefly free
+            # between the network completing and the rows being painted.
+            lease = self._acquire_paging_lease(source)
+            if lease is None:
+                return
         head = self._resume_pending_head
         # Same turn-boundary snap as the initial cut: a page that opened on
         # a tool result whose call is still in the remaining head would
@@ -6981,20 +7082,22 @@ class OperatorApp(App[None]):
             # the input lease stuck after a malformed persisted row.
             self._resume_pending_head = head
             self._resume_mounted_ids.intersection_update(mounted_ids)
-            self._resume_paging = False
+            self._release_paging_lease(lease)
             self._resume_fill_active = False
             raise
-        source = self._interaction
         generation = self._sidebar_navigation.generation
 
         def release_gate() -> None:
-            # A hidden/replaced view cannot release the new view's lease.
+            # A hidden/replaced view cannot release the new view's lease, and
+            # a completion that no longer holds the gate cannot release it at
+            # all — that identity check is F1's remediation.
+            if not self._release_paging_lease(lease):
+                return
             if not self._is_current(source) or self._transcript is not transcript:
                 return
             if self._sidebar_navigation.generation != generation:
                 # A failed/cancelled navigation can leave THIS view active.
-                # Retire its old lease without continuing superseded fill.
-                self._resume_paging = False
+                # Retire the fill without continuing superseded work.
                 self._resume_fill_active = False
                 self._reconcile_head_notice()
                 return
@@ -7006,7 +7109,7 @@ class OperatorApp(App[None]):
             # Releasing any earlier re-opens the gate while an animated page-up
             # is still crossing the trigger row, and the next animation frame
             # mounts another page.
-            self._resume_paging = False
+            #
             # This page changed both terms the head notice is decided from —
             # how much history is left, and whether the frame can reach it —
             # so restate it from the geometry this mount just produced. Without
