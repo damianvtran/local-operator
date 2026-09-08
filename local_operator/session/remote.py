@@ -616,6 +616,13 @@ class RemoteSession:
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
+        # Esc-recall's twin of the pair above: the synchronous protocol method
+        # answers optimistically from local state and the owner's REJECTION —
+        # the steer was already drained — comes back through this callback, so
+        # the app can warn instead of leaving the user to press Enter on a
+        # composer whose text is still queued (a silent double-send).
+        self._recall_resolution: Callable[[str], None] | None = None
+        self._recall_task: asyncio.Task[None] | None = None
         # Teams and agent profiles are LOCAL CONFIG, not runtime state: they
         # live in `<config_dir>/teams` and `<config_dir>/agents`, the same
         # files `lop team`/`lop agents` read with no session at all. So a
@@ -4631,13 +4638,53 @@ class RemoteSession:
         ]
 
     def recall_steering(self, message: Any) -> bool:
+        """Optimistic unsend: True means the op was ISSUED, not that it landed.
+
+        ``SessionProtocol.recall_steering`` is synchronous — the Esc handler
+        reads its answer inline — but the authoritative queue lives on the
+        owner across a socket, so the real outcome arrives later. The follower
+        answers from the state it holds and reports the owner's verdict through
+        the ``_recall_resolution`` callback the app installs, exactly as
+        ``cancel_subagents`` does for its count.
+
+        The verdict matters because a REJECTION strands the user. By the time
+        the owner answers ``that steering message is no longer queued`` the app
+        has already put the text in the composer and removed the steer's rows,
+        so the message is both still queued on the owner AND sitting in the
+        composer ready for Enter — press it and the same message is delivered
+        twice. That is the double-send this seam exists to report rather than
+        swallow: previously the rejection surfaced only as an unretrieved task
+        exception in the log.
+        """
         ids = {str(item.get("id", "") or "") for item in self.frontend_state.queued_steering}
         if str(getattr(message, "id", "") or "") not in ids:
             return False
         client = self._client
         if client is not None:
-            asyncio.create_task(client.recall_steer(str(message.id)))
+            self._recall_task = asyncio.ensure_future(self._resolve_recall(client, str(message.id)))
         return True
+
+    async def _resolve_recall(self, client: AttachClient, command_id: str) -> None:
+        """Tell the app whether the owner actually unsent the steer."""
+        try:
+            await client.recall_steer(command_id)
+        except Exception:
+            # Every failure shape is the same fact to the user: the composer
+            # holds text the owner may still deliver. A lost socket cannot be
+            # told apart from an explicit rejection here, and guessing wrong
+            # in the quiet direction is what produces a silent double-send.
+            resolver = self._recall_resolution
+            if resolver is not None:
+                resolver(command_id)
+
+    def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
+        """Install the app's handler for a recall the owner did NOT honour.
+
+        Called with the recalled message's command id when the op failed, so
+        the app can warn that the steer may still be delivered. ``None``
+        disarms it.
+        """
+        self._recall_resolution = resolver
 
     def abort(self, reason: str = "interrupted") -> None:
         client = self._client

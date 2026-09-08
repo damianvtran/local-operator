@@ -182,3 +182,178 @@ async def test_overlay_scrollback_and_blur_do_not_acknowledge(tmp_path, monkeypa
         await pilot.pause()
         await app._poll_completion_attention()
         assert session.store.state("session/sess")["unseen"]
+
+
+class InterruptSession(FakeSession):
+    """An attention-backed fake with nothing published until a test says so.
+
+    ``ReceiptSession`` publishes a COMPLETE outcome in its constructor. The
+    duplicate-row defect needs the opposite order — the app paints its own
+    live row first, and the durable ``interrupted`` outcome is published
+    afterwards, exactly as a real session does (it mints
+    ``completion-<token>`` when it publishes, which is strictly after the turn
+    has ended on screen).
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.store = AttentionStore(path)
+        self.identity = "session/interrupted"
+
+    def publish_interrupted(self) -> str:
+        token = str(uuid.uuid4())
+        self.store.publish(self.identity, token, f"completion-{token}", "interrupted")
+        return token
+
+    async def refresh_attention(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self.store.state, self.identity)
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self.store.acknowledge, self.identity, token)
+
+
+async def _interrupt_a_turn(app: OperatorApp, pilot: Any) -> None:
+    """Run a turn to the point where the app has painted its own abort row."""
+    from local_operator.tui.events import TurnEnded, TurnStarted
+    from local_operator.tui.widgets.editor import Editor
+
+    for _ in range(200):
+        if app._session is not None:
+            break
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+    editor = app.query_one(Editor)
+    editor.focus()
+    editor.text = "run the long job"
+    await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+    app.post_message(TurnStarted())
+    await pilot.pause()
+    app.post_message(TurnEnded(True, None))
+    await pilot.pause()
+    await pilot.pause()
+
+
+def _notice_texts(app: OperatorApp) -> list[str]:
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    return [
+        block._text for block in app._transcript_view().blocks() if isinstance(block, NoticeBlock)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_interruption_is_stated_once(tmp_path) -> None:
+    """Two producers, one outcome, one row.
+
+    ``_finalize_turn`` announces the abort live; the attention poller reads the
+    same interruption back out of the durable store a tick later and appended a
+    SECOND row, because its only dedupe is ``completion_anchor_id`` and the
+    live row cannot carry one (the anchor does not exist until the session
+    publishes). The user saw ``! interrupted`` above ``· Interrupted``.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _interrupt_a_turn(app, pilot)
+        assert _notice_texts(app) == ["interrupted"], "the turn states its own outcome"
+
+        # Now the session publishes that same interruption durably.
+        token = session.publish_interrupted()
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        assert _notice_texts(app) == ["interrupted"], "and it is not restated"
+        # The live row ADOPTED the anchor rather than being shadowed by a
+        # second one, which is what lets looking at it mark the outcome read.
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert [
+            block.completion_anchor_id
+            for block in app._transcript_view().query(NoticeBlock)
+            if block.completion_anchor_id
+        ] == [anchor]
+        assert token
+
+
+@pytest.mark.asyncio
+async def test_an_interruption_this_app_never_painted_still_gets_a_row(tmp_path) -> None:
+    """The poller keeps the case it exists for: a session that stopped away.
+
+    Proves the fix suppresses a DUPLICATE, not the attention notice itself —
+    with no live row to adopt, a user returning to the session must still be
+    told it was interrupted.
+    """
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        # No turn ran in THIS app; the outcome was produced elsewhere.
+        session.publish_interrupted()
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        assert _notice_texts(app) == ["Interrupted"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_outcome_never_adopts_an_earlier_turns_row(tmp_path) -> None:
+    """The held row is turn-scoped: a new turn makes it unadoptable.
+
+    Otherwise a second interruption would stamp its anchor onto the FIRST
+    turn's row — marking an old outcome read while the new one gets no row at
+    all.
+    """
+    from local_operator.tui.events import TurnStarted
+
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _interrupt_a_turn(app, pilot)
+        assert _notice_texts(app) == ["interrupted"]
+
+        # A NEW turn opens, and only then does an outcome get published.
+        app.post_message(TurnStarted())
+        await pilot.pause()
+        session.publish_interrupted()
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        assert _notice_texts(app) == ["interrupted", "Interrupted"]
+
+
+@pytest.mark.asyncio
+async def test_the_adopted_row_can_be_acknowledged(tmp_path, monkeypatch) -> None:
+    """Adoption stamps a real anchor, so looking at the row marks it read.
+
+    Not incidental to the duplicate fix but the other half of it. The receipt
+    is cleared by `_completion_anchor_visible` finding the ANCHORED block in
+    the viewport; suppressing the poller's row without stamping the live one
+    would leave an interruption the user is looking at permanently unseen, and
+    the sidebar flagging a session whose outcome is on screen.
+    """
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    session = InterruptSession(tmp_path / "attention.db")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _interrupt_a_turn(app, pilot)
+        session.publish_interrupted()
+        app.on_app_focus(AppFocus())
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert app._completion_anchor_visible(anchor), "the adopted row is the anchor"
+        # Wait on the acknowledgement the poll publishes, not on a clock.
+        for _ in range(20):
+            await app._poll_completion_attention()
+            await pilot.pause()
+            if not session.store.state(session.identity)["unseen"]:
+                break
+        assert not session.store.state(session.identity)["unseen"]

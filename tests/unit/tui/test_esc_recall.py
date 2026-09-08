@@ -8,10 +8,14 @@ the engine's steering queue, its rows (the user row, its images, the queued
 receipt) leave the transcript, and the composer holds the text ready for an
 immediate edit-and-resend.
 
-The pairing is by IDENTITY: the app hands the session the very ``Message`` it
-queued (``steer_message``), so a recall can name exactly the object the
-composer is about to hold — equal-but-distinct messages, older steers, and
-wake deliveries that ride the same queue are never what a recall removes.
+The pairing is by MESSAGE ID, with object identity kept as a fast path. The
+app hands the session the very ``Message`` it queued (``steer_message``), and
+the in-process ``Session`` gives that object back — but a ``RemoteSession``
+rebuilds its queue snapshot out of serialized frontend state, so on every
+daemon-attached session the objects differ and only the id survives. The id is
+what the recall already crosses the process boundary on (``command_id``), so
+it is the seam's real identity; older steers and wake deliveries that ride the
+same queue are still never what a recall removes.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
     QUEUED_STEER_NOTICE,
+    RECALL_UNCONFIRMED_NOTICE,
     SENT_STEER_NOTICE,
     OperatorApp,
 )
@@ -398,3 +403,139 @@ async def test_the_session_recall_is_identity_scoped(tmp_path: Path) -> None:
     session.steer_message(first)
     drained = await session._drain_steering()
     assert [getattr(m, "text", "") for m in drained] == ["same text"]
+
+
+class _RemoteLikeStreaming(_Streaming):
+    """A mid-turn fake with ``RemoteSession``'s queued_steering semantics.
+
+    The in-process ``Session`` drains and re-puts the very objects it was
+    handed, so a snapshot's entries ARE the app's messages.
+    ``RemoteSession.queued_steering`` cannot do that: the queue lives in
+    another process and reaches this one as serialized frontend state, so it
+    rebuilds a fresh ``Message`` per item on every call. Equal ids, never the
+    same object — which is what the TUI's pointer-identity match silently
+    failed on for every daemon-attached session.
+
+    Modelled rather than driven through a real socket because the property
+    under test is the app's matching rule, not the transport: what a fake can
+    get wrong here is only whether it rebuilds, and it does.
+    """
+
+    def steer_message(self, message: Any) -> None:
+        # Stored as the WIRE shape (a dict), so no Message object survives in
+        # this fake for the app to accidentally match by identity.
+        self._steering_queue.append({"id": message.id, "text": message.text})
+
+    def queued_steering(self) -> list[Any]:
+        return [Message.user(item["text"], id=item["id"]) for item in self._steering_queue]
+
+    def recall_steering(self, message: Any) -> bool:
+        wanted = str(getattr(message, "id", "") or "")
+        for index, item in enumerate(self._steering_queue):
+            if item["id"] == wanted:
+                del self._steering_queue[index]
+                return True
+        return False
+
+
+@pytest.mark.asyncio
+async def test_esc_recalls_a_steer_from_a_session_that_rebuilds_its_queue() -> None:
+    """The daemon case: equal-but-distinct messages must still be recallable.
+
+    Pointer identity was a single-process assumption. Every session attached
+    to a ``kind=daemon`` runtime goes through ``RemoteSession``, whose
+    ``queued_steering`` rebuilds its entries, so the match found nothing and
+    Esc-recall was a total, SILENT no-op there — the message stayed queued and
+    was delivered anyway, while the user believed they had taken it back.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "Ok after you did that, it seems to work now")
+        assert len(session.queued_steering()) == 1
+        # The premise of the test: nothing in the snapshot IS the held object.
+        held = app._held_steer_blocks[-1][0]
+        snapshot = session.queued_steering()
+        assert not any(item is held for item in snapshot), "the fake must rebuild"
+        assert snapshot[0].id == held.id, "...while preserving the id"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Unsent: the message left the queue, so it cannot ride a later
+        # boundary and be delivered a second time.
+        assert session.queued_steering() == []
+        assert editor.text == "Ok after you did that, it seems to work now"
+        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert _user_texts(app) == []
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_queue_id_declines_instead_of_guessing() -> None:
+    """An id that names two queue entries is not an identity, so it must not match.
+
+    ``RemoteSession.queued_steering`` substitutes the literal ``remote-steer``
+    for a wire item carrying no id, and any wire that repeats an id has the
+    same shape: one key, several messages. Matching on it would unsend one
+    message while handing the composer another one's text. The recall declines
+    instead — the steers stay queued and ride the next boundary, exactly as if
+    Esc had not been pressed, which is the same "cost the user nothing" rule
+    the read-only and half-typed-draft declines follow.
+
+    The app's OWN ids are minted per submit and therefore unique, so this
+    guards the queue the app is told about rather than one it can produce; a
+    duplicated id is modelled here directly because that is the only way the
+    condition is reachable from outside.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "older steer")
+        await _submit(pilot, editor, "newer steer")
+        # The wire reports the newest steer's id TWICE — one key, two messages.
+        newest_id = app._held_steer_blocks[-1][0].id
+        for item in session._steering_queue:
+            item["id"] = newest_id
+        assert [m.id for m in session.queued_steering()] == [newest_id, newest_id]
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Nothing lifted and nothing unsent: an ambiguous match is no match.
+        assert editor.text == ""
+        assert [m.text for m in session.queued_steering()] == ["older steer", "newer steer"]
+        assert _user_texts(app) == ["older steer", "newer steer"]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_remote_recall_warns_instead_of_double_sending() -> None:
+    """The owner refused: the composer holds text the session already sent.
+
+    A follower's recall is optimistic — the composer takes the text and the
+    rows go before the owner answers. When the drain won the race the owner
+    answers ``that steering message is no longer queued``, and the message is
+    both delivered AND drafted here. Pressing Enter would send it twice, which
+    is the reported double-send, so the app says so rather than leaving the
+    user to infer it from the agent acting on one instruction twice.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "use 0.75 for the direct API")
+        message_id = app._held_steer_blocks[-1][0].id
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "use 0.75 for the direct API"
+
+        # The owner's rejection arrives after the press has already returned.
+        app._on_recall_rejected(message_id)
+        await pilot.pause()
+
+        assert RECALL_UNCONFIRMED_NOTICE in _notice_texts(app)
+        # The draft is NOT thrown away: discarding what the user may want to
+        # edit is the loss `action_stop` forbids. The row warns; the user decides.
+        assert editor.text == "use 0.75 for the direct API"
