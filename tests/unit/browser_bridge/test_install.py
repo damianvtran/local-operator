@@ -636,21 +636,54 @@ def test_an_own_registration_wins_over_an_inherited_one(
     assert any(install.label() in a[-1] for a in calls)
 
 
-def test_the_legacy_lookup_searches_the_passwd_home_too(
+def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
 ) -> None:
-    """A redirected ``$HOME`` must not hide a registration written under the
-    passwd home — the released build ran with ``$HOME`` at its normal value."""
+    """THE A3 GUARD. An isolated root must not claim another root's supervisor.
+
+    ``HOME=/tmp/... LOCAL_OPERATOR_CONFIG_DIR=...`` is the isolation AGENTS.md
+    prescribes for any bridge work. An earlier version of this fix also searched
+    the passwd home, so that pattern resolved the OPERATOR's live plist; the
+    isolated root has no install of its own, so it was ADOPTED and would then be
+    booted out, unlinked and SIGTERM'd. It fanned out without bound — every
+    isolated root resolves that same one file — and ownership is unrecoverable
+    from the plist, which names no config root.
+
+    The lookup is HOME-keyed on purpose ("did MY predecessor write this?"),
+    unlike ``_default_config_root``, which is UID-keyed ("does this root own the
+    default NAME?"). A registration under a different ``$HOME`` belongs to a
+    different run.
+
+    Uses a FAKE passwd home: this must never depend on, or touch, the real one.
+    """
     passwd_home = tmp_path / "passwd-home"
     (passwd_home / "Library" / "LaunchAgents").mkdir(parents=True)
-    legacy = passwd_home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
-    legacy.write_text("<plist/>", encoding="utf-8")
+    other_root_plist = passwd_home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
+    other_root_plist.write_text("<plist>another root's daemon</plist>", encoding="utf-8")
     redirected = tmp_path / "redirected-home"
     (redirected / "Library" / "LaunchAgents").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: redirected))
     monkeypatch.setattr(install, "_passwd_home", lambda: passwd_home)
-    assert install.legacy_registration() == legacy
+
+    assert install.legacy_registration() is None, "must not resolve another HOME's plist"
+
+    # And the consequences, not merely the lookup: nothing may target or delete
+    # a registration this root does not own.
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+    install.uninstall()
+    assert other_root_plist.exists(), "uninstall must not delete another root's plist"
+    install.service_action("stop")
+    assert not any(str(other_root_plist) in c[-1] for c in calls)
+    assert not any(
+        c[-1].endswith(f"/{install.LABEL}") for c in calls
+    ), "must not address the default label it does not own"
 
 
 def test_the_legacy_unit_is_resolved_on_linux_too(
@@ -676,3 +709,79 @@ def test_the_legacy_unit_is_resolved_on_linux_too(
     monkeypatch.setattr(install.subprocess, "run", fake_run)
     install.service_action("start")
     assert any(install.SYSTEMD_UNIT in c and install.systemd_unit() not in c for c in calls)
+
+
+# --------------------------------------------------------------------------
+# A4 — the systemd half of the inherited-registration handling.
+#
+# On a PR whose whole purpose is the Linux path, this branch was unguarded:
+# deleting it entirely, and separately swapping its by-unit-name disable for
+# the suffixed name, both left 187 tests green.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inherited_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path) -> Path:
+    """A legacy unit exactly as a pre-per-root build wrote it, under a suffixed root."""
+    home = tmp_path / "linux-home"
+    (home / ".config" / "systemd" / "user").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "linux")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    legacy = home / ".config" / "systemd" / "user" / install.SYSTEMD_UNIT
+    legacy.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    return legacy
+
+
+def _systemctl_spy(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Record every ``systemctl`` argv without running one."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    return calls
+
+
+def test_uninstall_removes_the_systemd_unit_an_older_build_left(
+    inherited_linux: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Linux twin of the launchd case: the file must actually go, and the
+    step must say so, or `uninstall` reports a success it did not achieve."""
+    _systemctl_spy(monkeypatch)
+    result = install.uninstall()
+    assert not inherited_linux.exists(), "the inherited unit file must be removed"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("older build" in str(step) for step in steps)
+
+
+def test_uninstall_disables_the_legacy_unit_by_its_own_name(
+    inherited_linux: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd addresses units by NAME, so disabling the suffixed name leaves the
+    legacy unit enabled and its daemon running — deleting the file alone does not
+    stop it. Swapping this for ``systemd_unit()`` previously passed every test."""
+    calls = _systemctl_spy(monkeypatch)
+    install.uninstall()
+    disables = [c for c in calls if "disable" in c]
+    assert any(
+        install.SYSTEMD_UNIT in c for c in disables
+    ), f"no disable targeted the legacy unit name; saw {disables}"
+
+
+def test_uninstall_leaves_no_systemd_unit_untouched_when_nothing_was_inherited(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mirror of the above: with nothing inherited, the legacy name is never
+    disabled — otherwise this would disable a unit belonging to someone else."""
+    home = tmp_path / "bare-home"
+    (home / ".config" / "systemd" / "user").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "linux")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls = _systemctl_spy(monkeypatch)
+    install.uninstall()
+    assert not any(install.SYSTEMD_UNIT in c and install.systemd_unit() not in c for c in calls)

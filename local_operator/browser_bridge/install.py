@@ -557,26 +557,37 @@ def _own_registration_exists() -> bool:
     return False
 
 
-def _legacy_paths() -> list[Path]:
-    """Every place a pre-per-root build could have written this user's registration.
+def _legacy_path() -> Path | None:
+    """Where a pre-per-root build running under THIS ``$HOME`` wrote its registration.
 
-    BOTH homes, and that is the correction this needed. ``Path.home()`` reads
-    ``$HOME``, but the released build ran under whatever ``$HOME`` was at the
-    time — normally the passwd home. An agent or a service running with a
-    redirected ``$HOME`` therefore looked in a directory the legacy install was
-    never written to, found nothing, and reported the orphan as absent. The two
-    coincide in the common case, so the list is de-duplicated rather than
-    assumed distinct.
+    ``Path.home()`` only, and the distinction from :func:`_default_config_root`
+    is the whole point rather than an inconsistency:
+
+    * :func:`_default_config_root` asks a UID-keyed question — "does this root
+      own the default supervisor NAME?" The namespace it guards is launchd's
+      ``gui/<uid>`` and systemd's ``--user`` instance, neither of which moves
+      when ``$HOME`` does, so it must anchor on the passwd home.
+    * This asks a HOME-keyed question — "did MY predecessor write this file?"
+      A registration under a *different* ``$HOME`` belongs to a different run,
+      and adopting it is not an upgrade path; it is one root claiming another
+      root's supervisor.
+
+    Searching the passwd home here as well looked like it served a second
+    upgrade trigger, and instead recreated the incident this module exists to
+    prevent: under the isolation AGENTS.md prescribes
+    (``HOME=/tmp/... LOCAL_OPERATOR_CONFIG_DIR=...``) the lookup resolved the
+    OPERATOR's live plist, and because such a root has no install of its own it
+    would be adopted — then booted out, unlinked, and SIGTERM'd. It fanned out
+    without bound, since every isolated root resolved that same one file, and
+    ownership cannot be recovered from the plist body: nothing in it names a
+    config root.
     """
-    homes: list[Path] = []
-    for home in (Path.home(), _passwd_home()):
-        if home not in homes:
-            homes.append(home)
+    home = Path.home()
     if sys.platform == "darwin":
-        return [home / "Library" / "LaunchAgents" / f"{LABEL}.plist" for home in homes]
+        return home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     if sys.platform.startswith("linux"):
-        return [home / ".config" / "systemd" / "user" / SYSTEMD_UNIT for home in homes]
-    return []
+        return home / ".config" / "systemd" / "user" / SYSTEMD_UNIT
+    return None
 
 
 def legacy_registration() -> Path | None:
@@ -585,9 +596,8 @@ def legacy_registration() -> Path | None:
     Only ever non-``None`` when this root's supervisor name is SUFFIXED: the
     default root's name is unchanged, so an existing install stays exactly
     where it was and is adopted, not orphaned. Two things produce a suffix and
-    both are ordinary user situations rather than just test isolation — a
-    ``LOCAL_OPERATOR_CONFIG_DIR`` (a documented setting), and a ``$HOME`` that
-    differs from the passwd home.
+    the usual cause being a ``LOCAL_OPERATOR_CONFIG_DIR``, which is a
+    documented setting.
 
     Such a user upgrading from a released build has a registration under the
     SHARED default name that this build no longer addresses. Left unresolved
@@ -597,13 +607,14 @@ def legacy_registration() -> Path | None:
     reintroduced on a different path. So every entry point that manages a
     supervisor — install, uninstall, start/stop/restart, status — resolves it
     the same way, on both platforms.
+
+    Scoped to this ``$HOME`` by :func:`_legacy_path`; see there for why a
+    registration under another ``$HOME`` is deliberately NOT adopted.
     """
     if not _root_suffix():
         return None
-    for legacy in _legacy_paths():
-        if legacy.exists():
-            return legacy
-    return None
+    legacy = _legacy_path()
+    return legacy if legacy is not None and legacy.exists() else None
 
 
 def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object]:
