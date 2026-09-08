@@ -191,7 +191,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
         "shutil.rmtree",
-        "legacy agents/ layout",
+        "Two calls, both confined to agents/: (1) the drained source under the "
+        "legacy agents/agents/ layout, removed only after every file was copied "
+        "out; (2) rollback of a target this same attempt created, guarded by "
+        "created_target so a pre-existing agent directory is never reachable -- "
+        "mkdir() without exist_ok is what proves ownership. Without the rollback "
+        "a torn copy strands the agent behind the target_dir.exists() skip",
+        2,
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
+        "<path>.rmdir",
+        "The drained legacy agents/agents/ directory itself, and only when the "
+        "filesystem confirms it is empty -- rmdir refuses a non-empty directory, "
+        "so no agent data (and nothing under sessions/, which is a sibling of "
+        "agents/ and never reachable from this fixed path) can be removed",
     ),
     (
         "local_operator/agents.py::AgentRegistry.export_agent_archive",
