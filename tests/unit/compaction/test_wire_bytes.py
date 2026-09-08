@@ -124,8 +124,12 @@ def test_byte_trigger_respects_disabled_and_off_exactly_like_the_token_trigger()
     assert (
         should_compact(0, 1_000_000, CompactionSettings(strategy="off"), wire_bytes=10**9) is False
     )
-    # Unknown window still never triggers, byte pressure or not.
-    assert should_compact(0, 0, CompactionSettings(), wire_bytes=10**9) is False
+    # An unknown window disables the TOKEN term only: a request over the wire
+    # cap is too large to send whether or not a context length is known for
+    # the route, and that is the one configuration where the byte trigger is
+    # the only trigger there is.
+    assert should_compact(0, 0, CompactionSettings(), wire_bytes=10**9) is True
+    assert should_compact(0, 0, CompactionSettings(), wire_bytes=0) is False
     # Explicitly disabled byte trigger.
     settings = CompactionSettings(wire_bytes_trigger=0)
     assert should_compact(0, 1_000_000, settings, wire_bytes=10**9) is False

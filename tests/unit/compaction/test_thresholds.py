@@ -252,3 +252,24 @@ def test_resolve_strategy_selection():
 def test_resolve_strategy_ignores_missing_attribute():
     """A model without supports_images is treated as non-vision."""
     assert resolve_strategy(CompactionSettings(), object()) == "context-full"
+
+
+def test_wire_bytes_trigger_fires_with_an_unknown_window() -> None:
+    """An unresolved context window must not disarm the transport backstop.
+
+    The window guard answers the TOKEN question ("does this fit the model's
+    context?"), which is unanswerable without a window. The byte question
+    ("will the provider accept a request this large?") is answerable regardless,
+    and on a route whose context length the harness could not resolve the byte
+    trigger is the ONLY trigger there is — precisely the configuration where a
+    session 413s forever with a working guard switched off.
+    """
+    settings = CompactionSettings(wire_bytes_trigger=1_000_000)
+
+    assert should_compact(0, 0, settings, wire_bytes=2_000_000) is True
+    # Still monotone in bytes and still strictly greater-than.
+    assert should_compact(0, 0, settings, wire_bytes=1_000_000) is False
+    assert should_compact(0, 0, settings, wire_bytes=0) is False
+    # The disabled/off short-circuit outranks it, unknown window or not.
+    assert should_compact(0, 0, CompactionSettings(enabled=False), wire_bytes=2_000_000) is False
+    assert should_compact(0, 0, CompactionSettings(strategy="off"), wire_bytes=2_000_000) is False

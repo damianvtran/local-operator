@@ -28,6 +28,7 @@ import time
 import uuid
 from asyncio import InvalidStateError
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
@@ -49,7 +50,9 @@ from local_operator.mobile.types import (
     ask_pending_request,
 )
 from local_operator.session.runtime.server import SessionHandle
-from local_operator.session.runtime.server import image_blocks as _image_blocks
+from local_operator.session.runtime.server import (
+    image_blocks_in_thread as _image_blocks_async,
+)
 from local_operator.session.runtime.types import runtime_must_complete
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
@@ -127,11 +130,32 @@ GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
 MAX_QUEUED_PROMPTS = 32
 
 
+def _already_bounded(images: Any) -> bool:
+    """Whether ``images`` are decoded ``ImageContent`` rather than wire dicts.
+
+    The wire carries ``[{"data_b64": ..., "mime_type": ...}]``; in-process
+    callers that have already run the bound pass ``ImageContent`` blocks. Both
+    reach ``prompt``/``steer``, and telling them apart is what lets an
+    already-bounded caller keep the prelude await-free (see ``prompt``).
+
+    An EMPTY list is "already bounded" -- there is nothing to decode, and the
+    hop would only cost a suspension point.
+    """
+    if not images:
+        return True
+    return not isinstance(images[0], Mapping)
+
+
 @dataclass
 class _PromptCommand:
     command_id: str
     text: str
-    images: list["ImageContent"]
+    # ``None`` at runtime on an image-less prompt: ``_already_bounded`` treats
+    # None as "already bounded" (nothing to decode) and passes it through, so
+    # the cast that feeds this field can legitimately hand over None. Declared
+    # here because pyright trusts the cast and would not catch a consumer
+    # that assumed a list.
+    images: list["ImageContent"] | None
     admitted: asyncio.Future[None]
     completed: asyncio.Future[bool] | None = None
 
@@ -1114,7 +1138,7 @@ class OwnedSessionHandle(SessionHandle):
     async def prompt(
         self,
         text: str,
-        images: list[dict[str, str]] | None = None,
+        images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
         *,
         wait_complete: bool = False,
@@ -1128,6 +1152,31 @@ class OwnedSessionHandle(SessionHandle):
         if existing is not None:
             await existing.admitted
             return "already admitted"
+        # Bounded BEFORE the reservation, deliberately: the bound is a thread
+        # hop, and awaiting between reserving a producer identity and queueing
+        # the command would open a suspension point inside that window, where
+        # every path out is a reject. Decoding first keeps the reserve-to-queue
+        # span await-free. The cost of bounding an image for a prompt that is
+        # then rejected is a duplicate submission's worth of CPU, which is the
+        # cheaper side of that trade.
+        #
+        # ALREADY-DECODED blocks pass straight through, and that is not a
+        # convenience: ``_admit_without_waiting_for_the_turn`` budgets a few
+        # LOOP TURNS for this method's synchronous prelude to raise its
+        # reportable refusals, and a thread hop does not resolve inside that
+        # budget (measured: not done at 2 sleep(0)s, done by 20) no matter how
+        # warm the pool is, because ``to_thread`` always yields at least once.
+        # A caller that has already bounded therefore keeps the prelude
+        # await-free, which is the premise ``_ADMISSION_PRELUDE_TURNS``
+        # documents. Without this, an image-carrying admission reached the
+        # budget with its prelude unrun and its refusals were logged to a
+        # detached callback instead of reaching the user -- the silent drop
+        # that method exists to repair.
+        blocks = (
+            cast(list["ImageContent"], images)
+            if _already_bounded(images)
+            else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
+        )
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -1174,7 +1223,7 @@ class OwnedSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, _image_blocks(images), admitted, completed)
+        command = _PromptCommand(command_id, text, blocks, admitted, completed)
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -1484,11 +1533,23 @@ class OwnedSessionHandle(SessionHandle):
     async def steer(
         self,
         text: str,
-        images: list[dict[str, str]] | None = None,
+        images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
+        # Bounded BEFORE the reservation, deliberately: the bound is a thread
+        # hop, and awaiting between reserving a producer identity and handing
+        # the steer to the session would open a suspension point inside that
+        # window. Decoding first keeps the reserve-to-mutate span await-free.
+        # Already-decoded blocks pass through for the reason ``prompt``
+        # documents: an in-process caller that bounded already must not be
+        # made to yield again.
+        blocks = (
+            cast(list["ImageContent"], images)
+            if _already_bounded(images)
+            else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
+        )
         if not self._command_reservations.reserve(
             command_id,
             kind="steer",
@@ -1504,7 +1565,7 @@ class OwnedSessionHandle(SessionHandle):
         if "producer_command_id" in parameters:
             fields["producer_command_id"] = command_id
         try:
-            self._session.steer(text, _image_blocks(images), **fields)
+            self._session.steer(text, blocks, **fields)
         except Exception:
             # No queue insertion means no durable acceptance exists; the same
             # producer identity must remain retryable after this terminal reject.
@@ -2505,8 +2566,22 @@ class OwnedSessionHandle(SessionHandle):
         its synchronous prelude" is a fact about scheduling that holds under any
         contention (AGENTS.md, "Wait on the event, never on the clock").
         """
+        # Bounded HERE and handed on DECODED, so ``prompt``'s prelude stays
+        # await-free and the loop-turn budget below measures what it claims to.
+        #
+        # The budget gives ``prompt`` a few turns to raise its reportable
+        # refusals, on the documented premise that it raises them before its
+        # first await. Bounding images inside ``prompt`` broke that premise: a
+        # thread hop does not resolve within the budget however warm the pool
+        # is, because ``to_thread`` always yields at least once. An
+        # image-carrying admission then reached the budget with its prelude
+        # unrun, was judged "genuinely queued behind a running turn", and its
+        # refusals went to the detached log instead of the warning receipt --
+        # the silent drop this method exists to repair, back for requests with
+        # attachments.
+        blocks = await _image_blocks_async(images)
         task = asyncio.ensure_future(
-            self.prompt(request, images=images, command_id=str(uuid.uuid4()))
+            self.prompt(request, images=blocks, command_id=str(uuid.uuid4()))
         )
         # One turn is enough today — nothing before ``prompt``'s first suspension
         # point yields — but a couple of extra turns costs nothing and keeps this

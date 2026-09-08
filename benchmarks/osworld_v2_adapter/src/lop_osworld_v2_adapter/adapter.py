@@ -417,6 +417,11 @@ class OSWorldV2Adapter:
         # a pure plan (when the task is already known), mints the deterministic
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
+        # Cheapest possible refusal for an environment that cannot produce a
+        # frame at all: no env var can fix a missing decoder, so asking here
+        # (before any allocation) is the difference between a free failure and
+        # one that lands on the first observation of a paid VM.
+        requirements_mod.require_imaging_decoder()
         provisioning.resolve_proxy_policy(params.infra_values)
         # A SUPPLIED proxy config is validated here, at the earliest point that
         # exists. This deliberately does NOT cover the absent-but-needed case:

@@ -515,7 +515,8 @@ class HostVerifier:
             raise SupervisionError("adapter observation belongs to another task or episode")
         validate_observation(observation)
         for frame in observation.frames:
-            verify_artifact(self.artifact_root, frame.artifact)
+            data = verify_artifact(self.artifact_root, frame.artifact)
+            _verify_frame_geometry(data, frame)
 
     def validate_execution_result(self, params: ExecuteParams, result: ExecuteResult) -> None:
         if self.current_observation is None:
@@ -994,6 +995,41 @@ def verify_artifact(root: Path, reference: ArtifactRef) -> bytes:
     except MediaValidationError as error:
         raise SupervisionError("artifact media differs") from error
     return raw
+
+
+def _verify_frame_geometry(data: bytes, frame: Any) -> None:
+    """Refuse a frame whose pixels disagree with the geometry it publishes.
+
+    The model is TOLD ``model_visible`` (the runner's frames line), validates
+    its coordinates against it, and the adapter converts them back through the
+    same field. Nothing so far checks that the IMAGE is that size, so an
+    adapter that resized without updating its geometry — or a runner-side
+    rewrite of frame pixels, which is the drift this makes impossible — would
+    silently miscalibrate every click for the rest of the episode.
+
+    Header-only (``sniff_image`` reads dimensions without decoding), so it is
+    cheap enough to run on every observation, which is where it has to run:
+    the invariant is worth nothing if it is sampled.
+
+    A format whose header does not carry dimensions is accepted rather than
+    refused. ``validate_media`` has already agreed the bytes are the declared
+    media type; failing here on an unreadable header would refuse honest
+    frames to catch nothing, since a dishonest adapter would simply pick such
+    a format.
+    """
+
+    from local_operator.media import sniff_image
+
+    info = sniff_image(data)
+    if info is None or info.width is None or info.height is None:
+        return
+    expected = frame.geometry.model_visible
+    if (info.width, info.height) != (expected.width, expected.height):
+        raise SupervisionError(
+            f"frame {frame.frame_id!r} is {info.width}x{info.height} but declares a "
+            f"model-visible geometry of {expected.width}x{expected.height}: every "
+            "coordinate the model emits would be miscalibrated"
+        )
 
 
 def persist_rescue(root: Path, descriptor: RescueDescriptor) -> Path:

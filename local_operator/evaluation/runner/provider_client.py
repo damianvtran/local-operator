@@ -803,6 +803,15 @@ class _ContextBuilder:
                 self._closed_turns.add(index)
 
     def _render_observation(self, turn: EpisodeTurn, previous: EpisodeTurn | None) -> Message:
+        # FRAME PIXELS ARE THE ADAPTER'S, AND THIS METHOD MUST NOT TOUCH THEM.
+        # In particular it must never call ``rebound_oversize_image``, however
+        # fat a frame looks: the adapter published ``geometry.model_visible``,
+        # compiles the model's coordinates back through it, and the host
+        # verifier refuses any frame whose decoded pixels disagree with it. A
+        # rewrite here would therefore not silently miscalibrate clicks — it
+        # would fail the next observation loudly, which is the design. Frames
+        # that are too large are a TRANSPORT problem and are handled by
+        # dropping whole frames (``_enforce_wire_fit``), never by resizing one.
         from local_operator.harness.types import ImageContent, Message, TextContent
 
         observation = turn.observation
@@ -1157,14 +1166,21 @@ class ProviderModelClient:
             ) from error
 
     async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
-        """Run one compaction pass when the frame budget or the token threshold says so.
+        """Run one compaction pass when the frame budget or the resolved trigger says so.
 
-        Two triggers, one pass. The frame budget (``rebuild_due``) is the usual
-        one for a screen-driving episode; the token threshold is the ordinary
-        session's trigger and applies here too because a long text-heavy episode can
-        fill the window without ever tripping the frame budget. Either way the pass
-        rebuilds the whole prefix ONCE, which is the only rewrite this client
-        ever makes to sent messages.
+        Two inputs, one pass. The frame budget (``rebuild_due``) is the usual
+        one for a screen-driving episode; the resolved trigger
+        (``should_compact``) is the ordinary session's and applies here too,
+        judging TOKENS against the window and BYTES against the wire cap in a
+        single answer. Either way the pass rebuilds the whole prefix ONCE,
+        which is the only rewrite this client ever makes to sent messages.
+
+        The byte input matters here specifically because this client's history
+        is mostly screenshots: their token charge is flat by design, so a
+        request can sit far under every token threshold and still be too large
+        for the provider to accept. Passing ``wire_bytes`` is what makes the
+        byte trigger — and, after a pass, the byte-fit shed below — reachable
+        at all; without it both were configured, tested, and dead in this path.
 
         The token trigger is a SAFETY BOUND and is never silenced (review round
         2, M2): the only way to avoid a rebuild every turn is to make the pass
@@ -1182,8 +1198,10 @@ class ProviderModelClient:
         from local_operator.compaction.thresholds import (
             compaction_context_tokens,
             resolve_threshold_tokens,
+            resolve_wire_bytes_budget,
             should_compact,
         )
+        from local_operator.compaction.tokens import estimate_wire_bytes
 
         messages = self._context.messages
         if not messages:
@@ -1202,10 +1220,25 @@ class ProviderModelClient:
             self._last_provider_context_tokens, self._priced_estimate(messages)
         )
         window = int(getattr(self._model_spec, "context_window", 0) or 0)
-        threshold_due = should_compact(tokens_before, window, self._compaction)
+        wire_before = estimate_wire_bytes(messages)
+        # Two questions, asked of the ONE resolver (its docstring forbids a
+        # second predicate): "does the context fit the window?" and "will the
+        # request be accepted?". They are asked separately here because their
+        # answers are consumed separately below. ``token_due`` alone decides
+        # whether the pass must FIT a token band afterwards; the byte answer
+        # only fires the pass and is fitted by ``_enforce_wire_fit``. Folding
+        # both into one flag made a byte-only trigger shed stale turns to a
+        # token band it never crossed, and with an unknown window (``window ==
+        # 0``) resolved that band to 0 and raised ``ContextUnrecoverableError``
+        # on the first byte pass -- the exact case the byte term exists to
+        # save (review round 1, F1).
+        token_due = should_compact(tokens_before, window, self._compaction)
+        threshold_due = token_due or should_compact(
+            tokens_before, window, self._compaction, wire_bytes=wire_before
+        )
         if not (frame_due or threshold_due):
             return None, None, 0
-        threshold = resolve_threshold_tokens(window, self._compaction) if threshold_due else None
+        threshold = resolve_threshold_tokens(window, self._compaction) if token_due else None
 
         summary_usage: ModelUsage | None = None
         summary_cost = 0
@@ -1243,12 +1276,23 @@ class ProviderModelClient:
             # A frame-budget rebuild lets the pass judge its own gate (on a small
             # context it prunes its frames and refuses the summary as
             # below-threshold, the common and correct outcome). A
-            # threshold-triggered pass was ALREADY judged over the line by the
+            # TOKEN-triggered pass was ALREADY judged over the line by the
             # same resolver, so the gate is not re-asked after the prune:
             # re-asking let the prune alone slip just under the line, refuse
             # the summary, and re-fire the pass on the very next turn (review
             # round 1, m2).
-            respect_threshold=not threshold_due,
+            #
+            # ``token_due``, NOT ``threshold_due``. The m2 argument is about
+            # tokens: a frame prices at a flat 1,200 so pruning frames barely
+            # moves the token count, and a re-asked gate slips under by a hair
+            # for no headroom. Bytes are the opposite. The pass's own frame
+            # prune (``keep_recent_frames``) removes megabytes, so on a
+            # BYTE-only trigger the re-asked gate refusing is the CORRECT
+            # outcome -- "a context the prune alone brought under the line
+            # never buys a summary" (pass_.py step 1). Skipping the gate here
+            # bought two summaries and folded observations 0-2 into a marker
+            # on a prefix the prune had already fixed (#836 round 2, F5).
+            respect_threshold=not token_due,
         )
         # The pass returns the pruned list even when it refused to summarize; either
         # way it is the prefix to send from now on.
@@ -1285,13 +1329,20 @@ class ProviderModelClient:
                     "observation turn(s) that shedding could not fit under it; the "
                     "episode ends as a harness error rather than send a rejected request"
                 )
+        # The byte mirror of the fit above, and needed for the same reason: a
+        # pass that RAN is not a pass that FITS. The token side judges the
+        # window, this side judges the transport, and a screenshot-heavy prefix
+        # routinely satisfies one while violating the other — which is the
+        # whole reason bytes are a separate ruler in this package.
+        byte_shed = self._enforce_wire_fit(resolve_wire_bytes_budget(self._compaction))
+        frames_dropped = result.frames_dropped + byte_shed
         # A shed-only rebuild is still a rebuild: when the pass itself refused
         # (``nothing-to-summarize`` — the kept window was the whole tail) but
         # the shed removed turns, previously sent messages vanish from the next
         # request, and a ``context_compaction`` event is the only honest trace
         # of that (review round 4, m8). Returning nothing here would hide it
         # behind a bare ``message_count`` drop.
-        if shed == 0 and result.frames_dropped == 0 and not result.ran and not result.pruned:
+        if shed == 0 and frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
         record = CompactionRecord(
             strategy=result.strategy or "prune",
@@ -1302,9 +1353,11 @@ class ProviderModelClient:
             # After a shed the pass's own figure describes a prefix that no
             # longer exists; measure what is actually being sent.
             tokens_after=(
-                _estimate_context(self._context.messages) if shed else result.tokens_after
+                _estimate_context(self._context.messages)
+                if (shed or byte_shed)
+                else result.tokens_after
             ),
-            frames_dropped=result.frames_dropped,
+            frames_dropped=frames_dropped,
             messages_before=before,
             messages_after=len(self._context.messages),
             summary_text=result.summary_text,
@@ -1362,6 +1415,71 @@ class ProviderModelClient:
         if self._priced_estimate(self._context.messages) <= band:
             return True, 0
         return self._shed_stale_turns(band)
+
+    def _enforce_wire_fit(self, budget: int) -> int:
+        """After a pass, shed the oldest FRAMES until the request fits the byte band.
+
+        The byte counterpart of :meth:`_enforce_threshold_fit`, and deliberately
+        a different mechanism: that one sheds whole stale TURNS to recover
+        window, this one replaces the oldest frames with notices to recover
+        transport size (``shed_frames_to_wire_budget``), which removes no
+        message at all and so cannot disturb user/assistant alternation. Bytes
+        and tokens are separate rulers in this package and each gets the shed
+        that answers its own question.
+
+        Sheds to a BAND BELOW THE TRIGGER, not merely under ``budget``, and
+        that is the same lesson the token side already carries: the trigger is
+        clamped to at most the budget, so a prefix shed to exactly the budget
+        can still be over the trigger and fire the pass again on the very next
+        turn — measured as a rebuild every turn, which destroys the prefix
+        cache for no headroom. The band buys the episode room to append.
+
+        Returns the number of frames dropped, 0 when already inside the band or
+        when no byte ceiling is configured. Raises
+        :class:`ContextUnrecoverableError` when even dropping every frame
+        leaves the request over ``budget`` — a text-only prefix too large to
+        send is not something this client can repair, and sending it earns a
+        provider rejection that ends the episode anyway, less legibly. Note the
+        asymmetry: the shed AIMS at the band, but only the hard ``budget`` is
+        worth refusing over.
+
+        The rebuild-once property is preserved: in the normal case this finds
+        the prefix already inside the band and replaces nothing, so the pass
+        above remains the single rewrite.
+        """
+        from local_operator.compaction.pruning import shed_frames_to_wire_budget
+        from local_operator.compaction.thresholds import resolve_wire_bytes_trigger
+        from local_operator.compaction.tokens import estimate_wire_bytes
+
+        if budget <= 0:
+            return 0
+        trigger = resolve_wire_bytes_trigger(self._compaction)
+        band = min(budget, int(0.8 * trigger)) if trigger > 0 else budget
+        messages = self._context.messages
+        wire = estimate_wire_bytes(messages)
+        if wire <= band:
+            return 0
+        shed_messages, dropped = shed_frames_to_wire_budget(messages, budget=band)
+        if dropped:
+            self._context.replace(shed_messages)
+        remaining = estimate_wire_bytes(self._context.messages)
+        if remaining > budget:
+            raise ContextUnrecoverableError(
+                "context cannot fit the wire budget: the rebuilt prefix is "
+                f"{remaining} bytes against a budget of {budget} after dropping "
+                f"{dropped} frame(s); the episode ends as a harness error rather "
+                "than send a request the provider will reject"
+            )
+        logger.info(
+            "evaluation context shed %d frame(s) to fit the wire band (%d -> %d bytes, "
+            "band %d, budget %d)",
+            dropped,
+            wire,
+            remaining,
+            band,
+            budget,
+        )
+        return dropped
 
     def _shed_stale_turns(self, band: int) -> tuple[bool, int]:
         """Shed the oldest stale turns, one at a time, until the priced prefix

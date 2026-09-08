@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -193,3 +194,45 @@ def test_pre_ownership_wire_is_rejected(version: str, tmp_path: Path) -> None:
     data["schema_version"] = version
     with pytest.raises(ValidationError, match="1.6"):
         AdapterSelector.model_validate(data)
+
+
+def test_bound_screen_frame_reports_the_size_of_the_bytes_it_returns() -> None:
+    """``model_visible`` must describe the payload, not the requested edge.
+
+    This is the contract the host verifier checks on every observation: it
+    sniffs the artifact and compares against the geometry the adapter
+    published. A helper that predicted the size arithmetically instead of
+    reading it back would turn any rounding disagreement inside the resizer
+    into a mid-episode supervision failure.
+    """
+    from PIL import Image
+
+    from local_operator.evaluation.adapters.api import bound_screen_frame
+    from local_operator.media import sniff_image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1920, 1080), (24, 36, 48)).save(buffer, format="PNG")
+
+    bound = bound_screen_frame(buffer.getvalue())
+
+    sniffed = sniff_image(bound.payload)
+    assert sniffed is not None
+    assert (sniffed.width, sniffed.height) == (
+        bound.model_visible.width,
+        bound.model_visible.height,
+    )
+    assert sniffed.mime_type == bound.media_type
+    assert (bound.model_visible.width, bound.model_visible.height) == (1280, 720)
+
+
+def test_bound_screen_frame_refuses_bytes_that_are_not_an_image() -> None:
+    """A frame that will not decode fails HERE, not on the wire.
+
+    The adapter turns this into an ObservationError, which the episode already
+    knows how to report; forwarding it would earn an opaque provider 400 with
+    the block already in the history.
+    """
+    from local_operator.evaluation.adapters.api import bound_screen_frame
+
+    with pytest.raises(ValueError):
+        bound_screen_frame(b"not an image at all")

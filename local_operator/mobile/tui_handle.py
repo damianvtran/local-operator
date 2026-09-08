@@ -48,7 +48,11 @@ from local_operator.mobile.types import (
     SessionProjection,
     ask_pending_request,
 )
-from local_operator.session.runtime.server import SessionHandle, image_blocks
+from local_operator.session.runtime.server import (
+    SessionHandle,
+    image_blocks,
+    image_blocks_in_thread,
+)
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
@@ -62,8 +66,12 @@ async def _await_future(future: asyncio.Future[Any]) -> Any:
 
 
 # Decode wire images via the shared mobile-contract helper (registrant.py);
-# kept as a module alias so existing call sites stay short.
+# kept as module aliases so existing call sites stay short. The helper BOUNDS
+# each image, which is CPU-bound, so async callers take the ``_async`` form and
+# the one sync caller (``_decode_attachments``, reached from a Textual callback)
+# keeps the direct call — see its docstring for why that stall is bounded.
 _image_blocks = image_blocks
+_image_blocks_async = image_blocks_in_thread
 
 
 def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
@@ -72,6 +80,12 @@ def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
     Shared by ``slash_images`` and the routed-slash path so both hand the
     dispatch the same ``{1: Attachment, …}`` shape the composer would have
     produced had the images been attached locally.
+
+    Synchronous even though the bound it now performs is CPU-bound, because it
+    runs inside a Textual callback that cannot await. The stall is bounded by
+    the control socket's 1 MB line cap (``_MAX_LINE_BYTES``): a payload that
+    large decodes to at most a few images of a few hundred KB, ~50-100 ms of
+    work, not the ~315 ms a 20 MP paste would cost.
     """
     from local_operator.tui.widgets.editor import Attachment
 
@@ -287,7 +301,7 @@ class TuiSessionHandle(SessionHandle):
     ) -> str:
         if not command_id:
             raise ValueError("command_id is required")
-        image_blocks = _image_blocks(images)
+        image_blocks = await _image_blocks_async(images)
 
         def begin_prompt() -> tuple[asyncio.AbstractEventLoop, asyncio.Future[None], Any] | None:
             session = self._session()
@@ -338,7 +352,7 @@ class TuiSessionHandle(SessionHandle):
     ) -> str:
         if not command_id:
             raise ValueError("command_id is required")
-        image_blocks = _image_blocks(images)
+        image_blocks = await _image_blocks_async(images)
 
         def do_steer() -> bool:
             session = self._session()

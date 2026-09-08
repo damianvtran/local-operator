@@ -37,6 +37,8 @@ from the runtime's loop, serialized by the implementor".
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import inspect
 import json
@@ -70,29 +72,94 @@ logger = logging.getLogger(__name__)
 
 
 def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
-    """Decode the wire's [{data_b64, mime_type}] into ImageContent blocks.
+    """Decode the wire's [{data_b64, mime_type}] into BOUNDED ImageContent blocks.
 
     Bad entries are dropped, not fatal: a paste that half-decoded should cost
     that one image, not the whole prompt. Empty input yields an empty list,
     which ``_submit_prompt`` treats exactly like no images. This is part of
     the mobile contract — both handles use it.
+
+    Every entry is bounded at the INGEST edge here, the same call the composer
+    makes on a paste, because this is the equivalent seam: a phone camera roll
+    produces 4032x3024 photos and a phone screenshot 2206x266, and a provider
+    refuses an image over 2000 pixels on its long edge once a request carries
+    more than twenty of them. Forwarding verbatim was not lossless, it was
+    deferred: the block lands in the HISTORY, so every later request re-sends
+    it. The render seam did repair oversize blocks afterwards, which made this
+    degraded rather than broken — but a repair on every render is work paid
+    repeatedly for a bound that costs nothing once, at entry.
+
+    CPU-bound (~315 ms for a 20 MP image), so an async caller must use
+    :func:`image_blocks_in_thread` instead.
     """
     if not images:
         return []
     from local_operator.harness.types import ImageContent
+    from local_operator.imaging import bound_image_for_model
+    from local_operator.media import sniff_image
 
     out: list[ImageContent] = []
     for item in images:
         if not isinstance(item, dict):
             logger.debug("mobile image dropped: not a dict (%r)", type(item).__name__)
             continue
+        # The client's declared ``mime_type`` is deliberately NOT read: the
+        # format is decided by CONTENT below, and the wire mime comes back from
+        # the bound. A phone that mislabels a HEIC as image/png would otherwise
+        # pick an encoder for a format the bytes are not.
         data = item.get("data_b64") or item.get("data") or ""
-        mime = item.get("mime_type") or "image/png"
         if not data:
             logger.debug("mobile image dropped: no data_b64/data")
             continue
-        out.append(ImageContent(data=data, mime_type=mime))
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error):
+            logger.debug("mobile image dropped: data_b64 is not valid base64")
+            continue
+        # Format comes from the CONTENT, never the client's mime_type: a phone
+        # that mislabels a HEIC as image/png would otherwise pick the encoder
+        # for a format the bytes are not.
+        info = sniff_image(raw)
+        if info is None:
+            logger.debug("mobile image dropped: unrecognised image format")
+            continue
+        try:
+            payload, wire_mime, _summary = bound_image_for_model(raw, info)
+        except ValueError as error:
+            # Undecodable, a decompression bomb, or too large to send with no
+            # decoder available. Same contract as every other bad entry here:
+            # this image is dropped, the rest of the prompt proceeds.
+            logger.debug("mobile image dropped: %s", error)
+            continue
+        out.append(
+            ImageContent(
+                data=base64.b64encode(payload).decode("ascii"),
+                mime_type=wire_mime,
+            )
+        )
     return out
+
+
+async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["ImageContent"]:
+    """:func:`image_blocks` off the event loop.
+
+    The bound decodes and re-encodes, which is CPU-bound and unbounded in
+    duration by an event loop's standards, so every async caller goes through
+    here — the same discipline the composer's paste path follows.
+
+    Returns WITHOUT suspending when there is nothing to decode, and that is
+    load-bearing rather than an optimisation. ``asyncio.to_thread`` always
+    yields to the loop, so an unconditional hop turns every image-less prompt
+    and steer into a suspension point — and these callers reserve a producer
+    identity and queue in FIFO order right after this call, so a yield here
+    lets concurrently submitted turns interleave and be admitted out of order
+    (three gathered prompts admitted 1,3,2). The overwhelming majority of
+    prompts carry no images and must keep the await-free path they had.
+    """
+
+    if not images:
+        return []
+    return await asyncio.to_thread(image_blocks, images)
 
 
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the

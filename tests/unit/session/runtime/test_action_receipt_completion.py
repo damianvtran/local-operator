@@ -37,6 +37,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 
+from local_operator.harness.types import ImageContent
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
@@ -133,6 +134,53 @@ async def _settle() -> None:
     """
     for _ in range(20):
         await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_an_image_carrying_admission_still_reports_its_refusals() -> None:
+    """The loop-turn budget must not be spent on the image bound.
+
+    ``_admit_without_waiting_for_the_turn`` gives ``prompt`` a few loop turns
+    to reach its first suspension point, then treats anything still pending as
+    "genuinely queued behind a running turn" and stops watching it. Bounding
+    images is a THREAD HOP, and a cold pool does not resolve one inside that
+    budget (measured: not done at 2 sleep(0)s, done by 20) -- so once ``prompt``
+    bounded its own images, an image-carrying admission reached the budget with
+    its SYNCHRONOUS prelude unrun and its reportable refusals stopped becoming
+    the warning receipt: the silent drop this module exists to repair, back
+    again for requests carrying attachments.
+
+    ``_disposing`` is the refusal used because it is raised in that prelude,
+    AFTER the bound and before any real await -- the same shape as a full queue
+    or a rejected reservation.
+
+    The executor is replaced with a fresh one so the pool is COLD. That is the
+    whole reason the defect reached CI: on a warm pool the hop resolves inside
+    the budget and the bug is invisible, so it passed a full-file run here and
+    failed only in the shard that ran this file first. An order dependency, not
+    a flake.
+    """
+    import concurrent.futures
+
+    handle, _session = make_handle()
+    handle._disposing = True
+    images = [{"data_b64": "aGk=", "mime_type": "image/png"}]
+
+    loop = asyncio.get_running_loop()
+    cold = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(cold)
+    try:
+        result = await handle._complete_unconsumed_action(_attach_receipt(), images, None)
+    finally:
+        cold.shutdown(wait=False)
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor())
+
+    await _settle()
+    assert result.style == "warning", (
+        "an admission refused in prompt's synchronous prelude must reach the "
+        "user as a warning; a budget spent on the image bound loses it"
+    )
+    assert "was not sent" in result.text
 
 
 @pytest.mark.asyncio
@@ -329,6 +377,14 @@ def test_the_declared_set_matches_what_the_producers_emit() -> None:
     assert all(isinstance(item, str) and item for item in SLASH_ACTION_RECEIPTS)
 
 
+#: A 1x1 PNG, so the test images decode. The bound drops anything that does
+#: not, and a fake payload would test the drop rather than the ride.
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
 @pytest.mark.asyncio
 async def test_images_ride_the_completed_request() -> None:
     """Wire images survive the completion; only paste BODIES degrade.
@@ -348,12 +404,19 @@ async def test_images_ride_the_completed_request() -> None:
 
     handle.prompt = capture  # type: ignore[method-assign]
 
-    await handle._complete_unconsumed_action(
-        _attach_receipt(), [{"data_b64": "aGk=", "mime_type": "image/png"}], None
-    )
+    # A VALID tiny PNG: "aGk=" (base64 of "hi") used to stand in here, and the
+    # bound now drops it as undecodable -- which was the correct behaviour, but
+    # it made this test assert on the wrong half of the contract. A real image
+    # is what the degradation note promises survives.
+    image = [{"data_b64": _TINY_PNG_B64, "mime_type": "image/png"}]
+
+    await handle._complete_unconsumed_action(_attach_receipt(), image, None)
 
     assert session.prompt_calls == ["do the thing"]
     assert captured and captured[0], "the wire images must reach the admission"
+    assert isinstance(
+        captured[0][0], ImageContent
+    ), "an image reaches the admission DECODED -- the bound runs on the way in"
 
 
 @pytest.mark.asyncio

@@ -338,7 +338,7 @@ async def command(session_id: str, body: Command, request: Request):
             outcome = await bridge.remote.route_shared_slash(
                 spec.name,
                 body.args,
-                images=decode_images(body.images),
+                images=await decode_images(body.images),
             )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
@@ -376,10 +376,15 @@ async def command(session_id: str, body: Command, request: Request):
         )
 
 
-def decode_images(images: list[Image]):
-    from local_operator.session.runtime.server import image_blocks
+async def decode_images(images: list[Image]):
+    """Wire images to bounded ImageContent blocks, off the event loop.
 
-    return image_blocks([image.model_dump() for image in images])
+    The shared helper resizes and re-encodes each image, which is CPU-bound;
+    this runs inside a request handler, so it takes the threaded form.
+    """
+    from local_operator.session.runtime.server import image_blocks_in_thread
+
+    return await image_blocks_in_thread([image.model_dump() for image in images])
 
 
 @router.post(
