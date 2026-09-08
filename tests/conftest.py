@@ -44,6 +44,10 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
+    # Names the session a `lop secret` retrieval is attributed to in the audit
+    # trail. Inherited from the operator's own runtime it would write their
+    # real session id into a sandboxed store's audit rows.
+    "LOCAL_OPERATOR_SESSION_ID",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
