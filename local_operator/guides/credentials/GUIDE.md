@@ -1,6 +1,6 @@
 ---
 name: credentials
-description: How to reach a stored secret from bash and from eval, when to store one and when not to, and what an agent must never do with a credential (echo it, write it to a file, commit it, paste it into a PR).
+description: How to use a stored secret from bash and eval without reading it, when to store one and when not to, and what to never do with a credential (echo, save, commit, paste it).
 ---
 
 # Working with credentials and secrets
