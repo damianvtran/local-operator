@@ -291,6 +291,48 @@ _CLOSING_TAG_RE = re.compile(
 )
 
 
+#: The heading that opens the tool-inventory block. Exported because the block
+#: is the one part of the prompt that must track SESSION state rather than the
+#: builder's arguments: ``Session`` re-renders it from its live inventory and
+#: identifies the block to replace by this prefix (see
+#: ``Session._reconcile_tool_inventory``). Changing the heading here without
+#: changing it there would silently stop that reconciliation.
+TOOL_INVENTORY_HEADING = "## Available tools"
+
+
+def render_tool_inventory_block(
+    tools: Sequence[AgentTool], *, host_has_browser: bool | None = None
+) -> str:
+    """The complete "## Available tools" block for ``tools``.
+
+    Split out of :func:`build_system_blocks` so the session can re-render this
+    ONE block against the inventory it is actually about to advertise, without
+    rebuilding (or re-anchoring) the rest of the prompt. Two renderers would
+    drift, and the browser note is exactly the kind of thing that gets updated
+    in one place and forgotten in the other.
+
+    ``host_has_browser`` carries the caller's already-computed host probe so
+    the three-state diagnosis documented in :func:`build_system_blocks` is
+    decided identically here. Left as ``None`` (the session's re-render, which
+    has no cheaper source) it is probed once via
+    :func:`_host_browser_backend_available`; that probe is the only way to tell
+    state 2 (the HOST has no backend, so the setup playbook applies) from
+    state 3 (the host is fine and only this ROLE lacks the tool), and
+    conflating them tells a subagent to install a backend its host already has.
+    """
+    block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools)}"
+    # Membership, not visibility: a hidden tool is still callable, and telling
+    # the model a browser does not exist while one answers would be worse than
+    # saying nothing.
+    if any(tool.name == "browser" for tool in tools):
+        return block
+    if host_has_browser is None:
+        host_has_browser = _host_browser_backend_available()
+    # Same prohibition either way; only the DIAGNOSIS differs. See the
+    # three-state comment in build_system_blocks and _ROLE_HAS_NO_BROWSER_NOTE.
+    return block + (_ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE)
+
+
 def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
     """One line per visible tool: the NAME only, deliberately.
 
@@ -495,11 +537,7 @@ def build_system_blocks(
             "direct instruction in the conversation still wins.\n\n"
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
-    inventory = f"## Available tools\n\n{_render_tool_inventory(tools)}"
-    if not has_browser:
-        # Same prohibition either way; only the DIAGNOSIS differs. See the
-        # three-state comment above and _ROLE_HAS_NO_BROWSER_NOTE.
-        inventory += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE
+    inventory = render_tool_inventory_block(tools, host_has_browser=host_has_browser)
     env_block = f"Today is {date_str}."
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
@@ -554,6 +592,9 @@ def build_system_blocks(
             "answered until someone reopens it.\n\n"
             "- Prefer to PROCEED with what you have, or finish the turn with a "
             "clear statement of what you would have asked, over calling `ask`.\n"
+            "- That statement is a decision you already took and the fact that "
+            "would change it, not a question left hanging: with nobody at a "
+            "screen a prose question is even less answerable than usual.\n"
             "- Do not take an irreversible or destructive action to avoid "
             "asking; when the choice genuinely needs a person, stop and say so "
             "— that is cheaper than a wrong guess.\n"
