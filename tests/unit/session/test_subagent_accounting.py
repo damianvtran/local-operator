@@ -23,7 +23,8 @@ from local_operator.tui.widgets.subagent_panel import job_stats
 #: Loop TURNS to allow the app's boot worker, not seconds. A turn count
 #: survives the contention a wall-clock budget does not (AGENTS.md, "Wait on
 #: the event, never on the clock"), and the only test here that drives a real
-#: ``OperatorApp`` needs the band mounted before it can assert on the ledger.
+#: ``OperatorApp`` needs its band mounted AND its session adopted before it
+#: can assert on that session's ledger.
 MAX_BOOT_TURNS = 200
 
 
@@ -204,21 +205,19 @@ async def test_rendered_footer_uses_whole_owner_ledger():
     from tests.e2e.harness import wait_for_adoption
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
-        # Wait for the BAND to exist, not for a fixed number of pauses.
-        # ``_apply_frontend_state`` returns early while ``_status`` is None, so
-        # a single pause asserts nothing about the ledger on a machine where
-        # boot has not finished within one loop turn — the total simply stays
-        # 0.0 and the failure names the cost rather than the race. Idle, one
-        # pause is enough (measured); under CI shard load it is not, which is
-        # how this went red on a branch that only ever ADDED unrelated test
-        # files: file-index sharding moved this test to a busier shard.
+        # The band mounts BEFORE the asynchronous factory finishes. Applying
+        # money at that point writes the placeholder interaction's ledger;
+        # adoption correctly replaces it with the new session's empty ledger
+        # on the next yield. Wait for the actual owner as well as the band,
+        # not a fixed delay or merely the existence of the rendered widget.
         for _ in range(MAX_BOOT_TURNS):
             await pilot.pause()
-            if app._status is not None:
+            if app._status is not None and app._session is session:
                 break
-        assert app._status is not None, "the band never mounted"
+        assert app._status is not None and app._session is session, "session never adopted"
         state = FrontendSessionState(
             epoch="money",
             session_id="money",
