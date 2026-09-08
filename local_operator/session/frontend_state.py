@@ -2920,6 +2920,18 @@ class FrontendStateStore:
                 "epoch": epoch,
                 "sequence": 0,
                 "usage_components": _capped_components(state.usage_components),
+                # The checkpoint describes a previous owner, not a scheduler
+                # to restart. Keep its progress visible without claiming an
+                # iteration still runs (or replaying a possibly costly turn).
+                "loop": (
+                    {
+                        **state.loop,
+                        "status": "interrupted",
+                        "reason": "Owner restarted; iterations were not replayed",
+                    }
+                    if state.loop and state.loop.get("status") in {"running", "judging"}
+                    else state.loop
+                ),
                 **_inherited_identity_fixups(state, session_id),
             }
         )

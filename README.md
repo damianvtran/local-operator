@@ -605,15 +605,25 @@ project-supplied servers.
 
 ## ⚙️ Headless & Server Modes
 
-**One-shot execution** for scripts and automation:
+**Headless sessions** for scripts, saved teams and goal loops:
 
 ```bash
 lop exec "summarize the failures in ./test.log"
 lop exec "long migration" --background   # detach with a log file
 lop exec "audit deps" --json             # one JSON line per event
+lop exec "review the change" --team release --background
+lop exec --goal "Finish the checklist" --loop 3
+lop exec --status JOB_ID                 # durable outcome and session ID
+lop --resume SESSION_ID                  # live TUI attachment or cold resume
 ```
 
-Exit code 0 on success, so `lop exec` composes in a pipeline.
+Foreground exit code 0 means success, so `lop exec` composes in a pipeline.
+Background launch prints a readiness receipt; use `--status` for the eventual
+outcome. Saved teams, reusable profiles, goals and conversation names persist
+with the ordinary session. Non-TTY approvals still deny unless explicitly
+changed; `--control` opts into supervisor gates, not automatic approval.
+See [the full exec guide](./docs/EXEC.md) for option combinations, stdin,
+resume precedence, loop counting, approvals and lifecycle semantics.
 
 **Server mode** exposes the agent as a FastAPI service (used by the optional
 [desktop UI](https://github.com/damianvtran/local-operator-ui)):
