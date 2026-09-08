@@ -492,12 +492,22 @@ class OSWorldV2Adapter:
         # allocated, so the refusal is free. Upstream would instead load an
         # empty pool at import and crash mid-episode with the VM already
         # billed.
-        provisioning.validate_proxy_config_file(
-            self._infra_values,
-            enable_proxy=provisioning.resolve_proxy_policy(
-                self._infra_values, task_proxy=bool(self._task.proxy)
-            ),
+        # The CONJUNCTION, not the policy alone. ``resolve_proxy_policy``
+        # returns the override verbatim when one is supplied, so gating on it
+        # by itself would refuse every ORDINARY task whenever an operator set
+        # the run-wide OSWORLD_ENABLE_PROXY=true -- for want of a pool that
+        # task never touches. Upstream combines the two the same way
+        # (``desktop_env.py:321``: ``task_use_proxy = task_proxy and
+        # self.enable_proxy``) and so does this package's own requirements
+        # table (``requirements.py``: ``descriptor.proxy and enable_proxy``).
+        # Enforcement that disagrees with the declared requirements is worse
+        # than either rule alone: inspect_requirements would call the input
+        # optional and reset_start would then refuse the episode for missing
+        # it.
+        needs_proxy = bool(self._task.proxy) and provisioning.resolve_proxy_policy(
+            self._infra_values, task_proxy=bool(self._task.proxy)
         )
+        provisioning.validate_proxy_config_file(self._infra_values, enable_proxy=needs_proxy)
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",

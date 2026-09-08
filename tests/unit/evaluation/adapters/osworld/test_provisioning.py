@@ -10,6 +10,7 @@ not even a read-only ``describe_images`` is issued.
 from __future__ import annotations
 
 import os
+import signal
 
 import pytest
 from lop_osworld_v2_adapter import provisioning, taskfile
@@ -349,11 +350,12 @@ def test_a_relative_proxy_config_path_is_refused(tmp_path) -> None:
 
 
 def test_an_absent_proxy_config_is_refused_without_echoing_the_path(tmp_path) -> None:
-    # An absent path fails the regular-file check before the open, so it
-    # reports the type rather than the read. Either way it is refused before
-    # allocation and, critically, without repeating the operator's input.
+    # An absent path fails at the open itself, so it reports the read rather
+    # than the type -- the race-free check opens first (O_NONBLOCK) and only
+    # then fstats. Either way it is refused before allocation and, critically,
+    # without repeating the operator's input.
     missing = str(tmp_path / "nope.json")
-    with pytest.raises(ProvisioningError, match="regular file") as excinfo:
+    with pytest.raises(ProvisioningError, match="not readable") as excinfo:
         provisioning.validate_proxy_config_file(_proxy_infra(missing), enable_proxy=True)
     # An operator can mistype a credentialed URL into this field; never echo it.
     assert missing not in str(excinfo.value)
@@ -417,18 +419,36 @@ def test_an_oversized_proxy_config_is_refused_rather_than_parsed(tmp_path) -> No
         provisioning.validate_proxy_config_file(_proxy_infra(path), enable_proxy=True)
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX alarm only")
 def test_a_proxy_config_naming_a_non_regular_file_is_refused(tmp_path) -> None:
     """A FIFO must refuse, not hang.
 
-    ``open`` follows symlinks and ignores the file type, so a path naming a
-    FIFO blocks until a writer appears -- with no timeout, at prepare, before
-    anything else runs. A hang is a worse failure than a refusal and much
-    harder to attribute, so the type is checked before the open.
+    An ``O_RDONLY`` open on a FIFO blocks in the kernel until a writer appears,
+    so without ``O_NONBLOCK`` this path hangs ``prepare`` forever -- there is no
+    timeout above it. A hang is a worse failure than a refusal and much harder
+    to attribute.
+
+    Guarded by ``SIGALRM``, matching
+    ``test_a_fifo_reaching_the_reader_is_refused_instead_of_blocking`` in the
+    ecosystem-instructions suite, for the reason that test states: the
+    regression is an INFINITE BLOCK, so without the alarm dropping the guard
+    would not FAIL this test -- it would hang CI with no report and nothing to
+    read.
     """
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
-    with pytest.raises(ProvisioningError, match="regular file"):
-        provisioning.validate_proxy_config_file(_proxy_infra(str(fifo)), enable_proxy=True)
+
+    def _blocked(signum, frame):  # noqa: ANN001 - signal handler signature
+        raise AssertionError("the validator blocked on a fifo instead of refusing it")
+
+    previous = signal.signal(signal.SIGALRM, _blocked)
+    signal.alarm(10)
+    try:
+        with pytest.raises(ProvisioningError, match="regular file"):
+            provisioning.validate_proxy_config_file(_proxy_infra(str(fifo)), enable_proxy=True)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def test_a_proxy_config_symlinked_to_a_regular_file_is_accepted(tmp_path) -> None:

@@ -200,3 +200,111 @@ async def test_a_non_proxy_task_needs_no_pool_config(tmp_path: Path) -> None:
         )
     # Reaching provider construction proves the proxy guard did not fire.
     assert built == ["yes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [None, "false", "true"])
+@pytest.mark.parametrize("hint", [False, True])
+async def test_the_guard_and_the_requirements_table_agree(
+    tmp_path: Path, hint: bool, override: str | None
+) -> None:
+    """Enforcement must demand exactly what ``inspect_requirements`` declares.
+
+    The two drifting apart is worse than either rule being wrong on its own:
+    the adapter would tell an operator ``PROXY_CONFIG_FILE`` is optional for
+    this episode and then refuse the episode for not supplying it, which is
+    unactionable from the outside. That is what happened when the guard gated
+    on the policy override ALONE -- a run-wide ``OSWORLD_ENABLE_PROXY=true``
+    refused every ordinary task for want of a pool it never touches. Upstream
+    combines the two as a conjunction (``desktop_env.py:321``:
+    ``task_use_proxy = task_proxy and self.enable_proxy``), so both sides here
+    must too.
+    """
+    from local_operator.evaluation.adapters.api import ResetStartParams
+    from tests.unit.evaluation.adapters.osworld.test_cache_dir import _write_workspace
+
+    source = fixtures.PROXY if hint else fixtures.PLAIN
+    task_id = "task_proxy" if hint else "task_plain"
+    infra = _INFRA + (() if override is None else (_policy(override),))
+
+    # What the adapter TELLS the operator is required for this episode.
+    descriptor = taskfile.load_static(source.encode(), module_name=f"tasks/{task_id}.py")
+    declared = {
+        req.name
+        for req in requirements.derive_requirements(descriptor, infra_values=infra)
+        if req.required
+    }
+    declares_pool = "PROXY_CONFIG_FILE" in declared
+
+    # What the adapter ENFORCES at the last free moment before allocation.
+    built: list[str] = []
+
+    def provider_factory():
+        built.append("yes")
+        raise RuntimeError("stop after the guard")
+
+    workspace = _write_workspace(tmp_path, {task_id: source})
+    adapter = OSWorldV2Adapter(provider_factory=provider_factory, workspace_root=workspace)
+    artifacts = tmp_path / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+    await adapter.prepare(
+        PrepareParams(
+            operation_id="prepare-agree",
+            episode_id="ep-agree",
+            secret_refs=(),
+            infra_values=infra,
+        )
+    )
+    with pytest.raises((provisioning.ProvisioningError, RuntimeError)) as error:
+        await adapter.reset_start(
+            ResetStartParams(
+                operation_id="reset-agree",
+                task_id=task_id,
+                episode_id="ep-agree",
+                artifact_root=str(artifacts),
+                secrets=(),
+            )
+        )
+    enforces_pool = isinstance(error.value, provisioning.ProvisioningError)
+
+    assert enforces_pool is declares_pool, (
+        f"hint={hint} override={override}: requirements say "
+        f"{'required' if declares_pool else 'optional'} but the guard "
+        f"{'refused' if enforces_pool else 'allowed'} the episode"
+    )
+    # And the only episodes refused are the ones that truly use a proxy.
+    expected = hint and (hint if override is None else override == "true")
+    assert enforces_pool is expected
+    assert built == ([] if expected else ["yes"])
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_supplied_pool_config_is_refused_at_prepare(tmp_path: Path) -> None:
+    """The prepare-time validation is real work, and this is what pins it.
+
+    ``prepare`` cannot enforce REQUIREDNESS -- it has no task -- so it passes a
+    constant ``enable_proxy=False``. That makes the call look dead to a reader,
+    and deleting it left the whole adapter suite green. It is not dead: a
+    SUPPLIED but unusable path is refused here, before the episode does any
+    work at all, rather than one step later in ``reset_start``. Without this
+    test a future cleanup removes the call and CI agrees.
+    """
+
+    def forbidden_provider():
+        pytest.fail("prepare must not construct a provider")
+
+    adapter = OSWorldV2Adapter(provider_factory=forbidden_provider, workspace_root=tmp_path)
+    relative = ScopedInfraValue.model_validate(
+        {"name": "PROXY_CONFIG_FILE", "purpose": "benchmark_compute", "value": "relative/path.json"}
+    )
+    with pytest.raises(provisioning.ProvisioningError, match="absolute path"):
+        await adapter.prepare(
+            PrepareParams(
+                operation_id="prepare-bad-pool",
+                episode_id="ep-bad-pool",
+                secret_refs=(),
+                infra_values=_INFRA + (relative,),
+            )
+        )
+    # Refused before prepare produced anything at all.
+    assert adapter._refs is None and adapter._plan is None

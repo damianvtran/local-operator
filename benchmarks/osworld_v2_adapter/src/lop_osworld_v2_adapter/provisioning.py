@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
@@ -244,20 +245,34 @@ def validate_proxy_config_file(
     if not os.path.isabs(path):
         # Never echo the value: an operator can mistype a credentialed URL here.
         raise ProvisioningError("PROXY_CONFIG_FILE must be an absolute path")
-    # Require a regular file BEFORE opening. ``open`` follows symlinks and does
-    # not care about the type, so a path naming a FIFO blocks prepare forever
-    # waiting for a writer -- a hang is a worse failure than a refusal, and
-    # harder to attribute. ``isfile`` resolves symlinks, so a symlink TO a
-    # regular file is still accepted.
-    if not os.path.isfile(path):
-        raise ProvisioningError("PROXY_CONFIG_FILE must name a regular file")
+    # Refuse a non-regular file WITHOUT a TOCTOU window, using the same idiom
+    # as ``ecosystem_instructions._read_instruction_file`` and
+    # ``evidence/store.py`` rather than inventing a second one. A plain
+    # ``isfile`` then ``open`` still races: a regular file swapped for a FIFO
+    # in between reaches the blocking open, and an ``O_RDONLY`` open on a FIFO
+    # blocks in the kernel until a writer appears -- so ``prepare`` hangs with
+    # no timeout above it, which is a strictly worse failure than a refusal and
+    # far harder to attribute. ``O_NONBLOCK`` is load-bearing, not tidiness: it
+    # makes the open return a descriptor immediately so ``S_ISREG`` is
+    # reachable at all. Regular files are unaffected by the flag, and it
+    # follows symlinks, so a symlink TO a regular file still works.
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read(_PROXY_CONFIG_MAX_BYTES + 1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
         raise ProvisioningError(
             f"PROXY_CONFIG_FILE is not readable ({exc.__class__.__name__})"
         ) from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ProvisioningError("PROXY_CONFIG_FILE must name a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(_PROXY_CONFIG_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ProvisioningError(
+            f"PROXY_CONFIG_FILE is not readable ({exc.__class__.__name__})"
+        ) from None
+    finally:
+        os.close(descriptor)
     if len(raw) > _PROXY_CONFIG_MAX_BYTES:
         raise ProvisioningError("PROXY_CONFIG_FILE is larger than the supported ceiling")
     try:
