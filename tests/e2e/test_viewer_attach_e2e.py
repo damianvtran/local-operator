@@ -361,7 +361,16 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
 
     server._retire_if_pristine = spy_retire  # type: ignore[method-assign]
 
-    async def engage_here(sid: str, cwd: str, work: Any, *, config_dir: Path, deadline_s=30.0):
+    async def engage_here(
+        sid: str,
+        cwd: str,
+        work: Any,
+        *,
+        config_dir: Path,
+        deadline_s=30.0,
+        preempt=None,
+        preempt_budget_s=0.0,
+    ):
         # Stand in for the spawn only: the record, the dial and the sync are
         # production code against this real server.
         await server.start_in_process()

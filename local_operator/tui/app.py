@@ -3733,7 +3733,30 @@ class OperatorApp(App[None]):
             if session.is_cold:
                 if speculative:
                     raise RuntimeError("The prepared owner is no longer ready")
-                await asyncio.wait_for(session._ensure_bound(), 15)
+                # NO outer wall clock. The removed `wait_for(..., 15)` was not
+                # redundant with anything — it was DESTRUCTIVE: it replaced
+                # `_ensure_bound`'s `ConnectionError`, which carries a sentence
+                # worth showing, with a bare `TimeoutError` whose `str()` is the
+                # empty string, so the sidebar's "Could not open conversation:
+                # {error}" rendered with nothing after the colon. It was also
+                # the last bare wall clock left on this seam, which is the shape
+                # this change exists to replace (review round 2, MINOR-1).
+                #
+                # BUT it was the only thing bounding this call at 15 s, so be
+                # precise about what does bound it now (review round 3, M3-2).
+                # `_FOREGROUND_BIND_BUDGET_S` (15 s) covers only the retry/sync
+                # half: that deadline is computed AFTER `engage_runtime` has
+                # returned, and the foreground engage passes no `deadline_s`, so
+                # it takes `DEFAULT_DEADLINE_S` (30 s) first. Worst case here is
+                # therefore ~45 s, not 15 s — measured 30.00 s in the engage
+                # alone against a stalling owner. That is a deliberate trade,
+                # not an oversight: capping the foreground engage would halve
+                # the spawn/discovery window on a cold start, which is the path
+                # this change exists to make more reliable, and the wait is
+                # cancellable and reports progress rather than being silent.
+                # Do not re-add an outer `wait_for` to "restore" the 15 s; bound
+                # the engage itself if that worst case ever needs shortening.
+                await session._ensure_bound()
             if session.is_cold:
                 raise RuntimeError("The conversation has not finished connecting")
             await session.ensure_display_current()
@@ -11470,7 +11493,12 @@ class OperatorApp(App[None]):
 
         async def run() -> None:
             try:
-                await cast(Callable[[], Awaitable[None]], ensure)()
+                # BACKGROUND envelope. Nobody is waiting on this engage and it
+                # is silent on failure, so it can afford to outlast an owner
+                # whose authoritative loop is busy with a turn — which is the
+                # condition that used to leave the session cold and make the
+                # user's first command pay for a fresh bind.
+                await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
             except Exception:  # noqa: BLE001 — the real prompt reports the failure
                 # A speculative warm-up that fails must stay silent: the user
                 # has not asked for anything yet, and the message they send
@@ -11647,9 +11675,60 @@ class OperatorApp(App[None]):
                 # Clear the latch as the other two triggers do, so the next
                 # keystroke or command retries rather than finding it stuck.
                 self._warm_engage_started = False
-                self._system_notice(
-                    f"could not start a runtime for this session: {error}", "warning"
-                )
+                # "could not start a runtime for this session" was wrong on
+                # both halves for the common case: a runtime very likely DID
+                # start (``engage_runtime`` returned, ``find_owner_record``
+                # found it, the socket authenticated) and the session is not
+                # broken — the bind ran out of its envelope while the owner's
+                # authoritative loop was busy. Reporting that as a boot failure
+                # told the user their session was lost when it was running in
+                # the background the whole time.
+                #
+                # Gated on the SYNC condition, never on "not actionable".
+                # ``runtime_alive`` is set only by ``RuntimeUnresponsiveError``,
+                # which is raised at the one place that establishes the claim —
+                # a live socket whose owner did not sync in time. Branching on
+                # ``not actionable`` instead put "it is running" over three
+                # sentences where it was false: a deliberate `/stop`, an owner
+                # mid-reconnect, and the no-record case (review round 1,
+                # MAJOR-1). Those are plain ``ConnectionError``s and their own
+                # text is the honest answer, so they keep relaying it.
+                #
+                # A VETTED sentence is different again: those are real
+                # configuration faults the user has to act on (a missing
+                # credential, an unusable model), so they keep their own text
+                # and stay a warning.
+                if getattr(error, "actionable", False):
+                    self._system_notice(str(error), "warning")
+                elif getattr(error, "runtime_alive", False):
+                    # Past tense for the ATTEMPT, present for the RUNTIME. At
+                    # the moment this paints the retry is over — all three
+                    # attempts are spent and the `finally` below has already
+                    # cleared the band — so a present participle ("still
+                    # connecting") promises background progress the code
+                    # deliberately is not making, and a user who believes it
+                    # waits, which is the one action that cannot work (design
+                    # round 1, D1). "in the background" is dropped for the same
+                    # reason: it is the implementation's word and it is what
+                    # made the sentence sound like work in flight.
+                    #
+                    # `note`, not `info`: this row is the sole receipt for a
+                    # command that was DROPPED (the return below never reaches
+                    # the dispatch), which is NoticeBlock's definition of the
+                    # middle tier — the answer to something the user just did.
+                    # `info` rendered it in the same dim ink as the decorative
+                    # boot hint two rows above (design round 1, D2).
+                    self._system_notice(
+                        "could not reach this session's runtime in time — it is "
+                        "still running; try that again in a moment",
+                        "note",
+                    )
+                else:
+                    # Everything else keeps the reason it was given. The old
+                    # copy at least relayed `{error}`; dropping it for a
+                    # reassurance would regress this change's own goal of
+                    # honest failure strings.
+                    self._system_notice(str(error), "warning")
                 return
             finally:
                 self._set_starting(False)
