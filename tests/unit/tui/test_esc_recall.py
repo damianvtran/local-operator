@@ -709,3 +709,50 @@ async def test_the_double_send_warning_survives_the_next_escape() -> None:
         assert RECALL_DECLINE_NOTICE in _notice_texts(app), "the decline still speaks"
         assert RECALL_UNCONFIRMED_NOTICE in _notice_texts(app), "and the warning survives it"
         assert editor.text == "use 0.75 for the direct API"
+
+
+@pytest.mark.asyncio
+async def test_a_successful_recall_retires_the_ambiguity_row() -> None:
+    """`it is still queued` must not outlive the recall that unsends the steer.
+
+    Design round 3 D6 / review round 2 MINOR-2. The ambiguity row asserts a
+    PRESENT-TENSE fact and lives in the Esc ladder's single slot, but the
+    successful-recall path retired that slot only when it held the decline
+    row. Both routes into ambiguity clear on their own — a stale replicated
+    ``frontend_state`` that stops doubling an id once the socket pump catches
+    up, and an id-less entry draining at a boundary — so the very next press
+    succeeds and leaves a row standing that says the steer is queued while it
+    is sitting in the composer.
+
+    That is the same stale-row class the decline row is retired for, on a
+    surface whose whole argument is that stale promises get retired.
+    """
+    session = _RemoteLikeStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _submit(pilot, editor, "use 0.75 for the direct API")
+        # A stale snapshot doubles the id, so this press cannot name the steer.
+        held_id = app._held_steer_blocks[-1][0].id
+        session._steering_queue.append({"id": held_id, "text": "a stale duplicate"})
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert RECALL_AMBIGUOUS_NOTICE in _notice_texts(app)
+        assert editor.text == "", "nothing was recalled while the id was ambiguous"
+
+        # The pump catches up: the duplicate is gone and the id names one entry.
+        session._steering_queue = [
+            item for item in session._steering_queue if item["text"] != "a stale duplicate"
+        ]
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # The recall worked...
+        assert editor.text == "use 0.75 for the direct API"
+        assert session.queued_steering() == []
+        # ...so the row claiming it is still queued must be gone with it.
+        remaining = _notice_texts(app)
+        assert (
+            RECALL_AMBIGUOUS_NOTICE not in remaining
+        ), f"the ambiguity row outlived the recall that made it false: {remaining}"

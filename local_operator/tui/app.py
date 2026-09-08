@@ -5632,13 +5632,24 @@ class OperatorApp(App[None]):
         if getattr(session, "session_id", ""):
             self._sidebar_sources[session.session_id] = source
         # DISARM THE OUTGOING session's recall resolver before the binding
-        # moves — this is the last moment the old session is reachable. The
-        # incoming one is armed at the foot of this method, so the pair is
-        # symmetric with the cancel resolver above it, which is likewise
-        # cleared on adopt and re-installed per use. `_on_recall_rejected`
-        # also checks the session it was bound to, but that guard only stops
-        # the ROW; releasing the callback here is what stops a retired facade
-        # holding the app alive for the length of its ack timeout.
+        # moves — this is the last moment the old session is reachable from
+        # here. The incoming one is armed at the foot of this method, so the
+        # pair is symmetric with the cancel resolver above it, which is
+        # likewise cleared on adopt and re-installed per use.
+        #
+        # WHAT STOPS THE STALE ROW IS `_on_recall_rejected`'S SESSION CHECK,
+        # not this line, and the distinction matters because this line does
+        # not run everywhere. `_reload_session` and `/resume` null
+        # `self._session` BEFORE calling this, so `outgoing` is None on
+        # exactly those paths and nothing is disarmed there (review round 2,
+        # MINOR-1). That is acceptable rather than a hole: both DISPOSE the
+        # session first, and a pending `_recall_task` retains the facade for
+        # up to `ACK_TIMEOUT_S` regardless of whether its resolver is still
+        # installed — so releasing the callback buys no lifetime those paths
+        # do not already pay. Chasing it into each caller would spread one
+        # rule across three sites to save nothing measurable. The claim is
+        # stated here rather than in the callers so the next reader does not
+        # infer a guarantee this line cannot make on its own.
         outgoing = self._session
         if outgoing is not None and outgoing is not session:
             disarm_recall = getattr(outgoing, "set_recall_resolution", None)
@@ -30978,13 +30989,25 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         for block in (notice, *image_blocks, user_block):
             transcript.remove_block(block)
-        # A decline row from an earlier press advertised exactly this recall
-        # ("clear the composer, esc again"); now that it has happened the row
-        # is an instruction for a state that no longer holds — the same
-        # stale-row class the queued-steer receipts exist to eliminate. Retire
-        # it with the steer's own rows (design round 2, D4).
+        # EITHER Esc-failure row from an earlier press is now stale, and both
+        # go for one reason: each described the state this recall has just
+        # ended. The decline row advertised exactly this recall ("clear the
+        # composer, esc again"), and the ambiguity row asserts a present-tense
+        # fact — "it is still queued" — about a message now sitting in the
+        # composer. Both are the stale-row class the queued-steer receipts
+        # exist to eliminate, so both retire with the steer's own rows (design
+        # round 2 D4; design round 3 D6 / review round 2 MINOR-2).
+        #
+        # The ambiguity row reaches this the way its own docstring says it can:
+        # both routes into it CLEAR ON THEIR OWN — a stale replicated
+        # `frontend_state` that stops doubling an id once the pump catches up,
+        # and an id-less entry draining at a boundary — so the very next press
+        # succeeds while the row it left behind still says the steer is queued.
         stop_notice = self._stop_notice
-        if stop_notice is not None and stop_notice.text() == RECALL_DECLINE_NOTICE:
+        if stop_notice is not None and stop_notice.text() in (
+            RECALL_DECLINE_NOTICE,
+            RECALL_AMBIGUOUS_NOTICE,
+        ):
             transcript.remove_block(stop_notice)
             self._stop_notice = None
         # The steer branch registered a pending echo so the delivery's
@@ -31037,12 +31060,19 @@ class OperatorApp(App[None]):
         round 1, D1).
 
         SCOPED TO THE SESSION THAT ISSUED THE RECALL. The refusal crosses a
-        socket with a 15 s ack timeout (`ACK_TIMEOUT_S`), so `/clear`, `/new`,
-        `/resume`, a sidebar switch or a takeover can all land first — and a
-        row telling the user "that steer was sent" about a conversation that
-        never sent it is worse than silence, because it is the double-send
-        warning aimed at the wrong text. A late ack for a conversation that is
-        no longer on screen is dropped.
+        socket with a 15 s ack timeout (`ACK_TIMEOUT_S`), so `/new`, `/resume`,
+        a sidebar switch or a takeover can all land first — and a row telling
+        the user "that steer was sent" about a conversation that never sent it
+        is worse than silence, because it is the double-send warning aimed at
+        the wrong text. A late ack for a conversation that is no longer
+        current is dropped.
+
+        `/clear` is deliberately NOT in that list, and the guard does not fire
+        there: it empties the SCREEN, leaving the session and its steering
+        queue intact, so the message really may still be delivered and the
+        composer really may still hold the duplicate. The conversation has not
+        changed, so the warning is about the text in front of the user and
+        painting it is correct (review round 2, NIT-1).
         """
         if session is not self._session:
             logger.debug("dropped a recall refusal for a session that is no longer current")
