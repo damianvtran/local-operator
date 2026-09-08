@@ -664,9 +664,10 @@ def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
     prescribes for any bridge work. An earlier version of this fix also searched
     the passwd home, so that pattern resolved the OPERATOR's live plist; the
     isolated root has no install of its own, so it was ADOPTED and would then be
-    booted out, unlinked and SIGTERM'd. It fanned out without bound — every
-    isolated root resolves that same one file — and ownership is unrecoverable
-    from the plist, which names no config root.
+    booted out, unlinked and SIGTERM'd. The fake passwd-home plist must satisfy
+    the other ownership checks: valid matching-log evidence and no default-root
+    directory. A malformed or no-log fixture is rejected by the evidence guard
+    even if HOME discovery widens, so it cannot test this boundary.
 
     The lookup is HOME-keyed on purpose ("did MY predecessor write this?"),
     unlike ``_default_config_root``, which is UID-keyed ("does this root own the
@@ -678,7 +679,10 @@ def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
     passwd_home = tmp_path / "passwd-home"
     (passwd_home / "Library" / "LaunchAgents").mkdir(parents=True)
     other_root_plist = passwd_home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
-    other_root_plist.write_text("<plist>another root's daemon</plist>", encoding="utf-8")
+    other_root_plist.write_bytes(
+        plistlib.dumps({"Label": install.LABEL, "StandardOutPath": str(install.log_path())})
+    )
+    original_plist = other_root_plist.read_bytes()
     redirected = tmp_path / "redirected-home"
     (redirected / "Library" / "LaunchAgents").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
@@ -686,6 +690,13 @@ def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: redirected))
     monkeypatch.setattr(install, "_passwd_home", lambda: passwd_home)
 
+    # Isolate the discovery boundary: none of the later checks may reject this
+    # candidate and conceal a passwd-home fallback regression.
+    assert not install._default_config_root().exists()
+    assert not install._own_registration_exists()
+    recorded = install._recorded_log_path(other_root_plist)
+    assert recorded is not None
+    assert install._canonical(recorded) == install._canonical(install.log_path())
     assert install.legacy_registration() is None, "must not resolve another HOME's plist"
 
     # And the consequences, not merely the lookup: nothing may target or delete
@@ -697,7 +708,9 @@ def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
         lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
     )
     install.uninstall()
-    assert other_root_plist.exists(), "uninstall must not delete another root's plist"
+    assert (
+        other_root_plist.read_bytes() == original_plist
+    ), "uninstall must preserve another root's plist byte-for-byte"
     install.service_action("stop")
     assert not any(str(other_root_plist) in c[-1] for c in calls)
     assert not any(
@@ -966,3 +979,40 @@ def test_an_unclaimable_registration_is_reported_not_silently_ignored(
     warning = install.uninstall().get("warning")
     assert warning is not None and str(install.LABEL) in str(warning)
     assert install.status()["legacy_ambiguity"] is not None
+
+
+def test_ambiguous_uninstall_advice_preserves_configuration_and_sessions(
+    inherited_darwin: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A5: removing persistent user data is not a remedy for an ambiguous job.
+
+    Exercise the printed CLI warning, not only the helper's return value. The
+    ownership heuristic must still refuse, but its advice must concern only the
+    named supervisor registration, never the retained config/session root.
+    """
+    from argparse import Namespace
+
+    from local_operator.cli import browser_command
+
+    default_root = install._default_config_root()
+    default_root.mkdir()
+    transcript = default_root / "sessions" / "synthetic" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"synthetic": true}\n', encoding="utf-8")
+    original = inherited_darwin.read_bytes()
+    monkeypatch.setattr(
+        install, "_launchctl", lambda *a: subprocess.CompletedProcess(list(a), 0, "", "")
+    )
+
+    # Preserve the previously approved return contract; this change is advice
+    # only, not a redesign of ambiguity handling.
+    assert browser_command(Namespace(browser_command="uninstall", purge=False)) == 0
+    output = capsys.readouterr().out
+    assert str(inherited_darwin) in output
+    assert "remove that config root" not in output
+    assert "confirm ownership" in output
+    assert "Keep all configuration and session data" in output
+    assert inherited_darwin.read_bytes() == original
+    assert transcript.read_text(encoding="utf-8") == '{"synthetic": true}\n'

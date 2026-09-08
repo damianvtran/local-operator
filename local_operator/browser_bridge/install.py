@@ -698,8 +698,9 @@ def legacy_ambiguity() -> str | None:
     if _default_root_dir_exists():
         return (
             f"{candidate} looks like this root's, but the default config root "
-            f"{_default_config_root()} still exists and may own it. Left untouched "
-            "— remove it by hand, or remove that config root first."
+            f"{_default_config_root()} still exists and may own it. Left untouched. "
+            "Inspect the named supervisor registration and confirm ownership before "
+            "stopping or removing it. Keep all configuration and session data."
         )
     return None
 
