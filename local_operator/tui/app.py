@@ -8913,6 +8913,11 @@ class OperatorApp(App[None]):
         A socket object can exist before its canonical sync. Never derive
         permission from that object or queue a user mutation until it binds.
         Local draft clearing, copy and exiting do not require owner authority.
+
+        Scoped to the SOURCE deliberately. ``_session_transition_pending`` is a
+        different state with its own better answers — ``/stop`` says "still
+        starting" there, and ``/reload`` owns the window — so folding it in
+        here would replace those with this method's generic refusal.
         """
         source = source or self._interaction
         return (
@@ -8920,7 +8925,6 @@ class OperatorApp(App[None]):
             and not source.retired
             and not source.display_only
             and not source.command_frame_pending
-            and not self._session_transition_pending
             and not self._sidebar_navigation.requested_id
         )
 
