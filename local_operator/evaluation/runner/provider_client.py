@@ -1276,16 +1276,23 @@ class ProviderModelClient:
             # A frame-budget rebuild lets the pass judge its own gate (on a small
             # context it prunes its frames and refuses the summary as
             # below-threshold, the common and correct outcome). A
-            # threshold-triggered pass -- by tokens OR by bytes -- was ALREADY
-            # judged over the line by the same resolver, so the gate is not
-            # re-asked after the prune: re-asking let the prune alone slip
-            # just under the line, refuse the summary, and re-fire the pass on
-            # the very next turn (review round 1, m2). The pass's own gate
-            # takes ``wire_bytes`` too, so a byte-only pass is admitted by it
-            # either way; ``threshold_due`` (not ``token_due``) is used here
-            # deliberately, and the split above is only about which BAND the
-            # rebuilt prefix must then fit.
-            respect_threshold=not threshold_due,
+            # TOKEN-triggered pass was ALREADY judged over the line by the
+            # same resolver, so the gate is not re-asked after the prune:
+            # re-asking let the prune alone slip just under the line, refuse
+            # the summary, and re-fire the pass on the very next turn (review
+            # round 1, m2).
+            #
+            # ``token_due``, NOT ``threshold_due``. The m2 argument is about
+            # tokens: a frame prices at a flat 1,200 so pruning frames barely
+            # moves the token count, and a re-asked gate slips under by a hair
+            # for no headroom. Bytes are the opposite. The pass's own frame
+            # prune (``keep_recent_frames``) removes megabytes, so on a
+            # BYTE-only trigger the re-asked gate refusing is the CORRECT
+            # outcome -- "a context the prune alone brought under the line
+            # never buys a summary" (pass_.py step 1). Skipping the gate here
+            # bought two summaries and folded observations 0-2 into a marker
+            # on a prefix the prune had already fixed (#836 round 2, F5).
+            respect_threshold=not token_due,
         )
         # The pass returns the pruned list even when it refused to summarize; either
         # way it is the prefix to send from now on.

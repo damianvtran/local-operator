@@ -2483,6 +2483,60 @@ async def test_a_byte_only_trigger_never_fits_to_a_token_band(tmp_path: Path, wi
 
 
 @pytest.mark.asyncio
+async def test_a_byte_only_pass_whose_prune_fixes_the_bytes_buys_no_summary(tmp_path: Path) -> None:
+    """A byte-only pass must re-ask the pass's own gate after its frame prune.
+
+    Round 2, F5. ``respect_threshold`` was ``not threshold_due`` -- tokens OR
+    bytes -- so a byte-only pass skipped the gate on the strength of the m2
+    argument, which is about TOKENS (a frame prune barely moves the token
+    count). On bytes the frame prune removes megabytes, so with the gate
+    skipped the pass summarised a prefix its own prune had already brought
+    under the line: two summaries bought and observations 0-2 folded into a
+    marker (reviewer's reproduction, 8 fat frames, keep_recent_frames=3).
+    With the gate re-asked it refuses as below-threshold, the frames are
+    pruned, and every observation turn survives.
+
+    Needs a summarising strategy and a small ``keep_recent_tokens`` so a
+    skipped gate would actually find a cut; ``keep_recent_frames=3`` so the
+    prune actually relieves the byte pressure (at 6 it drops nothing and both
+    settings agree, which is why the F1 test cannot see this).
+    """
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=24_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(
+            keep_recent_tokens=2_000,
+            wire_bytes_trigger=350_000,
+            wire_bytes_budget=500_000,
+            strategy="context-full",
+        ),
+        keep_recent_frames=3,
+        rebuild_every_frames=64,
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(8):
+        current = _fat_framed_observation(tmp_path, sequence, pixels=60_000)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    final = stream.requests[-1].messages
+    assert stream.summary_requests == [], (
+        f"a byte-only pass bought {len(stream.summary_requests)} summary call(s) "
+        "for a prefix its own frame prune had already brought under the line"
+    )
+    user_turns = sum(1 for message in final if message.role == "user")
+    assert user_turns == 8, f"observation turns were folded into a marker: {user_turns} of 8 remain"
+
+
+@pytest.mark.asyncio
 async def test_byte_trigger_does_not_fire_under_the_trigger(tmp_path: Path) -> None:
     """Under the trigger, the prefix is append-only and message identity holds.
 
