@@ -28,6 +28,7 @@ inherit it. See ``adapter.OSWorldV2Adapter._install_judge_environment``.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -169,11 +170,31 @@ def instantiate_task(module_path: str, task_id: str) -> Any:
 
     from desktop_env.task_base import BaseTask  # type: ignore[import-not-found]
 
-    spec = importlib.util.spec_from_file_location(f"osworld_task_{task_id}", module_path)
+    module_name = f"osworld_task_{task_id}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot build an import spec for {module_path!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register BEFORE exec, which is what the import system itself does and
+    # what upstream's loader gets for free by going through ``import``.
+    # Skipping it breaks any task module combining ``from __future__ import
+    # annotations`` with ``@dataclass``: string annotations send dataclasses
+    # into ``_is_type``, which does ``sys.modules.get(cls.__module__)`` and
+    # then reads ``.__dict__`` on the result -- None for an unregistered
+    # module, so the task dies with a bare
+    # ``AttributeError: 'NoneType' object has no attribute '__dict__'``
+    # at reset_start, with the VM already allocated. Reproduced exactly:
+    # unregistered raises, registered imports cleanly.
+    #
+    # Cleaned up in a finally so a failed task import cannot leave a
+    # half-initialised module visible to a later one, and so the process does
+    # not accumulate one entry per episode.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     get_task = getattr(module, "get_task", None)
     if callable(get_task):
         return get_task()

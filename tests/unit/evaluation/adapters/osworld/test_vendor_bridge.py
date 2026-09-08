@@ -71,3 +71,56 @@ def test_ordinary_injectable_names_still_reach_the_environment() -> None:
     )
     assert os.environ["WEBSITE_HOST_SUFFIX"] == "example.test"
     assert os.environ["AWS_REGION"] == "us-east-1"
+
+
+def test_a_task_module_is_registered_before_execution(tmp_path) -> None:
+    """A task combining future annotations with @dataclass must import.
+
+    ``module_from_spec`` does NOT register in ``sys.modules``; the import
+    system does that itself before executing a module, and upstream's loader
+    gets it for free by going through ``import``. Skipping it breaks string
+    annotations: dataclasses resolves them through ``_is_type``, which does
+    ``sys.modules.get(cls.__module__)`` and reads ``.__dict__`` on the result.
+    For an unregistered module that is None, and the task dies at
+    ``reset_start`` -- with the VM already allocated -- with a bare
+    ``AttributeError: 'NoneType' object has no attribute '__dict__'`` that
+    names neither the task nor the cause.
+    """
+    import sys as _sys
+
+    # instantiate_task imports BaseTask for the class search; the upstream
+    # package is only present in the evaluation venv.
+    pytest.importorskip("desktop_env.task_base")
+    from lop_osworld_v2_adapter import vendor_bridge as bridge
+
+    module_path = tmp_path / "task_probe.py"
+    module_path.write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class _Result:\n"
+        "    ok: bool\n"
+        "    detail: str | None\n"
+        "def get_task():\n"
+        "    return _Result(ok=True, detail=None)\n",
+        encoding="utf-8",
+    )
+    try:
+        task = bridge.instantiate_task(str(module_path), "probe")
+        assert task.ok is True
+    finally:
+        _sys.modules.pop("osworld_task_probe", None)
+
+
+def test_a_task_module_that_fails_to_import_is_not_left_registered(tmp_path) -> None:
+    """A half-initialised module must not stay visible to the next episode."""
+    import sys as _sys
+
+    pytest.importorskip("desktop_env.task_base")
+    from lop_osworld_v2_adapter import vendor_bridge as bridge
+
+    module_path = tmp_path / "task_broken.py"
+    module_path.write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="boom"):
+        bridge.instantiate_task(str(module_path), "broken")
+    assert "osworld_task_broken" not in _sys.modules
