@@ -996,7 +996,7 @@ marker for this Kind.
 ## K. Implementation notes — where the build diverged from this design
 
 Recorded by the implementing agent. Everything in §A–§J was followed as
-written except the two items below, both found by driving the real app.
+written except the items below, all found by driving the real app.
 
 ### K.1 App-level conflicts are read from the DECLARED binding map, not from
 `handle_bindings_clash`
@@ -1014,11 +1014,21 @@ reason is a collision between two parts of this same design:
   is capturing.
 
 Observed against the real app: capturing `ctrl+t` reported no conflict at all.
-`SettingsView._app_binding_victim` now reads `app._bindings.key_to_bindings` —
-the DECLARED map, unaffected by the gate — and names the binding's
-`description`. That is still live rather than a table here, so it stays true
-as the app's own bindings change, and it yields the intended frame:
-`takes ctrl+t from "Expand/collapse todos"`.
+`SettingsView._app_binding_victim` therefore reads
+`app._bindings.key_to_bindings` — the DECLARED map, unaffected by the gate —
+and names the binding's `description`. That is still live rather than a table
+here, so it stays true as the app's own bindings change, and it yields the
+intended frame: `takes ctrl+t from "Expand/collapse todos"`.
+
+**Amended after review round 1 (M1).** The declared map is correct only for
+bindings whose keys never move. `set_keymap` does not rewrite it, so for the
+REMAPPABLE bindings it keeps reporting the shipped key forever — which
+produced a false positive (warning that a freed `ctrl+n` was taken) and a
+false negative (missing that `new_session` already held the captured
+`ctrl+g`), both reproduced on the real app. The method now resolves
+remappable victims from the PERSISTED values via `keymap.action_holding` and
+uses the declared map only for the rest. The split is the point: two kinds of
+binding, two sources of truth, and only one of them can move.
 
 The `handle_bindings_clash` override was consequently **not shipped**: it would
 have been a second mechanism recording state nothing reads (`R6`'s
@@ -1036,3 +1046,25 @@ cursor, it captures `down`. The cursor-move route is therefore a click on
 another row or a programmatic `action_move`, both of which reach `_settle_row`.
 The parametrized test drives `action_move` for that case and the counterfactual
 was verified: removing the disarm from `_settle_row` turns it red.
+
+### K.3 §C.4's group check was missed in the first build, and is now implemented
+
+§C.4 says two remappable actions may not share a key: *"Validate in
+`settings_io` across the whole `keymap.*` group, not just per key."* The first
+build validated per `Setting` only, so both ids could be written to one key —
+`lop config edit` accepted both with no UI to warn, and three presses of the
+shared chord fired `new_session` every time while `/resume` was reachable only
+by slash command (review round 1, M2).
+
+This was an oversight rather than a decision, and the design was right: unlike
+a soft conflict, where the user trades a context-scoped binding they may never
+use for a hotkey they asked for, two ids on one key has no reading under which
+it is intended — both victims are inside the feature being configured, and the
+survivor is decided by nothing better than position in `KEY_ACTIONS`.
+
+Implemented as `keymap.group_conflict`, called from `settings_io.validate`
+(so `lop config edit` and `PATCH /v1/settings` are covered, neither having a
+UI that could warn) and from `_capture_key` (so the page refuses on the press
+rather than at commit — accepting a key that cannot be stored would light the
+footer's `enter confirm` for a gesture that then errors, which is design round
+1's D2 defect in a second place).

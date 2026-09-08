@@ -366,6 +366,70 @@ def conflict_note(action_id: str, key: str) -> str:
     return ""
 
 
+def action_holding(
+    key: str, values: Mapping[str, Any], *, excluding: str | None = None
+) -> KeyAction | None:
+    """The remappable action that answers to ``key`` RIGHT NOW, or ``None``.
+
+    Resolved from the persisted values, never from ``OperatorApp.BINDINGS``.
+    That is the whole point of this function and it is not a style preference:
+    ``set_keymap`` does not rewrite the class-declared map, so the declared map
+    keeps reporting a remapped action at its SHIPPED key forever (measured —
+    declared is byte-identical before and after a remap). A caller that asks
+    the declared map "who holds ctrl+n?" after ``new_session`` moved to
+    ``ctrl+g`` is told "New session" about a key that is now free, and is told
+    nothing about ``ctrl+g``, which is the collision that actually breaks
+    something. Both were reproduced on the real app (review round 1, M1).
+
+    ``excluding`` is the id being edited, so a row never reports itself as its
+    own victim.
+
+    Compares against :func:`effective_key` per action rather than inverting
+    :func:`resolved_keymap`, because the resolver deliberately OMITS an action
+    sitting at its default — omission is how "unset" is encoded — so an
+    inverted map would be blind to exactly the default-keyed actions a user is
+    most likely to collide with.
+    """
+    wanted = normalize_key(key)
+    if not wanted:
+        return None
+    for action in KEY_ACTIONS:
+        if action.id == excluding:
+            continue
+        if effective_key(action, values) == wanted:
+            return action
+    return None
+
+
+def group_conflict(action_id: str, key: str, values: Mapping[str, Any]) -> str | None:
+    """Why ``key`` may not be given to ``action_id``, or ``None``.
+
+    TWO REMAPPABLE ACTIONS MAY NOT SHARE A KEY, and this is a refusal rather
+    than the warn-and-allow the soft conflicts get. The asymmetry is
+    deliberate and design §C.4 argued it: a soft conflict trades one
+    context-scoped binding the user may never use for a hotkey they asked for,
+    which is a trade they can reasonably want, whereas two ids on one key has
+    no reading under which it is intended — BOTH victims are inside the
+    feature being configured, and the survivor is decided by nothing better
+    than position in :data:`KEY_ACTIONS`. Reproduced before the fix: both ids
+    on ``ctrl+g`` made three presses fire ``['new','new','new']`` with
+    ``/resume`` reachable only by slash command and nothing anywhere saying
+    why (review round 1, M2) — the silent-disable failure this module exists
+    to prevent, arrived at from the other direction.
+
+    Lives here rather than in the page because ``lop config edit`` and a hand
+    edit reach the same values with no UI to warn at all, and it is called
+    from ``settings_io.validate`` so every writer shares one answer.
+
+    Takes ``values`` rather than reading config itself, so it stays pure and
+    the caller decides which snapshot is authoritative.
+    """
+    other = action_holding(key, values, excluding=action_id)
+    if other is None:
+        return None
+    return f"{other.label.lower()} already uses that key — pick another, or change that row first"
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------

@@ -1068,3 +1068,22 @@ def test_bool_settings_read_strictly(tmp_path: Path, raw: object, expected: bool
     manager.update_config({"session": {"cleanup": {"enabled": raw}}})
     setting = settings_io.BY_KEY["session.cleanup.enabled"]
     assert settings_io.read_setting(ConfigManager(tmp_path), setting) is expected
+
+
+def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path) -> None:
+    """`lop config edit` and `PATCH /v1/settings` have no UI that could warn.
+
+    The group check therefore lives at the write boundary every writer funnels
+    through, not in the page. Before review round 1's M2 fix both writes
+    succeeded and one action became unreachable.
+    """
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
+
+    with pytest.raises(ValueError, match="already uses that key"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+
+    # A free key still stores, and re-writing a row's own key is not a clash.
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"

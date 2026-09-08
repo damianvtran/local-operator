@@ -1613,6 +1613,16 @@ class SettingsView(Vertical):
         if capture is None:
             return
         reason = keymap_mod.validate_key(key)
+        if reason is None:
+            # A key another hotkey already holds is refused HERE rather than at
+            # commit, even though `write_setting` would also refuse it. The
+            # footer offers `enter confirm` the moment a key is pending, so
+            # accepting one that cannot be stored would advertise a gesture
+            # that then errors — the same "lit hint that does nothing" defect
+            # this page rules against elsewhere (design round 1, D2). Refusing
+            # on the press keeps the state machine honest: pending always
+            # means storable.
+            reason = keymap_mod.group_conflict(capture.setting_key, key, self._config_values())
         if reason is not None:
             self._capture = capture._replace(refused=reason)
             self._repaint()
@@ -1668,35 +1678,60 @@ class SettingsView(Vertical):
     def _app_binding_victim(self, key: str) -> str:
         """The description of the app binding ``key`` already answers to.
 
-        Read from the app's DECLARED binding map, not from
-        ``screen.active_bindings``. That distinction is the whole correctness
-        of this method: while a row is capturing, ``check_action`` returns
-        False for every app action, which removes them all from the active map
-        — so the active map is empty of exactly the bindings this is trying to
-        find, and the warning silently never fired (observed driving the real
-        app: capturing `ctrl+t` reported no conflict at all).
+        TWO SOURCES, because the app has two kinds of binding and only one of
+        them can move:
 
-        Read live rather than from a table here so it stays true as the app's
-        own bindings change. Never raises: the page must still render on the
-        unit hosts, which have no app to ask.
+        * **Remappable** bindings are resolved from the PERSISTED values via
+          ``keymap.action_holding``. They must not be read from the declared
+          map, because ``set_keymap`` never rewrites it — the declared map
+          reports a remapped action at its shipped key forever, which produced
+          both a false positive (warning that a freed key was taken) and a
+          false negative (missing the action that actually held the captured
+          key) once anything had been remapped (review round 1, M1).
+        * **Everything else** is read from the app's DECLARED map, which is
+          correct for them precisely because their keys never move, and is
+          read live so it stays true as the app's own bindings change.
+
+        Not ``screen.active_bindings`` for either: while a row is capturing,
+        ``check_action`` returns False for every app action, so the active map
+        is empty of exactly the bindings this is trying to find and the warning
+        silently never fired (observed driving the real app: capturing `ctrl+t`
+        reported no conflict at all).
+
+        Never raises: the page must still render on the unit hosts, which have
+        no app to ask.
         """
         capture = self._capture
+        editing = capture.setting_key if capture is not None else None
+        holder = keymap_mod.action_holding(key, self._config_values(), excluding=editing)
+        if holder is not None:
+            return holder.label
         try:
             declared = self.app._bindings.key_to_bindings
         except Exception:  # noqa: BLE001 — no app, or Textual moved the map
             return ""
         for binding in declared.get(key, ()):  # type: ignore[union-attr]
-            # Never name the row being edited as its own victim, and never
-            # name the OTHER hotkey action's default either: `_capture_key`
-            # has not applied anything yet, so the map still holds both
-            # remappable bindings at their current keys and one of them is
-            # legitimately the row in hand.
+            # Remappable ids are answered above, from the values. Skipping them
+            # here keeps this loop to the bindings whose declared key IS their
+            # live key, so the stale-map hazard cannot re-enter through it.
             binding_id = getattr(binding, "id", None)
             if binding_id is not None and binding_id.startswith(keymap_mod.KEYMAP_PREFIX):
-                if capture is not None and binding_id == capture.setting_key:
-                    continue
+                continue
             return str(getattr(binding, "description", "") or "")
         return ""
+
+    def _config_values(self) -> Mapping[str, Any]:
+        """The current config mapping, or an empty one off-app.
+
+        The hotkey group checks read siblings rather than one key, so they need
+        the whole snapshot. Kept behind a helper because the page renders on
+        unit hosts with no manager at all, and a raising accessor in a paint
+        path would take the page down rather than the row.
+        """
+        try:
+            return self._manager.get_config().values
+        except Exception:  # noqa: BLE001 — no manager on the bare test hosts
+            return {}
 
     # -- text editing -------------------------------------------------------
     def _begin_edit(self, row: "_Row") -> None:
@@ -3027,7 +3062,17 @@ class SettingsView(Vertical):
                 # fire, so echoing the intent would be a lie the user only
                 # discovers later.
                 if capture.key:
+                    # The trailing `?` is a NON-COLOUR cue that the value is
+                    # uncommitted. Pending and saved otherwise differed only by
+                    # hue, and the only other distinction was the ABSENCE of
+                    # the `▸` affordance — an absence reads as "less", not as
+                    # "pending", and neither survives a monochrome or
+                    # low-colour terminal (design round 1, D5). `?` rather than
+                    # a second glyph because it asks the question the state
+                    # actually poses, and the detail line answers it with
+                    # `enter confirms`.
                     line.append(keymap_mod.format_key_display(capture.key), style=accent)
+                    line.append(" ?", style=accent)
                 else:
                     line.append("press a key\u2026", style=accent)
                 return line
@@ -3428,6 +3473,10 @@ class SettingsView(Vertical):
         every cursor move — the "rows are load-bearing" rule in AGENTS.md.
         """
         faint = Style(color=theme_mod.semantic_color("faint"))
+        # `dim` is 4.55:1 against the page background where `faint` is 1.97:1.
+        # Used by the capture branch, whose line is the sole content of the row
+        # and the only statement of the way out (design round 1, D3).
+        dim = Style(color=theme_mod.semantic_color("dim"))
         error = Style(color=theme_mod.semantic_color("danger"))
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
@@ -3437,36 +3486,120 @@ class SettingsView(Vertical):
             # string about an invisible setting would repeat #431's lie
             # in words. The constraint is the only useful thing to say.
             text.append(_TOO_SHORT, style=faint)
+            if self._capture is not None:
+                # …except when a capture is still live behind the hidden body.
+                # The user is then in a modal state with no visible
+                # representation and every app binding disarmed, and nothing
+                # on screen naming the way out (design round 1, D6). `esc`
+                # does work; it just was not advertised. Appended rather than
+                # ending the capture so that resizing back does not silently
+                # discard a key the user had already pressed.
+                text.append("  ·  esc cancels", style=dim)
         elif self._capture is not None:
             # Above everything but the too-short constraint: while a row is
             # listening, the app has no hotkeys at all, so what this row says
             # is the ONLY thing on screen explaining the state and the way out
             # of it. A help string here would be actively misleading.
             capture = self._capture
+            # THE CAPTURE LADDER. Same discipline as the setting-row ladder
+            # below, and it must be a ladder for the same reason: this line is
+            # handed to `.settings-view-detail` (`height: 2`, no wrap), which
+            # CLIPS WITHOUT A MARK. Appending directly meant an ordinary 80x24
+            # terminal cut `esc cancels` down to `esc`, and 60x20 lost the
+            # contract entirely and ended on a dangling `·` (design round 1,
+            # D1).
+            #
+            # The shed ORDER is the finding's substance: the REASON goes
+            # before the CONTRACT. A user can re-press a key to re-read why it
+            # was refused, but cannot guess the way out — and while capture is
+            # live `check_action` has disarmed every app binding, so this line
+            # is the only correct statement of the exit anywhere on screen.
+            #
+            # `dim`, not `faint`. A clause that is the only text on the line
+            # takes dim (4.55:1) and never faint (1.97:1) — this page's own
+            # standing rule, and capture is its strongest instance since the
+            # body behind it is inert (design round 1, D3, restating rounds
+            # 1/2 D3/D9).
+            lead: str
+            lead_style: Style
+            reason: str
             if capture.refused:
-                # A refusal, in the DANGER ink, because it is a report that the
-                # press did not land — the one thing that must not read as
-                # ordinary guidance. The row stays in capture, so the next
+                # A refusal is a report that the press did not land, so it
+                # takes the danger ink: the one thing here that must not read
+                # as ordinary guidance. The row stays in capture, so the next
                 # press is still heard.
-                text.append(capture.refused, style=error)
-                text.append("  ·  press another key · esc cancels", style=faint)
+                lead, lead_style, reason = capture.refused, error, "press another key"
+                contract_text = "esc cancels"
             elif capture.key:
-                bold_faint = faint + Style(bold=True)
-                text.append(keymap_mod.format_key_display(capture.key), style=bold_faint)
-                conflict = self._capture_conflict()
-                if conflict:
-                    # The cost of the choice, at the moment of the choice.
-                    # Warn-and-ALLOW: the reserved set is enormous and mostly
-                    # context-scoped, so refusing every overlap would make the
-                    # feature feel arbitrary — but stealing silently leaves the
-                    # victim invisible until the user notices weeks later that
-                    # something stopped working. So it is named, and the user
-                    # presses enter having read it.
-                    text.append(f"  ·  {conflict}", style=error)
-                text.append("  ·  enter confirms · esc cancels", style=faint)
+                lead = keymap_mod.format_key_display(capture.key)
+                lead_style = dim + Style(bold=True)
+                # The cost of the choice, at the moment of the choice.
+                # Warn-and-ALLOW: the reserved set is enormous and mostly
+                # context-scoped, so refusing every overlap would make the
+                # feature feel arbitrary — but stealing silently leaves the
+                # victim invisible until the user notices weeks later that
+                # something stopped working. So it is named, and the user
+                # presses enter having read it.
+                reason = self._capture_conflict()
+                contract_text = "enter confirms · esc cancels"
             else:
-                text.append("press the key you want\u2026", style=faint + Style(bold=True))
-                text.append("  ·  esc cancels", style=faint)
+                # Leads with the CONTRACT rather than restating the value
+                # column's `press a key…`; carrying both phrasings made a user
+                # check whether the difference was meaningful (design round 1,
+                # D7). The value column keeps the prompt, this line explains
+                # the way out.
+                lead, lead_style, reason = "listening for a key", dim + Style(bold=True), ""
+                contract_text = "esc cancels"
+
+            width = self._detail_width()
+            contract_part = (contract_text, dim, False)
+            lead_part = (lead, lead_style, False)
+            reason_style = error if reason else dim
+            capture_rungs: list[list[tuple[str, Style, bool]]] = []
+            if reason:
+                capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])
+                # A SHRUNK reason before a dropped one. The reason is the
+                # widest part and the least survival-critical, but it is also
+                # the only statement of what the key would cost — dropping it
+                # whole at 100x30 (where it used to be legible) to protect a
+                # contract that already fits trades too much. So it degrades
+                # to a visible `…` for as long as a useful stub fits, and is
+                # shed only when it no longer does.
+                spent = cell_len(self._join_detail([lead_part, contract_part]).plain) + 3
+                stub = width - spent
+                if stub >= 16:
+                    capture_rungs.append(
+                        [
+                            lead_part,
+                            (truncate_cells(reason, stub), reason_style, False),
+                            contract_part,
+                        ]
+                    )
+            capture_rungs.append([lead_part, contract_part])
+            for rung in capture_rungs:
+                rendered = self._join_detail(rung)
+                if cell_len(rendered.plain) <= width:
+                    text.append_text(rendered)
+                    break
+            else:
+                # THE FLOOR, and it truncates the LEAD rather than the line.
+                # Cutting the assembled string would eat the contract from the
+                # right — the opposite of the shed order — so the exit is
+                # reserved first and whatever room is left goes to the lead,
+                # which degrades to a visible `…`. A refusal at 60x20 then
+                # still reads as a refusal instead of disappearing into a bare
+                # `esc cancels` that does not say the press was rejected.
+                contract_render = self._join_detail([contract_part])
+                room = width - cell_len(contract_render.plain) - 3  # ` · `
+                if room >= 8:
+                    text.append(truncate_cells(lead, room), style=lead_style)
+                    text.append(" · ", style=dim)
+                    text.append_text(contract_render)
+                else:
+                    # Not even a stub of the lead fits. The exit alone is what
+                    # survives: a user who cannot read why is still a user who
+                    # must be able to leave.
+                    text.append(truncate_cells(contract_render.plain, width), style=dim)
         elif question:
             # Above the error and above the help: an unanswered destructive
             # question is the only thing the user needs the row to say.
@@ -4415,6 +4548,13 @@ class SettingsView(Vertical):
             # does something else entirely. What is true is that any key is
             # being read, and that `enter` commits once one has been.
             move = (self._move_hint, " any key", False)
+            # ONLY once a key is held. `enter` is in the reserved set, so
+            # pressing it while capture is empty is REFUSED and repaints the
+            # detail line in danger ink: the footer would name a key, the user
+            # would obey, and get an error (design round 1, D2). This is the
+            # page's own "a lit hint whose key does nothing" rule, which the
+            # detail line already honoured in both phases — the footer was the
+            # half that disagreed.
             enter = (self._enter_hint, " confirm", True)
         if self._editing is not None:
             if dropdown_open:
@@ -4448,11 +4588,21 @@ class SettingsView(Vertical):
         # The detail line already says WHY the row is retired; the footer's job
         # is only to stop advertising keys that will not act.
         if self._capture is not None:
-            # Two keys, and `←→` is NOT one of them: while capturing, an arrow
-            # is a key to bind rather than the pane switch, so offering it
-            # would name a key that now does something else — the same reason
-            # the dropdown branch below drops it.
-            leads = [move, enter]
+            # `←→` is NOT offered: while capturing, an arrow is a key to bind
+            # rather than the pane switch, so offering it would name a key that
+            # now does something else — the same reason the dropdown branch
+            # below drops it.
+            #
+            # ORDER IS THE SHED ORDER, and here it is inverted from every other
+            # state: `enter` leads so that it is the LAST lead dropped as the
+            # footer narrows. At 46x18 the ladder shed `enter confirm` while a
+            # key was pending, leaving the only committing gesture advertised
+            # nowhere (design round 1, D4). `↑↓ any key` is informational —
+            # "keys are being read", which the detail line also says — whereas
+            # `enter` is the only irreversible action available, so it outranks
+            # it. Empty capture offers `enter` nowhere at all (D2), which is
+            # what frees the width that makes this fit.
+            leads = [enter, move] if self._capture.key else [move]
         elif dropdown_open:
             # The dropdown state offers its own three keys and NOT `r`/`←→`:
             # `r default` types `r` into the buffer (the #425 anti-pattern
@@ -4512,8 +4662,16 @@ class SettingsView(Vertical):
                 break
         plan, esc_label = chosen
         visible = {hint for hint, _label, _lead in plan}
-        for hint, label, lead in plan:
-            hint.paint(esc_label if hint is self._exit_hint else label, lead=lead)
+        for index, (hint, label, lead) in enumerate(plan):
+            # The FIRST hint never draws its `·` seam, whatever its tuple says.
+            # `lead` is declared per hint, but a hint's position is decided by
+            # the rung — and capture reorders them so `enter` leads (design
+            # round 1, D4). Without this, the reordered row opened on a
+            # dangling separator with nothing before it.
+            hint.paint(
+                esc_label if hint is self._exit_hint else label,
+                lead=lead and index > 0,
+            )
         for hint in (
             self._move_hint,
             self._enter_hint,
@@ -4667,16 +4825,32 @@ class SettingsView(Vertical):
         self._leave()
 
     def on_unmount(self) -> None:
-        """The last-resort disarm.
+        """The last-resort disarm, of the APP's flag as well as this page's.
 
         The page is torn down by paths it never hears about — a session swap, a
         `/clear`, an app shutdown — and a capture leaked through one of those
         would leave the app with no hotkeys and no surface left to clear the
-        flag from. ``_close_settings_view`` clears it directly for the same
-        reason (a message from a removed widget is never delivered); this is
-        the backstop for any route that does not go through it.
+        flag from.
+
+        Clearing ``self._capture`` alone is NOT a backstop, which is what this
+        docstring used to claim: the app's ``_keymap_capture`` is the flag
+        ``check_action`` reads, and a message posted from an unmounting widget
+        is never delivered, so ``_end_capture()`` cannot carry it. Left set, it
+        disarms every app binding INCLUDING ``ctrl+c`` — the R1 failure the
+        design is organised around, reached through the one path written to
+        prevent it (review round 1, M3). So poke the app directly, exactly as
+        ``_close_settings_view`` does.
+
+        Every teardown caller today does go through ``_close_settings_view``,
+        so this is unreachable on this head. It is here anyway because that is
+        a property of today's call sites rather than a guarantee, and the cost
+        of being wrong is the user's interrupt key.
         """
         self._capture = None
+        try:
+            self.app._set_keymap_capture(False)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — no app, or already torn down
+            pass
 
     def _leave(self) -> None:
         # Leaving the page cancels a live capture. Ordered before the preview
