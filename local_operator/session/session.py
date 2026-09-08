@@ -5755,6 +5755,11 @@ class Session:
                     conversation_id=sync.snapshot.session_id,
                     owner_epoch=sync.epoch,
                     through_id=sync.live_cursor,
+                    durable_seed_tools=frozenset(
+                        str(event.get("tool_call_id", ""))
+                        for event in sync.snapshot.live_events
+                        if event.get("type") == "tool_execution_end"
+                    ),
                 )
                 window.durable_seed_ids = [
                     str(event["message"]["id"])
@@ -5762,21 +5767,6 @@ class Session:
                     if isinstance(event.get("message"), dict)
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
-                seed_tools = {
-                    str(event.get("tool_call_id", ""))
-                    for event in sync.snapshot.live_events
-                    if event.get("type") == "tool_execution_end"
-                }
-                if seed_tools:
-                    window.durable_seed_tool_ids = [
-                        str(message.tool_call_id)
-                        for message in self._transcript.build_llm_history(
-                            through_id=sync.live_cursor
-                        )
-                        if isinstance(message, Message)
-                        and message.role == "tool"
-                        and message.tool_call_id in seed_tools
-                    ]
                 sync.display_history = window
             except BaseException:
                 subscription.unsubscribe()

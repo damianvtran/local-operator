@@ -43,7 +43,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -52,6 +52,9 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.session.attachments import AttachmentStore
+
+if TYPE_CHECKING:
+    from local_operator.session.history_window import _DisplayWindowCache
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +525,7 @@ class Transcript:
         # a new owner. The signing key never leaves this resident transcript.
         self._history_generation = 0
         self._history_page_key = os.urandom(32)
+        self._display_window_cache: _DisplayWindowCache | None = None
         # Derived indexes only describe durable rows. They are updated after
         # fsync, rebuilt after a file fold, and never published from a worker.
         self._entry_ids: set[str] = set()
@@ -818,6 +822,7 @@ class Transcript:
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
             self._history_generation += 1
+            self._display_window_cache = None
         self._entry_ids.add(entry.id)
         self._latest_by_type[entry.type] = entry
         if entry.type == ENTRY_CUSTOM:
@@ -1164,6 +1169,7 @@ class Transcript:
                         break
             self._entries = folded
             self._history_generation += 1
+            self._display_window_cache = None
             self._entry_ids.clear()
             self._latest_by_type.clear()
             self._latest_custom_entries.clear()

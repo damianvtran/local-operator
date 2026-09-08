@@ -12,6 +12,8 @@ import base64
 import hashlib
 import hmac
 import json
+import sys
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,6 +26,13 @@ if TYPE_CHECKING:
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
+
+# Per OWNER, not per viewer: a fleet of sessions must not retain a full replay
+# per speculative attach. Admission examines only the already bounded page,
+# never walks the whole canonical history merely to decide whether to cache it.
+DISPLAY_PAGE_CACHE_ENTRIES = 4
+DISPLAY_PAGE_CACHE_BYTES = 2 * 1024 * 1024
+_CACHE_CONTAINER_ALLOWANCE = 4096
 
 
 class DisplayHistoryWindow(BaseModel):
@@ -70,6 +79,79 @@ def _verify(token: str, key: bytes) -> dict[str, Any]:
         raise ValueError("invalid history token") from exc
 
 
+class _DisplayWindowCache:
+    """Private detached page templates; no model/context consumer sees them."""
+
+    def __init__(self) -> None:
+        self.entries: OrderedDict[tuple[object, ...], tuple[DisplayHistoryWindow, int]] = (
+            OrderedDict()
+        )
+        self.retained_bytes = 0
+
+    def get(self, key: tuple[object, ...]) -> DisplayHistoryWindow | None:
+        cached = self.entries.get(key)
+        if cached is None:
+            return None
+        self.entries.move_to_end(key)
+        # Rendering and seed annotation mutate returned models. A shared cached
+        # Message would poison later attaches and violate replay's ownership.
+        return cached[0].model_copy(deep=True)
+
+    def put(self, key: tuple[object, ...], page: DisplayHistoryWindow) -> None:
+        size = _retained_size((key, page), DISPLAY_PAGE_CACHE_BYTES - _CACHE_CONTAINER_ALLOWANCE)
+        if size is None:
+            return
+        previous = self.entries.pop(key, None)
+        if previous is not None:
+            self.retained_bytes -= previous[1]
+        while self.entries and (
+            len(self.entries) >= DISPLAY_PAGE_CACHE_ENTRIES
+            or self.retained_bytes + size > DISPLAY_PAGE_CACHE_BYTES - _CACHE_CONTAINER_ALLOWANCE
+        ):
+            _, (_, removed) = self.entries.popitem(last=False)
+            self.retained_bytes -= removed
+        self.entries[key] = (page.model_copy(deep=True), size)
+        self.retained_bytes += size
+
+
+def _retained_size(value: object, limit: int) -> int | None:
+    """Bound the page's reachable data, including keys, tool metadata and media.
+
+    This is a small page walk, not a full-history admission pass (the latter
+    doubled cold 20k-row replay CPU in the measured prototype). Shared immutable
+    values count once within a page and conservatively again across cache entries.
+    The fixed allowance covers the four LRU nodes and bookkeeping. Framework
+    class/schema objects are process-global, not retained by this cache.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    total = 0
+    while pending:
+        item = pending.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(item)
+        if total > limit:
+            return None
+        if isinstance(item, BaseModel):
+            pending.extend(
+                (
+                    item.__dict__,
+                    item.__pydantic_fields_set__,
+                    item.__pydantic_extra__,
+                    item.__pydantic_private__,
+                )
+            )
+        elif isinstance(item, dict):
+            pending.extend(item)
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+    return total
+
+
 def display_window(
     transcript: Transcript,
     *,
@@ -80,6 +162,60 @@ def display_window(
     anchor: str = "",
     max_messages: int = DISPLAY_HISTORY_MESSAGES,
     max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
+    durable_seed_tools: frozenset[str] = frozenset(),
+) -> DisplayHistoryWindow:
+    """Reuse exact bounded display requests, never the mutable public replay.
+
+    A signed ``before`` token owns its cut, irrespective of the newer cursor
+    the caller passes beside it. The token itself is part of the key, so no
+    validation is bypassed: only the exact request already validated at this
+    generation/epoch can hit. Invalid/reset requests are never retained.
+    """
+    cache = transcript._display_window_cache
+    if cache is None:
+        cache = transcript._display_window_cache = _DisplayWindowCache()
+    key = (
+        conversation_id,
+        owner_epoch,
+        transcript._history_generation,
+        transcript._history_page_key,
+        None if before is not None else through_id,
+        before,
+        anchor,
+        max_messages,
+        max_wire_bytes,
+        durable_seed_tools,
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    page = _capture_display_window(
+        transcript,
+        conversation_id=conversation_id,
+        owner_epoch=owner_epoch,
+        through_id=through_id,
+        before=before,
+        anchor=anchor,
+        max_messages=max_messages,
+        max_wire_bytes=max_wire_bytes,
+        durable_seed_tools=durable_seed_tools,
+    )
+    if page.status != "reset":
+        cache.put(key, page)
+    return page
+
+
+def _capture_display_window(
+    transcript: Transcript,
+    *,
+    conversation_id: str,
+    owner_epoch: str,
+    through_id: str | None,
+    before: str | None = None,
+    anchor: str = "",
+    max_messages: int = DISPLAY_HISTORY_MESSAGES,
+    max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
+    durable_seed_tools: frozenset[str] = frozenset(),
 ) -> DisplayHistoryWindow:
     """Return complete replay rows, with tool call/result groups kept together.
 
@@ -110,6 +246,20 @@ def display_window(
         history = transcript.build_llm_history(through_id=through_id) if through_id else []
     except ValueError:
         return DisplayHistoryWindow(status="reset", **envelope)
+    # These identities belong to the SAME durable cut as the page. Derive
+    # them before discarding the full replay, including on an oversized page;
+    # a subscribing session must not reconstruct history a second time.
+    seed_tool_ids = (
+        [
+            str(message.tool_call_id)
+            for message in history
+            if isinstance(message, Message)
+            and message.role == "tool"
+            and message.tool_call_id in durable_seed_tools
+        ]
+        if durable_seed_tools
+        else []
+    )
     total = len(history)
     end = int(claims["position"]) if claims is not None else total
     if end < 0 or end > total:
@@ -162,7 +312,9 @@ def display_window(
                     for m in selected
                 )
             ):
-                return DisplayHistoryWindow(status="full_required", **envelope)
+                return DisplayHistoryWindow(
+                    status="full_required", durable_seed_tool_ids=seed_tool_ids, **envelope
+                )
             break
         selected[0:0] = group
         used += cost
@@ -177,6 +329,7 @@ def display_window(
     return DisplayHistoryWindow(
         **envelope,
         messages=selected,
+        durable_seed_tool_ids=seed_tool_ids,
         before_token=before_token,
         snapshot_token=snapshot_token,
         has_more=start > 0,
