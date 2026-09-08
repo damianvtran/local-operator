@@ -1088,6 +1088,74 @@ async def test_the_engage_preemption_deadline_can_only_shorten_the_wait(
 
 
 @pytest.mark.asyncio
+async def test_a_set_preemption_actually_cuts_the_engage_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A set preemption must CUT a long engage deadline down to the budget.
+
+    THE COMPLEMENT of the monotonicity test above, and the one that guards this
+    delta's headline fix: the ``min()`` in ``_deadline()`` at
+    ``launch.py``. That test runs a 0.1 s deadline against a 600 s budget, so a
+    correct implementation ignores the preemption entirely — it pins the
+    DIRECTION of the ``min`` and cannot notice if the cut is deleted outright.
+    The two sibling tests have the same blind spot from the other side: one
+    stubs ``engage_runtime`` wholesale, so no line inside it ever executes.
+
+    So this case inverts the ratio — a 30 s deadline against a 0.5 s budget —
+    which is the real shape (``DEFAULT_DEADLINE_S`` 30 s vs
+    ``_BACKGROUND_YIELD_BUDGET_S`` 1 s) and the only one where the cut is
+    load-bearing. Deleting the ``min()`` line makes this wait the full 30 s;
+    measured 1.01 s on head against 30.03 s without it.
+
+    Structural, not calibrated: the two numbers are 60x apart, so the ceiling
+    sits an order of magnitude clear of both. It fails by taking ~30 s, in the
+    same way the other guards in this file fail by hanging.
+    """
+    from local_operator.session.runtime import launch as launch_mod
+    from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+    class _AliveCandidate:
+        """A candidate that never dies and never publishes a record.
+
+        So the loop can only ever leave through its DEADLINE, which is the
+        quantity under test. Spawning a real runtime would leave a process
+        behind for the 30 s the mutant keeps the loop alive.
+        """
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(launch_mod, "_spawn_runtime", lambda *a, **k: _AliveCandidate())
+
+    preempt = asyncio.Event()
+    # Set BEFORE the call, so the cut is taken on the loop's first deadline
+    # read rather than depending on a race with the poll interval.
+    preempt.set()
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await engage_runtime(
+            "does-not-exist",
+            "/tmp",
+            WarmErrand(),
+            config_dir=tmp_path,
+            # The production ratio: a generous engage deadline that a waiting
+            # foreground caller must be able to cut short.
+            deadline_s=30.0,
+            preempt=preempt,
+            preempt_budget_s=0.5,
+        )
+    elapsed = time.monotonic() - started
+    # Not a calibrated ceiling: 0.5 s budget vs a 30 s deadline. Anything under
+    # 10 s proves the deadline was cut to the budget rather than left at its
+    # own clock, with 20x headroom above the budget and 3x below the deadline.
+    assert elapsed < 10.0, (
+        f"the engage took {elapsed:.2f}s against a 0.5s preemption budget: a "
+        "set preemption did not shorten the 30s deadline, so a foreground "
+        "caller waits behind the background engage's full envelope"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_raw_bind_lock_acquisition_announces_itself(tmp_path: Path, monkeypatch) -> None:
     """Every FOREGROUND acquisition of ``_bind_lock`` publishes a waiter.
 

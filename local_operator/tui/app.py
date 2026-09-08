@@ -3731,17 +3731,29 @@ class OperatorApp(App[None]):
             if session.is_cold:
                 if speculative:
                     raise RuntimeError("The prepared owner is no longer ready")
-                # NO outer wall clock. `_ensure_bound` is already bounded by
-                # its own foreground envelope (`_FOREGROUND_BIND_BUDGET_S`,
-                # 15 s) and reports failure as a `ConnectionError` carrying a
-                # sentence worth showing. An outer `wait_for(..., 15)` on the
-                # same number could only fire on the same tick the inner
-                # envelope would have — replacing that sentence with a bare
-                # `TimeoutError` whose `str()` is the empty string, so the
-                # sidebar's "Could not open conversation: {error}" rendered
-                # with nothing after the colon. It was also the last bare wall
-                # clock left on this seam, which is the shape this change
-                # exists to replace (review round 2, MINOR-1).
+                # NO outer wall clock. The removed `wait_for(..., 15)` was not
+                # redundant with anything — it was DESTRUCTIVE: it replaced
+                # `_ensure_bound`'s `ConnectionError`, which carries a sentence
+                # worth showing, with a bare `TimeoutError` whose `str()` is the
+                # empty string, so the sidebar's "Could not open conversation:
+                # {error}" rendered with nothing after the colon. It was also
+                # the last bare wall clock left on this seam, which is the shape
+                # this change exists to replace (review round 2, MINOR-1).
+                #
+                # BUT it was the only thing bounding this call at 15 s, so be
+                # precise about what does bound it now (review round 3, M3-2).
+                # `_FOREGROUND_BIND_BUDGET_S` (15 s) covers only the retry/sync
+                # half: that deadline is computed AFTER `engage_runtime` has
+                # returned, and the foreground engage passes no `deadline_s`, so
+                # it takes `DEFAULT_DEADLINE_S` (30 s) first. Worst case here is
+                # therefore ~45 s, not 15 s — measured 30.00 s in the engage
+                # alone against a stalling owner. That is a deliberate trade,
+                # not an oversight: capping the foreground engage would halve
+                # the spawn/discovery window on a cold start, which is the path
+                # this change exists to make more reliable, and the wait is
+                # cancellable and reports progress rather than being silent.
+                # Do not re-add an outer `wait_for` to "restore" the 15 s; bound
+                # the engage itself if that worst case ever needs shortening.
                 await session._ensure_bound()
             if session.is_cold:
                 raise RuntimeError("The conversation has not finished connecting")
