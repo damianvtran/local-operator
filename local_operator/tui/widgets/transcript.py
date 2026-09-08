@@ -3636,10 +3636,30 @@ class TranscriptView(ScrollableContainer):
         # a wheel notch DOWN while already at the tail, which must hand the
         # anchor straight back rather than leaving it released forever.
         self.call_after_refresh(self._resync_tail_anchor)
+        self._report_scroll_input(upward, continuous=continuous)
+
+    def _report_scroll_input(self, upward: bool | None, *, continuous: bool = False) -> None:
+        """Tell the app which DIRECTION a person just asked for.
+
+        Split out of :meth:`note_user_scroll` because the two halves of that
+        method answer different questions, and one gesture needs only this one.
+        `note_user_scroll` says "a person moved the viewport: release the tail
+        anchor and re-decide where they landed". ``end`` is not that gesture —
+        it is an explicit REQUEST for the tail, which :meth:`follow_tail`
+        acquires outright — yet it is still the most explicit downward input
+        there is and must retire any older upward demand.
+
+        Routing ``end`` through the full `note_user_scroll` is what regressed
+        tail-following (UX round 2, U2): the deferred `_resync_tail_anchor` ran
+        BETWEEN `follow_tail`'s acquire and its deferred `_scroll_to_tail`,
+        measured `is_near_bottom()` at an offset the reader had not been moved
+        to yet, and un-acquired the anchor the same keypress had just taken —
+        so the next reply landed off screen and was never seen.
+        """
         if self._on_user_scroll is not None:
             # Positional provenance preserves the hook's existing variadic
             # contract for other transcript consumers. True/False is actual
-            # directional input; None below is only an offset observation.
+            # directional input; None is only an offset observation.
             self._on_user_scroll(upward, continuous=continuous)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
@@ -3903,8 +3923,14 @@ class TranscriptView(ScrollableContainer):
         as `upward=False` also retires any older upward demand, exactly as a
         `pagedown` does: the reader travelling to the newest content is not
         asking for older history.
+
+        Provenance ONLY, deliberately — not the whole of `note_user_scroll`.
+        This gesture's anchor handling belongs to `follow_tail` below, which
+        acquires the tail outright; adding the release-and-re-decide pass on
+        top of it un-acquires that anchor a frame later (U2). See
+        :meth:`_report_scroll_input`.
         """
-        self.note_user_scroll(upward=False)
+        self._report_scroll_input(False)
         if self._on_tail_requested is not None:
             self._on_tail_requested()
         self.follow_tail()

@@ -20,7 +20,7 @@ from local_operator.session.runtime.server import RuntimeServer
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
-from local_operator.tui.widgets.transcript import GAP_CLASS
+from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -731,3 +731,49 @@ async def test_inserted_rows_never_paint_with_provisional_spacing() -> None:
                     )
                 seen[key] = (y, gap)
         assert seen, "no inserted row was ever visible during the insertion"
+
+
+@pytest.mark.asyncio
+async def test_end_holds_the_tail_and_still_retires_upward_demand() -> None:
+    """`end` must acquire the tail AND cancel older upward demand (U2).
+
+    Reporting the gesture through the full `note_user_scroll` scheduled a
+    resync that ran between `follow_tail`'s acquire and its deferred scroll,
+    measured the not-yet-moved offset, and released the anchor the keypress
+    had just taken — so a reply arriving afterwards landed off screen.
+    """
+    session = FakeSession()
+    session._history = history()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await settled(app, pilot)
+        view = app._transcript_view()
+        view.focus()
+
+        # Read upward first, so there is genuine upward demand to retire and
+        # the reader is demonstrably away from the tail.
+        view.scroll_to(y=0, animate=False, immediate=True)
+        app._transcript_scrolled(True)
+        await settled(app, pilot)
+        assert view.is_following_tail is False
+
+        pending_before = len(app._resume_pending_head)
+        await pilot.press("end")
+        await settled(app, pilot)
+
+        # The anchor the keypress asked for is still held.
+        assert view.is_following_tail is True
+        # And the demand it retired stays retired: no page is drawn by
+        # travelling to the newest content.
+        assert not app._resume_in_zone
+        assert len(app._resume_pending_head) == pending_before
+
+        # The user-visible half: a reply arriving after `end` is on screen.
+        app._append_block(NoticeBlock("a reply that arrives after end", "info"))
+        await settled(app, pilot)
+        for _ in range(6):
+            await pilot.pause()
+        arrived = view.blocks()[-1]
+        assert view.is_following_tail is True
+        assert arrived.region.bottom <= view.content_region.bottom
+        assert arrived.region.y >= view.content_region.y
