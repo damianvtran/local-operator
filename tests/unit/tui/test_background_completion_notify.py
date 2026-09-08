@@ -38,6 +38,11 @@ class AttachedSession(FakeSession):
         return "current"
 
 
+#: Monotonic birth clock for fixture sessions. Module-level rather than a
+#: function attribute so the type checker can see it.
+_birth_clock: float = 1_700_000_000.0
+
+
 def _make_session(root: Path, session_id: str, name: str) -> Path:
     """A session directory the catalog can actually scan and name.
 
@@ -48,6 +53,14 @@ def _make_session(root: Path, session_id: str, name: str) -> Path:
 
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
+    # Pin the birth date the catalog ranks by. Without it these directories
+    # fall through to the filesystem birthtime, which macOS has and Linux does
+    # not — so every row would tie at 0 on CI and rank by session id instead of
+    # by creation, silently changing which rows land under the announce cap.
+    # Monotonic in creation order, matching what a real store looks like.
+    global _birth_clock
+    _birth_clock += 1.0
+    (directory / "created_at.json").write_text(str(_birth_clock))
     (directory / "transcript.jsonl").write_text(
         '{"id":"e1","ts":1,"type":"message",'
         '"payload":{"kind":"message","role":"user","content":[{"text":"go"}]}}\n'
