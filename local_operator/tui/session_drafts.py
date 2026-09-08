@@ -44,12 +44,18 @@ class SessionDraftStore:
 
     @staticmethod
     def _size(draft: SessionDraft) -> int:
-        from local_operator.tui.widgets.editor import Attachment, PastedText
+        from local_operator.tui.widgets.editor import (
+            Attachment,
+            PastedCredential,
+            PastedText,
+        )
 
         size = len(draft.text.encode("utf-8")) + len((draft.aside_main_text or "").encode("utf-8"))
         for attachment in (*draft.attachments.values(), *draft.aside_main_images.values()):
             if isinstance(attachment, Attachment):
                 size += len(attachment.image.data)
+            elif isinstance(attachment, PastedCredential):
+                size += len(attachment.value.encode("utf-8"))
             elif isinstance(attachment, PastedText):
                 size += len(attachment.text.encode("utf-8"))
         if draft.aside is not None:
@@ -108,7 +114,11 @@ class SessionDraftStore:
 
     @staticmethod
     def _encode_attachments(values: dict[int, Any]) -> dict[str, Any]:
-        from local_operator.tui.widgets.editor import Attachment, PastedText
+        from local_operator.tui.widgets.editor import (
+            Attachment,
+            PastedCredential,
+            PastedText,
+        )
 
         attachments: dict[str, Any] = {}
         for index, attachment in values.items():
@@ -116,6 +126,27 @@ class SessionDraftStore:
                 attachments[str(index)] = {
                     "kind": "image",
                     "image": attachment.image.model_dump(),
+                    "marker": attachment.marker,
+                }
+            elif isinstance(attachment, PastedCredential):
+                # THE VALUE IS DELIBERATELY NOT WRITTEN. This encoder spills an
+                # unsubmitted draft to a temp JSON file when the sidebar's RAM
+                # budget is exceeded, and a session credential is
+                # memory-only-for-one-session by construction (see
+                # `VariableStore.store_credential`) — persisting it here would
+                # put a plaintext secret on disk through a caching side door
+                # that nothing about the gesture suggests.
+                #
+                # The KEY and LENGTH are kept so the restored draft still
+                # paints its marker and the operator can see what was there.
+                # The empty value is what makes the loss honest rather than
+                # silent: on submit `store_credential` refuses a blank, and
+                # `_mark_credentials_unstored` tells the model the credential
+                # was NOT stored, so the operator re-pastes instead of the
+                # agent hunting an env var nobody set.
+                attachments[str(index)] = {
+                    "kind": "credential",
+                    "key": attachment.key,
                     "marker": attachment.marker,
                 }
             elif isinstance(attachment, PastedText):
@@ -168,15 +199,23 @@ class SessionDraftStore:
 
     @staticmethod
     def _decode_attachments(values: dict[str, Any]) -> dict[int, Any]:
-        from local_operator.tui.widgets.editor import Attachment, PastedText
+        from local_operator.tui.widgets.editor import (
+            Attachment,
+            PastedCredential,
+            PastedText,
+        )
 
         attachments = {}
         for index, item in values.items():
-            attachments[int(index)] = (
-                Attachment(ImageContent.model_validate(item["image"]), item["marker"])
-                if item["kind"] == "image"
-                else PastedText(item["text"], item["marker"])
-            )
+            if item["kind"] == "image":
+                attachments[int(index)] = Attachment(
+                    ImageContent.model_validate(item["image"]), item["marker"]
+                )
+            elif item["kind"] == "credential":
+                # Value intentionally absent from the file — see the encoder.
+                attachments[int(index)] = PastedCredential("", item["key"], item["marker"])
+            else:
+                attachments[int(index)] = PastedText(item["text"], item["marker"])
         return attachments
 
     def _decode_draft(self, data: dict[str, Any]) -> SessionDraft:
