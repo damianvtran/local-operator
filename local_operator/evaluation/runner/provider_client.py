@@ -1319,12 +1319,7 @@ class ProviderModelClient:
         # request, and a ``context_compaction`` event is the only honest trace
         # of that (review round 4, m8). Returning nothing here would hide it
         # behind a bare ``message_count`` drop.
-        if (
-            shed == 0
-            and frames_dropped == 0
-            and not result.ran
-            and not result.pruned
-        ):
+        if shed == 0 and frames_dropped == 0 and not result.ran and not result.pruned:
             return None, None, 0
         record = CompactionRecord(
             strategy=result.strategy or "prune",
@@ -1399,7 +1394,7 @@ class ProviderModelClient:
         return self._shed_stale_turns(band)
 
     def _enforce_wire_fit(self, budget: int) -> int:
-        """After a pass, shed the oldest FRAMES until the request fits ``budget`` bytes.
+        """After a pass, shed the oldest FRAMES until the request fits the byte band.
 
         The byte counterpart of :meth:`_enforce_threshold_fit`, and deliberately
         a different mechanism: that one sheds whole stale TURNS to recover
@@ -1409,27 +1404,39 @@ class ProviderModelClient:
         and tokens are separate rulers in this package and each gets the shed
         that answers its own question.
 
-        Returns the number of frames dropped, 0 when already under budget or
+        Sheds to a BAND BELOW THE TRIGGER, not merely under ``budget``, and
+        that is the same lesson the token side already carries: the trigger is
+        clamped to at most the budget, so a prefix shed to exactly the budget
+        can still be over the trigger and fire the pass again on the very next
+        turn — measured as a rebuild every turn, which destroys the prefix
+        cache for no headroom. The band buys the episode room to append.
+
+        Returns the number of frames dropped, 0 when already inside the band or
         when no byte ceiling is configured. Raises
         :class:`ContextUnrecoverableError` when even dropping every frame
-        leaves the request over the wire budget — a text-only prefix too large
-        to send is not something this client can repair, and sending it earns
-        a provider rejection that ends the episode anyway, less legibly.
+        leaves the request over ``budget`` — a text-only prefix too large to
+        send is not something this client can repair, and sending it earns a
+        provider rejection that ends the episode anyway, less legibly. Note the
+        asymmetry: the shed AIMS at the band, but only the hard ``budget`` is
+        worth refusing over.
 
-        The rebuild-once property is preserved: in the normal case this shed
-        finds the prefix already under budget and replaces nothing, so the pass
+        The rebuild-once property is preserved: in the normal case this finds
+        the prefix already inside the band and replaces nothing, so the pass
         above remains the single rewrite.
         """
         from local_operator.compaction.pruning import shed_frames_to_wire_budget
+        from local_operator.compaction.thresholds import resolve_wire_bytes_trigger
         from local_operator.compaction.tokens import estimate_wire_bytes
 
         if budget <= 0:
             return 0
+        trigger = resolve_wire_bytes_trigger(self._compaction)
+        band = min(budget, int(0.8 * trigger)) if trigger > 0 else budget
         messages = self._context.messages
         wire = estimate_wire_bytes(messages)
-        if wire <= budget:
+        if wire <= band:
             return 0
-        shed_messages, dropped = shed_frames_to_wire_budget(messages, budget=budget)
+        shed_messages, dropped = shed_frames_to_wire_budget(messages, budget=band)
         if dropped:
             self._context.replace(shed_messages)
         remaining = estimate_wire_bytes(self._context.messages)
@@ -1441,10 +1448,13 @@ class ProviderModelClient:
                 "than send a request the provider will reject"
             )
         logger.info(
-            "evaluation context shed %d frame(s) to fit the wire budget (%d -> %d bytes)",
+            "evaluation context shed %d frame(s) to fit the wire band (%d -> %d bytes, "
+            "band %d, budget %d)",
             dropped,
             wire,
             remaining,
+            band,
+            budget,
         )
         return dropped
 

@@ -49,7 +49,9 @@ from local_operator.mobile.types import (
     ask_pending_request,
 )
 from local_operator.session.runtime.server import SessionHandle
-from local_operator.session.runtime.server import image_blocks_in_thread as _image_blocks_async
+from local_operator.session.runtime.server import (
+    image_blocks_in_thread as _image_blocks_async,
+)
 from local_operator.session.runtime.types import runtime_must_complete
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 

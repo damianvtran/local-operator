@@ -103,8 +103,11 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
         if not isinstance(item, dict):
             logger.debug("mobile image dropped: not a dict (%r)", type(item).__name__)
             continue
+        # The client's declared ``mime_type`` is deliberately NOT read: the
+        # format is decided by CONTENT below, and the wire mime comes back from
+        # the bound. A phone that mislabels a HEIC as image/png would otherwise
+        # pick an encoder for a format the bytes are not.
         data = item.get("data_b64") or item.get("data") or ""
-        mime = item.get("mime_type") or "image/png"
         if not data:
             logger.debug("mobile image dropped: no data_b64/data")
             continue

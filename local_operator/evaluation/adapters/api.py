@@ -12,14 +12,27 @@ import platform
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, Literal, NamedTuple, Protocol, TypeAlias, runtime_checkable
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    NamedTuple,
+    Protocol,
+    TypeAlias,
+    runtime_checkable,
+)
 
 from pydantic import AfterValidator, Field, field_validator, model_validator
 
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
 from local_operator.evaluation.lifecycle import CleanupPlan
-from local_operator.evaluation.protocol import ActionBatch, FrameSize, Observation, ProtocolModel
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    FrameSize,
+    Observation,
+    ProtocolModel,
+)
 from local_operator.evaluation.receipts import (
     ZERO_DIGEST,
     Digest,

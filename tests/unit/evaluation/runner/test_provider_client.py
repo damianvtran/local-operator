@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -2318,3 +2319,141 @@ def test_an_eval_row_falls_back_to_the_episode_when_there_is_no_task() -> None:
     finally:
         analytics_pkg.get_recorder = original  # type: ignore[assignment]
     assert captured == [("lop-eval-ep-42", f"eval ep-42 · {ROUTE.model_id}")]
+
+
+def _fat_framed_observation(root: Path, sequence: int, *, pixels: int) -> Observation:
+    """A framed observation whose frame is big enough to matter in BYTES.
+
+    The other frame helpers publish a 1x1 PNG, which is right for identity and
+    geometry tests and useless here: the byte trigger measures the base64
+    payload, so a frame has to actually weigh something to move it.
+    """
+    from local_operator.compaction.png import encode_grayscale_png
+    from local_operator.evaluation.protocol import (
+        ArtifactRef,
+        FrameGeometry,
+        FrameRef,
+        FrameSize,
+    )
+
+    # Incompressible, so the encoded size tracks the pixel count instead of
+    # collapsing to a few bytes of run-length.
+    data = encode_grayscale_png(pixels, 1, os.urandom(pixels))
+    digest = _publish_frame(root, data)
+    provisional = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=sequence,
+        observation_id="provisional",
+        text=f"screen {sequence}",
+        frames=(
+            FrameRef(
+                frame_id="screen",
+                artifact=ArtifactRef(sha256=digest, media_type="image/png", byte_count=len(data)),
+                geometry=FrameGeometry(
+                    native=FrameSize(width=pixels, height=1),
+                    model_visible=FrameSize(width=pixels, height=1),
+                ),
+            ),
+        ),
+    )
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+@pytest.mark.asyncio
+async def test_byte_trigger_rebuilds_once_when_frames_outgrow_the_wire_trigger(
+    tmp_path: Path,
+) -> None:
+    """Bytes must be able to fire the pass on their own, and fire it ONCE.
+
+    A screenshot's token charge is flat by design, so an image-heavy prefix can
+    sit far under every token threshold while the serialized request is past
+    the provider's size cap. Before ``wire_bytes`` was passed through, the byte
+    trigger and the wire shed were both configured, both tested in isolation,
+    and both unreachable from this client — the session 413'd with its
+    backstops inert.
+    """
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.compaction.tokens import estimate_wire_bytes
+
+    stream = RecordingStream(_wait_reply)
+    # A window big enough that the TOKEN trigger cannot fire: whatever compacts
+    # here compacted on bytes.
+    spec = ModelSpec(provider="provider", model_id="model", context_window=10_000_000)
+    # Each fixture frame is ~80 KB on the wire once base64'd. Frames accumulate
+    # (keep_recent_frames covers the whole run), so the payload grows by one
+    # frame per turn and crosses the trigger exactly once during six turns; the
+    # shed then puts it far enough under that the remaining turns stay below.
+    trigger, budget = 350_000, 500_000
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(
+            keep_recent_tokens=20_000,
+            wire_bytes_trigger=trigger,
+            wire_bytes_budget=budget,
+        ),
+        keep_recent_frames=6,
+        rebuild_every_frames=64,  # far out of reach, so only bytes can trigger
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(6):
+        current = _fat_framed_observation(tmp_path, sequence, pixels=60_000)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    rebuilds = [
+        index
+        for index in range(1, len(stream.requests))
+        if not all(
+            a is b
+            for a, b in zip(stream.requests[index - 1].messages, stream.requests[index].messages)
+        )
+    ]
+    assert len(rebuilds) == 1, f"expected exactly one prefix rebuild, got {rebuilds}"
+    final = estimate_wire_bytes(stream.requests[-1].messages)
+    assert final <= budget, f"the request after the rebuild is still {final} bytes over {budget}"
+
+
+@pytest.mark.asyncio
+async def test_byte_trigger_does_not_fire_under_the_trigger(tmp_path: Path) -> None:
+    """Under the trigger, the prefix is append-only and message identity holds.
+
+    The guarantee the byte path owes every ordinary episode: a session below
+    the ceiling must behave byte-identically to one without a byte trigger at
+    all, which means no rebuild and no re-created message objects.
+    """
+    from local_operator.compaction.thresholds import CompactionSettings
+
+    stream = RecordingStream(_wait_reply)
+    spec = ModelSpec(provider="provider", model_id="model", context_window=10_000_000)
+    client = ProviderModelClient(
+        stream,
+        route=ROUTE,
+        model_spec=spec,
+        artifact_root=tmp_path,
+        compaction=CompactionSettings(
+            keep_recent_tokens=20_000,
+            wire_bytes_trigger=50_000_000,
+            wire_bytes_budget=100_000_000,
+        ),
+        keep_recent_frames=3,
+        rebuild_every_frames=64,
+    )
+
+    history: list[EpisodeTurn] = []
+    for sequence in range(6):
+        current = _fat_framed_observation(tmp_path, sequence, pixels=60_000)
+        history.append(EpisodeTurn(observation=current))
+        decision = await client.decide(current, tuple(history))
+        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+
+    # Every earlier message object survives into the next request unchanged:
+    # append-only, so the provider's prefix cache stays warm.
+    for previous, following in zip(stream.requests, stream.requests[1:]):
+        assert len(following.messages) > len(previous.messages)
+        assert all(a is b for a, b in zip(previous.messages, following.messages))

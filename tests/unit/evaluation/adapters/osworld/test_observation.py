@@ -10,6 +10,7 @@ build raises (a resized guest would silently miscalibrate every coordinate).
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,95 @@ def test_metadata_excludes_floats(tmp_path: Path) -> None:
     observation = builder.build(_raw(), task_id="t", episode_id="e", sequence=0)
     for value in observation.metadata.values():
         assert not isinstance(value, float)
+
+
+def _photographic_frame(size: tuple[int, int]) -> bytes:
+    """A native-sized frame that is NOT line art and NOT flat.
+
+    ``write_png_rgb`` with a constant shade compresses to a few KB and reads as
+    line art, which takes the ladder's bilevel exemption — so it would prove
+    nothing about the screen edge. Real per-pixel content is what makes the
+    resize and the format choice meaningful.
+    """
+    import os
+
+    width, height = size
+    return write_png_rgb(width, height, os.urandom(width * height * 3))
+
+
+def test_frame_artifact_is_the_bounded_image_and_geometry_maps_back_to_native(
+    tmp_path: Path,
+) -> None:
+    """The published frame IS what the model sees, and it still points home.
+
+    Three properties the episode depends on together: the artifact decodes to
+    the model-visible size (not the guest's), a coordinate at the far corner of
+    that space converts back into native pixels, and an identical guest screen
+    yields an identical artifact address — which is what ``_frames_identical``
+    reads to tell the model the screen did not move.
+    """
+    from PIL import Image
+
+    png = _photographic_frame((NATIVE_SCREEN.width, NATIVE_SCREEN.height))
+    builder = ObservationBuilder(tmp_path)
+    observation = builder.build(
+        {"screenshot": png, "accessibility_tree": None, "terminal": None, "instruction": "go"},
+        task_id="t",
+        episode_id="e",
+        sequence=0,
+    )
+
+    frame = observation.frames[0]
+    payload = (tmp_path / frame.artifact.sha256).read_bytes()
+    assert Image.open(io.BytesIO(payload)).size == (1280, 720)
+    assert frame.geometry.model_visible == FrameSize(width=1280, height=720)
+    assert frame.geometry.native == NATIVE_SCREEN
+
+    # Coordinates the model emits in this space land back on the guest's.
+    # The interior scales by 1.5 native px per model px...
+    interior = frame.geometry.model_to_native(640, 360)
+    assert (interior.x, interior.y) == (960, 540)
+    penultimate = frame.geometry.model_to_native(1278, 718)
+    assert (penultimate.x, penultimate.y) == (1917, 1077)
+    # ...and the last row/column is CLAMPED to the last native pixel rather
+    # than scaled (protocol._scale_clamped_axis), so a click on the extreme
+    # edge of the frame cannot land one pixel short of the screen edge.
+    corner = frame.geometry.model_to_native(1279, 719)
+    assert (corner.x, corner.y) == (1919, 1079)
+
+    # Identical native bytes must give an identical artifact address, both
+    # within one builder (memoised) and across a fresh one (deterministic).
+    again = builder.build(
+        {"screenshot": png, "accessibility_tree": None, "terminal": None, "instruction": "go"},
+        task_id="t",
+        episode_id="e",
+        sequence=1,
+    )
+    assert again.frames[0].artifact.sha256 == frame.artifact.sha256
+    fresh = ObservationBuilder(tmp_path).build(
+        {"screenshot": png, "accessibility_tree": None, "terminal": None, "instruction": "go"},
+        task_id="t",
+        episode_id="e",
+        sequence=2,
+    )
+    assert fresh.frames[0].artifact.sha256 == frame.artifact.sha256
+
+
+def test_native_dimension_check_still_runs_on_the_raw_screenshot(tmp_path: Path) -> None:
+    """The guest-resize guard must judge the GUEST's bytes, not our own.
+
+    Bounding happens after this check by construction: if the assertion ever
+    moved onto the bounded frame it would compare our resizer's output against
+    the native screen and either fire on every observation or never fire at
+    all, and the case it exists for — a guest that silently changed resolution,
+    miscalibrating every coordinate — would go unnoticed.
+    """
+    builder = ObservationBuilder(tmp_path)
+    raw = {
+        "screenshot": _photographic_frame((1600, 900)),
+        "accessibility_tree": None,
+        "terminal": None,
+        "instruction": "go",
+    }
+    with pytest.raises(ObservationError, match="guest frame is 1600x900"):
+        builder.build(raw, task_id="t", episode_id="e", sequence=0)

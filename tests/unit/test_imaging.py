@@ -34,6 +34,7 @@ from local_operator.imaging import (
     IMAGE_MAX_EDGE,
     IMAGE_MAX_PIXELS,
     IMAGE_REFUSAL_MAX_B64_BYTES,
+    IMAGE_SCREEN_MAX_EDGE,
     _is_line_art,
     bound_image_for_model,
     rebound_oversize_image,
@@ -846,3 +847,85 @@ def test_an_oversized_archive_frame_is_repaired_without_going_lossy() -> None:
     repaired = Image.open(io.BytesIO(base64.b64decode(data)))
     assert repaired.mode == "L", "grayscale was widened, which is what forces the JPEG rung"
     assert max(repaired.size) <= MANY_IMAGE_PIXEL_LIMIT
+
+
+def _ui_frame(size: tuple[int, int]) -> bytes:
+    """A synthetic desktop screenshot: chrome, small labels, and a photo block.
+
+    Deliberately NOT line art. The ladder exempts bilevel sources from the
+    tighter bounds (see ``IMAGE_INGEST_MAX_EDGE``), so a two-tone fixture would
+    take the exemption and prove nothing about the screen edge. A photographic
+    block with per-pixel noise is what keeps ``_is_line_art`` answering "no",
+    and it is also what makes the PNG large enough for the byte cap to mean
+    something.
+    """
+    from PIL import ImageDraw
+
+    width, height = size
+    image = Image.new("RGB", size, (246, 246, 248))
+    draw = ImageDraw.Draw(image)
+    # Window chrome and a tab strip, the 10-11px text this edge is chosen for.
+    draw.rectangle((0, 0, width, 36), fill=(222, 225, 232))
+    draw.rectangle((8, 6, 220, 30), fill=(255, 255, 255))
+    draw.text((14, 12), "Documents — Finder", fill=(40, 42, 48))
+    draw.rectangle((8, 44, width - 8, 68), fill=(255, 255, 255))
+    draw.text((16, 50), "https://example.internal/reports/q3?tab=summary", fill=(60, 62, 70))
+    for row in range(12):
+        y = 90 + row * 22
+        draw.text(
+            (20, y),
+            f"row {row:02d}   2026-03-1{row % 10}   invoice-{row:04d}.pdf",
+            fill=(30, 30, 34),
+        )
+    # The photographic block: per-pixel noise over a third of the frame, which
+    # is what stops the whole thing reading as line art.
+    import os
+
+    noise_size = (width // 3, height // 3)
+    noise = Image.frombytes("RGB", noise_size, os.urandom(noise_size[0] * noise_size[1] * 3))
+    image.paste(noise, (width - noise_size[0] - 20, height - noise_size[1] - 20))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_screen_edge_bounds_a_1080p_frame_to_1280x720_under_the_byte_cap() -> None:
+    """The screen bound is what an eval adapter publishes as ``model_visible``.
+
+    Three properties at once, because the adapter depends on all three: the
+    frame comes back at exactly 1280x720 (the geometry it will advertise), the
+    payload is inside the byte cap (so the request is sendable), and the media
+    type is one the clients serialize (the ladder is free to pick either).
+    """
+    frame = _ui_frame((1920, 1080))
+    assert not _is_line_art(
+        Image.open(io.BytesIO(frame))
+    ), "the fixture took the line-art exemption"
+
+    payload, mime, _summary = bound_image_for_model(
+        frame, _sniffed(frame), max_edge=IMAGE_SCREEN_MAX_EDGE
+    )
+
+    assert Image.open(io.BytesIO(payload)).size == (1280, 720)
+    assert len(payload) <= IMAGE_MAX_BYTES, (
+        f"a bounded screen frame is {len(payload)} bytes, over the "
+        f"{IMAGE_MAX_BYTES}-byte cap the ladder promises"
+    )
+    assert mime in {"image/png", "image/jpeg"}
+
+
+def test_screen_edge_leaves_a_720p_frame_verbatim() -> None:
+    """Already inside the bound means untouched — no re-encode, no resize.
+
+    A guest that already renders at the model's size must not pay a PNG
+    round-trip, which routinely makes screenshots BIGGER (see the ladder's
+    first rung).
+    """
+    frame = _ui_frame((1280, 720))
+
+    payload, mime, _summary = bound_image_for_model(
+        frame, _sniffed(frame), max_edge=IMAGE_SCREEN_MAX_EDGE
+    )
+
+    assert payload == frame, "a frame already at the screen edge was re-encoded"
+    assert mime == "image/png"

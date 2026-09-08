@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import signal
 import stat
@@ -59,6 +60,9 @@ from local_operator.evaluation.lifecycle import CleanupAction, CleanupPlan
 from local_operator.evaluation.protocol import (
     ActionBatch,
     ArtifactRef,
+    FrameGeometry,
+    FrameRef,
+    FrameSize,
     Observation,
     WaitAction,
 )
@@ -784,3 +788,53 @@ def test_completion_rejects_incompatible_ownership(
     )
     with pytest.raises(SupervisionError, match="answer"):
         verifier.finish_ask(params, result, answer_owner=owner)
+
+
+def _frame_observation(root: Path, payload: bytes, *, declared: FrameSize) -> Observation:
+    """An observation whose one frame declares ``declared`` as model-visible."""
+    digest = hashlib.sha256(payload).hexdigest()
+    (root / digest).write_bytes(payload)
+    provisional = Observation(
+        task_id="task",
+        episode_id="episode",
+        sequence=0,
+        observation_id="provisional",
+        text="state",
+        frames=(
+            FrameRef(
+                frame_id="screen",
+                artifact=ArtifactRef(
+                    sha256=digest, media_type="image/png", byte_count=len(payload)
+                ),
+                geometry=FrameGeometry(
+                    native=FrameSize(width=1920, height=1080), model_visible=declared
+                ),
+            ),
+        ),
+    )
+    return provisional.model_copy(update={"observation_id": observation_content_id(provisional)})
+
+
+def test_host_refuses_a_frame_whose_pixels_disagree_with_model_visible(tmp_path: Path) -> None:
+    """The invariant the whole resize seam rests on, enforced by the host.
+
+    The model is told ``model_visible``, validates its coordinates against it,
+    and the adapter converts them back through it. Nothing else checks that the
+    IMAGE is that size, so an adapter that resized without updating its
+    geometry — or any runner-side rewrite of frame pixels — would miscalibrate
+    every click for the rest of the episode, silently. It must fail loudly on
+    the observation instead.
+    """
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1280, 720), (12, 24, 36)).save(buffer, format="PNG")
+    payload = buffer.getvalue()
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    honest = _frame_observation(tmp_path, payload, declared=FrameSize(width=1280, height=720))
+    verifier.accept_initial(honest)
+
+    lying = _frame_observation(tmp_path, payload, declared=FrameSize(width=1920, height=1080))
+    with pytest.raises(SupervisionError, match="model-visible geometry"):
+        HostVerifier("task", "episode", tmp_path).accept_initial(lying)
