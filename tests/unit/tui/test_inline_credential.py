@@ -379,6 +379,173 @@ async def test_the_armed_token_is_still_tracked_while_text_before_it_is_edited()
         assert editor.text.startswith("please deploy [Credential #1,")
 
 
+#: Single edits that move the armed token FAR in one step, each a keystroke an
+#: operator reaches without doing anything unusual. The parameter is what the
+#: token slides by, and the values straddle the ``_ARM_DRIFT = 64`` boundary
+#: that used to sit in ``_relocate_armed_token``: 63 captured and 64 leaked.
+_ONE_BIG_EDIT = (
+    ("shift+home", ("shift+home", "backspace")),
+    ("delete_line", ("ctrl+shift+k",)),
+    ("kill_to_start", ("ctrl+u",)),
+    ("cut_block", ("shift+home", "ctrl+x")),
+)
+
+
+@pytest.mark.parametrize("name,keys", _ONE_BIG_EDIT, ids=[case[0] for case in _ONE_BIG_EDIT])
+@pytest.mark.parametrize("pad", (63, 64, 70, 120))
+@pytest.mark.asyncio
+async def test_one_large_edit_before_the_token_cannot_disarm_it(
+    pad: int, name: str, keys: tuple[str, ...]
+) -> None:
+    """R7 / QA Q5: a SINGLE edit may move the token ANY distance and stay armed.
+
+    ``_relocate_armed_token`` used to bound the move by ``_ARM_DRIFT = 64`` and
+    return ``None`` past it, which ``_sync_credential_arm`` reads as "the
+    operator deleted the gesture" — so it disarmed while the token was STILL
+    PLAINLY IN THE BUFFER, and silently, because ``reason="gone"`` has no
+    notice branch. The next paste landed as ordinary text: in the composer, in
+    scrollback, and in the prompt sent to the model in plaintext.
+
+    Measured at exactly that boundary: 63 characters above the token captured,
+    64 leaked. That is why this is parameterised over the distance rather than
+    asserting one case — a window of any size has the same cliff one character
+    further along, which is why the fix removes the distance test rather than
+    widening it.
+
+    The delta's own drift test could not catch this: it types seven characters
+    ONE KEYSTROKE AT A TIME, so the token never moves more than one character
+    per sync and no single edit ever crosses the window.
+    """
+    app = Host()
+    # Wide enough that the padding line is ONE visual row for every `pad` here:
+    # `home` moves to the start of the WRAPPED row, so a narrower composer would
+    # select only part of the line and the token would move less than `pad`.
+    async with app.run_test(size=(200, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        # Context ABOVE the token, then the gesture — all typed, because the
+        # arm is only reachable by keystrokes (`load_text` disarms).
+        for char in "x" * pad:
+            await pilot.press(char)
+        await pilot.press("shift+enter")
+        for char in "deploy /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed(), "precondition: the gesture armed"
+
+        # ONE edit, removing the whole line above and moving the token by pad+1.
+        editor.move_cursor((0, pad))
+        await pilot.pause()
+        for key in keys:
+            await pilot.press(key)
+        await pilot.pause()
+        assert editor.credential_armed(), f"{name} moved the token {pad} chars; it is still there"
+
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text, "the paste was CAPTURED, not left in plaintext"
+        assert "[Credential #1, 64 chars]" in editor.text
+        assert SECRET not in _painted(app), "and nothing painted the secret"
+
+
+@pytest.mark.asyncio
+async def test_typing_over_a_large_selection_before_the_token_does_not_disarm_it() -> None:
+    """The same cliff reached by REPLACING a block rather than deleting it.
+
+    One keystroke over a wide selection is a single edit that both removes and
+    inserts, so the token's net move is the block's length. It is the route
+    that looks least like an edit to the token — the operator is retyping a
+    sentence somewhere else entirely — and under the drift window it disarmed
+    just as silently.
+    """
+    app = Host()
+    # Wide enough that the 150-character line is ONE visual row: `home` moves to
+    # the start of the WRAPPED row, so a narrower composer would select only
+    # part of it and measure a shorter move than the test claims.
+    async with app.run_test(size=(200, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "z" * 150:
+            await pilot.press(char)
+        await pilot.press("shift+enter")
+        for char in "deploy /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed()
+
+        # Select the whole 150-character line above and type ONE character over
+        # it: a single edit that moves the token by 149.
+        editor.move_cursor((0, 150))
+        await pilot.pause()
+        await pilot.press("shift+home")
+        await pilot.press("q")
+        await pilot.pause()
+        assert editor.text.startswith("q\n"), "precondition: the block really was replaced"
+        assert editor.credential_armed(), "replacing a block before the token keeps the arm"
+
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert SECRET not in editor.text, "the secret was captured, not left in plaintext"
+        assert "[Credential #1, 64 chars]" in editor.text
+        assert SECRET not in _painted(app)
+
+
+@pytest.mark.asyncio
+async def test_a_large_edit_then_submit_never_discloses_the_secret() -> None:
+    """R7/Q5 as the DISCLOSURE property, on the real app and through submit.
+
+    ``credential_armed() is True`` is the mechanism; this is the thing that
+    actually matters and the thing that regressed — the secret must not reach
+    the model's prompt, the transcript, or the painted screen. Asserted end to
+    end because every one of those is a separate seam from the latch.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "x" * 120:
+            await pilot.press(char)
+        await pilot.press("shift+enter")
+        for char in "deploy /credential ":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.credential_armed()
+
+        # ONE edit, moving the token by 121. `delete_line` rather than
+        # `shift+home`: it takes the whole LOGICAL line, so the move does not
+        # depend on where the composer soft-wraps it at this width.
+        editor.move_cursor((0, 120))
+        await pilot.pause()
+        await pilot.press("ctrl+shift+k")
+        await pilot.pause()
+        assert editor.text.startswith("deploy /credential"), "precondition: the line above is gone"
+
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        for char in " the staging key":
+            await pilot.press(char)
+        await pilot.press("enter")
+        for _ in range(12):
+            await pilot.pause()
+
+        sent = " ".join(str(prompt) for prompt in session.prompts)
+        assert SECRET not in sent, "the secret must NEVER reach the model"
+        assert "the staging key" in sent, "precondition: the message really was sent"
+        keys = session.variables.credential_names()
+        assert len(keys) == 1, "it went to the store instead"
+        assert session.variables.credential_env()[keys[0]] == SECRET
+        assert keys[0] in sent, "the model learns the NAME"
+        assert SECRET not in _painted(app), "and it is not on screen"
+
+
 # -- the edge cases the gesture has to decide ---------------------------------
 @pytest.mark.asyncio
 async def test_an_empty_paste_while_armed_creates_no_zero_length_credential() -> None:

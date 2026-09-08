@@ -557,12 +557,14 @@ CREDENTIAL_ARM = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)[ \t]*$", re.IGNO
 #: I already armed on move to" after the operator kept typing (design round 1,
 #: D2).
 #:
-#: It is matched against a WINDOW around the latched offset rather than the
-#: whole buffer (see :meth:`Editor._sync_credential_arm`). A whole-buffer
+#: It is matched NEAREST the latched offset rather than by a whole-buffer
+#: ``search`` (see :meth:`Editor._sync_credential_arm`). A whole-buffer
 #: ``search`` returns the FIRST token in the text, which is unrelated to the
 #: one that armed: a buffer replaced while armed re-anchored the latch onto a
 #: token the operator never typed, and the next ordinary paste was swallowed as
-#: a secret (review round 2, R6b/R6c; QA round 2, Q4).
+#: a secret (review round 2, R6b/R6c; QA round 2, Q4). Nearest is a TIE-BREAK
+#: among tokens, never a distance test — see ``_relocate_armed_token`` for why
+#: bounding it by a distance re-opened the leak (review round 3, R7; QA Q5).
 #:
 #: NOTE the token typed as prose — ``fix the /credential command`` — DOES arm,
 #: and deliberately so: it passes through ``/credential`` at end-of-line while
@@ -595,20 +597,6 @@ CREDENTIAL_TOKEN = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)(?!\S)", re.IGN
 #: operator who wants the destructive verb still reaches it by typing it, and
 #: the operator writing ``deploy with /credential the prod key`` stays armed.
 CREDENTIAL_ARGUMENT = re.compile(r"[ \t]+-", re.IGNORECASE)
-
-#: How far the latched token may have MOVED between two syncs and still be
-#: recognised as the same occurrence (:meth:`Editor._relocate_armed_token`).
-#:
-#: Every buffer edit re-syncs, so ordinary typing before the token moves it by
-#: one character; the slack is for the edits that move it further in one step
-#: (a completion, a pasted word, a deleted line). It is a DRIFT tolerance, not
-#: a search radius: its job is only to separate "the token I armed on, nudged"
-#: from "a different token in a buffer that was wholly replaced", and a
-#: replacement moves the token by much more than this or puts it in text that
-#: has none. Erring generous is the safe direction — too tight disarms
-#: mid-typing and lands the secret in plaintext (design round 1, D2), which is
-#: unrecoverable, while too loose costs a swallowed paste (review round 2, R6).
-_ARM_DRIFT = 64
 
 #: Random-name alphabet: Crockford-ish base32 WITHOUT the letters that read as
 #: digits. The name is quoted back to the operator in a notice and may be typed
@@ -5432,10 +5420,15 @@ class Editor(TextArea):
         MIGRATED the arm onto a token the operator never typed, and the next
         ordinary paste was swallowed as a secret: unrecoverable, because
         ``ctrl+o`` refuses to expand a credential and a submit stores the blob
-        (review round 2, R6b/R6c; QA round 2, Q4). Matching within a window
-        around the latched offset keeps the "token slides as you type before
-        it" case working while making an arriving token unable to inherit the
-        arm.
+        (review round 2, R6b/R6c; QA round 2, Q4). Matching nearest the latched
+        offset keeps the "token slides as you type before it" case working
+        while making an arriving token unable to inherit the arm.
+
+        "Gone" here means GONE FROM THE BUFFER, not "moved further than some
+        window". :meth:`_relocate_armed_token` answers by identity and never by
+        distance, so this branch cannot fire on a token the operator can still
+        see — which it did, silently, while a distance bound stood there
+        (review round 3, R7; QA round 3, Q5).
         """
         if self._credential_arm is None:
             span = self._credential_arm_span()
@@ -5479,25 +5472,49 @@ class Editor(TextArea):
         token the operator never typed, and the next ordinary paste was
         swallowed as a secret with no way to get it back.
 
-        The window is deliberately generous rather than exact. A single edit
-        can legitimately move the token by more than one character (an
-        autocomplete before it, a pasted word, a deleted line), and being too
-        strict fails the SAFE way only for the migration case — in the ordinary
-        case it would disarm mid-typing and put the secret in plaintext, which
-        is the unrecoverable direction D2 exists to prevent. So it admits any
-        match whose start is within :data:`_ARM_DRIFT` of where the latch left
-        it, and rejects the wholesale replacements that move a token much
-        further or introduce one in unrelated prose.
+        Nearest is a TIE-BREAK among the tokens present, NOT a distance test.
+        There used to be an ``_ARM_DRIFT = 64`` window here, and a distance
+        bound of any size is unsafe in this direction: a SINGLE edit can move
+        the token arbitrarily far while it is still plainly in the buffer —
+        ``shift+home`` over a long line above it, ``ctrl+x`` of a block,
+        ``ctrl+u``, ``delete_line``, an ordinary paste of context before it —
+        and past the bound this returned ``None``, which
+        :meth:`_sync_credential_arm` reads as "the operator deleted the
+        gesture" and disarms. SILENTLY: ``reason="gone"`` has no notice branch.
+        The next paste then landed in the composer, in scrollback and in the
+        prompt SENT TO THE MODEL in plaintext — measured at exactly N=64 on the
+        line above, N=63 still capturing (review round 3, R7; QA round 3, Q5).
+        Every finite window has that cliff, and the cliff fails in the one
+        direction D2 calls unrecoverable, so there is no window to tune.
+
+        WHEN THE BUFFER HOLDS EXACTLY ONE MATCH THERE IS NO AMBIGUITY: it is
+        the token that armed, however far the text before it moved, so it is
+        returned regardless of distance. That single case is what the drift
+        window was breaking, and it is the overwhelmingly common one.
+
+        With two or more, the arm is genuinely ambiguous — the operator typed a
+        second mention — and nearest-to-the-latch is the right reading, because
+        the token slides only as text before it is edited while an added
+        mention appears somewhere else entirely. That is the property
+        ``test_the_arm_stays_on_its_own_token_when_an_earlier_one_is_typed_in``
+        pins. Ambiguity still resolves to STAYING ARMED rather than to
+        ``None``: a wrong-but-armed token costs a swallowed paste the operator
+        can see and redo, while disarming costs a disclosure that no keystroke
+        undoes. The arriving-text routes that a window was defending against
+        are already closed upstream and by construction — :meth:`load_text`
+        DISARMS rather than re-syncing, so a recalled prompt, a restored draft
+        or a completion never reaches this function with a live arm at all
+        (review round 2, R6b/R6c).
         """
         anchor = self._credential_arm[0] if self._credential_arm is not None else 0
         nearest: tuple[int, int] | None = None
-        best = _ARM_DRIFT + 1
+        best = -1
         for match in CREDENTIAL_TOKEN.finditer(self.text):
             distance = abs(match.start() - anchor)
-            if distance < best:
+            if nearest is None or distance < best:
                 best = distance
                 nearest = match.span()
-            elif nearest is not None:
+            else:
                 # `finditer` walks left to right, so once the distance stops
                 # shrinking every later match is further away still.
                 break
@@ -5508,9 +5525,20 @@ class Editor(TextArea):
 
         The MODE GATE for the next paste. Anchored at the caret and at the end
         of the token, so it answers "is the operator pasting a secret RIGHT
-        HERE" rather than "does this draft mention the command anywhere" — a
-        draft that says ``fix the /credential command`` and then pastes a log
-        four words later must collapse that log as an ordinary paste.
+        HERE" rather than "does this draft mention the command anywhere".
+
+        It is the ONLY way to arm, but it is not the only thing that decides
+        whether an arm is live: once it latches, the arm survives the words
+        typed after the token (:meth:`_arm_credential`). So a draft that says
+        ``fix the /credential command`` and then pastes a log four words later
+        DOES capture that log — the prose passes through ``/credential`` at
+        end-of-line as it is typed, which is exactly the arming gesture, and it
+        is the same keystroke shape as ``deploy with /credential the prod key``,
+        which must stay armed (design round 1, D2). No rule keyed on the buffer
+        separates the two, so this docstring no longer promises that it does
+        (review round 2, R6a; corrected review round 3, R8). See
+        ``CREDENTIAL_TOKEN`` and :meth:`_sync_credential_arm` for the same note
+        at the two other places the rule is written down.
 
         Deliberately NOT routed through ``slash_command_for`` /
         ``consumes_prompt``. ``consumes_prompt=True`` (``/team``, ``/agent``)

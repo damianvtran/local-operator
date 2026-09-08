@@ -168,6 +168,36 @@ async def main() -> None:
             await pilot.pause()
         return ["still armed: " + str(editor.credential_armed())]
 
+    async def big_edit_then_capture(pilot, app, editor, session):
+        """R7/QA Q5: ONE large edit above the token, then a capture.
+
+        The frame that has to show a MARKER CHIP rather than ``ghp_…``. Under
+        the old ``_ARM_DRIFT = 64`` window this single ``delete_line`` moved
+        the token past the bound, ``_relocate_armed_token`` returned ``None``,
+        and the arm was dropped SILENTLY while the token was still in the
+        buffer — so this same paste painted the secret here in plaintext.
+        """
+        await type_text(pilot, "x" * 120)
+        await pilot.press("shift+enter")
+        await type_text(pilot, "deploy /credential ")
+        armed_before = editor.credential_armed()
+        editor.move_cursor((0, 120))
+        await pilot.pause()
+        await pilot.press("ctrl+shift+k")
+        for _ in range(3):
+            await pilot.pause()
+        armed_after = editor.credential_armed()
+        editor.move_cursor(editor._end_of_buffer())
+        app.post_message(events.Paste(SECRET))
+        for _ in range(6):
+            await pilot.pause()
+        await type_text(pilot, " the staging deploy key")
+        return [
+            f"armed before the 121-char delete_line: {armed_before}",
+            f"armed after it (was False, the leak):  {armed_after}",
+            f"chip in buffer (was the raw secret):   {'[Credential #1' in editor.text}",
+        ]
+
     frames = [
         ("03-armed", armed),
         ("03b-armed-midline", armed_midline),
@@ -178,6 +208,7 @@ async def main() -> None:
         ("51-armed-affordance-typed-word", disarm_word),
         ("52-captured", captured),
         ("53-blank-paste-while-armed", blank_paste),
+        ("54-big-edit-then-capture", big_edit_then_capture),
     ]
     for name, drive in frames:
         await shoot(outdir, size, name, drive)
