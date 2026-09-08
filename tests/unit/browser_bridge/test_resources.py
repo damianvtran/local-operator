@@ -8,9 +8,11 @@ from typing import Any
 import pytest
 
 from local_operator.browser_bridge import resources
+from local_operator.browser_bridge.backend import BridgeUnreachable
 from local_operator.browser_bridge.resources import (
     RESOURCE_NAME,
     BrowserResource,
+    cleanup_disposition,
     cleanup_exact,
     read_inventory,
 )
@@ -28,6 +30,9 @@ class BridgeFixture:
         #: could not remove the tab" answer can be exercised as itself rather
         #: than as a transport failure.
         self.finish_state = ""
+        #: Raise the real transport error, whose message names the diagnosing
+        #: command — the detail the operator is supposed to receive.
+        self.unreachable = False
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
@@ -37,6 +42,10 @@ class BridgeFixture:
             self.retained = True
             return {"state": "retained"}
         if method == "owner_finish":
+            if self.unreachable:
+                raise BridgeUnreachable(
+                    "browser bridge unreachable: no live daemon state. " "Run 'lop browser status'."
+                )
             if self.fail_close:
                 raise ConnectionError("disposable fixture unavailable")
             if self.finish_state:
@@ -276,3 +285,99 @@ async def test_refusals_name_the_specific_cause_and_the_route_out(
     held.remember("bridge:9:held")
     assert "pending login" in (await cleanup_exact(retained, held.generation)).detail
     assert bridge.calls == [], "no refusal may reach the bridge"
+
+
+def test_finalized_unleased_child_can_browse_on_a_later_run(tmp_path: Path) -> None:
+    """M3/Q2: a settled scope must not lock a resumed child out of the browser.
+
+    In-process children use ``claim_session``, not ``acquire_session_lease``,
+    so gating the retire branch on holding a lease made ``terminal`` permanent
+    for EVERY subagent: ``allocate`` refuses on terminal, and ``hub
+    op='resume'`` relaunches children on their own directory, so an ordinary
+    finish-then-resume left a child that could never browse again. No round-1
+    guard set ``terminal`` on an UNLEASED record, which is why the regression
+    passed 15/15.
+    """
+    directory = tmp_path / "sessions" / "child"
+    first = BrowserResource(directory, "child")
+    first.initialize()
+    first.record.update(state="retained", surface_id="bridge:9:tok", terminal="cancelled")
+    first._save()
+    assert not (directory / ".execution-lease").exists()
+
+    resumed = BrowserResource(directory, "child")
+    resumed.initialize()
+    assert resumed.record.get("terminal") is None
+    resumed.allocate()
+
+
+def test_paused_unleased_child_consumes_its_release_on_resume(tmp_path: Path) -> None:
+    """A pause routes through cancellation, so the unleased path must release it."""
+    directory = tmp_path / "sessions" / "paused"
+    first = BrowserResource(directory, "paused")
+    first.initialize()
+    first.record.update(state="retained", terminal="cancelled", retention="paused scope")
+    first._save()
+
+    resumed = BrowserResource(directory, "paused")
+    resumed.initialize()
+    assert resumed.record.get("release_pause") is True
+
+
+def test_operator_cleanup_of_a_stranded_scope_is_never_blocked_by_a_resume(
+    tmp_path: Path,
+) -> None:
+    """Retiring a stranded scope must not cost the operator their recovery route.
+
+    A failed close leaves the tab out there, and the resumed owner is the party
+    responsible for it — the route the crash-shape refusal names. That is safe
+    for the operator's own path because ``cleanup_exact`` reaches a record
+    through ``adopt``, never through ``initialize``, so an untouched stranded
+    record stays a cleanup candidate with its terminal intact.
+    """
+    directory = tmp_path / "sessions" / "stranded"
+    first = BrowserResource(directory, "stranded")
+    first.initialize()
+    first.record.update(state="cleanup_pending", surface_id="bridge:4:tok", terminal="completed")
+    first._save()
+
+    # Untouched by any new run, the row remains the operator's to clean up.
+    assert cleanup_disposition(read_inventory(tmp_path / "sessions")[0])[0] is True
+
+    # A resume takes responsibility for the tab and may browse again.
+    resumed = BrowserResource(directory, "stranded")
+    resumed.initialize()
+    assert resumed.record.get("terminal") is None
+    resumed.allocate()
+
+
+def test_a_live_incumbent_is_never_retired_by_a_concurrent_instance(tmp_path: Path) -> None:
+    """B1 must survive the M3 fix: no terminal means no retire, so no fencing."""
+    directory = tmp_path / "sessions" / "live"
+    incumbent = BrowserResource(directory, "live")
+    incumbent.initialize()
+    incumbent.remember("bridge:2:live")
+
+    newcomer = BrowserResource(directory, "live")
+    newcomer.initialize()
+    assert newcomer.generation == incumbent.generation
+    # The incumbent still owns its tab; the newcomer adopted, not seized.
+    incumbent.remember("bridge:2:live")
+
+
+@pytest.mark.asyncio
+async def test_pending_cleanup_names_the_command_not_the_class(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """D10/U10: the bridge's own message names the fix; the class name does not."""
+    directory = tmp_path / "sessions" / "unreachable"
+    resource = BrowserResource(directory, "unreachable")
+    resource.initialize()
+    resource.record["terminal"] = "completed"
+    resource.remember("bridge:100:private")
+    bridge.unreachable = True
+
+    result = await resource.finish(resource.generation, "completed")
+    assert result.state == "pending"
+    assert "BridgeUnreachable" != result.detail
+    assert "lop browser status" in result.detail

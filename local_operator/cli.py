@@ -1370,14 +1370,21 @@ def browser_command(args: argparse.Namespace) -> int:
         # script as an empty browser. Unowned tabs are listed, never selectable.
         live_tabs: list[dict[str, Any]] = []
         current = browser_state.read()
-        if current is not None:
-            # Read-only, and never fatal: an absent or unreachable bridge just
-            # means the live half is unknown, which must not break the listing
-            # of the durable half.
-            probe = browser_install.health(current.port)
-            driven = (probe or {}).get("driven_tabs")
-            if isinstance(driven, list):
-                live_tabs = [entry for entry in driven if isinstance(entry, dict)]
+        # Resolve the port exactly as the sibling `status` does. `state.read()`
+        # returns None for a MISSING OR CORRUPT discovery file as much as for
+        # an absent daemon, so skipping the probe on None made a healthy bridge
+        # driving five tabs render as an empty browser — `status` found them at
+        # the default port in the same state, which is the divergence this
+        # command was added to remove.
+        probe = browser_install.health(current.port if current else browser_install.DEFAULT_PORT)
+        driven = (probe or {}).get("driven_tabs")
+        # Read-only and never fatal, but UNKNOWN IS NOT ZERO: a probe that did
+        # not answer means the live half is unknowable, and reporting that as
+        # "no tabs" tells the operator the opposite of the truth in exactly the
+        # wedged-bridge state that sent them here.
+        live_known = isinstance(driven, list)
+        if live_known:
+            live_tabs = [entry for entry in driven if isinstance(entry, dict)]
         # Every durable record is redacted (no capability, no tab handle), so a
         # record cannot be matched to a live URL here. The honest framing is a
         # count of records against a count of live tabs, with the live ones
@@ -1388,11 +1395,18 @@ def browser_command(args: argparse.Namespace) -> int:
                 json.dumps(
                     {
                         "resources": rows,
-                        "unowned_tabs": [
+                        "live_tabs": [
                             {"url": str(tab.get("url", "")), "title": str(tab.get("title", ""))}
                             for tab in unowned
                         ],
-                        "live_tab_count": len(live_tabs),
+                        # Null, not 0, when the bridge did not answer: a script
+                        # must not be able to read an unreachable bridge as an
+                        # empty browser. The key is `live_tabs` to match the
+                        # rendered heading — records are redacted, so a listed
+                        # tab can only be described as live, never proven
+                        # unowned.
+                        "live_tabs_known": live_known,
+                        "live_tab_count": len(live_tabs) if live_known else None,
                         "mode": "read-only",
                     },
                     indent=2,
@@ -1400,7 +1414,16 @@ def browser_command(args: argparse.Namespace) -> int:
             )
             return 0
         if not rows and not live_tabs:
-            print("No browser tabs and no ownership records.")
+            print(
+                "No browser tabs and no ownership records."
+                if live_known
+                else textwrap.fill(
+                    "No ownership records. The bridge did not answer, so open "
+                    "tabs are unknown — run 'lop browser status' to check the "
+                    "daemon.",
+                    width=78,
+                )
+            )
             return 0
         if rows:
             # Pad the state so the third column starts at one offset: at real
@@ -1415,10 +1438,19 @@ def browser_command(args: argparse.Namespace) -> int:
                 # rstrip so an unmarked row carries no trailing padding.
                 print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
                 print(f"  generation={row.get('generation', '')}")
-                print(
-                    f"  terminal={row.get('terminal') or 'not established'}; "
-                    f"retention={row.get('retention') or 'none recorded'}"
-                )
+                # Wrapped on the same discipline as the reason below it: a
+                # retention reason is free text (it can quote a whole approval
+                # URL), so an unwrapped line here ran to 141 columns beside
+                # neighbours that wrap at 76.
+                for line in textwrap.wrap(
+                    f"terminal={row.get('terminal') or 'not established'}; "
+                    f"retention={row.get('retention') or 'none recorded'}",
+                    width=76,
+                    initial_indent="  ",
+                    subsequent_indent="    ",
+                    break_long_words=False,
+                ):
+                    print(line)
                 if not row.get("cleanup_candidate") and row.get("blocked_reason"):
                     # Wrapped: the reasons name a recovery command, and a line
                     # running past the terminal width is where that command
@@ -1446,6 +1478,18 @@ def browser_command(args: argparse.Namespace) -> int:
             print(
                 "  Handles are redacted, so these cannot be attributed to a record above."
                 "\n  Close an unwanted tab by hand; provenance is unproven."
+            )
+        elif not live_known and rows:
+            # The records rendered above are only half the answer, and silence
+            # here would read as "the browser is empty" beside them.
+            print()
+            print(
+                textwrap.fill(
+                    "Live tabs: unknown — the bridge did not answer, so tabs open "
+                    "outside these records could not be listed. Run 'lop browser "
+                    "status' to check the daemon.",
+                    width=78,
+                )
             )
         print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
         if any(row.get("cleanup_candidate") for row in rows):

@@ -99,7 +99,7 @@ orphans.
 Operator diagnostics are conservative:
 
 ```sh
-lop browser tabs              # durable ownership records + live unowned tabs
+lop browser tabs              # durable ownership records + live bridge tabs
 lop browser tabs --json       # the same, machine-readable
 lop browser cleanup SESSION --generation GENERATION --yes
 ```
@@ -111,6 +111,12 @@ states why each of the others is refused, so eligibility never has to be
 inferred. Live tabs the bridge is driving are listed separately: handles are
 redacted, so they cannot be attributed to a record, and Local Operator will not
 close them.
+
+An unreachable bridge makes the live half **unknown, never zero** — the listing
+says so and points at `lop browser status`, and `--json` reports
+`live_tabs_known: false` with a null `live_tab_count`. Do not read that as an
+empty browser: a wedged bridge is often why tabs are stranded in the first
+place.
 
 **A session killed before it finished has no terminal intent, and cleanup will
 refuse it forever — correctly, because a live owner must not be closed behind

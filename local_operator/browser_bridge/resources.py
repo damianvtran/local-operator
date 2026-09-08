@@ -117,14 +117,47 @@ class BrowserResource:
             allocation_id=self.record.get("allocation_id") or secrets.token_urlsafe(24),
             state=self.record.get("state", "closed"),
         )
-        if self._lease_at_creation and self.previous_generation != self.generation:
-            # Only a real lease change is a resume. Gating this on "generation
-            # differs" alone would retire a live owner's terminal intent on the
-            # unleased path, where the generation is now deliberately reused.
+        if self._is_new_execution_over_settled_scope():
             self.record.pop("terminal", None)
             if self.record.get("retention") == "paused scope":
                 self.record["release_pause"] = True
         self._save()
+
+    def _is_new_execution_over_settled_scope(self) -> bool:
+        """May this owner retire the terminal intent the record already carries?
+
+        The question a resume has to answer is "is this a NEW RUN of the
+        session", and the honest evidence for that is the record itself, never
+        a pid and never a lease.
+
+        Keying this on holding a lease was wrong in both directions, and the
+        wrong one shipped: in-process children use ``claim_session``, not
+        ``acquire_session_lease``, so for every subagent the branch was dead
+        and ``terminal`` became permanent. ``allocate`` refuses on terminal, so
+        a finalized child could never browse again on any later run — and
+        ``hub op='resume'`` relaunches children on their own directory, which
+        made that an ordinary flow, not a corner. Worse, a scope that ended
+        holding a tab for a pending approval could no longer be finished, so
+        the tab was stranded: the leak class this module exists to remove.
+
+        Two facts make the record sufficient. ``terminal`` is written only by
+        ``finish``, so its presence means the previous scope SETTLED and has no
+        live owner left to fence. And ``initialize`` runs only on a
+        freshly-constructed resource — the instance that called ``finish``
+        returns early from it — so reaching here over a settled record IS a
+        later execution. That keeps B1 intact: a live incumbent has no terminal
+        recorded, so a concurrent second instance still cannot retire anything.
+
+        A STRANDED scope (the close failed, so the tab is still out there) is
+        retired too, and that is deliberate rather than an oversight: the
+        resumed owner is alive again and is the party responsible for that tab,
+        which is precisely the route out that the crash-shape refusal names
+        — resume the session and let the owner close it. It costs the operator
+        no evidence, because ``cleanup_exact`` reaches a record through
+        ``adopt``, never through this method, and a row only stops being a
+        cleanup candidate while a live owner is actually holding it.
+        """
+        return bool(self.record.get("terminal"))
 
     def adopt(self, generation: str) -> None:
         """Take on an EXISTING record's identity without minting a new one.
@@ -277,7 +310,10 @@ class BrowserResource:
                 self._save()
                 return BrowserCleanupResult(state)
         except Exception as exc:
-            return BrowserCleanupResult("pending", type(exc).__name__)
+            # The bridge's own message names the command that diagnoses the
+            # failure; the class name is the fallback for a type that carries
+            # no message, matching how the CLI renders its outer handler.
+            return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
 
 
 #: States in which a tab is stranded and an operator may recover it. Both are
