@@ -279,3 +279,89 @@ async def test_alternating_within_the_working_set_hits_the_cache_every_time(
                 f"(RETAINED_PRESENTATIONS={RETAINED_PRESENTATIONS})"
             )
             assert len(app._sidebar_presentations) == n - 1
+
+
+@pytest.mark.asyncio
+async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the presentation cache is full, polling must not churn viewers.
+
+    F3, stated structurally: with more live sessions than
+    ``RETAINED_PRESENTATIONS``, prewarm used to admit a candidate, evict the
+    LRU entry to respect the bound, and re-select the evicted session on the
+    next poll — one ``RemoteSession.connect`` and one dispose per candidate
+    per poll, forever. The pre-fix tree fails this with +20 connects over
+    10 idle polls.
+
+    Three things are pinned together because each guards a way a naive fix
+    regresses the feature:
+
+    1. Below the bound prewarm still fills every free slot (the fixture's
+       cache reaches the bound at all) — a guard that simply disabled
+       speculation would pass the socket count and make every first click
+       cold.
+    2. At the bound, idle polls open no sockets and evict nothing.
+    3. The row the user is heading for (``intent_id``) is still warmed at
+       the bound: that admission is user-driven, and the guard must not
+       starve it.
+
+    The bound is lowered through the module constant (the same knob the
+    diagnosis harness turns) so six owners suffice; the guard reads the
+    constant at call time.
+    """
+    import local_operator.tui.app as app_mod
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    bound = 3
+    monkeypatch.setattr(app_mod, "RETAINED_PRESENTATIONS", bound)
+    async with live_owners(config, 6, monkeypatch) as (ids, resume):
+        connects = 0
+        original_connect = RemoteSession.connect.__func__  # type: ignore[attr-defined]
+
+        async def counted_connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal connects
+            connects += 1
+            return await original_connect(cls, *args, **kwargs)
+
+        monkeypatch.setattr(RemoteSession, "connect", classmethod(counted_connect))
+        app = OperatorApp(lambda: resume(ids[0]), resume_factory=resume)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await wait_for_adoption(app, pilot)
+            app._set_sidebar_open(True)
+            assert app._sidebar_timer is not None
+            app._sidebar_timer.pause()  # the test drives polls so cycles are countable
+            # (1) Prewarm fills the cache up to the bound over a few polls.
+            for _ in range(bound + 2):
+                await one_poll(app, pilot)
+                if len(app._sidebar_presentations) >= bound:
+                    break
+            assert len(app._sidebar_presentations) == bound, (
+                f"prewarm parked {len(app._sidebar_presentations)} of {bound} slots: "
+                "the guard must fill free slots, not disable speculation"
+            )
+            parked = dict(app._sidebar_presentations)
+            connects_at_capacity = connects
+
+            # (2) Idle polls over a stable catalog: no new sockets, no eviction.
+            for _ in range(10):
+                await one_poll(app, pilot)
+            assert connects == connects_at_capacity, (
+                f"{connects - connects_at_capacity} viewer sockets opened over 10 idle polls "
+                f"with {len(ids)} live sessions and a bound of {bound}: prewarm is evicting "
+                "what it just warmed and re-warming it next poll"
+            )
+            assert app._sidebar_presentations == parked
+
+            # (3) The row the user is heading for is exempt from the guard.
+            target = next(sid for sid in ids[1:] if sid not in parked)
+            app._sidebar_navigation.intend(target)
+            try:
+                await one_poll(app, pilot)
+            finally:
+                app._sidebar_navigation.intent_id = ""
+            assert target in app._sidebar_presentations, (
+                "the guard starved the row the user is navigating toward"
+            )
+            assert len(app._sidebar_presentations) == bound

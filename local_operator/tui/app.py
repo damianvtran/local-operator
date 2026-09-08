@@ -5391,6 +5391,26 @@ class OperatorApp(App[None]):
         would resume a runtime, and speculation must not start processes the
         user did not ask for. Already-cached and current sessions are skipped
         rather than blocking the whole prewarm as they used to.
+
+        Speculation only fills FREE slots of the presentation cache; it never
+        evicts to make room. Admitting at capacity evicted the LRU entry to
+        respect ``RETAINED_PRESENTATIONS``, and the evicted session — still
+        live, still top-ranked, no longer cached — matched this filter again on
+        the very next poll. Once live sessions outnumbered the bound that was
+        a real ``RemoteSession.connect`` plus a dispose per candidate per 2 s
+        poll, forever: measured 60 connects + 60 disposes over 30 polls at 10
+        live sessions, poll loop-CPU 9.5 → 110 ms, paid for as long as the
+        sidebar was open and gone the moment it was closed — which is the
+        operator's "slow after a while with the sidebar open" exactly. The
+        refusal map is deliberately NOT used for this: it records
+        ``retainable()`` refusals keyed on content, and these candidates are
+        admissible; parking them there would be the permanent blacklist its
+        own docstring warns about. Under the bound nothing changes — every
+        live row has a slot — so the case that worked keeps working.
+
+        The one exemption is the row the user is heading for
+        (``intent_id``): that admission is user-driven, not speculation, so
+        it may evict like a click does and the guard cannot starve it.
         """
         if (
             not self._session_sidebar.display
@@ -5399,7 +5419,9 @@ class OperatorApp(App[None]):
         ):
             return
         current = str(getattr(self._session, "session_id", ""))
-        candidates = [
+        intent = self._sidebar_navigation.intent_id
+        free_slots = max(0, RETAINED_PRESENTATIONS - len(self._sidebar_presentations))
+        ranked = [
             entry
             for entry in entries
             if entry.id != current
@@ -5410,7 +5432,10 @@ class OperatorApp(App[None]):
             # and the poll would re-select it forever. An explicit click still
             # prepares it — the user asked, and that path does not loop.
             and not self._sidebar_prewarm_refused(entry.id)
-        ][:PREWARM_PER_REFRESH]
+        ]
+        candidates = [entry for entry in ranked if entry.id == intent][:1]
+        candidates += [entry for entry in ranked if entry.id != intent][:free_slots]
+        candidates = candidates[:PREWARM_PER_REFRESH]
         if not candidates:
             return
 
@@ -5430,6 +5455,14 @@ class OperatorApp(App[None]):
                         and not self._sidebar_navigation.requested_id
                         and candidate.id not in self._sidebar_presentations
                         and candidate.id != str(getattr(self._session, "session_id", ""))
+                        # Re-checked here, not only at selection: a click that
+                        # committed while this prepare was in flight may have
+                        # filled the slot this candidate was selected for, and
+                        # admitting anyway would evict what the user just used.
+                        and (
+                            len(self._sidebar_presentations) < RETAINED_PRESENTATIONS
+                            or candidate.id == self._sidebar_navigation.intent_id
+                        )
                         and self._admit_sidebar_presentation(candidate.id, prepared[0], prepared[1])
                     ):
                         self._sidebar_presentations[candidate.id] = prepared[1]
