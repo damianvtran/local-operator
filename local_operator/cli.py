@@ -429,6 +429,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_tunnel_parser(subparsers)
 
+    # Encrypted secret store. Same discipline: argument registration is
+    # stdlib-only, so `--version` and `--help` never load the crypto stack that
+    # the handlers import at the point of use.
+    from local_operator.secrets.cli import add_parser as add_secret_parser
+
+    add_secret_parser(subparsers)
+
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
@@ -4174,6 +4181,10 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "secret":
+            from local_operator.secrets.cli import main as secret_main
+
+            return secret_main(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":
