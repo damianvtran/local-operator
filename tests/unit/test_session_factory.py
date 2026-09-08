@@ -2571,7 +2571,9 @@ def test_the_resolver_names_a_superset_but_not_a_collapsed_duplicate(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "config").mkdir()
-    shared = "- Shared rule."
+    # Over the 200-char floor, so the finding is the containment rather than
+    # the threshold (which has its own test below).
+    shared = "- Shared rule." + "x" * 200
     _write_ecosystem_file(tmp_path, shared)
 
     (tmp_path / "config" / "system_prompt.md").write_text(
@@ -2579,7 +2581,8 @@ def test_the_resolver_names_a_superset_but_not_a_collapsed_duplicate(
     )
     assembled, sources = session_factory.resolve_user_instructions()
     native = next(source for source in sources if source.label == "system_prompt.md")
-    assert native.overlaps == "imported"
+    assert native.overlaps_index == 1
+    assert native.overlap_contains is True
     assert native.overlap_chars == len(shared)
     # The cost the row is claiming is real: both copies are in the prompt.
     assert assembled.count(shared) == 2
@@ -2587,14 +2590,84 @@ def test_the_resolver_names_a_superset_but_not_a_collapsed_duplicate(
     # Byte-identical: collapsed, sent once, and NOT flagged as an overlap.
     (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
     assembled, sources = session_factory.resolve_user_instructions()
-    assert [source.overlaps for source in sources] == [None, None]
+    assert [source.overlaps_index for source in sources] == [None, None]
     assert next(source for source in sources if source.label == "imported").collapsed is True
     assert assembled.count(shared) == 1
 
     # Two distinct files: healthy, and must stay unflagged.
     (tmp_path / "config" / "system_prompt.md").write_text("- Entirely other.", encoding="utf-8")
     _, sources = session_factory.resolve_user_instructions()
-    assert [source.overlaps for source in sources] == [None, None]
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+
+def test_the_resolver_names_the_overlap_when_the_earlier_source_is_the_superset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The migration arrangement, and the reason the test is symmetric.
+
+    An operator moves their rules into ``~/.agents/AGENTS.md``, grows them
+    there, and leaves the old ``system_prompt.md`` behind as a subset. Both
+    copies ship in every request, exactly as in the superset case — but a test
+    that only asks "does a LATER source contain an EARLIER one" is silent here,
+    and the guide reads that silence as an all-clear. That is issue #822's own
+    shape: documentation asserting something the code does not do.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Rule that moved to the shared file." + "y" * 200
+    _write_ecosystem_file(tmp_path, f"{shared}\n\n- Grown since the move.")
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    native = next(source for source in sources if source.label == "system_prompt.md")
+    # Reported on the SUBSET, pointing back at the file that holds it, because
+    # the remedy here is to delete this file rather than to trim the other one.
+    assert native.overlaps_index == 1
+    assert native.overlap_contains is False
+    assert native.overlap_chars == len(shared)
+    assert next(source for source in sources if source.label == "imported").overlaps_index is None
+    # The claim is true of the prompt, not just of the arithmetic.
+    assert assembled.count(shared) == 2
+
+
+def test_the_resolver_ignores_an_overlap_too_small_to_be_worth_removing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Containment has no natural floor — a shared ``-`` is literal containment
+    — and a WARNING row advertising a one-character cost is the warning
+    operators learn to ignore, which is what this row exists to avoid. Pinned at
+    the boundary in both directions so the constant cannot drift silently.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    floor = session_factory._OVERLAP_MIN_CHARS
+    native = tmp_path / "config" / "system_prompt.md"
+
+    _write_ecosystem_file(tmp_path, "-")
+    native.write_text("- lop only rule.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+    _write_ecosystem_file(tmp_path, "s" * (floor - 1))
+    native.write_text("s" * (floor - 1) + "\n\n- lop only.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
+
+    _write_ecosystem_file(tmp_path, "s" * floor)
+    native.write_text("s" * floor + "\n\n- lop only.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert sources[1].overlaps_index == 1
+    assert sources[1].overlap_chars == floor
+
+    # The floor applies to the subset direction too, on the span that is
+    # actually duplicated rather than on the size of the containing file.
+    _write_ecosystem_file(tmp_path, "s" * (floor - 1) + "\n\n- Shared only.")
+    native.write_text("s" * (floor - 1), encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps_index for source in sources] == [None, None]
 
 
 def test_the_resolver_flags_a_profile_that_repeats_an_earlier_source(
@@ -2609,13 +2682,17 @@ def test_the_resolver_flags_a_profile_that_repeats_an_earlier_source(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "config").mkdir()
-    shared = "- Rule the profile repeats."
+    shared = "- Rule the profile repeats." + "z" * 200
     (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
 
     assembled, sources = session_factory.resolve_user_instructions(shared)
 
     profile = next(source for source in sources if source.label == "agent profile")
-    assert profile.overlaps == "system_prompt.md"
+    assert profile.overlaps_index == 1
+    # Equal-length texts satisfy containment both ways; "contains" is tried
+    # first, so the tie reads as the superset case rather than flipping with
+    # source order.
+    assert profile.overlap_contains is True
     assert profile.overlap_chars == len(shared)
     assert assembled.count(shared) == 2
 

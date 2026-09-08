@@ -236,16 +236,64 @@ def test_a_superset_native_file_names_the_overlap_it_pays_for(home: Path, capsys
     files, so the guide's "check with ``config instructions``" pointed at a
     diagnosis the output could not give — the gap #822 reported, one level down.
     The overlapping TEXT must never appear: the count is the answer.
+
+    The other source is named by ROW NUMBER rather than label because labels are
+    not unique — several override paths all render as ``imported`` — and because
+    the label form did not fit 80 columns, wrapping the row out of the box.
     """
-    _write_agents_md(home, "- SHARED-OVERLAP-MARKER rule.\n")
-    _write_system_prompt(home, "- SHARED-OVERLAP-MARKER rule.\n\n- lop only.\n")
+    shared = "- SHARED-OVERLAP-MARKER rule." + "x" * 200
+    _write_agents_md(home, f"{shared}\n")
+    _write_system_prompt(home, f"{shared}\n\n- lop only.\n")
 
     assert config_instructions_command(_args()) == 0
 
     out = capsys.readouterr().out
-    assert 'Overlaps: contains all 29 chars of "imported" verbatim' in out
-    assert "both copies are sent" in out
+    assert "Overlaps: contains source 1 verbatim (229 chars); both copies are sent" in out
     assert "SHARED-OVERLAP-MARKER" not in out
+
+
+def test_the_overlap_row_reports_the_migration_case_on_the_subset(home: Path, capsys) -> None:
+    """Rules moved into the shared file and grew there, leaving the old
+    ``system_prompt.md`` behind as a subset. Both copies still ship, so silence
+    here would be the report asserting an all-clear it has not established — and
+    the direction has to be on the row, because the remedy differs: delete the
+    subset rather than trim the superset."""
+    shared = "- SHARED-OVERLAP-MARKER rule." + "y" * 200
+    _write_agents_md(home, f"{shared}\n\n- Grown since the move.\n")
+    _write_system_prompt(home, f"{shared}\n")
+
+    assert config_instructions_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "Overlaps: verbatim inside source 1 (229 chars); both copies are sent" in out
+    assert "SHARED-OVERLAP-MARKER" not in out
+
+
+def test_every_overlap_row_fits_inside_the_box_at_eighty_columns(home: Path, capsys) -> None:
+    """The box does no wrapping of its own, so a row past 80 characters
+    soft-wraps in a standard terminal and the overflow lands outside the “│”
+    gutter — the failure the two-line footer below already avoids. Asserted on
+    the widest realistic inputs (a 64,000-character span, a two-digit row
+    number) rather than on the default install, because it is the large numbers
+    that push the row over."""
+    shared = "- Shared rule." + "z" * 200
+    _write_agents_md(home, f"{shared}\n")
+    _write_system_prompt(home, f"{shared}\n\n- lop only.\n")
+
+    assert config_instructions_command(_args()) == 0
+    rendered = [line for line in capsys.readouterr().out.splitlines() if "Overlaps:" in line]
+    assert rendered and all(len(line) <= 80 for line in rendered)
+
+    # The widest states the format string can reach, measured directly rather
+    # than by constructing a 64,000-character file per case.
+    for index in (1, 9, 10, 99):
+        for count in (1, 999, 1_000, 63_998, 64_000):
+            for direction in (
+                f"contains source {index} verbatim",
+                f"verbatim inside source {index}",
+            ):
+                row = f"│    Overlaps: {direction} ({count:,} chars); both copies are sent"
+                assert len(row) <= 80, row
 
 
 def test_the_overlap_row_stays_silent_on_the_collapsed_and_distinct_cases(
@@ -263,6 +311,13 @@ def test_the_overlap_row_stays_silent_on_the_collapsed_and_distinct_cases(
     assert "Overlaps:" not in collapsed
 
     _write_agents_md(home, "- Shared rule.\n")
+    _write_system_prompt(home, "- Entirely different.\n")
+    assert config_instructions_command(_args()) == 0
+    assert "Overlaps:" not in capsys.readouterr().out
+
+    # Third silent case: containment too short to be worth an operator's
+    # attention. "- " appears in both files, which is literal containment.
+    _write_agents_md(home, "- \n")
     _write_system_prompt(home, "- Entirely different.\n")
     assert config_instructions_command(_args()) == 0
     assert "Overlaps:" not in capsys.readouterr().out

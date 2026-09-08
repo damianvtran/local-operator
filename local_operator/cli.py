@@ -1493,17 +1493,32 @@ def config_instructions_command(args: argparse.Namespace) -> int:
             )
         if source.truncated:
             print(paint("│    Truncated: hit the size cap; the tail was dropped", WARNING))
-        if source.overlaps:
+        if source.overlaps_index:
             # The superset arrangement, which the digest collapse cannot catch
             # and which two rows of non-zero "Included" cannot distinguish from
             # two genuinely distinct files. WARNING, matching ``Truncated:``:
             # this is a cost the operator is paying on every cached request and
             # can remove. The overlapping TEXT is never printed — the count and
-            # the other source's label are the whole answer.
+            # the other source's row number are the whole answer.
+            #
+            # Kept within 80 columns in every reachable state: 79 for a
+            # two-digit row number at 64,000 characters, and still 80 at three
+            # digits, which a source list bounded by the override paths plus two
+            # cannot reach. The box has no wrapping of its own, so a longer row
+            # soft-wraps in an 80-column terminal and the overflow lands outside
+            # the "│" gutter — the same reason the footer below is two lines
+            # rather than one. The source is named by ROW NUMBER, not label:
+            # several imported files all render as "imported", so a label could
+            # not identify which file to edit.
+            direction = (
+                f"contains source {source.overlaps_index} verbatim"
+                if source.overlap_contains
+                else f"verbatim inside source {source.overlaps_index}"
+            )
             print(
                 paint(
-                    f"│    Overlaps: contains all {source.overlap_chars:,} chars of "
-                    f'"{source.overlaps}" verbatim; both copies are sent',
+                    f"│    Overlaps: {direction} "
+                    f"({source.overlap_chars:,} chars); both copies are sent",
                     WARNING,
                 )
             )

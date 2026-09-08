@@ -101,6 +101,18 @@ _AGENT_INSTRUCTIONS_RESERVE = 16_000
 #: standing preference of the same kind and the same order of magnitude.
 _ECOSYSTEM_INSTRUCTIONS_RESERVE = 16_000
 
+#: Floor on a shared span before ``Overlaps:`` claims it is worth removing.
+#: The containment test has no natural lower bound — a single ``-`` present in
+#: both files is literal containment — and a WARNING row advertising a one-
+#: character cost is exactly the warning operators learn to ignore, which is
+#: the failure this row was added to avoid. 200 characters is roughly a
+#: paragraph of standing rules: below it the row would cost more attention than
+#: the duplication costs context (200 chars ≈ 50 tokens on the cached prefix,
+#: and 0.3% of the 64,000-character budget), and no realistic shared rule set
+#: is smaller. Deliberately not scaled to file size: the operator is being told
+#: about an absolute cost re-paid on every request, not a ratio.
+_OVERLAP_MIN_CHARS = 200
+
 
 #: Modules whose import dominates :func:`create_session`, measured rather than
 #: guessed: on this machine ``mcp`` costs 443 ms and ``httpx`` 234 ms to import,
@@ -776,13 +788,18 @@ class InstructionSource:
     #: the ordinary state of an install that simply has no such file, and
     #: reporting both as "empty" sends the operator to the wrong one.
     unreadable: bool = False
-    #: Label of an EARLIER source whose text this one contains verbatim, and how
-    #: many characters that is. The superset arrangement — shared rules plus a
-    #: lop-only overlay in ``system_prompt.md`` — is the case the digest
+    #: 1-based ASSEMBLY INDEX of an earlier source this one shares text with,
+    #: and how many characters that is. The superset arrangement — shared rules
+    #: plus a lop-only overlay in ``system_prompt.md`` — is the case the digest
     #: collapse cannot catch, so both copies ride the cached prefix of every
     #: request. Without this the frame is identical to two genuinely distinct
     #: files, and "two rows with non-zero Included" is true of every healthy
     #: multi-source install, so it cannot be the diagnosis.
+    #:
+    #: An index rather than a label because labels are not unique: several
+    #: override paths all render as ``imported``, so a label named a row the
+    #: operator could not pick out of the box, and the remedy (edit one of these
+    #: two files) needs exactly that.
     #:
     #: Containment rather than equality, and it does not double-report the
     #: collapse: an imported file byte-identical to ``system_prompt.md`` is
@@ -790,8 +807,14 @@ class InstructionSource:
     #: the test. An agent PROFILE equal to an earlier source is a different
     #: matter — profiles are never collapsed — and is flagged, correctly: both
     #: copies really are in the prompt.
-    overlaps: str | None = None
+    overlaps_index: int | None = None
     overlap_chars: int = 0
+    #: Which way round the containment runs: ``True`` when THIS source holds all
+    #: of the earlier one, ``False`` when this source sits wholly inside it. The
+    #: two arrangements have different remedies — trim the superset, or delete
+    #: the subset — so the row has to say which one the operator is looking at,
+    #: and a single "these overlap" would send half of them to the wrong file.
+    overlap_contains: bool = True
 
 
 def resolve_user_instructions(
@@ -965,6 +988,15 @@ def resolve_user_instructions(
     # read, no new arithmetic, and CPython's substring search over a handful of
     # sources bounded at 64,000 characters is not work worth avoiding.
     #
+    # SYMMETRIC, because the cost is. An earlier version asked only whether a
+    # LATER source contained an EARLIER one, which is silent on the natural
+    # migration: rules move into ``~/.agents/AGENTS.md`` and grow there while the
+    # old ``system_prompt.md`` is left behind as a subset. Both copies ship in
+    # every request and no row fired — and the guide read that silence as an
+    # all-clear, which is issue #822's own shape (a claim the code does not
+    # make). Measured at 41 µs for 64 KiB-in-64 KiB, so the second direction is
+    # free.
+    #
     # Restricted to sources that survived WHOLE (``included == chars``) so the
     # row can say both copies are sent without qualification: a source the
     # budget already cut carries a ``Truncated:`` row, and claiming a verbatim
@@ -977,13 +1009,24 @@ def resolve_user_instructions(
     ]
     for position, (index, raw) in enumerate(whole):
         for earlier_index, earlier_raw in whole[:position]:
-            if earlier_raw in raw:
-                sources[index] = replace(
-                    sources[index],
-                    overlaps=sources[earlier_index].label,
-                    overlap_chars=len(earlier_raw),
-                )
-                break
+            # Equal-length texts satisfy both directions; "contains" is tried
+            # first so an agent profile identical to an earlier source keeps
+            # reading as the superset case rather than flipping on tie order.
+            if len(earlier_raw) >= _OVERLAP_MIN_CHARS and earlier_raw in raw:
+                contains, shared_chars = True, len(earlier_raw)
+            elif len(raw) >= _OVERLAP_MIN_CHARS and raw in earlier_raw:
+                contains, shared_chars = False, len(raw)
+            else:
+                continue
+            sources[index] = replace(
+                sources[index],
+                # 1-based: the box numbers its rows from 1, and an index the
+                # operator cannot match to a printed row is not an answer.
+                overlaps_index=earlier_index + 1,
+                overlap_chars=shared_chars,
+                overlap_contains=contains,
+            )
+            break
 
     # Imported first, native second, profile last: later text is read as the
     # more specific instruction, so lop's own file outranks the shared one and

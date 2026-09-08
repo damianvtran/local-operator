@@ -93,16 +93,25 @@ Each imported file is capped at 64 KiB at read; the assembled result is then bou
 local-operator config instructions
 ```
 
-It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. A superset is named explicitly, so you do not have to infer it from the counts:
+It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. A duplicated span is named explicitly, so you do not have to infer it from the counts:
 
 ```
 │ 2. system_prompt.md
 │    Path: ~/.local-operator/system_prompt.md
 │    Read: 1,124 chars   Included: 1,124 chars
-│    Overlaps: contains all 1,079 chars of "imported" verbatim; both copies are sent
+│    Overlaps: contains source 1 verbatim (1,079 chars); both copies are sent
 ```
 
-An `Overlaps:` row means you are paying twice for those characters on every request. Fix it by keeping the shared file and the lop-only file **disjoint** — move the overlapping rules out of `system_prompt.md` — or by making them byte-identical, which collapses instead. Two rows with no `Overlaps:` line are two genuinely distinct sources and are nothing to fix.
+The row names the other source by its **row number** in the same box, since several imported paths all print as `imported`. It reads either way round — the migration case, where the rules moved into `~/.agents/AGENTS.md` and grew there while the old `system_prompt.md` was left behind as a subset, prints on the smaller file instead:
+
+```
+│ 2. system_prompt.md
+│    Overlaps: verbatim inside source 1 (1,079 chars); both copies are sent
+```
+
+An `Overlaps:` row means you are paying twice for those characters on every request. Fix it by keeping the shared file and the lop-only file **disjoint** — move the overlapping rules out of whichever file is the copy — or, when one is wholly inside the other, by deleting the subset or making the two byte-identical, which collapses instead.
+
+Two rows with no `Overlaps:` line are not a certificate of no duplication: the check is whole-source containment with a 200-character floor, so it does not catch two files that share a paragraph while each holding rules the other does not, and it does not report spans under 200 characters. It also stays silent for a source the size cap already cut — that row carries `Truncated:` instead, and a claim that both copies are sent whole would be untrue of text the prompt partly dropped.
 
 ## Set the default provider and model
 
