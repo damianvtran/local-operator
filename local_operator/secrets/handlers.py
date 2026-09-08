@@ -383,7 +383,8 @@ def _rotate(args: argparse.Namespace) -> int:
     1. STAGE the new key beside the old one. Inert until the database moves.
     2. COMMIT the re-seal. From here the database needs the new key, and the
        staged file is the copy of it that survives this process dying.
-    3. INSTALL the staged key as ``master.key`` and remove the staging file.
+    3. INSTALL the staged key as ``master.key`` and remove the staging file,
+       but ONLY if the database is still sealed under it.
 
     The previous order committed first and wrote the key afterwards, with a
     docstring claiming a crash there "leaves the old key matching an unmodified
@@ -392,13 +393,26 @@ def _rotate(args: argparse.Namespace) -> int:
     cut destroyed every secret in the store. ``resolve_master_key`` recovers a
     crash between 2 and 3 by matching the staged key's fingerprint against the
     one the database records.
+
+    **Step 3 is conditional, and that is what makes concurrent rotation safe.**
+    The epoch guard in step 2 serialises the COMMITs but imposed no order on the
+    installs, so a rotator that committed earlier could install its superseded
+    key later and leave the database sealed under a key held nowhere on disk —
+    with both processes reporting success.
+    :func:`local_operator.secrets.store.install_master_key_if_current` carries
+    the full analysis; it re-checks the fingerprint under the database's write
+    lock and refuses rather than clobbering.
+
+    A rotator that loses says so and exits non-zero. The loss is not a fault:
+    the operator's secrets are intact under the winner's key, this rotation's
+    re-seal was superseded by an equally valid one, and the honest report is
+    "another rotation completed first, run it again if you still want one".
+    Reporting success would be the actual defect — it is what the unguarded
+    install did while destroying the store.
     """
     from local_operator.secrets.crypto import generate_master_key
-    from local_operator.secrets.keys import (
-        discard_staged_master_key,
-        replace_master_key,
-        stage_master_key,
-    )
+    from local_operator.secrets.keys import discard_staged_master_key, stage_master_key
+    from local_operator.secrets.store import install_master_key_if_current
 
     store = open_store()
     new_key = generate_master_key()
@@ -413,7 +427,20 @@ def _rotate(args: argparse.Namespace) -> int:
         # file is the only on-disk copy of the key its database now needs.
         discard_staged_master_key(None, new_key)
         raise
-    replace_master_key(None, new_key)
+    if not install_master_key_if_current(new_key):
+        # Superseded between this rotation's COMMIT and its install. The store
+        # is fully usable under the winner's key; only this rotation is void.
+        # Safe to discard THIS key now: the compare-and-swap read the
+        # fingerprint under the write lock and it was not ours, so no committed
+        # database needs it and no later one can (the key is fresh randomness).
+        discard_staged_master_key(None, new_key)
+        _err(
+            "Another key rotation completed first, so this one was not installed. "
+            "Your secrets are intact and readable under the key that rotation "
+            "installed; nothing was lost. Run `lop secret rotate` again if you "
+            "still want a fresh key."
+        )
+        return 2
     _err(f"rotated {moved} secret(s) to key generation {store.key_generation()}")
     return 0
 

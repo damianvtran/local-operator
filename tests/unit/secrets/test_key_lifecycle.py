@@ -20,11 +20,15 @@ from __future__ import annotations
 
 import concurrent.futures
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
+from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.secrets.access import resolve_master_key
 from local_operator.secrets.crypto import (
     KEY_BYTES,
@@ -40,7 +44,17 @@ from local_operator.secrets.keys import (
     stage_master_key,
     staged_key_paths,
 )
-from local_operator.secrets.store import SecretStore
+from local_operator.secrets.store import SecretStore, install_master_key_if_current
+
+#: Rotators in the natural concurrency test. Four is the count QA measured the
+#: defect at (3 of 4 trials bricked); two never reproduced it, because the
+#: window needs a third rotation to commit between a slow rotator's commit and
+#: its install.
+CONCURRENT_ROTATORS = 4
+
+#: Real `lop secret` subprocesses run from the repo root so they import THIS
+#: tree rather than whatever `lop` the operator has installed globally.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # --- R1: a concurrent write must never be orphaned by a rotation -------------
 
@@ -691,3 +705,325 @@ def test_a_store_created_concurrently_is_readable_afterwards(
             "under a key that is not the store's"
         )
     assert reader.damaged_records() == [], "the concurrently created store has damaged rows"
+
+
+# --- R4: concurrent ROTATIONS must not install a superseded key --------------
+#
+# The R1-R3 invariants above all held while the store could still be destroyed
+# outright by two ordinary `lop secret rotate` runs. `rotate` is stage -> COMMIT
+# -> install, and the epoch guard serialises the COMMITs but imposed no order on
+# the installs, which ran outside every transaction. So a rotator that committed
+# EARLIER could install its now-superseded key LATER:
+#
+#     A: COMMIT -> db under Ka | B: COMMIT -> db under Kb, install Kb, discard Kb
+#                              | A: install Ka (stale), discard Ka
+#
+# leaving the database needing Kb, `master.key` holding Ka, and Kb nowhere on
+# disk. Both processes exited 0 printing `rotated N secret(s)` while every
+# secret became unrecoverable, and `resolve_master_key` could not repair it: it
+# adopts a STAGED key matching the database, and the matching one was
+# legitimately discarded by the rotation that installed it.
+#
+# THESE TESTS DRIVE THE REAL CLI IN REAL PROCESSES, deliberately. Calling
+# `SecretStore.rotate()` directly proves nothing here — it documents that the
+# caller must stage first, so a bare call bricks by construction and reports a
+# "failure" that is the test's own doing. The defect lives in the ORDER the
+# handler performs stage/commit/install in, so the handler is what has to run.
+
+
+def _cli_env(config_root: Path) -> dict[str, str]:
+    """Environment for a real `lop secret` subprocess pinned inside tmp_path.
+
+    `CMUX_*` is stripped for the reason AGENTS.md gives: an inherited
+    `CMUX_WORKSPACE_ID` let a headless test rename the operator's real cmux
+    workspaces. `HOME` is redirected as well as the config dir, because the
+    store resolves under `config_dir()` and a redirected READ path is not
+    automatically a redirected WRITE path.
+    """
+    import os
+
+    home = config_root.parent / "cli_home"
+    home.mkdir(exist_ok=True)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("CMUX_", "LOCAL_OPERATOR_"))
+    }
+    env["HOME"] = str(home)
+    env[CONFIG_DIR_ENV] = str(config_root)
+    return env
+
+
+def _secret_cli(
+    config_root: Path, *argv: str, stdin: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run `lop secret ...` exactly as the operator would, and return the result."""
+    return subprocess.run(
+        [sys.executable, "-m", "local_operator.cli", "secret", *argv],
+        cwd=str(_REPO_ROOT),
+        env=_cli_env(config_root),
+        capture_output=True,
+        text=True,
+        input=stdin,
+        stdin=None if stdin is not None else subprocess.DEVNULL,
+        timeout=300,
+    )
+
+
+#: Rotator that parks between its COMMIT and its install, which is the window
+#: the defect lives in. It patches the seam rather than sleeping, because the
+#: window is microseconds wide and no wall-clock harness can hit it reliably —
+#: the same lesson the R3 barrier comment records. Everything it then executes
+#: is the product's own code path.
+_LATE_INSTALLER = """
+import os, sys, time
+from pathlib import Path
+from local_operator.secrets import store as store_mod
+
+committed = Path(os.environ["TEST_GATE_COMMITTED"])
+peer_done = Path(os.environ["TEST_GATE_PEER_DONE"])
+real_install = store_mod.install_master_key_if_current
+
+def install_late(key, base=None):
+    committed.write_text("1")
+    for _ in range(3000):
+        if peer_done.exists():
+            break
+        time.sleep(0.01)
+    return real_install(key, base)
+
+store_mod.install_master_key_if_current = install_late
+from local_operator.cli import main
+sys.exit(main())
+"""
+
+#: Its peer: waits for that gate, then runs one entirely ordinary rotation.
+_PEER_ROTATOR = """
+import os, sys, time
+from pathlib import Path
+
+committed = Path(os.environ["TEST_GATE_COMMITTED"])
+for _ in range(3000):
+    if committed.exists():
+        break
+    time.sleep(0.01)
+from local_operator.cli import main
+sys.exit(main())
+"""
+
+
+def test_a_rotation_superseded_between_commit_and_install_is_refused(
+    config_root: Path,
+) -> None:
+    """The exact interleaving that destroyed the store, through the real CLI.
+
+    Forcing the order rather than waiting for it: the natural race lands this
+    7 times in 8, but a test that fails one run in eight is not a regression
+    guard. Only the TIMING is forced — both processes run the shipped handler.
+
+    Three assertions, and all three are needed. The store must still be
+    readable (the brick). The loser must exit non-zero (it exited 0 while
+    destroying the store, which is what made the defect silent). And its
+    message must be an explanation rather than a traceback, because `lop secret`
+    is routinely run inside `$( )`.
+    """
+    seeded = _secret_cli(config_root, "set", "CANARY", stdin="canary-value")
+    assert seeded.returncode == 0, f"seed failed: {seeded.stderr}"
+
+    env = _cli_env(config_root)
+    env["TEST_GATE_COMMITTED"] = str(config_root / "committed")
+    env["TEST_GATE_PEER_DONE"] = str(config_root / "peer_done")
+
+    def spawn(source: str) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            [sys.executable, "-c", source, "secret", "rotate"],
+            cwd=str(_REPO_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    late = spawn(_LATE_INSTALLER)
+    peer = spawn(_PEER_ROTATOR)
+    _, peer_err = peer.communicate(timeout=300)
+    (config_root / "peer_done").write_text("1")
+    late_out, late_err = late.communicate(timeout=300)
+
+    assert (config_root / "committed").exists(), "the gate never fired; this run proves nothing"
+    assert peer.returncode == 0, f"the uninterrupted rotation failed: {peer_err}"
+
+    # The brick: every secret must still be readable by a fresh process that
+    # knows only what is on disk.
+    got = _secret_cli(config_root, "get", "CANARY")
+    assert (
+        got.returncode == 0 and got.stdout == "canary-value"
+    ), f"the store is unreadable after two concurrent rotations: {got.stderr}"
+
+    assert late.returncode != 0, (
+        "the superseded rotation reported SUCCESS; that is the silent half of "
+        "the defect — it printed 'rotated N secret(s)' while the store died"
+    )
+    assert late_out == "", "a failing rotation wrote to stdout, which is a data channel"
+    assert "Traceback" not in late_err, f"the loser crashed instead of explaining: {late_err}"
+    assert (
+        "Another key rotation completed first" in late_err
+    ), f"the loser's message does not explain what happened: {late_err!r}"
+
+
+def test_four_concurrent_rotations_leave_the_store_intact(config_root: Path) -> None:
+    """QA's shape: four real `lop secret rotate` processes, no forcing at all.
+
+    The natural counterpart to the deterministic test above — four rotators
+    released together on an absolute deadline, which bricked 7 runs in 8 before
+    the fix. Kept as well as, not instead of, the forced one: this is the shape
+    the operator actually reaches with ~11 live sessions, and it is the only
+    version that exercises whichever guard happens to fire first (a loser may
+    be turned away at COMMIT by the epoch guard or at INSTALL by the
+    compare-and-swap, and both are correct outcomes).
+    """
+    values = {"CANARY": "canary-value", "SECOND": "second-value", "THIRD": "third-value"}
+    for name, value in values.items():
+        seeded = _secret_cli(config_root, "set", name, stdin=value)
+        assert seeded.returncode == 0, f"seed failed: {seeded.stderr}"
+
+    env = _cli_env(config_root)
+    # An absolute deadline, so the rotations overlap instead of serialising
+    # behind interpreter startup; workers import everything before waiting.
+    env["TEST_ROTATE_AT"] = str(time.monotonic() + 5.0)
+    source = """
+import os, sys, time
+deadline = float(os.environ["TEST_ROTATE_AT"])
+from local_operator.cli import main
+while time.monotonic() < deadline:
+    time.sleep(0.0005)
+sys.exit(main())
+"""
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", source, "secret", "rotate"],
+            cwd=str(_REPO_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        for _ in range(CONCURRENT_ROTATORS)
+    ]
+    outcomes = []
+    for worker in workers:
+        _, err = worker.communicate(timeout=300)
+        outcomes.append((worker.returncode, err))
+
+    # Every secret still readable is the property that matters; the rest
+    # explains a failure rather than adding one.
+    for name, value in values.items():
+        got = _secret_cli(config_root, "get", name)
+        assert got.returncode == 0 and got.stdout == value, (
+            f"{name} is unreadable after {CONCURRENT_ROTATORS} concurrent "
+            f"rotations: {got.stderr}"
+        )
+
+    assert any(
+        code == 0 for code, _ in outcomes
+    ), f"no rotation succeeded; all four were refused: {[err for _, err in outcomes][:2]}"
+    for code, err in outcomes:
+        if code == 0:
+            continue
+        assert "Traceback" not in err, f"a losing rotation crashed instead of explaining: {err}"
+
+    # And the store is coherent, not merely readable one key at a time.
+    listing = _secret_cli(config_root, "list")
+    assert listing.returncode == 0, f"list failed after concurrent rotation: {listing.stderr}"
+    status = _secret_cli(config_root, "status")
+    assert "damaged" not in status.stdout, f"concurrent rotation damaged rows:\n{status.stdout}"
+
+
+def test_the_install_guard_refuses_a_key_the_database_has_moved_past(
+    config_root: Path,
+) -> None:
+    """The compare-and-swap itself, in isolation and without a race.
+
+    The process-level tests above prove the defect is gone; this one pins WHY,
+    so a refactor that quietly drops the fingerprint check fails here with a
+    readable assertion rather than only in a timing-dependent subprocess test.
+    """
+    key = _seed_store(config_root)
+    superseded = generate_master_key()
+    winner = generate_master_key()
+
+    # A rotation commits under `winner`, so the database has moved past both
+    # `key` and `superseded`.
+    stage_master_key(config_root, winner)
+    SecretStore(key, base=config_root).rotate(winner)
+    assert install_master_key_if_current(winner, config_root) is True
+
+    installed_before = key_path(config_root).read_bytes()
+    assert install_master_key_if_current(superseded, config_root) is False, (
+        "a key the database is not sealed under was installed; this is the "
+        "write that made every secret unrecoverable"
+    )
+    assert (
+        key_path(config_root).read_bytes() == installed_before
+    ), "the refused install still clobbered master.key"
+    assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
+
+
+def test_restricting_modes_tolerates_a_sidecar_that_vanishes(
+    store: SecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite deletes `-wal`/`-shm` when the last connection closes.
+
+    `_restrict_modes` tests `exists()` and then `chmod`s, and a concurrent
+    session closing its connection inside that gap removed the file and turned
+    an otherwise fine operation into a `FileNotFoundError` (observed once in
+    ~200 rotation-heavy concurrent runs). At the CLI that is caught and becomes
+    a clean rc=2, but the library API a later PR exposes would surface it as a
+    traceback, so the gap is closed here rather than at the call sites.
+    """
+    import os as os_module
+
+    store.set("PRESENT", b"value")
+    # The sidecars are created here by hand: SQLite removes them when the last
+    # connection closes, which is BEFORE `_restrict_modes` runs, so an ordinary
+    # `set` never reaches the chmod at all and a test written around one proves
+    # nothing (it asserted its own hook had fired, and the hook had not).
+    sidecars = [store.path.with_name(store.path.name + suffix) for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.write_bytes(b"")
+
+    real_chmod = os_module.chmod
+    vanished: list[str] = []
+
+    def chmod_after_unlink(path, mode, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # The peer's close lands between this call's exists() and its chmod():
+        # really unlink the file, then fail the way the kernel would.
+        if str(path).endswith(("-wal", "-shm")):
+            vanished.append(str(path))
+            Path(path).unlink(missing_ok=True)
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os_module, "chmod", chmod_after_unlink)
+    store._restrict_modes()  # must not raise
+    monkeypatch.undo()
+
+    assert len(vanished) == 2, f"the sidecar chmods were not attempted: {vanished}"
+    assert store.get("PRESENT") == b"value"
+
+    # A permission failure on a file that IS there must still be reported: the
+    # suppression is scoped to "the file is gone", not to "chmod failed". A
+    # world-readable WAL carries the same ciphertext as the database.
+    for sidecar in sidecars:
+        sidecar.write_bytes(b"")
+
+    def chmod_denied(path, mode, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(path).endswith("-wal"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os_module, "chmod", chmod_denied)
+    with pytest.raises(PermissionError):
+        store._restrict_modes()

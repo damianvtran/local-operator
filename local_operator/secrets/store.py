@@ -21,6 +21,7 @@ and it will instead ask the broker, with this layer unchanged.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -54,6 +55,7 @@ from local_operator.secrets.keys import (
     FILE_MODE,
     check_mode,
     ensure_secrets_dir,
+    replace_master_key,
     store_path,
 )
 
@@ -238,6 +240,99 @@ def recorded_key_fingerprint(base: Path | None = None) -> bytes | None:
         return None
 
 
+def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
+    """Install ``key`` as ``master.key`` ONLY if the store is still sealed under it.
+
+    A compare-and-swap, and the reason it exists is that installing
+    unconditionally destroys the store. ``rotate`` is stage → COMMIT → install,
+    and the epoch guard inside the re-seal transaction serialises the COMMITs —
+    but it said nothing about the installs that follow them, which ran outside
+    any transaction. So a rotator that committed EARLIER could install its now
+    superseded key LATER::
+
+        A: COMMIT  -> db sealed under Ka
+        B: COMMIT  -> db sealed under Kb   (legitimate; B adopted Ka first)
+        B: install Kb, discard staged Kb   (correct)
+        A: install Ka, discard staged Ka   (last writer wins -- Ka is STALE)
+
+    Final state: the database needs Kb, ``master.key`` holds Ka, and both staged
+    copies are gone, so Kb exists NOWHERE. Every secret is unrecoverable and
+    both processes exit 0 printing ``rotated N secret(s)``. Reproduced
+    deterministically 3/3 with two real ``lop secret rotate`` processes and no
+    crash anywhere, and 7/8 from ordinary contention between four of them.
+    :func:`local_operator.secrets.access.resolve_master_key` cannot repair it:
+    it adopts a STAGED key matching the database, and the matching one was
+    legitimately discarded by the rotation that installed it.
+
+    **The fix is to make commit-and-install atomic with respect to other
+    rotators by putting the install under the database's OWN write lock.**
+    ``BEGIN IMMEDIATE`` here takes the same lock the re-seal transaction takes,
+    so an install and a competing COMMIT cannot interleave: either this call
+    finishes first and the competitor's later COMMIT+install lands on top of it,
+    or the competitor commits first and the fingerprint read below no longer
+    matches, and this install is REFUSED instead of clobbering.
+
+    Chosen over an exclusive rotation lock held across commit and install, for
+    three reasons. It adds no new lock primitive, so there is no second lock to
+    order against SQLite's and therefore no deadlock to reason about. It is not
+    an ``flock``, so it cannot reproduce #401 — a thread parked in ``flock()``
+    blocks a sibling's ``close()`` of that descriptor on macOS, whereas SQLite
+    contention is bounded by ``busy_timeout`` and raises rather than hangs. And
+    it fails CLOSED by construction: a lock that cannot be taken tempts a
+    degrade-to-unlocked path, which here would be exactly the unguarded install
+    that loses the store.
+
+    Ordinary writes are NOT serialised behind rotation by this. They already
+    contend for the same write lock for their own transactions; this adds one
+    short read-only transaction per rotation, not a lock that spans one.
+
+    **The install stays AFTER the COMMIT and is deliberately not folded into the
+    re-seal transaction.** Writing ``master.key`` before that COMMIT would leave
+    a crash window where the database is still under the OLD key while the new
+    one is installed and the old one is gone — the R2 invariant (at every
+    instant, a key that opens the store exists on disk) inverted. With the
+    ordering kept, R2 holds under concurrency too: before this call the staged
+    key is the copy that opens the committed database; after ``os.replace``
+    ``master.key`` is; a crash between them leaves the staged file for
+    ``resolve_master_key`` to adopt; and a refusal leaves the winner's install
+    untouched, so the key on disk is the one the database is sealed under at
+    every instant. Re-proven with four SIGKILLs landing inside this function
+    while three rotators contended: 0 stores left unopenable.
+
+    Returns ``True`` when the key was installed, ``False`` when another rotation
+    superseded it. Nothing is unlinked on either path: this function is reached
+    both by a rotator installing its OWN staged key and by
+    :func:`local_operator.secrets.access.resolve_master_key` completing somebody
+    ELSE's interrupted rotation, and only the owner is entitled to discard a
+    staged file (see
+    :func:`local_operator.secrets.keys.discard_staged_master_key` — removing
+    another rotation's staged key is the loss that check exists to prevent).
+    The rotator therefore does its own discard on a refusal.
+
+    A store with no database or no fingerprint row cannot be superseded by
+    anything, so the install proceeds unconditionally; that is the same
+    "cannot tell, do not guess" fallback :func:`recorded_key_fingerprint` uses.
+    """
+    path = store_path(base)
+    if not path.exists():
+        replace_master_key(base, key)
+        return True
+
+    with closing(_connect(path)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            recorded = _read_meta_blob(connection, KEY_FINGERPRINT_KEY)
+            if recorded is not None and recorded != key_fingerprint(key):
+                # Superseded. Refusing is what keeps the winner's key installed.
+                return False
+            replace_master_key(base, key)
+            return True
+        finally:
+            # Read-only throughout: the transaction exists solely to hold the
+            # write lock across the fingerprint check and the file install.
+            connection.execute("ROLLBACK")
+
+
 class SecretStore:
     """Read/write access to the encrypted store, given a master key.
 
@@ -291,8 +386,19 @@ class SecretStore:
             self._path.with_name(self._path.name + "-wal"),
             self._path.with_name(self._path.name + "-shm"),
         ):
-            if candidate.exists():
-                os.chmod(candidate, FILE_MODE)
+            # The exists()/chmod pair is a TOCTOU on the sidecars, not on the
+            # database: SQLite unlinks `-wal` and `-shm` when the last
+            # connection closes, so a concurrent session can remove one inside
+            # this gap and fail an operation that was otherwise fine (observed
+            # once naturally in ~200 rotation-heavy concurrent runs). A file
+            # that no longer exists carries no ciphertext and needs no mode, so
+            # the disappearance is the desired end state rather than an error.
+            # Only FileNotFoundError is suppressed; a permission failure on a
+            # file that IS there still raises, because that one leaves real
+            # ciphertext at a mode this function promised to remove.
+            with contextlib.suppress(FileNotFoundError):
+                if candidate.exists():
+                    os.chmod(candidate, FILE_MODE)
 
     def _open(self, *, for_write: bool) -> sqlite3.Connection:
         """Open an existing store, refusing an incompatible or exposed one."""

@@ -27,13 +27,12 @@ from pathlib import Path
 
 from local_operator.secrets.crypto import key_fingerprint
 from local_operator.secrets.errors import SecretStoreError
-from local_operator.secrets.keys import (
-    load_master_key,
-    replace_master_key,
-    secrets_dir,
-    staged_key_paths,
+from local_operator.secrets.keys import load_master_key, secrets_dir, staged_key_paths
+from local_operator.secrets.store import (
+    SecretStore,
+    install_master_key_if_current,
+    recorded_key_fingerprint,
 )
-from local_operator.secrets.store import SecretStore, recorded_key_fingerprint
 
 #: How many times :func:`resolve_master_key` re-reads the key state before
 #: giving up. Each attempt loses only to a rotation completing concurrently,
@@ -125,7 +124,17 @@ def resolve_master_key(base: Path | None = None, *, create: bool = False) -> byt
         # Completing it here rather than leaving the store readable-but-
         # unrepaired means the next crash does not find the same half-done
         # state.
-        replace_master_key(base, matched)
+        #
+        # Through the SAME compare-and-swap a rotator's own install uses, and
+        # for the same reason: this is an install outside the re-seal
+        # transaction, so without the guard a rotation committing between the
+        # fingerprint read above and this write would have its key clobbered by
+        # the stale one adopted here — the identical permanent-brick shape, just
+        # reached from the repair path instead of from `rotate`. A refusal means
+        # the store moved on under this call's feet, so the loop re-reads rather
+        # than returning a key that provably no longer opens the database.
+        if not install_master_key_if_current(matched, base):
+            continue
         return matched
 
     raise SecretStoreError(
