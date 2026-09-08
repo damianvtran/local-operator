@@ -30,7 +30,8 @@ from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.keys import (
     load_master_key,
     replace_master_key,
-    staged_key_path,
+    secrets_dir,
+    staged_key_paths,
 )
 from local_operator.secrets.store import SecretStore, recorded_key_fingerprint
 
@@ -71,6 +72,13 @@ def resolve_master_key(base: Path | None = None, *, create: bool = False) -> byt
     automatically: adopting a staged key on its mere presence would let a
     leftover file from an abandoned rotation replace a perfectly good key.
 
+    **All staged keys are considered, not one well-known file.** Rotation is
+    concurrent, so several rotations can sit between their COMMIT and their
+    install at once and each stages under its own name; exactly one of them
+    holds the key this database is now sealed under, and it is found by
+    fingerprint. Scanning only a single path meant a second rotator's staging
+    could displace the copy this store needed.
+
     Any other combination falls through to the installed key untouched — a
     staged key that does not match is inert, and a store with no fingerprint
     row predates the mechanism and is opened exactly as before.
@@ -95,29 +103,35 @@ def resolve_master_key(base: Path | None = None, *, create: bool = False) -> byt
         # The installed key does not open this database. Either a rotation
         # committed and died before installing its key, or one is completing
         # right now in another session.
-        try:
-            candidate = staged_key_path(base).read_bytes()
-        except OSError:
-            # No staged key to adopt. If another session is mid-install the
-            # next attempt sees the new key file; if nothing is in flight the
-            # loop ends and the mismatch is reported below rather than
-            # returning a key that cannot decrypt anything.
-            continue
+        matched: bytes | None = None
+        for path in staged_key_paths(base):
+            try:
+                candidate = path.read_bytes()
+            except OSError:
+                # Raced with the owning rotation installing and removing it.
+                continue
+            if key_fingerprint(candidate) == expected:
+                matched = candidate
+                break
 
-        if key_fingerprint(candidate) != expected:
+        if matched is None:
+            # No staged key opens this database. If another session is
+            # mid-install the next attempt sees the new key file; if nothing is
+            # in flight the loop ends and the mismatch is reported below rather
+            # than returning a key that cannot decrypt anything.
             continue
 
         # The re-seal committed under this key; only the install is missing.
         # Completing it here rather than leaving the store readable-but-
         # unrepaired means the next crash does not find the same half-done
         # state.
-        replace_master_key(base, candidate)
-        return candidate
+        replace_master_key(base, matched)
+        return matched
 
     raise SecretStoreError(
         "This secret store is sealed under a master key that is not on disk. A key "
         "rotation appears to have been interrupted; the key that opens this store was "
-        f"neither installed at {staged_key_path(base).parent / 'master.key'} nor left "
+        f"neither installed at {secrets_dir(base) / 'master.key'} nor left "
         "staged beside it."
     )
 

@@ -169,16 +169,39 @@ def load_master_key(base: Path | None = None, *, create: bool = False) -> bytes:
     return key
 
 
-def staged_key_path(base: Path | None = None) -> Path:
-    """Path to the key a rotation has staged but not yet installed.
+#: Basename prefix of a staged key. Every staged file is this plus a suffix
+#: unique to the rotation that wrote it, so the set of staged files is exactly
+#: the set of rotations currently in flight. Matching by prefix is what lets
+#: :func:`resolve_master_key` consider ALL of them, and a legacy file written
+#: under the bare prefix is still found.
+STAGED_KEY_PREFIX = "master.key.incoming"
 
-    See :func:`stage_master_key` for why this file exists rather than the
-    rotation simply writing the key after it commits.
+#: Prefix of the temporary a staging write lands on before it is renamed into
+#: place. Deliberately NOT under :data:`STAGED_KEY_PREFIX`: a reader globbing
+#: for staged keys must never observe a half-written file, so the temporary
+#: has to be invisible to that glob until the rename makes it complete.
+_STAGING_TEMP_PREFIX = "master.stage"
+
+
+def staged_key_paths(base: Path | None = None) -> list[Path]:
+    """Every key staged by a rotation that has not yet installed it.
+
+    A LIST rather than one path, because rotation is concurrent: several
+    sessions can each be between their COMMIT and their install at the same
+    instant, and each one's staged file is the only on-disk copy of the key
+    its committed database needs. See :func:`stage_master_key`.
+
+    Sorted for a deterministic scan order. A missing directory yields an empty
+    list rather than raising: "no rotation in flight" is the ordinary answer
+    for a store that has never been rotated.
     """
-    return secrets_dir(base) / "master.key.incoming"
+    try:
+        return sorted(secrets_dir(base).glob(f"{STAGED_KEY_PREFIX}*"))
+    except OSError:
+        return []
 
 
-def stage_master_key(base: Path | None, key: bytes) -> None:
+def stage_master_key(base: Path | None, key: bytes) -> Path:
     """Persist a rotation's new key BEFORE the re-seal transaction commits.
 
     This is the ordering that makes rotation crash-safe, and getting it wrong
@@ -199,23 +222,72 @@ def stage_master_key(base: Path | None, key: bytes) -> None:
       completes the install;
     * installed — ``master.key`` is the new key and the staged file is removed.
 
-    Written with ``O_EXCL`` semantics via a fresh unlink so a leftover file
-    from an abandoned rotation can never be mistaken for this one's.
+    **The staged file's name is unique PER ROTATION, and that is what makes the
+    invariant survive concurrency.** ``rotate`` is reachable from every session
+    at once, so several rotations are in flight together. With one shared
+    filename the invariant above is false: rotator B's staging replaced
+    rotator A's, and if A had already COMMITTED, the only on-disk copy of the
+    key A's database needs was gone — a power cut there lost every secret in
+    the store, which is the exact loss this staging exists to prevent. Making
+    the write atomic is NOT sufficient on its own; an atomic clobber is still a
+    clobber. Only a name nobody else writes keeps every committed rotation's
+    key on disk simultaneously, which is why the recovery path scans all of
+    them (:func:`staged_key_paths`) instead of looking at one place.
+
+    The write itself still goes through a temporary and ``os.replace`` so that
+    a concurrent reader globbing for staged keys never observes a partially
+    written one, and so a crash mid-write leaves no truncated candidate behind.
+
+    Returns the path written, which is the handle the caller passes back to
+    :func:`discard_staged_master_key`.
     """
     ensure_secrets_dir(base)
-    path = staged_key_path(base)
-    path.unlink(missing_ok=True)
-    write_private_file(path, key)
+    directory = secrets_dir(base)
+    unique = f"{os.getpid()}.{os.urandom(6).hex()}"
+    path = directory / f"{STAGED_KEY_PREFIX}.{unique}"
+    temporary = directory / f"{_STAGING_TEMP_PREFIX}.{unique}.tmp"
+    try:
+        write_private_file(temporary, key)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return path
 
 
-def discard_staged_master_key(base: Path | None = None) -> None:
-    """Remove a staged key. Called when a rotation failed before committing.
+def discard_staged_master_key(base: Path | None, key: bytes) -> None:
+    """Remove staged copies of THIS key, and never another rotation's.
 
-    Leaving it would be harmless — :func:`resolve_master_key` only adopts a
-    staged key that matches the database's recorded fingerprint — but a stray
-    copy of key material on disk is worth not keeping around.
+    Called when a rotation failed before committing, and again once a key has
+    been installed and its staged copy is redundant. Leaving a file would be
+    harmless for correctness — :func:`resolve_master_key` only adopts a staged
+    key matching the database's recorded fingerprint — but a stray copy of key
+    material on disk is worth not keeping around.
+
+    **Ownership is checked by content, and it is load-bearing.** An earlier
+    version unlinked a single fixed path unconditionally, which meant a
+    rotation that LOST the epoch race deleted the staged key of the rotation
+    that WON — and if the winner had committed but not yet installed, that
+    delete removed the only on-disk copy of the key the database needed. So a
+    staged file is removed only when it still holds the key this caller is
+    entitled to remove. Master keys are 32 random bytes, so "holds this key"
+    identifies the rotation exactly.
+
+    Comparison is not constant-time on purpose: both sides are key material
+    this process already holds in full, so there is no secret for a timing
+    side channel to leak.
     """
-    staged_key_path(base).unlink(missing_ok=True)
+    for path in staged_key_paths(base):
+        try:
+            if path.read_bytes() != key:
+                # Another rotation's key. Removing it is the loss this check
+                # exists to prevent.
+                continue
+            path.unlink(missing_ok=True)
+        except OSError:
+            # Raced with the owning rotation removing it, or with a reader.
+            # Either way the file is not ours to insist on.
+            continue
 
 
 def replace_master_key(base: Path | None, key: bytes) -> None:
@@ -226,8 +298,10 @@ def replace_master_key(base: Path | None, key: bytes) -> None:
     decrypts nothing. The temporary lives in the same 0700 directory, so it is
     never more exposed than the key it replaces.
 
-    The staged copy is removed last: until ``os.replace`` lands, the staged
-    file is the only on-disk copy of the key the committed database needs.
+    The staged copy is removed last, and only the copy holding THIS key: until
+    ``os.replace`` lands, the staged file is the only on-disk copy of the key
+    the committed database needs, and a concurrent rotation's staged file is
+    the same thing for ITS database (see :func:`discard_staged_master_key`).
 
     The temporary name is unique PER CALL, not fixed and not merely per-pid,
     because this is no longer a single-caller path: ``resolve_master_key``
@@ -247,4 +321,4 @@ def replace_master_key(base: Path | None, key: bytes) -> None:
         temporary.unlink(missing_ok=True)
         raise
     os.chmod(path, FILE_MODE)
-    discard_staged_master_key(base)
+    discard_staged_master_key(base, key)

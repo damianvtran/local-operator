@@ -277,19 +277,35 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the master.key.new.<pid>.<random> temp FILE this call just wrote",
     ),
-    # Removing a rotation's staged key: a fixed basename under
-    # config_dir()/secrets, no caller input, never a session directory.
+    # Removing a rotation's staged key. The paths come from
+    # `keys.staged_key_paths()`, which globs `master.key.incoming*` inside
+    # config_dir()/secrets -- no caller input reaches the pattern or the
+    # directory, so it cannot name anything under sessions/. The unlink is
+    # additionally gated on the file holding THIS caller's key, which is what
+    # stops one rotation deleting another's only on-disk copy.
     (
         "local_operator/secrets/keys.py::discard_staged_master_key",
         "<path>.unlink",
-        "master.key.incoming under config_dir()/secrets",
+        "master.key.incoming* under config_dir()/secrets, holding this call's own key",
     ),
-    # `stage_master_key` clears any leftover staging file before writing its
-    # own, for the same fixed path.
+    # Same shape as `replace_master_key` below: a temp FILE inside the secrets
+    # directory renamed onto the staged-key FILE beside it. Both names are
+    # built from `keys.secrets_dir()` plus fixed prefixes and this process's
+    # pid/random suffix; no caller input reaches either, so neither can name a
+    # path under sessions/. The rename replaces only the temporary this call
+    # just wrote.
+    (
+        "local_operator/secrets/keys.py::stage_master_key",
+        "os.replace",
+        "temp FILE -> master.key.incoming.<pid>.<random>, both under config_dir()/secrets",
+    ),
+    # The same staging temporary, unlinked when its rename fails. Named
+    # `master.stage.<pid>.<random>.tmp` under config_dir()/secrets and never
+    # derived from caller input.
     (
         "local_operator/secrets/keys.py::stage_master_key",
         "<path>.unlink",
-        "master.key.incoming under config_dir()/secrets",
+        "the master.stage.<pid>.<random>.tmp temp FILE this call just wrote",
     ),
     # `lop secret file` materialises a file-shaped secret for the lifetime of
     # one command. The directory removed is the one `tempfile.mkdtemp()`

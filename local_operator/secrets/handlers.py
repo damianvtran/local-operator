@@ -408,7 +408,10 @@ def _rotate(args: argparse.Namespace) -> int:
     except BaseException:
         # Nothing committed, so the staged key is not the store's key and
         # leaving it would be a stray copy of key material for no benefit.
-        discard_staged_master_key(None)
+        # Scoped to THIS rotation's key: a concurrent rotator that won the
+        # epoch race may be committed and not yet installed, and its staged
+        # file is the only on-disk copy of the key its database now needs.
+        discard_staged_master_key(None, new_key)
         raise
     replace_master_key(None, new_key)
     _err(f"rotated {moved} secret(s) to key generation {store.key_generation()}")

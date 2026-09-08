@@ -28,11 +28,12 @@ from local_operator.secrets.access import resolve_master_key
 from local_operator.secrets.crypto import generate_master_key, key_fingerprint
 from local_operator.secrets.errors import SecretCorrupt, SecretStoreError, StaleKeyEpoch
 from local_operator.secrets.keys import (
+    discard_staged_master_key,
     key_path,
     load_master_key,
     replace_master_key,
     stage_master_key,
-    staged_key_path,
+    staged_key_paths,
 )
 from local_operator.secrets.store import SecretStore
 
@@ -236,12 +237,12 @@ def test_an_interrupted_rotation_completes_the_key_install(config_root: Path) ->
 
     new_key = generate_master_key()
     _rotate_to_step(config_root, key, new_key, 2)  # crash before the install
-    assert staged_key_path(config_root).exists()
+    assert staged_key_paths(config_root)
     assert key_path(config_root).read_bytes() == key  # still the OLD key
 
     assert resolve_master_key(config_root) == new_key
     assert key_path(config_root).read_bytes() == new_key
-    assert not staged_key_path(config_root).exists(), "the staged key was not cleared"
+    assert not staged_key_paths(config_root), "the staged key was not cleared"
 
 
 def test_a_stale_staged_key_is_never_adopted(config_root: Path) -> None:
@@ -330,3 +331,185 @@ def test_a_damaged_record_is_reported_as_corrupt_by_get(store: SecretStore) -> N
     _damage_one_row(store, "BROKEN")
     with pytest.raises(SecretCorrupt):
         store.get("BROKEN")
+
+
+# --- R2 under CONCURRENCY: the staged key is per-rotation --------------------
+#
+# The crash matrix above proves the R2 invariant for ONE rotator. That control
+# passed while the invariant was in fact broken, because every rotation staged
+# its key at the same fixed filename: a second rotator's staging replaced the
+# first's, and a losing rotator's discard deleted the winner's. The tests below
+# are the concurrent case the matrix was missing. Each asserts the same
+# property as the matrix — after a power cut, some key on disk still opens the
+# store — with more than one rotation in flight.
+
+
+def _seed_store(base: Path, value: bytes = b"super-secret-value") -> bytes:
+    """An initialised single-record store; returns its master key."""
+    key = load_master_key(base, create=True)
+    store = SecretStore(key, base=base)
+    store.initialize()
+    store.set("ALPHA", value)
+    return key
+
+
+def _open_knowing_only_the_disk(base: Path) -> bytes:
+    """What a brand new process recovers, given only what is on disk."""
+    return SecretStore(resolve_master_key(base), base=base).get("ALPHA")
+
+
+def test_a_second_rotation_does_not_clobber_a_committed_rotations_staged_key(
+    config_root: Path,
+) -> None:
+    """B staging must not destroy the key A's committed database needs.
+
+    The interleave: A stages and COMMITS, so the database is now sealed under
+    A's key and the staged file is the only copy of it on disk. B then stages
+    its own key, and A is killed before it can install. With one shared staging
+    filename B's write replaced A's key and the store was unrecoverable — an
+    ordinary power cut, no adversary, losing every secret. Making that write
+    atomic does not help: an atomic clobber is still a clobber, which is why
+    the fix is a name unique per rotation rather than a safer write.
+    """
+    key = _seed_store(config_root)
+    a_key = generate_master_key()
+    b_key = generate_master_key()
+
+    stage_master_key(config_root, a_key)
+    SecretStore(key, base=config_root).rotate(a_key)  # A COMMITS
+    stage_master_key(config_root, b_key)  # B stages alongside, must not clobber
+    # A is killed here, before replace_master_key: power cut in the window.
+
+    assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
+
+
+def test_a_losing_rotation_does_not_discard_the_winners_staged_key(
+    config_root: Path,
+) -> None:
+    """The loser's cleanup must not delete a key that is not its own.
+
+    Two rotations race; the epoch guard makes exactly one win. The loser then
+    cleans up its staged key — and with an unconditional unlink of one fixed
+    path it deleted the WINNER's staged key instead. If the winner had already
+    committed and not yet installed, that cleanup removed the only on-disk copy
+    of the key the database needed, so a crash there lost the store.
+    """
+    key = _seed_store(config_root)
+    a_key = generate_master_key()
+    b_key = generate_master_key()
+
+    loser = SecretStore(key, base=config_root)  # opened under the pre-rotation key
+    stage_master_key(config_root, a_key)
+    SecretStore(key, base=config_root).rotate(a_key)  # A COMMITS, wins the epoch
+
+    stage_master_key(config_root, b_key)
+    with pytest.raises(StaleKeyEpoch):
+        loser.rotate(b_key)
+    discard_staged_master_key(config_root, b_key)  # loser cleans up after itself
+
+    # The winner's staged key is still the only copy of the database's key.
+    assert staged_key_paths(config_root), "the winner's staged key was deleted"
+    # A is killed here, before replace_master_key.
+    assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
+
+
+def test_discarding_a_staged_key_removes_only_that_rotations_own_copy(
+    config_root: Path,
+) -> None:
+    """Ownership is checked by content, so cleanup is precise, not merely safe.
+
+    Both halves matter: the discard must leave other rotations' keys alone AND
+    must still remove its own, or "never delete anything" would pass the test
+    above while leaving key material on disk forever.
+    """
+    _seed_store(config_root)
+    mine = generate_master_key()
+    theirs = generate_master_key()
+    my_path = stage_master_key(config_root, mine)
+    their_path = stage_master_key(config_root, theirs)
+
+    discard_staged_master_key(config_root, mine)
+
+    assert not my_path.exists(), "the caller's own staged key was left behind"
+    assert their_path.exists(), "another rotation's staged key was removed"
+    assert their_path.read_bytes() == theirs
+
+
+def test_concurrent_stagings_each_keep_their_own_key(config_root: Path) -> None:
+    """``stage_master_key`` is a concurrent path; no call may lose its key.
+
+    The coverage gap that let the clobber through: every existing test staged
+    from ONE thread. Here many rotations stage at once, and afterwards every
+    key must still be readable from the path its own call returned — which is
+    the property a committed rotation depends on. A shared filename fails this
+    both ways: keys go missing, and the unlink-then-write race surfaces as a
+    raw ``FileNotFoundError`` escaping the CLI.
+    """
+    _seed_store(config_root)
+    keys = [generate_master_key() for _ in range(24)]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(lambda k: stage_master_key(config_root, k), keys))
+
+    assert len({str(path) for path in paths}) == len(keys), "staged names collided"
+    for key, path in zip(keys, paths):
+        assert path.read_bytes() == key, f"{path.name} does not hold its own key"
+
+    # A staging temporary must never be visible to the recovery scan, and none
+    # may be left behind by a completed call.
+    leftovers = sorted(p.name for p in (config_root / "secrets").glob("master.stage*"))
+    assert leftovers == [], f"staging temporaries were left behind: {leftovers}"
+
+
+def test_recovery_finds_the_right_key_among_many_staged(config_root: Path) -> None:
+    """With several rotations in flight, recovery adopts the committed one.
+
+    Scanning all staged keys is only correct if the fingerprint still decides
+    WHICH one is adopted: the other rotations' keys are inert, exactly as a
+    single leftover file is.
+    """
+    key = _seed_store(config_root)
+    committed = generate_master_key()
+
+    for _ in range(3):  # rotations that staged and never committed
+        stage_master_key(config_root, generate_master_key())
+    stage_master_key(config_root, committed)
+    SecretStore(key, base=config_root).rotate(committed)
+    for _ in range(3):
+        stage_master_key(config_root, generate_master_key())
+
+    assert resolve_master_key(config_root) == committed
+    assert key_path(config_root).read_bytes() == committed
+    assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
+
+
+@pytest.mark.parametrize("crash_after_step", [0, 1, 2, 3])
+def test_a_crash_at_any_rotation_step_survives_a_concurrent_rotation(
+    config_root: Path, crash_after_step: int
+) -> None:
+    """The R2 crash matrix, re-run with another rotation in the picture.
+
+    Same property as the single-rotator matrix — a power cut at any step leaves
+    the store openable by a key that exists on disk — but a second rotator
+    stages, races and cleans up throughout. The single-rotator matrix passed
+    against code that lost the store this way, so the concurrent leg is the one
+    that actually pins the invariant.
+    """
+    key = _seed_store(config_root)
+    victim_key = generate_master_key()
+    other_key = generate_master_key()
+    other = SecretStore(key, base=config_root)  # holds the pre-rotation key
+
+    # The interfering rotation stages before the victim reaches any step.
+    stage_master_key(config_root, other_key)
+
+    _rotate_to_step(config_root, key, victim_key, crash_after_step)
+
+    # ...then loses the epoch race (or, at step 0, wins it) and cleans up.
+    try:
+        other.rotate(other_key)
+    except (StaleKeyEpoch, SecretStoreError):
+        discard_staged_master_key(config_root, other_key)
+
+    # Power cut. A brand new process must still open the store.
+    assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
