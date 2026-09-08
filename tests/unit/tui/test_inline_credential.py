@@ -26,6 +26,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.tui.app import (
     CREDENTIAL_ARMED_NOTICE,
+    CREDENTIAL_HELD_NOTICE,
     CREDENTIAL_PLACEHOLDER,
     OperatorApp,
 )
@@ -1384,3 +1385,239 @@ async def test_a_flag_disarm_clears_the_pickers_armed_notice() -> None:
         for _ in range(4):
             await pilot.pause()
         assert CREDENTIAL_ARMED_NOTICE not in _painted(app)
+
+
+# -- D9: a leftover token is a live destroy-everything control ----------------
+async def _capture_leaving_a_leftover_token(pilot, app, editor) -> None:
+    """Post-capture state that leaves a SECOND, unarmed ``/credential`` behind.
+
+    The draft mentions the command in prose before the operator makes the real
+    gesture — ``fix the /credential command`` is an ordinary sentence, and it
+    ARMS, because it passes through ``/credential`` at end-of-line while being
+    typed (that is the same keystroke shape as ``deploy with /credential the
+    prod key``, which must stay armed; see ``CREDENTIAL_TOKEN``). The latch
+    therefore sits on the EARLIER token, the marker splices there, and the
+    token the operator typed at the caret is left in the buffer, unarmed and
+    with an empty argument slot.
+    """
+    for char in "fix the /credential command /credential ":
+        await pilot.press(char)
+    for _ in range(4):
+        await pilot.pause()
+    app.post_message(events.Paste(SECRET))
+    for _ in range(4):
+        await pilot.pause()
+    assert "/credential" in editor.text, "precondition: a leftover token remains"
+    assert not editor.credential_armed(), "precondition: the capture ended the arm"
+
+
+@pytest.mark.parametrize(
+    ("label", "keys"),
+    [
+        ("end", ["end", "enter", "enter"]),
+        ("right-walk", ["right"] * 30 + ["enter", "enter"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_post_capture_leftover_token_cannot_wipe_the_store(
+    label: str, keys: list[str]
+) -> None:
+    """D9: pure keystrokes out of the feature's own output wiped everything.
+
+    The leftover token is not a cosmetic blemish, it is a live, PRESELECTED,
+    unconfirmed ``--forget-all``. Its argument slot is empty, so the picker
+    offered every row with the destructive one highlighted, and ``end`` then
+    Enter twice — or an equivalent walk to end-of-line — completed and RAN it
+    against a live store, with no confirmation and no undo.
+
+    D1's guard does not cover this: it keys on ARMED, and the capture itself
+    disarms, so by this frame the arm is already gone. The condition that
+    tracks the hazard is that the composer is HOLDING a secret the operator can
+    see, which is what a citation means.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        # A live credential from BEFORE this draft: the one a wipe destroys
+        # that the operator never consented to lose.
+        session.variables.store_credential("LOP_SECRET_LIVEKEY1", "kept", "command")
+        await _capture_leaving_a_leftover_token(pilot, app, editor)
+
+        for key in keys:
+            await pilot.press(key)
+            await pilot.pause()
+        for _ in range(8):
+            await pilot.pause()
+
+        assert (
+            "LOP_SECRET_LIVEKEY1" in session.variables.credential_names()
+        ), f"the pre-existing credential survives {label},enter,enter"
+
+
+@pytest.mark.asyncio
+async def test_the_chip_and_the_store_never_contradict_each_other() -> None:
+    """D9's load-bearing half: the wipe took the credential the chip cites.
+
+    The marker is a RECEIPT. Destroying what it points at while it is still on
+    screen put two rows of one frame in contradiction — a chip promising a
+    credential beside "No credentials stored for this session" — which is the
+    same defect class as the stale armed row (D7). So the property is not only
+    "the store survives" but "what is chipped is what is held".
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        await _capture_leaving_a_leftover_token(pilot, app, editor)
+        cited = [payload.key for payload in credential_payloads(editor.text, editor._attachments)]
+        assert len(cited) == 1, "precondition: the draft cites exactly one capture"
+
+        await pilot.press("end")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+
+        # The draft submitted, so its citation was honoured: the captured
+        # credential is IN the store rather than having been wiped alongside it.
+        assert (
+            cited[0] in session.variables.credential_names()
+        ), "the credential the chip cited reached the store"
+        assert SECRET not in _painted(app), "and the value itself never painted"
+
+
+@pytest.mark.asyncio
+async def test_a_held_credential_suppresses_the_destructive_rows_and_says_why() -> None:
+    """The mechanism behind D9, and the notice that keeps the list legible.
+
+    A list that simply emptied would read as the gesture having been dropped,
+    which is why the armed state has a notice; the held state needs its own,
+    because the armed one says "paste the secret" and by this point the
+    operator already has.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        session.variables.store_credential("LOP_SECRET_LIVEKEY1", "kept", "command")
+        await _capture_leaving_a_leftover_token(pilot, app, editor)
+        assert editor.credential_cited(), "the buffer still cites the capture"
+
+        await pilot.press("end")
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.picker.highlighted_name() is None, "no row is preselected"
+        assert CREDENTIAL_HELD_NOTICE in _painted(app), "the row says why it is empty"
+        assert CREDENTIAL_ARMED_NOTICE not in _painted(
+            app
+        ), "and does not promise a capture that already happened"
+
+
+@pytest.mark.asyncio
+async def test_the_forget_verbs_stay_reachable_by_typing_while_a_chip_is_held() -> None:
+    """The guard withholds ROWS, never the command.
+
+    Suppression that made the destructive verb unreachable would be a
+    regression dressed as a fix. The operator who means it still types it, and
+    typing the flag is the explicit act the preselected row was not.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        session.variables.store_credential("LOP_SECRET_LIVEKEY1", "kept", "command")
+        await _capture_leaving_a_leftover_token(pilot, app, editor)
+
+        # Clear the draft, then ask for the destructive verb deliberately.
+        editor.text = ""
+        editor.move_cursor(editor._end_of_buffer())
+        for _ in range(4):
+            await pilot.pause()
+        for char in "/credential --forget-all":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+
+        assert (
+            session.variables.credential_names() == []
+        ), "an explicitly typed --forget-all still wipes"
+
+
+@pytest.mark.asyncio
+async def test_the_guard_lifts_once_the_chip_is_gone() -> None:
+    """The suppression is scoped to the citation, not sticky for the session.
+
+    A capture the operator backspaced away is one they visibly withdrew, and
+    the map can still hold its payload until the edit funnel releases it — so
+    the guard asks about the CITATION, which tracks what is on screen.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        session.variables.store_credential("LOP_SECRET_LIVEKEY1", "kept", "command")
+        await _capture_leaving_a_leftover_token(pilot, app, editor)
+        assert editor.credential_cited()
+
+        # The operator clears the draft: nothing is chipped any more.
+        editor.text = ""
+        editor.move_cursor(editor._end_of_buffer())
+        for _ in range(4):
+            await pilot.pause()
+        assert not editor.credential_cited(), "no chip, no reason to withhold the rows"
+        assert app._credential_choices(armed=False, cited=False), "the rows come back"
+
+
+@pytest.mark.asyncio
+async def test_a_second_capture_still_arms_while_the_first_chip_is_held() -> None:
+    """The two guards compose: holding a chip must not block a further capture.
+
+    Suppressing the destructive ROWS while a credential is cited must not touch
+    the gesture itself — handing over a key and then a secret is an ordinary
+    thing to do, and it is the case ``_capture_credential`` documents. The
+    ARMED notice takes precedence over the HELD one here because the operator
+    is mid-gesture, so what the NEXT paste does is the more urgent thing to say.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "deploy with /credential ":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        app.post_message(events.Paste(SECRET))
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.credential_cited() and not editor.credential_armed()
+
+        for char in "and /credential ":
+            await pilot.press(char)
+        for _ in range(6):
+            await pilot.pause()
+        assert editor.credential_armed(), "the second gesture still arms"
+        painted = _painted(app)
+        assert CREDENTIAL_ARMED_NOTICE in painted, "mid-gesture, the armed notice wins"
+        assert CREDENTIAL_HELD_NOTICE not in painted, "and the two do not both show"
+
+        app.post_message(events.Paste("second-secret-value"))
+        for _ in range(4):
+            await pilot.pause()
+        assert editor.text.count("[Credential #") == 2, "both captures are chipped"
+        assert "second-secret-value" not in _painted(app)

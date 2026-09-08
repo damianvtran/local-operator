@@ -39,7 +39,7 @@ import asyncio  # noqa: E402
 from textual import events  # noqa: E402
 
 import scripts.probe_isolation  # noqa: E402, F401
-from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.app import CREDENTIAL_HELD_NOTICE, OperatorApp  # noqa: E402
 from scripts.visual_capture import save_capture  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 from tests.unit.tui.test_slash_echo import _boot  # noqa: E402
@@ -198,6 +198,65 @@ async def main() -> None:
             f"chip in buffer (was the raw secret):   {'[Credential #1' in editor.text}",
         ]
 
+    async def two_token_leftover(pilot, app, editor, session):
+        """D9: the post-capture state that leaves a SECOND token behind.
+
+        The draft mentions the command in prose before the real gesture, so the
+        latch sits on the EARLIER token and the marker splices there — leaving
+        the token the operator typed at the caret in the buffer, unarmed, with
+        an empty argument slot. This frame is the state itself.
+        """
+        await type_text(pilot, "fix the /credential command /credential ")
+        app.post_message(events.Paste(SECRET))
+        for _ in range(4):
+            await pilot.pause()
+        return [
+            f"leftover token in buffer: {'/credential' in editor.text}",
+            f"cites a held credential: {editor.credential_cited()}",
+        ]
+
+    async def two_token_leftover_rows(pilot, app, editor, session):
+        """D9: the load-bearing frame — the leftover's argument list, OPEN.
+
+        This is where ``--forget-all`` used to sit preselected under the caret,
+        two keystrokes from destroying the store INCLUDING the credential the
+        chip beside it cites. The rows must be empty and the row must say why.
+        """
+        await type_text(pilot, "fix the /credential command /credential ")
+        app.post_message(events.Paste(SECRET))
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("end")
+        for _ in range(6):
+            await pilot.pause()
+        return [
+            f"highlighted row (was '--forget-all'): {editor.picker.highlighted_name()!r}",
+            f"rows offered (was 2): {len(editor.picker._choices)}",
+            f"notice painted: {CREDENTIAL_HELD_NOTICE in painted(app)}",
+        ]
+
+    async def two_token_leftover_after_enter(pilot, app, editor, session):
+        """D9: the exact destructive drive — ``end,enter,enter`` — after the fix.
+
+        The store readout beside this frame is the proof: the seeded credential
+        survives, and the captured one is now IN the store rather than having
+        been wiped alongside it while its chip was still on screen.
+        """
+        await type_text(pilot, "fix the /credential command /credential ")
+        app.post_message(events.Paste(SECRET))
+        for _ in range(4):
+            await pilot.pause()
+        await pilot.press("end")
+        await pilot.press("enter")
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+        names = session.variables.credential_names()
+        return [
+            f"seeded credential survived (was wiped): {LIVE_KEY in names}",
+            f"captured credential reached the store:  {len(names) > 1}",
+        ]
+
     frames = [
         ("03-armed", armed),
         ("03b-armed-midline", armed_midline),
@@ -209,6 +268,9 @@ async def main() -> None:
         ("52-captured", captured),
         ("53-blank-paste-while-armed", blank_paste),
         ("54-big-edit-then-capture", big_edit_then_capture),
+        ("55-two-token-leftover", two_token_leftover),
+        ("56-two-token-leftover-rows", two_token_leftover_rows),
+        ("57-two-token-leftover-after-enter-enter", two_token_leftover_after_enter),
     ]
     for name, drive in frames:
         await shoot(outdir, size, name, drive)

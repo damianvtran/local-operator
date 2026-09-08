@@ -5306,6 +5306,26 @@ class Editor(TextArea):
         """
         return self._credential_arm is not None
 
+    def credential_cited(self) -> bool:
+        """True while the buffer still CITES a credential this composer holds.
+
+        The second public read of credential state, and the counterpart to
+        :meth:`credential_armed`: "armed" is *before* the secret arrives, this
+        is *after*. Both change what a destructive verb would MEAN, so both
+        gate the same rows (design round 3, D9).
+
+        Asked through :func:`credential_payloads` rather than by scanning
+        ``_attachments`` directly, because the two answer different questions.
+        The map keeps a payload until the edit funnel releases it, so a marker
+        the operator has already backspaced away can still be IN the map — and
+        a capture the buffer no longer cites is one the operator has visibly
+        withdrawn, which must not keep the verbs suppressed. Citation is also
+        the predicate submit uses to decide what is stored, so "what is
+        chipped" is exactly what this reports and the guard cannot outlive the
+        chip that justifies it.
+        """
+        return bool(credential_payloads(self.text, self._attachments))
+
     def _credential_names_taken(self) -> frozenset[str]:
         """Every credential name a fresh key must avoid.
 

@@ -1446,6 +1446,24 @@ CREDENTIAL_PLACEHOLDER = "Paste the secret… — it is captured, not shown"
 #: so the row says what the composer is waiting for instead.
 CREDENTIAL_ARMED_NOTICE = "armed — paste the secret; it is captured, never shown"
 
+#: Shown where those same rows would be once a capture has LANDED and the
+#: buffer still cites it (design round 3, D9). The armed notice cannot be
+#: reused: it says "paste the secret", and by this point the operator already
+#: did — a row promising the next paste is captured, next to a chip saying one
+#: already was, is the stale-hint defect D7 removed one state earlier.
+#:
+#: It names the reason the rows are gone rather than merely stating a fact, so
+#: the operator can act on it: the destructive verbs are still reachable in the
+#: same keystrokes they always were, by typing the flag.
+#:
+#: LENGTH IS A CONSTRAINT, not a preference. The picker's notice row ellipsizes
+#: at the panel width, and the measured budget at a 120-column terminal is ~82
+#: cells — a longer line drops its own TAIL, which is exactly the half that says
+#: how to reach the verbs, leaving a row that states a restriction and hides the
+#: way out of it. Kept comfortably inside that budget, and pinned by the test
+#: that asserts the whole string paints rather than a prefix of it.
+CREDENTIAL_HELD_NOTICE = "a credential is in this draft — type --forget-all to forget"
+
 #: How long after a terminal resize the floating overlay cards re-measure
 #: themselves. They are hosted in `width: auto` containers, so Textual sends
 #: them no resize event, and the dock's re-arrange lands AFTER the refresh
@@ -12624,8 +12642,22 @@ class OperatorApp(App[None]):
         # notice below, so the two channels contradicted each other and the row
         # the operator was looking at was the false one — a promise that the
         # next paste is never shown, immediately above the plaintext paste.
+        #
+        # The disarm branch falls back to the HELD notice rather than to blank
+        # (design round 3, D9): a capture disarms, and if the list is still open
+        # over a buffer that now cites the chip, the rows are suppressed for the
+        # citation instead. Blanking the row there would leave the list looking
+        # empty for no stated reason — the same "vanished, so the gesture must
+        # have been dropped" reading `CREDENTIAL_ARMED_NOTICE` exists to
+        # prevent. Rows are deliberately NOT refilled on this path: this handler
+        # only ever narrows what the list offers, so no disarm can hand back a
+        # destructive row the fill above withheld.
         if editor.argument_command in ("credential", "cred"):
-            editor.picker.set_notice(CREDENTIAL_ARMED_NOTICE if message.active else "")
+            editor.picker.set_notice(
+                CREDENTIAL_ARMED_NOTICE
+                if message.active
+                else (CREDENTIAL_HELD_NOTICE if editor.credential_cited() else "")
+            )
         if not message.active and message.reason == "argument":
             self._notice(
                 "credential capture disarmed — that is an argument to "
@@ -26009,9 +26041,16 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("credential", "cred"):
-            picker.set_choices(self._credential_choices(armed=editor.credential_armed()))
+            # Both suppression reasons are read here, and the notice follows
+            # whichever applies. ARMED wins the notice when both are true (a
+            # second gesture armed while an earlier chip is still in the
+            # draft): the operator is mid-gesture, so what the NEXT paste does
+            # is the more urgent of the two things to say.
+            armed = editor.credential_armed()
+            cited = editor.credential_cited()
+            picker.set_choices(self._credential_choices(armed=armed, cited=cited))
             picker.set_notice(
-                CREDENTIAL_ARMED_NOTICE if editor.credential_armed() else "",
+                CREDENTIAL_ARMED_NOTICE if armed else (CREDENTIAL_HELD_NOTICE if cited else "")
             )
             return
         if message.command in ("team", "teams", "agent", "agents"):
@@ -26110,7 +26149,9 @@ class OperatorApp(App[None]):
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
 
-    def _credential_choices(self, *, armed: bool = False) -> list[ArgumentChoice]:
+    def _credential_choices(
+        self, *, armed: bool = False, cited: bool = False
+    ) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
 
         Verbs first so a user who opened the list to store something is not
@@ -26129,18 +26170,40 @@ class OperatorApp(App[None]):
         which consumed the arming token, so the very next paste landed the
         secret IN PLAINTEXT on screen.
 
-        Suppressing the ROWS closes both, because both keys act on a highlighted
-        row and there is now no row to act on. The notice takes their place, so
-        the list still says something rather than vanishing.
+        EMPTY ALSO WHILE THE BUFFER CITES A CAPTURE (design round 3, D9), which
+        is the same defect one step later in the same gesture. ``armed`` covers
+        only the window BEFORE the secret arrives, and the capture itself ends
+        it — so a draft that mentions the command twice (``fix the /credential
+        command`` typed before the real gesture, which is an ordinary sentence)
+        keeps a second, now-UNARMED token in the buffer once the marker splices
+        at the first. Its argument slot is empty, so every row came back with
+        ``--forget-all`` preselected, and pure keystrokes out of the feature's
+        own post-capture output — ``end,enter,enter`` — wiped the whole store
+        INCLUDING the credential just captured, while its chip was still sitting
+        in the buffer citing it. That last part is the load-bearing half: the
+        frame then showed a chip promising a credential the store no longer
+        held, which is two rows of one screen contradicting each other.
 
-        Deliberately NOT a redesign of ``--forget-all``'s own confirmation. That
-        row and this picker predate this PR and the same wipe reproduces on
-        ``main`` without any of this — the defect owned here is that a new happy
-        path routes the operator through that state, so the fix is scoped to the
-        armed state and the destructive verb is reached exactly as before by
-        typing it (``CREDENTIAL_ARGUMENT`` disarms on the leading ``-``).
+        Why the citation and not the leftover token: splicing the marker at the
+        caret's token instead cannot fix this, because with two mentions a
+        capture consumes exactly one and the other is stray either way — it only
+        changes WHICH one is left. Moving the ARM to the caret's token was the
+        other candidate and it is worse than a no-op: ``CREDENTIAL_ARM``
+        transiently matches an earlier ``/cred`` while that sentence is still
+        being typed, so re-latching per sync migrates the arm onto a token the
+        operator never armed — exactly the R6b/R6c leak this PR closed in round
+        2. The condition that actually tracks the hazard is "this composer is
+        holding a secret the operator can see", which is what a citation means.
+
+        Still NOT a redesign of ``--forget-all``'s own confirmation. That row
+        and this picker predate this PR and the same wipe reproduces on ``main``
+        without any of this — the defect owned here is that a new happy path
+        routes the operator through that state, so the fix stays scoped to the
+        states this feature creates, and the destructive verb is reached exactly
+        as before by typing it (``CREDENTIAL_ARGUMENT`` disarms on a leading
+        ``-``, and a typed flag is the explicit act the rows are not).
         """
-        if armed:
+        if armed or cited:
             return []
         choices = [
             ArgumentChoice(
