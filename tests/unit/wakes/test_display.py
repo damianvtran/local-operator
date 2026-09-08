@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import UTC, datetime
@@ -85,9 +86,11 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> N
     session.wake_scheduler = SimpleNamespace(schedules=[schedule])
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        async with asyncio.timeout(5):
+            while app._session is None:
+                await pilot.pause()
         assert app._wake_panel is not None
-        app._wake_panel.sync(session)
+        app._refresh_band()
         assert app._wake_panel._shown is not None
         assert "7:52 PM PDT" in app._wake_panel._shown[0][0][1]
         app._run_slash_command("/settings")
@@ -99,9 +102,10 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path) -> N
         # Opening the enum starts on the current 12h choice; Down selects 24h.
         assert ConfigManager(tmp_path / "config").get_config_value("display.time_format") == "24h"
         await pilot.press("escape")
-        app._wake_panel.sync(session)
-        await pilot.pause()
-        assert app._wake_panel._shown is not None
+        # Let the production timer perform the repaint, not a test-only sync.
+        async with asyncio.timeout(5):
+            while "19:52 PDT" not in app._wake_panel._shown[0][0][1]:
+                await pilot.pause()
         assert "19:52 PDT" in app._wake_panel._shown[0][0][1]
         assert schedule.next_due_at == ms("2026-09-09T02:52:00+00:00")
         assert not app.screen.show_vertical_scrollbar
