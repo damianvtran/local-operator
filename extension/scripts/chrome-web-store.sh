@@ -42,6 +42,12 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # sed so the secret never reaches another process's argv, where `ps` would show
 # it. Do not extend this to dump headers, the curl command line, or the
 # environment.
+# A broken gateway or a hostile intermediary must not be able to flood the run
+# log: an unbounded echo works against the readability this script exists to
+# deliver (a single 400 was measured at 3,000,626 bytes of step output). The
+# sibling verify-release-environment.sh bounds its body the same way.
+BODY_PRINT_LIMIT=4000
+
 report_api_error() {
   local label=$1
   local status=$2
@@ -51,23 +57,39 @@ report_api_error() {
   # HTML, which is still worth showing verbatim rather than discarding.
   body=$(jq . "$output" 2>/dev/null) || body=$(cat "$output" 2>/dev/null) || body=""
   body=${body//"$CWS_ACCESS_TOKEN"/<redacted CWS_ACCESS_TOKEN>}
+  # Truncate AFTER redacting, so a token near the cut cannot survive by landing
+  # on the boundary. Bash parameter expansion rather than `head -c`: this body
+  # is a variable, not a file, and `printf ... | head -c` makes head exit early
+  # and SIGPIPE the producer, which under `set -o pipefail` aborts this function
+  # with 141 before the remedy below is ever printed (measured). The sibling can
+  # use `head -c` safely only because it reads a file.
+  local truncated=""
+  if [[ ${#body} -gt $BODY_PRINT_LIMIT ]]; then
+    truncated=" (truncated to $BODY_PRINT_LIMIT of ${#body} characters)"
+    body=${body:0:$BODY_PRINT_LIMIT}
+  fi
   printf 'Chrome Web Store %s call returned HTTP %s for extension %s v%s.\n' \
     "$label" "$status" "$CWS_EXTENSION_ID" "${EXPECTED_VERSION:-<unknown>}" >&2
   if [[ -n "$body" ]]; then
-    printf 'Response body (verbatim, from the store):\n%s\n' "$body" >&2
+    # The truncation is announced in the same line that introduces the body, so
+    # a cut-off payload cannot be misread as the store's complete answer.
+    printf 'Response body (verbatim, from the store)%s:\n%s\n' "$truncated" "$body" >&2
+    # No error-reason translation table on purpose. The v2 discovery document
+    # (revision 20260906) publishes response schemas but no enum of error
+    # reasons, so any mapping from a reason string to a remedy would be invented
+    # rather than sourced -- and a confident wrong diagnosis is worse than the
+    # body above, which is Google's own words. The pointers below are limited to
+    # operations the REST reference documents. This paragraph interprets the
+    # body, so it stays inside this branch: with no body there is nothing for it
+    # to refer to.
+    printf 'That body is the store speaking, not this script. If it reports that a\n' >&2
+    printf 'submission is already under review, the documented remedies are to wait for\n' >&2
+    printf 'that review to finish, or to withdraw it (the cancelSubmission method, or\n' >&2
+    printf 'Cancel in the Developer Dashboard) before submitting again.\n' >&2
   else
-    printf 'Response body was empty.\n' >&2
+    printf 'The store returned no response body to explain this.\n' >&2
   fi
-  # No error-reason translation table on purpose. The v2 discovery document
-  # (revision 20260906) publishes response schemas but no enum of error reasons,
-  # so any mapping from a reason string to a remedy would be invented rather
-  # than sourced -- and a confident wrong diagnosis is worse than the body
-  # above, which is Google's own words. The pointers below are limited to
-  # operations the REST reference documents.
-  printf 'That body is the store speaking, not this script. If it reports that a\n' >&2
-  printf 'submission is already under review, the documented remedies are to wait for\n' >&2
-  printf 'that review to finish, or to withdraw it (the cancelSubmission method, or\n' >&2
-  printf 'Cancel in the Developer Dashboard) before submitting again.\n' >&2
+  # Always useful, body or not: where to read the item's current state.
   printf 'Current state: GET %s/v2/%s:fetchStatus\n' "$API_ROOT" "$item" >&2
   exit 1
 }

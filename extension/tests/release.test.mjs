@@ -165,6 +165,59 @@ for (const { name, args, handlers, label } of [
   });
 }
 
+test("a transport failure is named as one, not reported as an HTTP status", async () => {
+  // Pins the `rc` guard, which a mutation proved load-bearing but unpinned:
+  // deleting it left the whole suite green. It is not redundant with the
+  // status check, because curl reports `http_code=200` alongside `rc=18` on a
+  // transfer truncated against its Content-Length -- a body that parses as
+  // valid JSON while the transfer was in fact broken. Only `rc` catches that.
+  // A closed port is the cheap, deterministic form of the same guard.
+  const server = createServer(() => {});
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  // Release the port before pointing the script at it, so nothing is listening
+  // and the socket cannot collide with an unrelated local service.
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+
+  const error = await run("bash", ["scripts/chrome-web-store.sh", "promote", VERSION], {
+    cwd: import.meta.dirname + "/..",
+    env: {
+      ...process.env,
+      CWS_API_ROOT: `http://127.0.0.1:${port}`,
+      CWS_ACCESS_TOKEN: "test-token",
+      CWS_PUBLISHER_ID: "test-publisher",
+      CWS_EXTENSION_ID: extensionId,
+      CWS_POLL_INTERVAL_SECONDS: "0",
+    },
+  }).then((ok) => { throw new Error(`expected a non-zero exit, got:\n${ok.stdout}`); }, (e) => e);
+
+  const output = error.stdout + error.stderr;
+  // Named as unreachable, carrying curl's own exit code -- NOT dressed up as an
+  // HTTP status, which is what a missing `rc` guard would produce (`HTTP 000`).
+  assert.match(output, /fetchStatus call could not reach the Chrome Web Store \(curl exit \d+\)/);
+  assert.doesNotMatch(output, /returned HTTP/);
+});
+
+test("an oversized error body is bounded and its truncation is disclosed", async () => {
+  // An unbounded echo floods the run log -- a single 400 was measured at
+  // 3,000,626 bytes of step output -- which works against the readability this
+  // script exists to deliver. The cut must be visible, so a partial body is
+  // never mistaken for the store's complete answer.
+  const filler = "F".repeat(200_000);
+  const error = await runRelease(
+    ["stage", "local-operator-extension.zip", VERSION],
+    [() => rejectWith(400, { error: { code: 400, status: "INVALID_ARGUMENT", message: filler } })],
+    { expectFailure: true },
+  );
+  const output = error.stdout + error.stderr;
+  assert.match(output, /\(truncated to \d+ of \d+ characters\)/);
+  // Bounded well below what the stub sent, while still showing the beginning.
+  assert.ok(output.length < 20_000, `expected a bounded log, got ${output.length} characters`);
+  assert.match(output, /INVALID_ARGUMENT/);
+  // Truncating the body must not cost the remedy that follows it.
+  assert.match(output, /cancelSubmission/);
+});
+
 test("a rejected call does not echo the access token, even if the body carries it", async () => {
   // A response body is NOT masked by Actions, and an API that echoed request
   // context could hand the token straight back. Nothing in this output may
