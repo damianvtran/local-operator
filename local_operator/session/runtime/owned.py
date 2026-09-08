@@ -1645,8 +1645,7 @@ class OwnedSessionHandle(SessionHandle):
         TUI chrome (/help tables, /usage panels) is the phone UI's own job."""
         self._check_loop_thread()
         if command == "goal":
-            stored = self._session.set_goal(args)
-            return "goal updated" if stored else "goal cleared"
+            return await self.slash_images(command, args)
         if command == "compact":
             asyncio.ensure_future(self._session.compact_now())
             return "compacting context"
@@ -2123,16 +2122,13 @@ class OwnedSessionHandle(SessionHandle):
         dispatcher `run_slash_authoritative` uses and renders its notice as
         the receipt, rather than failing the request outright.
 
-        Images are accepted and ignored for the routed set (none of
-        `/goal`, `/rename`, `/approvals`, `/compact` consumes an attachment);
-        that is stated here so a future image-consuming routed command is
-        added deliberately rather than silently dropping its payload.
+        Legacy/mobile callers cannot consume action receipts themselves, so
+        the owner completes them through normal admission, including images.
+        This must share the authoritative path or `/goal` would set metadata
+        without starting work only when invoked from the phone.
         """
-        from local_operator.session.frontend_state import SlashResult
-
-        result = await self._slash_result(command, args, SlashResult)
-        text = getattr(result, "text", "") or f"ran /{command}"
-        return str(text)
+        result = await self.run_slash_authoritative(command, args, images)
+        return str(result.get("text") or f"ran /{command}")
 
     def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
         """Run one ``/credential`` verb against the OWNER's variable store.
@@ -2518,6 +2514,7 @@ class OwnedSessionHandle(SessionHandle):
         )
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        arg = arg.strip()
         if not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         if not arg:
@@ -2536,17 +2533,17 @@ class OwnedSessionHandle(SessionHandle):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
-                    "applies from the next turn"
+                    f"goal set: shortened to the {MAX_GOAL_CHARS}-character cap. "
+                    "Sending the full request."
                 ),
                 style="warning",
-                data={"stored": stored},
+                data={"type": "goal_set", "stored": stored, "request": arg.strip()},
             )
         return SlashResult(
             kind="notice",
-            text="goal set — applies from the next step",
+            text="goal set",
             style="info",
-            data={"stored": stored},
+            data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
     def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
