@@ -10,6 +10,10 @@ tests below assert the store landed under ``tmp_path`` rather than trusting it.
 
 from __future__ import annotations
 
+import os
+import signal
+import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -42,3 +46,44 @@ def store(config_root: Path, master_key: bytes) -> SecretStore:
     instance.initialize()
     assert instance.path.is_relative_to(config_root), "store escaped the sandbox"
     return instance
+
+
+@pytest.fixture(autouse=True)
+def _stop_brokers_started_by_this_test(tmp_path: Path):
+    """Kill any broker a test caused to start, at that test's teardown.
+
+    Not optional hygiene. Retrieval lazily starts a daemon (design §13), and
+    the CLI tests drive real ``lop secret`` subprocesses, so a full run of this
+    directory left ~90 broker processes alive — each holding a master key in
+    memory and idling for 30 minutes. On the shared machine this repo is worked
+    on, with many concurrent worktrees, that is a resource leak an agent
+    inflicts on the operator rather than a harmless artifact.
+
+    Keyed on ``tmp_path`` rather than on ``config_root``: ``test_cli.py`` builds
+    its own isolated config dir under the same ``tmp_path`` instead of using
+    that fixture, and requesting ``config_root`` here would both miss those
+    brokers and re-create a directory the CLI fixture already made.
+
+    Teardown, not setup: each test gets a fresh ``tmp_path``, so there is
+    nothing to clean up beforehand.
+    """
+    yield
+
+    from local_operator.secrets import client
+
+    # Every config dir this test could have used lives under tmp_path; a broker
+    # is a per-config-dir singleton, so ask each one whether it has a daemon.
+    for candidate in {tmp_path / "config", tmp_path / "home" / ".local-operator"}:
+        if not candidate.exists():
+            continue
+        status = client.broker_status(candidate)
+        if status is None:
+            continue
+        pid = status.get("pid")
+        if not isinstance(pid, int):
+            continue
+        with suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and client.is_running(candidate):
+            time.sleep(0.05)

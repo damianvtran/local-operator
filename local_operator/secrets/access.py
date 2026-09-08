@@ -15,9 +15,19 @@ reimplementing every verb as a wire protocol, and would put the database's
 concurrency story inside a single-threaded daemon rather than in WAL, which
 §4 chose precisely because it already works under ~10 sessions.
 
-Nothing here stubs behaviour that lies. ``lop secret harden`` and
-``lop secret unlock`` report that they need the broker, because they do; they
-do not pretend to succeed.
+**The broker is now behind this seam.** :func:`open_store` asks the broker for
+the master key first and falls back to the key file when no broker can be
+reached. The fallback is honest rather than silent-and-equivalent, and which
+tier is live decides everything:
+
+- ``keyfile`` mode: the key is on disk beside the store, so a caller the broker
+  refuses can read it directly anyway (design §8). The broker's value here is
+  the audit trail and the §6 redaction notice, not access control, and a
+  denial or an outage therefore falls back rather than failing — refusing
+  would break the operator's own terminal while stopping no attacker.
+- ``passphrase`` mode: there is no unwrapped key on disk to fall back TO. A
+  denial is enforced, and an unreachable broker is a clearly-worded failure
+  rather than a degraded success (design §13).
 """
 
 from __future__ import annotations
@@ -25,7 +35,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from local_operator.secrets.keys import load_master_key
+from local_operator.secrets.errors import BrokerUnavailable, SecretStoreError
+from local_operator.secrets.keys import key_mode, load_master_key
 from local_operator.secrets.store import SecretStore
 
 #: Environment variable naming the session a CLI invocation belongs to, if it
@@ -42,6 +53,78 @@ def session_id() -> str | None:
     return value or None
 
 
+def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
+    """The master key, from the broker when there is one, else from disk.
+
+    **Why the broker is tried first even in ``keyfile`` mode, where it grants
+    nothing extra.** Going through it means retrievals are attributed to a peer
+    in the audit chain and, once PR 3 lands, that the §6 redaction notice
+    fires. Reading the key file directly is correct but unobserved.
+
+    **Why the fallback is safe to take.** In ``keyfile`` mode the key file IS
+    the at-rest story; a caller that can read it is a caller the broker would
+    have served, so falling back changes observability, not authority. In
+    ``passphrase`` mode the fallback does not exist — :func:`load_master_key`
+    raises, because the unwrapped key lives only in broker memory.
+
+    ``create`` short-circuits the broker: initialising a brand-new store has no
+    key to fetch yet, and starting a daemon to be told so is pure latency on
+    the one path where the operator is waiting.
+    """
+    if create:
+        return load_master_key(base, create=True)
+
+    # Imported here, not at module scope: this module is on the path of every
+    # `lop secret` verb, and the client drags in fcntl/socket machinery that
+    # the create path above never needs.
+    from local_operator.secrets.client import (
+        BrokerDenied,
+        BrokerLocked,
+        ensure_broker,
+        fetch_master_key,
+    )
+
+    hardened = key_mode(base) == "passphrase"
+    try:
+        if ensure_broker(base):
+            return fetch_master_key(base)
+        if hardened:
+            raise BrokerUnavailable(
+                "This store is hardened with a passphrase and the secret broker could not "
+                "be started, so there is no key to decrypt it with. Start one with "
+                "`lop secret broker start`, then `lop secret unlock`."
+            )
+    except BrokerLocked:
+        # A locked store has no unwrapped key ANYWHERE, so there is nothing to
+        # fall back to and pretending otherwise would just fail later and less
+        # clearly.
+        raise
+    except BrokerDenied:
+        # **Why a denial is not fatal in keyfile mode, which looks alarming and
+        # is not.** In that mode the master key sits on disk beside the store,
+        # so a caller the broker just refused can read it directly with no
+        # broker involved at all — design §8 states this outright ("Script
+        # reading a known key file path: NOT stopped"). Failing here would
+        # therefore add no security whatsoever while breaking the store's
+        # PRIMARY surface: the operator's own `lop secret get` in their own
+        # terminal has no lop session among its ancestors and is denied by
+        # construction.
+        #
+        # The ancestry check earns its keep in the tier where it is backed by
+        # something: in passphrase mode the key is not on disk unwrapped, the
+        # broker is the only holder, and a denial is enforced below. That is
+        # the same boundary §8's table draws, implemented rather than widened.
+        if hardened:
+            raise
+    except SecretStoreError:
+        # Anything else — no broker, a wedged one, a version mismatch — is an
+        # availability problem, and §13 requires the store to keep working in
+        # keyfile mode rather than becoming unusable because a daemon died.
+        if hardened:
+            raise
+    return load_master_key(base)
+
+
 def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore:
     """Return a store ready to use, obtaining the master key for it.
 
@@ -49,9 +132,5 @@ def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore
     that does not exist must say so rather than silently initialising an empty
     one and then reporting the secret missing, which are different problems
     with different fixes.
-
-    **Broker seam.** PR 2 replaces the ``load_master_key`` call below with a
-    broker request, falling back to the key file when the broker cannot start
-    (design §13). The signature and every caller stay as they are.
     """
-    return SecretStore(load_master_key(base, create=create), base=base)
+    return SecretStore(master_key_for(base, create=create), base=base)

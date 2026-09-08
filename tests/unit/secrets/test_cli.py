@@ -427,13 +427,32 @@ def test_child_command_flags_after_the_separator_are_preserved(cli) -> None:
     assert result.stdout == b"-n [key-value]", result.stderr
 
 
-def test_harden_and_unlock_report_the_missing_broker_honestly(cli) -> None:
-    """They must not pretend to succeed — see access.py's module docstring."""
-    for verb in ("harden", "unlock"):
-        result = cli(verb)
-        assert result.returncode == 2
-        assert b"needs the secret broker" in result.stderr
-        assert result.stdout == b""
+def test_unlock_refuses_a_store_that_is_not_hardened(cli) -> None:
+    """``unlock`` on a keyfile store has nothing to unlock, and says so.
+
+    Replaces PR 1's "the broker does not exist yet" assertion: the broker ships
+    here, so the honest failure is now about the store's TIER rather than about
+    a missing capability.
+    """
+    cli("set", "API_KEY", stdin=b"key-value\n")
+    result = cli("unlock")
+    assert result.returncode == 2
+    assert b"keyfile mode" in result.stderr
+    assert b"harden" in result.stderr
+    assert result.stdout == b""
+
+
+def test_harden_refuses_without_a_terminal_rather_than_reading_a_flag(cli) -> None:
+    """A passphrase never comes from argv; argv is readable by any same-uid process.
+
+    With stdin not a terminal ``getpass`` cannot prompt, and the CLI must fail
+    with that explanation instead of inventing a ``--passphrase`` flag.
+    """
+    cli("set", "API_KEY", stdin=b"key-value\n")
+    result = cli("harden", stdin=b"")
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert b"terminal" in result.stderr or b"passphrase" in result.stderr
 
 
 def test_secret_help_does_not_promise_a_vault(cli) -> None:

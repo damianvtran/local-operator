@@ -68,16 +68,21 @@ def audit_log_path(base: Path | None = None) -> Path:
     return secrets_dir(base) / "audit.log"
 
 
+def wrapped_key_path(base: Path | None = None) -> Path:
+    """Path to the scrypt-wrapped master key used by ``passphrase`` mode."""
+    return secrets_dir(base) / "master.key.wrapped"
+
+
 def key_mode(base: Path | None = None) -> str:
     """Which at-rest tier the store is in: ``keyfile`` or ``passphrase``.
 
-    Always ``keyfile`` today. The seam the broker PR fills: ``harden`` writes a
-    scrypt-wrapped ``master.key.wrapped`` beside the plain key and removes the
-    plain one, at which point this returns ``passphrase`` and callers route the
-    unwrap through the broker instead of reading the file. Reported by
-    ``lop secret status`` so the operator can see which tier is live.
+    ``harden`` writes a scrypt-wrapped ``master.key.wrapped`` and removes the
+    plain key, at which point this returns ``passphrase`` and callers route the
+    unwrap through the broker — which is the only process that ever holds the
+    unwrapped copy. Reported by ``lop secret status`` so the operator can see
+    which tier is live.
     """
-    if (secrets_dir(base) / "master.key.wrapped").exists():
+    if wrapped_key_path(base).exists():
         return "passphrase"
     return "keyfile"
 
@@ -143,11 +148,11 @@ def load_master_key(base: Path | None = None, *, create: bool = False) -> bytes:
     path = key_path(base)
     if not path.exists():
         if key_mode(base) == "passphrase":
-            # Unreachable until the broker PR writes the wrapped key; stated
-            # here so the failure is a clear message rather than "no such file".
+            # In this tier the unwrapped key exists ONLY in broker memory, so
+            # there is deliberately nothing on disk this function could return.
             raise SecretStoreError(
                 "This store is hardened with a passphrase, which needs the secret broker. "
-                "Run `lop secret unlock` once the broker is available."
+                "Run `lop secret unlock` once to unlock it for this boot."
             )
         if not create:
             raise SecretStoreError(
@@ -182,3 +187,89 @@ def replace_master_key(base: Path | None, key: bytes) -> None:
     write_private_file(temporary, key)
     os.replace(temporary, path)
     os.chmod(path, FILE_MODE)
+
+
+# --- the opt-in passphrase tier (design §2.3) --------------------------------
+
+#: scrypt parameters. n=2^15 measured at 182 ms / 32 MiB on this machine
+#: (design §2.3, spike 8) — unnoticeable once per boot, and a meaningful
+#: brute-force cost against a stolen wrapped key. n=2^14 (92 ms) is too cheap
+#: and n=2^17 (841 ms) is a noticeable stall for no proportionate gain.
+SCRYPT_N = 2**15
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_SALT_BYTES = 16
+
+#: Magic prefix and version of the wrapped-key file, so a file from a future
+#: format is refused with a message rather than fed to the KDF as if it were
+#: this one.
+_WRAP_MAGIC = b"lopsecwrap\x00"
+_WRAP_VERSION = 1
+
+
+def _derive_wrapping_key(passphrase: str, salt: bytes) -> bytes:
+    """scrypt over the operator's passphrase. Imported lazily, as everywhere."""
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+    return Scrypt(salt=salt, length=KEY_BYTES, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P).derive(
+        passphrase.encode("utf-8")
+    )
+
+
+def wrap_master_key(base: Path | None, key: bytes, passphrase: str) -> None:
+    """Wrap ``key`` under ``passphrase`` and remove the plaintext key file.
+
+    The order is load-bearing: the wrapped file is written and fsync'd FIRST,
+    and only then is the plain key removed. The reverse order loses the store
+    outright if the process dies in between — there would be no key on disk and
+    none in any broker's memory. A crash in this order leaves both files, and
+    :func:`key_mode` then reports ``passphrase`` while the stale plain key is
+    removed on the next successful call.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    salt = os.urandom(SCRYPT_SALT_BYTES)
+    nonce = os.urandom(12)
+    wrapping_key = _derive_wrapping_key(passphrase, salt)
+    # The header is bound as AAD so the parameters cannot be edited down to a
+    # cheaper KDF cost by an attacker holding the file.
+    header = _WRAP_MAGIC + bytes([_WRAP_VERSION]) + salt + nonce
+    blob = header + AESGCM(wrapping_key).encrypt(nonce, key, header)
+    write_private_file(wrapped_key_path(base), blob)
+    key_path(base).unlink(missing_ok=True)
+
+
+def unwrap_master_key(base: Path | None, passphrase: str) -> bytes:
+    """Recover the master key from the wrapped file, or raise.
+
+    A wrong passphrase surfaces as ``InvalidTag`` from AES-GCM and is
+    translated into a plain sentence: this is the one prompt the operator sees
+    per boot, and a traceback would be a poor way to say "that was the wrong
+    passphrase".
+    """
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    path = wrapped_key_path(base)
+    if not path.exists():
+        raise SecretStoreError(f"No hardened key at {path}; this store is not in passphrase mode.")
+    check_mode(path)
+    blob = path.read_bytes()
+    prefix = len(_WRAP_MAGIC) + 1 + SCRYPT_SALT_BYTES + 12
+    if len(blob) <= prefix or not blob.startswith(_WRAP_MAGIC):
+        raise SecretStoreError(f"{path} is not a valid wrapped master key.")
+    if blob[len(_WRAP_MAGIC)] != _WRAP_VERSION:
+        raise SecretStoreError(
+            f"{path} was written in wrapped-key format {blob[len(_WRAP_MAGIC)]}; "
+            f"this runtime understands {_WRAP_VERSION}. Upgrade local-operator."
+        )
+    salt = blob[len(_WRAP_MAGIC) + 1 : len(_WRAP_MAGIC) + 1 + SCRYPT_SALT_BYTES]
+    nonce = blob[len(_WRAP_MAGIC) + 1 + SCRYPT_SALT_BYTES : prefix]
+    header, ciphertext = blob[:prefix], blob[prefix:]
+    try:
+        key = AESGCM(_derive_wrapping_key(passphrase, salt)).decrypt(nonce, ciphertext, header)
+    except InvalidTag as exc:
+        raise SecretStoreError("Wrong passphrase for this secret store.") from exc
+    if len(key) != KEY_BYTES:
+        raise SecretStoreError("The wrapped key is damaged; it did not contain a master key.")
+    return key

@@ -140,6 +140,37 @@ runs as a child of some process that is itself a descendant of a lop session,
 inherits that ancestry and is allowed. Ancestry authenticates *lineage*, not
 *intent*. See §9.
 
+> **Amended during PR 2 (implementation).** Three corrections, each from
+> executed measurement rather than review:
+>
+> 1. **The walk must include pid 1, not stop above it.** Spike 9's loop is
+>    `while pid > 1`, which never examines pid 1 itself. That is invisible on
+>    this machine, where no session is pid 1, and wrong inside a container
+>    where a session frequently *is* pid 1 — measured in Docker, where a
+>    legitimate descendant was DENIED until the bound was corrected.
+> 2. **Ancestors are pinned by `p_uniqueid`, not by `pidversion`.** The audit
+>    token's `pidversion` is only readable for the *connecting* peer; the
+>    kernel exposes no way to read it for an arbitrary ancestor. Measured
+>    instead: `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` yields a monotonic,
+>    never-recycled 64-bit `p_uniqueid` for any pid, plus `p_puniqueid` — the
+>    parent's — which lets each hop of the walk VERIFY it links to the process
+>    it is about to examine rather than trusting a bare ppid. `pidversion` is
+>    still pinned for the peer itself; start time remains the Linux fallback.
+> 3. **Linux gets full ancestry authentication, not a fail-closed stub.** §14
+>    anticipated `SO_PEERCRED` yielding a pid and left the rest open. Measured
+>    in Docker: `SO_PEERCRED` plus `/proc/<pid>/stat` (ppid and field-22 start
+>    ticks) reproduces both spike-9 outcomes exactly — agent grandchild
+>    ALLOWED, detached `setsid` script DENIED. So Linux is a peer platform
+>    here. Only genuinely unsupported platforms fail closed, and they do so by
+>    refusing everyone rather than degrading open.
+>
+> A fourth correction is about the socket rather than the walk: macOS
+> `sockaddr_un.sun_path` is 104 bytes and `bind()` fails past it (measured: 103
+> binds, 104 fails). The default config dir yields a 49-byte path, but
+> `LOCAL_OPERATOR_CONFIG_DIR` is operator-controlled, so the socket relocates
+> to a short private `TMPDIR` directory when the natural path does not fit.
+> Only the rendezvous point moves; the key, database and audit log stay put.
+
 ### 2.2 (b) Capability tokens in the environment — **rejected on evidence**
 
 Spike 2, the measurement that decides it:
@@ -752,6 +783,27 @@ lifeline — it is consulted per retrieval. So:
   starts locked and says so. Note `AGENTS.md`'s #401 lesson — a blocking `flock`
   deadlocked the event loop — so this lock must be non-blocking-with-retry off
   the event loop, and the e2e stage should cover broker-down boot.
+
+> **Amended during PR 2 (implementation).** What a broker outage costs depends
+> on the tier, and the two must not be conflated:
+>
+> - In `keyfile` mode the master key is on disk beside the store, so a caller
+>   the broker would refuse can read it directly — §8's own table says as much
+>   ("Script reading a known key file path: **Not stopped**"). Failing a
+>   retrieval on a broker outage or an ancestry DENIAL would therefore add no
+>   security whatsoever while breaking the store's primary surface: the
+>   operator's own `lop secret get`, typed in their own terminal, has no lop
+>   session among its ancestors and is denied by construction. This mode
+>   therefore falls back to the key file, and the broker's contribution is the
+>   audit trail and the §6 redaction notice rather than access control.
+> - In `passphrase` mode there is no unwrapped key on disk to fall back to, so
+>   a denial is enforced and an unreachable broker is a hard, clearly-worded
+>   failure. This is the tier in which the ancestry boundary is load-bearing.
+>
+> Verified by execution in both tiers: a detached `setsid` script is denied
+> against an unlocked hardened store, and a SIGKILLed broker leaves an
+> in-flight retrieval with `BrokerUnavailable` in ~5 ms rather than a hang, a
+> stale value, or a wrong one.
 - A `launchd` agent (`com.damian.lop-secretd.plist`) is the tidier long-term
   answer, but it is **out of scope for these PRs**: it changes machine state
   outside the repo, and the flock-guarded lazy start is sufficient and testable.

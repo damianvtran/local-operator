@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -57,8 +58,9 @@ def dispatch(args: argparse.Namespace) -> int:
         "audit": _audit,
         "file": _file,
         "run": _run,
-        "harden": _needs_broker,
-        "unlock": _needs_broker,
+        "harden": _harden,
+        "unlock": _unlock,
+        "broker": _broker,
     }
     try:
         return handlers[command](args)
@@ -263,13 +265,18 @@ def _status(args: argparse.Namespace) -> int:
     mental model from, so it states the residual risk (design §9) rather than
     implying a vault.
     """
+    from local_operator.secrets.client import broker_status
+
     directory = secrets_dir()
     mode = key_mode()
+    broker = broker_status()
     payload: dict[str, Any] = {
         "directory": str(directory),
         "exists": (directory / "store.db").exists(),
         "key_mode": mode,
-        "broker": "not available in this version",
+        "broker_running": broker is not None,
+        "broker_pid": (broker or {}).get("pid"),
+        "broker_locked": (broker or {}).get("locked"),
     }
     if payload["exists"]:
         store = open_store()
@@ -286,17 +293,34 @@ def _status(args: argparse.Namespace) -> int:
 
     print(f"directory   {payload['directory']}")
     print(f"key mode    {mode}")
+    if broker is None:
+        print("broker      not running (it starts on demand)")
+    else:
+        locked = " (locked — run `lop secret unlock`)" if payload["broker_locked"] else ""
+        print(f"broker      running, pid {payload['broker_pid']}{locked}")
     if not payload["exists"]:
         print("store       not created yet (lop secret set NAME creates it)")
         return 0
     print(f"secrets     {payload['secrets']}")
     print(f"key gen     {payload['key_generation']}")
     print(f"audit       {payload['audit_message']}")
-    print(
-        "note        keyfile mode keeps the master key on disk beside the store. That "
-        "defeats\n            malware that scans for credential files; it does not "
-        "defeat an attacker\n            who reads the key file itself."
-    )
+    # The note is the text an operator builds their mental model from, so it
+    # states the residual risk (design §9) per tier rather than implying a
+    # vault. Neither line may be widened into a stronger claim.
+    if mode == "passphrase":
+        print(
+            "note        passphrase mode keeps the master key on disk only scrypt-wrapped; "
+            "the\n            unwrapped copy lives in the broker's memory until it exits. "
+            "Anything\n            running as you that can run `lop` can still read your "
+            "secrets while\n            the broker is unlocked."
+        )
+    else:
+        print(
+            "note        keyfile mode keeps the master key on disk beside the store. That "
+            "defeats\n            malware that scans for credential files; it does not "
+            "defeat an attacker\n            who reads the key file itself. "
+            "`lop secret harden` moves it into\n            passphrase mode."
+        )
     return 0
 
 
@@ -406,19 +430,128 @@ def _run(args: argparse.Namespace) -> int:
     return subprocess.run(command, env=environment, check=False).returncode
 
 
-def _needs_broker(args: argparse.Namespace) -> int:
-    """``harden`` / ``unlock`` — real verbs whose mechanism is not here yet.
+def _read_passphrase(prompt: str) -> str:
+    """Read a passphrase from the terminal, never from argv or a flag.
 
-    They report that honestly instead of pretending. Passphrase mode wraps the
-    master key with scrypt and keeps the unwrapped copy only in the broker's
-    memory, which is the entire point of it (design §2.3): implementing the
-    wrap without the daemon would leave the unwrapped key on disk anyway and
-    the operator would believe they had hardened something.
+    ``getpass`` reads from ``/dev/tty`` where it can, so this still works with
+    stdin redirected — and it keeps the passphrase off the command line, which
+    any same-uid process can read through ``ps`` and ``KERN_PROCARGS2``
+    (design §2.2, spike 2). A passphrase in argv is a passphrase already
+    leaked, exactly as a value in argv is.
     """
+    import getpass
+
+    try:
+        return getpass.getpass(prompt)
+    except (EOFError, OSError) as exc:
+        raise SecretStoreError(
+            "A passphrase must be typed at a terminal; there is no flag for it "
+            "because a passphrase on the command line is readable by any process "
+            "running as you."
+        ) from exc
+
+
+def _harden(args: argparse.Namespace) -> int:
+    """Move the store from ``keyfile`` mode to ``passphrase`` mode (design §2.3).
+
+    What this buys, stated exactly: afterwards the master key exists on disk
+    only scrypt-wrapped, and the unwrapped copy lives solely in the broker's
+    memory — which a same-uid attacker cannot read without tripping a macOS
+    authorization prompt (spikes 3, 5). It converts "a script reads the key
+    file and decrypts the store" into "a script must impersonate a lop session
+    while the broker is unlocked, or raise a password dialog on the operator's
+    screen". It does NOT protect a store while it is unlocked and in use
+    (design §9.4), and this is the one prompt the operator accepted: once per
+    boot, never per access.
+    """
+    from local_operator.secrets.keys import key_mode as current_mode
+    from local_operator.secrets.keys import load_master_key, wrap_master_key
+
+    if current_mode() == "passphrase":
+        _err("This store is already hardened. Use `lop secret unlock` to unlock it.")
+        return 2
+    # Read the key BEFORE prompting: a store that cannot be opened should fail
+    # before the operator types a passphrase they then discover was pointless.
+    key = load_master_key()
+    passphrase = _read_passphrase("New passphrase for the secret store: ")
+    if not passphrase:
+        _err("Empty passphrase; nothing changed.")
+        return 2
+    if passphrase != _read_passphrase("Repeat the passphrase: "):
+        _err("The passphrases did not match; nothing changed.")
+        return 2
+    wrap_master_key(None, key, passphrase)
     _err(
-        f"lop secret {args.secret_command}: passphrase mode needs the secret broker, which "
-        "this version does not ship yet.\n"
-        "The store is in keyfile mode: the master key is on disk beside it, 0600 in a 0700 "
-        "directory."
+        "Store hardened. The master key is now wrapped with your passphrase and the "
+        "plaintext key file is gone.\n"
+        "Run `lop secret unlock` once after each reboot; retrievals are silent after that.\n"
+        "If you forget this passphrase the secrets cannot be recovered — there is no "
+        "escrow copy."
     )
-    return 2
+    return 0
+
+
+def _unlock(args: argparse.Namespace) -> int:
+    """Unlock a hardened store for this boot by unwrapping the key into the broker."""
+    from local_operator.secrets.client import ensure_broker, unlock
+    from local_operator.secrets.keys import key_mode as current_mode
+
+    if current_mode() != "passphrase":
+        _err(
+            "This store is in keyfile mode, so there is nothing to unlock. "
+            "Run `lop secret harden` to move it to passphrase mode."
+        )
+        return 2
+    if not ensure_broker(None):
+        _err("Could not start the secret broker, so there is nowhere to hold the unlocked key.")
+        return 2
+    unlock(_read_passphrase("Passphrase for the secret store: "))
+    _err("Unlocked. The broker holds the key in memory until it exits or the machine reboots.")
+    return 0
+
+
+def _broker(args: argparse.Namespace) -> int:
+    """``lop secret broker {status,start,stop,run}``."""
+    from local_operator.secrets import broker as broker_module
+    from local_operator.secrets import client
+
+    command = getattr(args, "broker_command", None) or "status"
+
+    if command == "run":
+        # Foreground, for debugging. The normal path is the lazy start in
+        # client.ensure_broker; this exists so an operator can watch one.
+        return broker_module.run_broker()
+
+    if command == "start":
+        if client.ensure_broker(None):
+            status = client.broker_status(None) or {}
+            _err(f"secret broker running (pid {status.get('pid', '?')})")
+            return 0
+        _err("Could not start the secret broker.")
+        return 2
+
+    if command == "stop":
+        status = client.broker_status(None)
+        if status is None:
+            _err("No secret broker is running.")
+            return 0
+        pid = status.get("pid")
+        if not isinstance(pid, int):
+            _err("The broker did not report a pid; not killing anything.")
+            return 2
+        os.kill(pid, signal.SIGTERM)
+        _err(f"stopped secret broker (pid {pid})")
+        return 0
+
+    status = client.broker_status(None)
+    if getattr(args, "json", False):
+        print(json.dumps(status or {"running": False}, indent=2))
+        return 0
+    if status is None:
+        print("broker      not running (it starts on demand)")
+        return 0
+    print(f"broker      running (pid {status.get('pid')})")
+    print(f"protocol    {status.get('protocol')}")
+    print(f"locked      {status.get('locked')}")
+    print(f"sessions    {len(status.get('sessions') or [])} registered")
+    return 0

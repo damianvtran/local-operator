@@ -219,13 +219,27 @@ class SecretStore:
         return self._path.exists()
 
     def _restrict_modes(self) -> None:
+        """Tighten the mode on the database and its WAL sidecars.
+
+        ``FileNotFoundError`` is caught rather than pre-checked because the
+        ``-wal`` and ``-shm`` files are TRANSIENT: SQLite creates and removes
+        them as connections come and go, so an ``exists()`` test followed by a
+        ``chmod`` is a race the broker made reachable — it opens the store from
+        its own process to append audit rows, concurrently with the session
+        that is writing. Observed as an intermittent ``FileNotFoundError`` on
+        ``store.db-wal`` during a full-suite run. A file that vanished needs no
+        mode applied, so the correct handling is to move on rather than to
+        widen the pre-check, which cannot close the window.
+        """
         for candidate in (
             self._path,
             self._path.with_name(self._path.name + "-wal"),
             self._path.with_name(self._path.name + "-shm"),
         ):
-            if candidate.exists():
+            try:
                 os.chmod(candidate, FILE_MODE)
+            except FileNotFoundError:
+                continue
 
     def _open(self, *, for_write: bool) -> sqlite3.Connection:
         """Open an existing store, refusing an incompatible or exposed one."""
@@ -613,6 +627,45 @@ class SecretStore:
                 raise
         self._master_key = new_master_key
         return len(rows)
+
+    def record_broker_event(
+        self,
+        *,
+        event: str,
+        outcome: str,
+        pid: int | None = None,
+        exe: str | None = None,
+        session_id: str | None = None,
+        secret_id: str | None = None,
+    ) -> None:
+        """Append a broker decision to the chain (design §12).
+
+        The broker is the only component that knows the peer's pid and
+        executable path, so authorization outcomes — including DENIALS, which
+        are the entries an operator most wants after an incident — can only be
+        recorded from there. Kept separate from the verb methods because it
+        describes an access decision rather than a change to a record: nothing
+        here touches the ``secrets`` table.
+        """
+        if not self.exists():
+            return
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                audit.append(
+                    connection,
+                    event=event,
+                    ts=time.time(),
+                    outcome=outcome,
+                    secret_id=secret_id,
+                    session_id=session_id,
+                    pid=pid,
+                    exe=exe,
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     def audit_entries(self, limit: int | None = None) -> list[audit.AuditEntry]:
         """Recent audit entries, oldest first."""

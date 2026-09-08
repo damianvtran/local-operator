@@ -135,11 +135,25 @@ def add_parser(subparsers: Any) -> None:
     # Same reason as `file` above: REMAINDER would swallow `--secret`.
     run_parser.add_argument("command", nargs="*")
 
-    for verb, summary in (
-        ("harden", "Wrap the master key with a passphrase (needs the secret broker)"),
-        ("unlock", "Unlock a hardened store for this boot (needs the secret broker)"),
-    ):
-        actions.add_parser(verb, help=summary)
+    # The two passphrase-tier verbs. Opt-in by design: the operator rejected
+    # admin-gated and per-access-prompting stores, so the no-prompt keyfile
+    # default ships as the default and `harden` is an upgrade the operator
+    # chooses. Neither reads its passphrase from argv, for the same reason
+    # `set` does not read a value there.
+    actions.add_parser(
+        "harden",
+        help="Wrap the master key with a passphrase; unlock once per boot afterwards",
+    )
+    actions.add_parser("unlock", help="Unlock a hardened store for this boot")
+
+    broker_parser = actions.add_parser("broker", help="Inspect or control the secret broker")
+    broker_actions = broker_parser.add_subparsers(dest="broker_command")
+    broker_actions.add_parser("status", help="Is a broker running, and what does it hold?")
+    broker_actions.add_parser("start", help="Start a broker if one is not already running")
+    broker_actions.add_parser("stop", help="Stop the running broker")
+    broker_actions.add_parser(
+        "run", help="Run a broker in the foreground (for debugging; normally started on demand)"
+    )
 
 
 def main(args: argparse.Namespace) -> int:
