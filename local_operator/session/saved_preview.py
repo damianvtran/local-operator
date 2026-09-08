@@ -28,15 +28,15 @@ class SavedPreview:
 
 def read_saved_preview(directory: Path) -> SavedPreview:
     path = directory / "transcript.jsonl"
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            start = max(0, size - PREVIEW_BYTES)
-            handle.seek(start)
-            data = handle.read(PREVIEW_BYTES)
-    except FileNotFoundError:
-        return SavedPreview([], False)
+    # A missing journal is not evidence of an empty conversation. The caller
+    # may separately prove an unmaterialised live owner exists; this reader
+    # never invents that authority from an absent path.
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        start = max(0, size - PREVIEW_BYTES)
+        handle.seek(start)
+        data = handle.read(PREVIEW_BYTES)
     partial = start > 0
     if partial:
         _, separator, data = data.partition(b"\n")

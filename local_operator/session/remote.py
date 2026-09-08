@@ -801,9 +801,25 @@ class RemoteSession:
         external provider. The authenticated snapshot supplies it on binding.
         """
         from local_operator.session.frontend_state import FrontendModelSpec
-        from local_operator.session.saved_preview import read_saved_preview
+        from local_operator.session.saved_preview import (
+            SavedPreview,
+            read_saved_preview,
+        )
 
-        preview = await asyncio.to_thread(read_saved_preview, config_dir / "sessions" / session_id)
+        try:
+            preview = await asyncio.to_thread(
+                read_saved_preview, config_dir / "sessions" / session_id
+            )
+        except FileNotFoundError:
+            from local_operator.mobile.attach_client import find_owner_record
+
+            # A speculative live owner can deliberately defer creating its
+            # journal until its first write. Only an actual discoverable owner
+            # proves that empty state; a stale catalog row proves nothing.
+            record, owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+            if record is None or owner is None:
+                raise FileNotFoundError("This conversation is no longer available") from None
+            preview = SavedPreview([], False, record.cwd or cwd)
         self = cls(config_dir=config_dir, session_id=session_id, takeover_factory=takeover_factory)
         self._cwd = preview.cwd or cwd
         self.saved_preview_partial = preview.partial

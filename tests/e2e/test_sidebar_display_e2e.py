@@ -16,8 +16,9 @@ import pytest
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.tui.app import OperatorApp, ToolCard
+from local_operator.tui.app import ASIDE_PLACEHOLDER, OperatorApp, ToolCard
 from local_operator.tui.session_interaction import SessionDraft
+from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from tests.e2e.harness import (
     ScriptedStream,
     assistant_message,
@@ -26,7 +27,7 @@ from tests.e2e.harness import (
     user_message,
     wait_for_adoption,
 )
-from tests.unit.tui.test_app_pilot import _renderable_plain
+from tests.unit.tui.test_app_pilot import _renderable_plain, _set_editor_line
 
 
 def visible_text(app: OperatorApp) -> str:
@@ -38,8 +39,16 @@ def visible_text(app: OperatorApp) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "switch_away, fail_sync, restore_anchor",
-    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    "switch_away, fail_sync, restore_anchor, wrapped, move_reader",
+    [
+        (False, False, False, False, False),
+        (True, False, False, False, False),
+        (False, True, False, False, False),
+        (False, False, True, False, False),
+        (True, False, True, False, False),
+        (False, False, True, True, False),
+        (False, False, True, False, True),
+    ],
 )
 async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
     headless_tui_env: Path,
@@ -47,12 +56,17 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
     switch_away: bool,
     fail_sync: bool,
     restore_anchor: bool,
+    wrapped: bool,
+    move_reader: bool,
 ):
     config = headless_tui_env
     servers = {}
     released = asyncio.Event()
     entered = asyncio.Event()
     anchor_id = ""
+    aborts = []
+    initial_content = "waiting historical anchor" if wrapped else "waiting saved answer"
+    local_modes = not (switch_away or fail_sync or restore_anchor)
     original_await = RemoteSession._await_frontend
 
     async def await_frontend(remote, future, *, timeout, preempt=None):
@@ -73,13 +87,25 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 anchor_id = anchor.id
                 messages = (
                     [anchor]
-                    + [assistant_message(f"Historical row {i}") for i in range(200)]
+                    + [
+                        assistant_message(
+                            f"Historical row {i} " + ("wrapped content " * 35 if wrapped else "")
+                        )
+                        for i in range(20 if wrapped else 200)
+                    ]
                     + messages
                 )
             await seed_transcript(directory, messages)
             owner = build_session(directory, ScriptedStream([]), cwd=config)
             handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
             if sid == "waiting":
+                original_abort = owner.abort
+
+                def record_abort(*args, **kwargs):
+                    aborts.append(args)
+                    return original_abort(*args, **kwargs)
+
+                monkeypatch.setattr(owner, "abort", record_abort)
                 original = handle.subscribe_frontend
 
                 async def held_subscribe(*args, **kwargs):
@@ -132,7 +158,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 assert not released.is_set()
                 assert isinstance(app._session, RemoteSession)
                 assert app._session.session_id == "waiting"
-                assert "waiting saved answer" in visible_text(app)
+                assert initial_content in visible_text(app)
                 assert app._sidebar_gate_surface_ready(source)
                 assert app._adopt_composing_card("new-call", "bash") is None
                 assert outgoing_card not in app._transcript_view().blocks()
@@ -140,12 +166,26 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 assert app._status is not None
                 assert "Saved" in app._status.render_text(120).plain
                 editor = app._editor()
+                await pilot.press("ctrl+c")
                 editor.text = "Keep this unsent draft"
                 await pilot.press("enter")
                 assert editor.text == "Keep this unsent draft"
                 assert not app._session.frontend_state.streaming
 
+                if local_modes:
+                    _set_editor_line(editor, "/copy")
+                    await pilot.press("escape", "enter")
+                    assert isinstance(app.screen, CopyPickerScreen)
+                    await pilot.press("escape")
+                    editor.text = "Keep this unsent draft"
+                    await pilot.press("f8")
+                    assert app._aside_is_open()
+                    assert editor.placeholder == ASIDE_PLACEHOLDER
+                if move_reader:
+                    await pilot.press("ctrl+end")
+                    await pilot.pause()
                 saved_view = app._transcript_view()
+                saved_name = app._status.render_text(120).plain
                 connection = source.connection_task
                 # A slow source does not serialize the next local selection.
                 if switch_away:
@@ -155,17 +195,19 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                     await asyncio.wait_for(app._sidebar_navigation.select("waiting"), 10)
                     assert app._transcript_view() is saved_view
                     assert source.connection_task is connection
+                    assert app._status.render_text(120).plain == saved_name
                     assert not released.is_set()
-                    assert "waiting saved answer" in visible_text(app)
+                    assert initial_content in visible_text(app)
                     await asyncio.wait_for(app._sidebar_navigation.select("neighbour"), 10)
                 if fail_sync:
                     assert source.connection_task is not None
                     await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
                     assert source.connection_error == "the runtime is not responding"
                     assert source.display_only and app.composer_submission_blocked()
-                    assert "waiting saved answer" in visible_text(app)
+                    assert initial_content in visible_text(app)
                     assert editor.text == "Keep this unsent draft"
-                    assert "Connection unavailable" in app._status.render_text(120).plain
+                    assert "Connection unavailable" in app._status.render_text(80).plain
+                    assert "retry" in app._status.render_text(80).plain
                     fail_sync = False
                     released.set()
                     app._start_sidebar_connection(source)
@@ -179,16 +221,37 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                     assert "waiting saved answer" not in visible_text(app)
                     # Returning uses its own canonical state and controller.
                     await asyncio.wait_for(app._sidebar_navigation.select("waiting"), 10)
+                    await pilot.pause()
+                    if source.connection_task is not None:
+                        await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
+                if local_modes:
+                    assert app._aside_is_open()
+                    assert editor.placeholder == ASIDE_PLACEHOLDER
+                    await pilot.press("escape")
                 assert app._interaction is source
                 assert editor.text == "Keep this unsent draft"
                 assert not source.display_only
-                if restore_anchor:
+                if restore_anchor and not move_reader:
                     assert "waiting historical anchor" in visible_text(app)
                     assert not source.draft.following_tail
                     assert source.draft.scroll_anchor_id == anchor_id
-                else:
+                elif move_reader:
                     assert "waiting saved answer" in visible_text(app)
+                    assert source.draft.following_tail
+                else:
+                    assert initial_content in visible_text(app)
                 assert not app.composer_submission_blocked()
+                await pilot.pause()
+                assert aborts == [], "an offline shortcut queued a delayed owner abort"
+                if local_modes:
+                    missing = config / "sessions" / "deleted-target"
+                    assert not missing.exists()
+                    await asyncio.wait_for(app._sidebar_navigation.select("deleted-target"), 10)
+                    assert app._interaction is source
+                    assert editor.text == "Keep this unsent draft"
+                    assert "waiting saved answer" in visible_text(app)
+                    assert "no longer available" in visible_text(app)
+                    assert not missing.exists()
     finally:
         released.set()
         for server in servers.values():

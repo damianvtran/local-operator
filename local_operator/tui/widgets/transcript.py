@@ -3706,8 +3706,16 @@ class TranscriptView(ScrollableContainer):
             # gate open — see `OperatorApp._check_resume_page`), so the many
             # firings of one animated gesture collapse into ONE page (M1/U1).
             if self._on_user_scroll is not None:
-                # Observation can complete motion already requested by input,
-                # but must never arm demand by itself (including layout clamps).
+                # NOT the re-arm: the watch reports OFFSET MOTION, which is
+                # travel evidence rather than a gesture, and it fires for the
+                # clamped 1->0 step of a wheel already pinned at the top.
+                # Passing continuous=True keeps the page-back latch's re-arm
+                # rule intact (a clamped notch earns nothing) while still
+                # scheduling the at-rest check that lands the gesture.
+                # None marks passive offset observation, not user input.
+                # Consumers still need the paging check, but must not treat a
+                # layout/anchor compensation as permission to discard a saved
+                # reading position being restored asynchronously.
                 self._on_user_scroll(None, continuous=True)
 
     def _resync_tail_anchor(self) -> None:
@@ -3941,7 +3949,11 @@ class TranscriptView(ScrollableContainer):
         top of it un-acquires that anchor a frame later (U2). See
         :meth:`_report_scroll_input`.
         """
-        self._report_scroll_input(False)
+        # End is explicit DOWNWARD intent even when already at the tail. It
+        # must invalidate saved-position restoration, but must not re-arm an
+        # older-page request at the top before its own tail handoff runs.
+        if self._on_user_scroll is not None:
+            self._on_user_scroll(False, continuous=False)
         if self._on_tail_requested is not None:
             self._on_tail_requested()
         self.follow_tail()

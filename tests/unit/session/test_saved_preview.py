@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,62 @@ def journal(path: Path, entries: list[TranscriptEntry]) -> None:
     (path / "transcript.jsonl").write_text(
         "".join(entry.to_json() + "\n" for entry in entries), encoding="utf-8"
     )
+
+
+def test_missing_journal_is_not_a_complete_empty_saved_conversation(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_saved_preview(tmp_path / "missing")
+    with pytest.raises(FileNotFoundError):
+        read_saved_preview(tmp_path)
+    assert not (tmp_path / "missing").exists()
+
+
+def test_existing_empty_journal_is_a_valid_empty_preview(tmp_path):
+    (tmp_path / "transcript.jsonl").touch()
+    result = read_saved_preview(tmp_path)
+    assert result.messages == [] and not result.partial
+
+
+@pytest.mark.asyncio
+async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path, monkeypatch):
+    from local_operator.session.remote import RemoteSession
+
+    record = SimpleNamespace(cwd="/synthetic-owner")
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_owner_record", lambda *args: (record, 12345)
+    )
+
+    async def no_takeover():
+        raise AssertionError("a preview must not become an execution owner")
+
+    remote = await RemoteSession.saved_preview(
+        "unstarted", config_dir=tmp_path, cwd="/other", takeover_factory=no_takeover
+    )
+    try:
+        assert remote.is_cold
+        assert remote.frontend_state.cwd == "/synthetic-owner"
+        assert remote.display_history_window() == []
+        assert not (tmp_path / "sessions" / "unstarted").exists()
+    finally:
+        await remote.dispose()
+
+
+@pytest.mark.asyncio
+async def test_absent_owner_and_journal_refuse_before_building_facade(tmp_path, monkeypatch):
+    from local_operator.session.remote import RemoteSession
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_owner_record", lambda *args: (None, None)
+    )
+
+    async def no_takeover():
+        raise AssertionError("a missing target must not launch an owner")
+
+    with pytest.raises(FileNotFoundError, match="no longer available"):
+        await RemoteSession.saved_preview(
+            "deleted", config_dir=tmp_path, cwd="/other", takeover_factory=no_takeover
+        )
+    assert not (tmp_path / "sessions" / "deleted").exists()
 
 
 def test_preview_replays_correct_session_and_prunes(tmp_path):
