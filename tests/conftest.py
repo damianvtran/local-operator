@@ -409,9 +409,19 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
         # per-config-dir singleton, so this is the complete question, and it
         # skips the connect attempt for the many directories that never held
         # one.
-        if not socket_path(candidate).exists():
+        #
+        # Every filesystem call here is defensive because THIS RUNS AS TEARDOWN
+        # FOR EVERY TEST, including tests that deliberately break the calls it
+        # makes: `test_unexpected_exception_becomes_error_result` monkeypatches
+        # `Path.exists` to raise, and monkeypatch has not unwound yet when an
+        # autouse fixture declared here tears down. A cleanup fixture that can
+        # fail a passing test is worse than the leak it prevents.
+        try:
+            if not socket_path(candidate).exists():
+                continue
+            status = client.broker_status(candidate)
+        except Exception:  # noqa: BLE001 - see above; cleanup never fails a test
             continue
-        status = client.broker_status(candidate)
         if status is None:
             continue
         pid = status.get("pid")
@@ -430,7 +440,9 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     # config dir whose store was never initialised, hence the unconditional
     # removal. AFTER the broker is stopped, since the socket lives inside it.
     for candidate in candidates:
-        with suppress(OSError):
+        # `Exception`, not `OSError`, for the reason above: a test may have
+        # replaced the path machinery this line depends on.
+        with suppress(Exception):
             shutil.rmtree(_runtime_fallback_dir(secrets_dir(candidate)), ignore_errors=True)
 
 
@@ -456,8 +468,14 @@ def _secret_config_dirs(request: pytest.FixtureRequest, home: Path) -> list[Path
     """
     candidates = [home / ".local-operator"]
     tmp_path = getattr(request.node, "funcargs", {}).get("tmp_path")
-    if isinstance(tmp_path, Path) and tmp_path.is_dir():
-        candidates.append(tmp_path)
-        with suppress(OSError):
+    if not isinstance(tmp_path, Path):
+        return candidates
+    # `Exception`, not `OSError`: this walk runs in the teardown of EVERY test,
+    # and a test that monkeypatched `Path.exists`/`is_dir` to raise has not had
+    # that undone yet. Discovering nothing is the right failure here — the
+    # sweep skips a directory, it does not fail the test that just passed.
+    with suppress(Exception):
+        if tmp_path.is_dir():
+            candidates.append(tmp_path)
             candidates.extend(child for child in tmp_path.rglob("*") if child.is_dir())
     return candidates
