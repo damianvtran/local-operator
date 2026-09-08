@@ -2449,6 +2449,9 @@ async def test_a_byte_only_trigger_never_fits_to_a_token_band(tmp_path: Path, wi
         model_spec=spec,
         artifact_root=tmp_path,
         compaction=CompactionSettings(
+            # Large enough that the pass itself never finds a cut (it refuses
+            # "nothing-to-summarize"), so the ONLY mechanism that could remove
+            # an observation turn here is the token-band shed under test.
             keep_recent_tokens=20_000,
             wire_bytes_trigger=trigger,
             wire_bytes_budget=budget,

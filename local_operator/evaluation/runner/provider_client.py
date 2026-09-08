@@ -1276,11 +1276,15 @@ class ProviderModelClient:
             # A frame-budget rebuild lets the pass judge its own gate (on a small
             # context it prunes its frames and refuses the summary as
             # below-threshold, the common and correct outcome). A
-            # threshold-triggered pass was ALREADY judged over the line by the
-            # same resolver, so the gate is not re-asked after the prune:
-            # re-asking let the prune alone slip just under the line, refuse
-            # the summary, and re-fire the pass on the very next turn (review
-            # round 1, m2).
+            # threshold-triggered pass -- by tokens OR by bytes -- was ALREADY
+            # judged over the line by the same resolver, so the gate is not
+            # re-asked after the prune: re-asking let the prune alone slip
+            # just under the line, refuse the summary, and re-fire the pass on
+            # the very next turn (review round 1, m2). The pass's own gate
+            # takes ``wire_bytes`` too, so a byte-only pass is admitted by it
+            # either way; ``threshold_due`` (not ``token_due``) is used here
+            # deliberately, and the split above is only about which BAND the
+            # rebuilt prefix must then fit.
             respect_threshold=not threshold_due,
         )
         # The pass returns the pruned list even when it refused to summarize; either
