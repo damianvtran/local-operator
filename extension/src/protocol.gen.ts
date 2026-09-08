@@ -21,10 +21,11 @@ export enum ErrorCode {
   TAB_AMBIGUOUS = 'tab_ambiguous',
   BUSY = 'busy',
   PROTO_MISMATCH = 'proto_mismatch',
+  OWNER_REFUSED = 'owner_refused',
   INTERNAL = 'internal',
 }
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

@@ -2344,7 +2344,9 @@ class Session:
         # all ("open X", then next message "click Y" → "no browser surface
         # open") and that every turn which opened a browser stranded a cmux tab
         # the agent could never close. dispose() closes whatever is still open.
-        self._browser = BrowserSurface()
+        from local_operator.browser_bridge.resources import BrowserResource
+
+        self._browser = BrowserSurface(BrowserResource(transcript.directory, self._session_id))
         # Connections and overlapping read requests have a conversation owner.
         # This avoids rebuilding pools for every tool call without allowing one
         # child's disposal to close a sibling's active transport.
@@ -11294,6 +11296,44 @@ class Session:
         """
         self._dispose_hooks.append(hook)
 
+    @property
+    def browser_generation(self) -> str:
+        """The browser resource's execution-lease generation, never its PID."""
+        return self._browser.resource.execution_generation
+
+    async def finish_browser_scope(self, *, scope_id: str, generation: str, outcome: str) -> Any:
+        """Fence authoritative completion before publishing the child outcome.
+
+        Ordinary assistant finals and idle turns do not call this: they may be
+        waiting for a login or user approval in the exact owned tab.
+        """
+        from local_operator.browser_bridge.resources import BrowserCleanupResult
+
+        resource = self._browser.resource
+        if scope_id != self.session_id:
+            return BrowserCleanupResult("unresolved", "scope mismatch; no action taken")
+        if not resource.generation and not resource.path.exists():
+            if self._browser.surface_id:
+                from local_operator.tools.builtin import close_browser_surface
+
+                try:
+                    problem = await asyncio.wait_for(close_browser_surface(self._browser), 5.0)
+                    return BrowserCleanupResult("pending" if problem else "closed", problem)
+                except TimeoutError:
+                    return BrowserCleanupResult("pending", "cmux cleanup deadline exceeded")
+            return BrowserCleanupResult("closed")
+        try:
+            result = await asyncio.wait_for(resource.finish(generation, outcome), timeout=5.0)
+            if result.state == "closed":
+                self._browser.surface_id = ""
+            return result
+        except TimeoutError:
+            return BrowserCleanupResult("pending", "browser cleanup deadline exceeded")
+        except Exception:
+            # Teardown cannot suppress the authoritative child outcome because
+            # ownership advanced or the private sidecar became unreadable.
+            return BrowserCleanupResult("unresolved", "ownership changed; no action taken")
+
     async def _close_browser_surface(self) -> None:
         """Close a browser surface the agent left open as a teardown fallback.
 
@@ -11316,6 +11356,14 @@ class Session:
         ``CancelledError``), so the timeout does not trade a stranded tab for an
         orphaned process.
         """
+        resource = self._browser.resource
+        if resource.generation or resource.path.exists():
+            # Disposal is a fallback for process exit, not a claim that an idle
+            # assistant turn ended. Structured retention survives this boundary.
+            await self.finish_browser_scope(
+                scope_id=self.session_id, generation=self.browser_generation, outcome="disposed"
+            )
+            return
         if not self._browser.surface_id:
             return
         try:

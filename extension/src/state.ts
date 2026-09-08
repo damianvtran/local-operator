@@ -21,6 +21,9 @@ export interface StoredSurface {
   // Optional for seamless upgrade from 0.1.3 session storage. Identity and the
   // stable collision ordinal persist; native group ids do not survive Chrome.
   ownerKey?: string;
+  // Failed removal is a retryable obligation, never proof the tab disappeared.
+  cleanupPending?: boolean;
+  allocationId?: string | undefined;
   groupBaseLabel?: string;
   groupOrdinal?: number;
   groupAppliedLabel?: string;

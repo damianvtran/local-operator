@@ -115,6 +115,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
+    # The browser resource sidecar. Both paths are the FILE
+    # `<session_dir>/.browser-resource.json` and a `mkstemp` sibling of it, so
+    # neither call can name the directory itself: `os.replace` over a regular
+    # file never removes or renames its parent, and the unlink targets only the
+    # temporary file this same call created. The session directory is written
+    # INTO here, never removed — the module holds no directory-removal call at
+    # all, which is what this invariant is protecting.
+    (
+        "local_operator/browser_bridge/resources.py::BrowserResource._save",
+        "os.replace",
+        "Atomic write of the .browser-resource.json FILE; the parent directory is never named",
+    ),
+    (
+        "local_operator/browser_bridge/resources.py::BrowserResource._save",
+        "os.unlink",
+        "Removes only this call's own mkstemp sidecar temp file after a failed replace",
+    ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.replace",

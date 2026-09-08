@@ -81,6 +81,68 @@ Chrome, never a window"), carries the launch recipe, the required flags,
 teardown, and the measured reasons for each. If you are not changing the
 extension's own code, this does not apply to you.
 
+## Recovering ownership without touching another session's tab
+
+A failed first navigation now rolls back only its new allocation. If removal
+fails too, ownership remains recoverable rather than disappearing behind the
+eight-tab cap. Use `browser action=recover` in the same durable session after
+an interrupted operation or resume; it cannot adopt a listed foreign handle.
+Then retry `close` or continue the owned interaction.
+
+Use `browser action=retain text="pending login"` (or another specific reason)
+when the user must finish an interaction in that exact tab, or explicitly asks
+to keep it. `release` clears that hold and completes any pending terminal
+cleanup. Ordinary assistant final messages and idle sessions are not terminal
+lifecycle evidence. Running jobs, paused work, and pending approvals are not
+orphans.
+
+Operator diagnostics are conservative:
+
+```sh
+lop browser tabs              # durable ownership records + live bridge tabs
+lop browser tabs --json       # the same, machine-readable
+lop browser cleanup SESSION --generation GENERATION --yes
+```
+
+`reconcile` is an alias for `tabs`, not a second step.
+
+The listing marks the rows cleanup will accept (`<- cleanup candidate`) and
+states why each of the others is refused, so eligibility never has to be
+inferred. Live tabs the bridge is driving are listed separately: handles are
+redacted, so they cannot be attributed to a record, and Local Operator will not
+close them.
+
+An unreachable bridge makes the live half **unknown, never zero** — the listing
+says so and points at `lop browser status`, and `--json` reports
+`live_tabs_known: false` with a null `live_tab_count`. Do not read that as an
+empty browser: a wedged bridge is often why tabs are stranded in the first
+place.
+
+**A session killed before it finished has no terminal intent, and cleanup will
+refuse it forever — correctly, because a live owner must not be closed behind
+its back.** The route out is not `cleanup`: resume that session
+(`lop --resume <session_id>`) and let the owner `close` the tab or finalize its
+scope. The listing says this on the row itself.
+
+The cleanup command is for an **explicitly selected, durably terminal owner**.
+Copy its exact session and generation from diagnostics after inspecting the
+state; the command rechecks terminal intent, retention, and the execution
+lease immediately before acting. A live or uncertain lease blocks it.
+`--yes` approves that exact operation, not unknown tabs or other user tabs.
+Legacy records with no proven owner remain unknown: ask the operator to close
+an explicitly identified unwanted tab by hand instead of guessing from its URL.
+Neither PID absence, age, an expired localhost server, nor absent runtime
+publication proves that a tab is safe to close. `status --repair` repairs bridge
+discovery; it is not an ownership takeover command.
+
+Worker/bridge restarts preserve owner recovery. A full browser restart may
+remove the extension's authority records; diagnostics then say **unresolved**.
+No restored tab is adopted merely because its numeric ID or URL matches.
+New runtimes require the ownership-capable extension and fail before allocation
+with an update instruction when an older extension is connected. Older runtimes
+continue their capability-only legacy path; their tabs are never automatically
+claimed by the new owner protocol.
+
 ## When the `browser` tool is missing: set the extension up
 
 Treat the tool's absence as a one-minute setup step, not a dead end. Do the

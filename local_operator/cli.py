@@ -445,6 +445,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Reconcile advertised state against reality: drop tabs that no longer "
         "exist and republish a fresh heartbeat. Safe while sessions are live.",
     )
+    for action, blurb in (
+        ("tabs", "List durable ownership records and live tabs (read-only)"),
+        ("reconcile", "Alias for 'tabs': inspect ownership without closing anything"),
+    ):
+        inventory_browser = browser_subparsers.add_parser(action, help=blurb)
+        inventory_browser.add_argument(
+            "--json", action="store_true", help="machine-readable output"
+        )
+    cleanup_browser = browser_subparsers.add_parser(
+        "cleanup", help="Close one proven-terminal browser owner after revalidation"
+    )
+    cleanup_browser.add_argument("session_id")
+    cleanup_browser.add_argument("--generation", required=True)
+    cleanup_browser.add_argument("--yes", action="store_true", help="Approve this exact cleanup")
     for action in ("start", "stop", "restart"):
         browser_subparsers.add_parser(action, help=f"{action.capitalize()} the daemon")
     pair_browser = browser_subparsers.add_parser("pair", help="Show the extension pairing code")
@@ -1330,6 +1344,185 @@ def config_list_command() -> int:
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
+    if command in ("tabs", "reconcile", "cleanup"):
+        import asyncio
+        import json
+        import textwrap
+
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.browser_bridge import state as browser_state
+        from local_operator.browser_bridge.resources import (
+            cleanup_exact,
+            read_inventory,
+        )
+
+        sessions = config_dir() / "sessions"
+        if command == "cleanup":
+            if not args.yes:
+                print("No changes. Repeat with --yes to approve this exact session and generation.")
+                return 1
+            if Path(args.session_id).name != args.session_id or args.session_id in (".", ".."):
+                print("Invalid session id; no action taken.")
+                return 1
+            try:
+                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+            except Exception as exc:
+                # The bridge and lease errors already carry operator-grade
+                # sentences naming the command that fixes them; printing the
+                # class name instead threw that away and read as a truncated
+                # message. Keep the class name only for genuinely unexpected types.
+                detail = str(exc) or type(exc).__name__
+                print(f"Cleanup blocked: {detail} Nothing was closed.")
+                return 1
+            if result.state == "closed":
+                message = "Browser cleanup: closed. The tab was closed and its record settled."
+            elif result.state == "retained":
+                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+            elif result.state == "pending":
+                # The generation is deliberately NOT rotated by a failed attempt
+                # any more, so the value they already copied stays correct.
+                message = (
+                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
+                    "Retry the same command once the bridge answers; "
+                    "the generation you copied is still current."
+                )
+            else:
+                message = f"Browser cleanup: no action taken — {result.detail}."
+            print(textwrap.fill(message, width=78, subsequent_indent="  "))
+            return 0 if result.state in ("closed", "retained") else 1
+        rows = read_inventory(sessions)
+        # A command called `tabs` must reconcile with the browser and with
+        # `status`: reporting "no records" while the bridge drives seven tabs
+        # renders as its own opposite in EXACTLY the pool-exhausted state an
+        # operator reaches for it in, and `{"resources": []}` reads to any
+        # script as an empty browser. Unowned tabs are listed, never selectable.
+        live_tabs: list[dict[str, Any]] = []
+        current = browser_state.read()
+        # Resolve the port exactly as the sibling `status` does. `state.read()`
+        # returns None for a MISSING OR CORRUPT discovery file as much as for
+        # an absent daemon, so skipping the probe on None made a healthy bridge
+        # driving five tabs render as an empty browser — `status` found them at
+        # the default port in the same state, which is the divergence this
+        # command was added to remove.
+        probe = browser_install.health(current.port if current else browser_install.DEFAULT_PORT)
+        driven = (probe or {}).get("driven_tabs")
+        # Read-only and never fatal, but UNKNOWN IS NOT ZERO: a probe that did
+        # not answer means the live half is unknowable, and reporting that as
+        # "no tabs" tells the operator the opposite of the truth in exactly the
+        # wedged-bridge state that sent them here.
+        live_known = isinstance(driven, list)
+        if live_known:
+            live_tabs = [entry for entry in driven if isinstance(entry, dict)]
+        # Every durable record is redacted (no capability, no tab handle), so a
+        # record cannot be matched to a live URL here. The honest framing is a
+        # count of records against a count of live tabs, with the live ones
+        # listed as unattributed rather than falsely claimed by a session.
+        unowned = live_tabs
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "resources": rows,
+                        "live_tabs": [
+                            {"url": str(tab.get("url", "")), "title": str(tab.get("title", ""))}
+                            for tab in unowned
+                        ],
+                        # Null, not 0, when the bridge did not answer: a script
+                        # must not be able to read an unreachable bridge as an
+                        # empty browser. The key is `live_tabs` to match the
+                        # rendered heading — records are redacted, so a listed
+                        # tab can only be described as live, never proven
+                        # unowned.
+                        "live_tabs_known": live_known,
+                        "live_tab_count": len(live_tabs) if live_known else None,
+                        "mode": "read-only",
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if not rows and not live_tabs:
+            print(
+                "No browser tabs and no ownership records."
+                if live_known
+                else textwrap.fill(
+                    "No ownership records. The bridge did not answer, so open "
+                    "tabs are unknown — run 'lop browser status' to check the "
+                    "daemon.",
+                    width=78,
+                )
+            )
+            return 0
+        if rows:
+            # Pad the state so the third column starts at one offset: at real
+            # id and token widths an unpadded row loses its columns entirely,
+            # and the generation is moved to its own indented line so an
+            # 80-column terminal cannot wrap it mid-token — a wrapped token's
+            # continuation sits in column 1, looks like a new record, and is
+            # unsafe to copy, which is exactly what cleanup asks you to do.
+            width = max(len(str(row.get("state", ""))) for row in rows)
+            for row in rows:
+                mark = "  <- cleanup candidate" if row.get("cleanup_candidate") else ""
+                # rstrip so an unmarked row carries no trailing padding.
+                print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
+                print(f"  generation={row.get('generation', '')}")
+                # Wrapped on the same discipline as the reason below it: a
+                # retention reason is free text (it can quote a whole approval
+                # URL), so an unwrapped line here ran to 141 columns beside
+                # neighbours that wrap at 76.
+                for line in textwrap.wrap(
+                    f"terminal={row.get('terminal') or 'not established'}; "
+                    f"retention={row.get('retention') or 'none recorded'}",
+                    width=76,
+                    initial_indent="  ",
+                    subsequent_indent="    ",
+                    break_long_words=False,
+                ):
+                    print(line)
+                if not row.get("cleanup_candidate") and row.get("blocked_reason"):
+                    # Wrapped: the reasons name a recovery command, and a line
+                    # running past the terminal width is where that command
+                    # would be broken across a wrap and mis-copied.
+                    for line in textwrap.wrap(
+                        f"not cleanable: {row['blocked_reason']}",
+                        width=76,
+                        initial_indent="  ",
+                        subsequent_indent="    ",
+                        break_long_words=False,
+                    ):
+                        print(line)
+        if unowned:
+            if not rows:
+                print(
+                    textwrap.fill(
+                        f"No durable ownership records. {len(unowned)} tab(s) are open with "
+                        "no proven owner — listed below; Local Operator will not close them.",
+                        width=78,
+                    )
+                )
+            print(f"\nlive tabs ({len(unowned)}, not selectable for cleanup):")
+            for tab in unowned:
+                print(f"  - {tab.get('url', '')}")
+            print(
+                "  Handles are redacted, so these cannot be attributed to a record above."
+                "\n  Close an unwanted tab by hand; provenance is unproven."
+            )
+        elif not live_known and rows:
+            # The records rendered above are only half the answer, and silence
+            # here would read as "the browser is empty" beside them.
+            print()
+            print(
+                textwrap.fill(
+                    "Live tabs: unknown — the bridge did not answer, so tabs open "
+                    "outside these records could not be listed. Run 'lop browser "
+                    "status' to check the daemon.",
+                    width=78,
+                )
+            )
+        print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
+        if any(row.get("cleanup_candidate") for row in rows):
+            print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
+        return 0
     if command == "serve":
         from local_operator.browser_bridge.daemon import main as serve_main
 
