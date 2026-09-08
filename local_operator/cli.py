@@ -1392,6 +1392,12 @@ def browser_command(args: argparse.Namespace) -> int:
             print(f"legacy install:      {legacy}")
             print("                     (written by an older build under the shared name;")
             print("                      'lop browser uninstall' removes it)")
+        # A registration this root found but may not manage. Named explicitly,
+        # because otherwise a user sees "installed: no" beside a daemon that is
+        # plainly running and has nothing to act on.
+        ambiguous = result.get("legacy_ambiguity")
+        if ambiguous:
+            print(f"\n\033[1;33munclaimed registration:\033[0m {ambiguous}")
         return 0 if result["healthy"] else 1
     if command == "pair":
         if args.reset:
@@ -1471,6 +1477,11 @@ def browser_command(args: argparse.Namespace) -> int:
         error = result.get("error")
         if not result.get("ok") and error:
             print(f"\033[1;31m{error}\033[0m")
+        # What was found and deliberately left behind, so "uninstalled" never
+        # silently means "and something of yours is still registered".
+        warning = result.get("warning")
+        if warning:
+            print(f"\033[1;33mnote:\033[0m {warning}")
         return 0 if result.get("ok") else 1
     print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
     return 1

@@ -577,16 +577,130 @@ def _legacy_path() -> Path | None:
     prevent: under the isolation AGENTS.md prescribes
     (``HOME=/tmp/... LOCAL_OPERATOR_CONFIG_DIR=...``) the lookup resolved the
     OPERATOR's live plist, and because such a root has no install of its own it
-    would be adopted — then booted out, unlinked, and SIGTERM'd. It fanned out
-    without bound, since every isolated root resolved that same one file, and
-    ownership cannot be recovered from the plist body: nothing in it names a
-    config root.
+    would be adopted — then booted out, unlinked, and SIGTERM'd.
+
+    Location alone is NOT ownership, which is why this is only the first of
+    three tests; see :func:`legacy_registration`.
     """
     home = Path.home()
     if sys.platform == "darwin":
         return home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     if sys.platform.startswith("linux"):
         return home / ".config" / "systemd" / "user" / SYSTEMD_UNIT
+    return None
+
+
+def _canonical(path: str | Path) -> str:
+    """A path in the one spelling ownership comparisons can use.
+
+    Ownership is decided by comparing two recorded paths, so the comparison has
+    to survive symlinks (``/tmp`` → ``/private/tmp`` on macOS) and ``..``/``.``
+    segments. ``resolve()`` without ``strict`` also canonicalises a path whose
+    final component no longer exists, which is the normal case for a log file
+    that was never written.
+    """
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:  # pragma: no cover - unreadable parent
+        return str(Path(path).expanduser())
+
+
+def _recorded_log_path(registration: Path) -> str | None:
+    """The log destination a supervisor file records, or ``None`` when it records none.
+
+    This is the ownership evidence, and it exists because every build derives
+    the daemon's stdout/stderr destination from :func:`log_path`, which honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` unconditionally. A registration written under
+    ``LOCAL_OPERATOR_CONFIG_DIR=/x`` therefore records ``/x/logs/...`` while the
+    default root records the platform log dir — verified against the RELEASED
+    writer at ``v0.51.14``, not merely against current code.
+
+    ``None`` means the file carries no evidence, and callers must read that as
+    "not provably mine" rather than "mine". That case is real and common on
+    Linux: the released ``render_systemd`` emits ``ExecStart`` only, with no
+    ``StandardOutput=``, so a legacy unit from any build before this one is
+    journal-only and unattributable. Such a unit is never auto-adopted.
+    """
+    if sys.platform == "darwin":
+        try:
+            with registration.open("rb") as handle:
+                parsed = plistlib.load(handle)
+        except Exception:  # noqa: BLE001 - a corrupt plist is "no evidence", not a crash
+            return None
+        value = parsed.get("StandardOutPath") if isinstance(parsed, dict) else None
+        return value if isinstance(value, str) and value else None
+    try:
+        text = registration.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # `StandardOutput=append:<path>` is the only place a unit records this, and
+    # this build emits it only on systemd >= 240; older systemd logs to the
+    # journal, so the absence of this line is expected rather than anomalous.
+    match = re.search(r"^StandardOutput=append:(.+)$", text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _default_root_dir_exists() -> bool:
+    """HEURISTIC: does the default config root's DIRECTORY exist?
+
+    Deliberately named for what it measures. Directory existence proves neither
+    that a default-root daemon is running nor that the default root wrote the
+    registration under scrutiny — it is a conservative refusal signal, not
+    ownership. It is kept because the cost of the two errors is wildly
+    asymmetric: wrongly refusing leaves a stale file for the user to delete by
+    hand, while wrongly claiming deletes a live LaunchAgent along with its
+    ``RunAtLoad``/``KeepAlive``, so the bridge never returns after a reboot.
+
+    What it legitimately blocks, and this is a real cost rather than a
+    theoretical one: a user who has BOTH a populated ``~/.local-operator`` and a
+    ``LOCAL_OPERATOR_CONFIG_DIR`` root whose own legacy registration is the one
+    on disk cannot have it auto-removed, even when the evidence says it is
+    theirs. They get :func:`legacy_ambiguity`'s message naming the file instead
+    of a silent no-op. Positive evidence alone would serve that user; this
+    refusal is the price of not trusting evidence that a pre-``append:`` Linux
+    unit cannot supply at all.
+    """
+    return _default_config_root().exists()
+
+
+def legacy_ambiguity() -> str | None:
+    """Why a legacy registration that IS present was not claimed by this root.
+
+    Ambiguity must reach the user as an actionable statement naming the file,
+    never as a silent ``None`` that the caller then reports as "no service
+    installed" — that is the false-success shape this module keeps re-learning.
+    ``None`` here means there is genuinely nothing to report.
+    """
+    if not _root_suffix():
+        return None
+    candidate = _legacy_path()
+    if candidate is None or not candidate.exists():
+        return None
+    if _own_registration_exists():
+        return (
+            f"{candidate} was left by an older build, but this config root has its "
+            "own registration, which takes precedence. Left untouched."
+        )
+    recorded = _recorded_log_path(candidate)
+    if recorded is None:
+        noun = "unit" if sys.platform.startswith("linux") else "plist"
+        return (
+            f"{candidate} records no log destination, so nothing proves it belongs "
+            f"to this config root (a pre-0.51 systemd {noun} logs to the journal and "
+            "carries no such evidence). Left untouched — remove it by hand if it is "
+            "yours."
+        )
+    if _canonical(recorded) != _canonical(log_path()):
+        return (
+            f"{candidate} was written by a different config root: its logs go to "
+            f"{recorded}, this root's to {log_path()}. Left untouched."
+        )
+    if _default_root_dir_exists():
+        return (
+            f"{candidate} looks like this root's, but the default config root "
+            f"{_default_config_root()} still exists and may own it. Left untouched "
+            "— remove it by hand, or remove that config root first."
+        )
     return None
 
 
@@ -608,13 +722,35 @@ def legacy_registration() -> Path | None:
     supervisor — install, uninstall, start/stop/restart, status — resolves it
     the same way, on both platforms.
 
-    Scoped to this ``$HOME`` by :func:`_legacy_path`; see there for why a
-    registration under another ``$HOME`` is deliberately NOT adopted.
+    Claiming one requires POSITIVE, canonicalised evidence that it is this
+    root's, never mere presence at the expected location. All of:
+
+    1. discovery is scoped to this ``$HOME`` (:func:`_legacy_path`);
+    2. this root has no registration of its own, which always takes precedence;
+    3. the file records a log destination equal to this root's, and the default
+       root's directory is absent (:func:`_default_root_dir_exists`, a labelled
+       heuristic — see its docstring for the upgrade it legitimately blocks).
+
+    Anything else returns ``None`` and is reported through
+    :func:`legacy_ambiguity`, because the alternative is deleting a supervisor
+    belonging to another root. Presence alone let ``uninstall`` from any
+    non-default root remove the DEFAULT root's live LaunchAgent while reporting
+    success — data loss behind a success message, which is the shape this
+    module exists to prevent.
     """
     if not _root_suffix():
         return None
     legacy = _legacy_path()
-    return legacy if legacy is not None and legacy.exists() else None
+    if legacy is None or not legacy.exists():
+        return None
+    if _own_registration_exists():
+        return None
+    recorded = _recorded_log_path(legacy)
+    if recorded is None or _canonical(recorded) != _canonical(log_path()):
+        return None
+    if _default_root_dir_exists():
+        return None
+    return legacy
 
 
 def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object]:
@@ -634,6 +770,10 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
     # success is the false-success shape this function exists to avoid. It is
     # removed under the LEGACY name, which is the name it was registered with.
     orphan = legacy_registration()
+    # Unclaimable-but-present must not be reported as "nothing was installed".
+    # The user asked this root to manage a supervisor and it declined; saying so
+    # is the difference between an answer and a false success.
+    ambiguity = legacy_ambiguity()
     if supervisor == "launchctl":
         if not dry_run:
             existed = plist_path().exists()
@@ -696,7 +836,13 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
     # `ok` and not a literal: the disable branch above sets it False, and
     # returning True there is exactly the "claimed success it did not achieve"
     # bug this function was fixed for.
-    return {"ok": ok, "steps": steps}
+    result: dict[str, object] = {"ok": ok, "steps": steps}
+    if ambiguity is not None:
+        # Not an error — the removal this root COULD do succeeded — but the user
+        # must be told what was found and left, with the path, so "uninstalled"
+        # never silently means "and something of yours is still registered".
+        result["warning"] = ambiguity
+    return result
 
 
 def service_action(action: str) -> dict[str, object]:
@@ -773,4 +919,7 @@ def status(port: int | None = None) -> dict[str, object]:
         # explains why a daemon is running under a name the CLI would not
         # otherwise mention, and it tells the user which file to act on.
         "legacy_registration": str(orphan) if orphan is not None else None,
+        # A present-but-unclaimable registration is the case a user most needs
+        # named: it explains a daemon this root can neither see nor manage.
+        "legacy_ambiguity": legacy_ambiguity(),
     }
