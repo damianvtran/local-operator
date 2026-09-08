@@ -15530,13 +15530,19 @@ class OperatorApp(App[None]):
         acceptable: it is a pooled thread rather than this endpoint's loop, so
         the endpoint keeps answering and the click falls back on time.
 
-        ONE CLICK YIELDS A SWITCH OR A SPAWN, NEVER BOTH, AT ANY DELAY. That is
-        the property this endpoint owes its caller, and it is stated with its
-        scope — one click — because that is the scope the code delivers; the
-        residue for a PAIR of clicks is written out at the end of this
-        docstring rather than papered over. This file exists because a
-        docstring asserted an invariant its code did not have, so an
-        unconditional claim here would be the same defect in a new place.
+        ONE CLICK YIELDS A SWITCH OR A SPAWN, NEVER BOTH — unconditionally
+        while no switch has started, and for a switch already under way as long
+        as the app services the give-up hop within ``VIEWER_ABANDON_SETTLE_S``.
+        That is the property this endpoint owes its caller, and the condition is
+        in the claim rather than in a footnote because the two mechanisms below
+        genuinely differ in what they need: the refusal asks nothing of the app,
+        while the fence has to actually run to fence anything. Both residues —
+        a PAIR of clicks, and a wedge outlasting the settle budget — are written
+        out at the end of this docstring rather than papered over. This file
+        exists because a docstring asserted an invariant its code did not have,
+        and this clause has now been caught claiming more than the code delivers
+        three times, so a headline that a later paragraph has to walk back would
+        be the same defect in a new place.
 
         The bound alone never delivered even the single-click property:
         ``wait_for`` cancels the waiter, not the navigation, so a switch slower
@@ -15580,12 +15586,24 @@ class OperatorApp(App[None]):
         switched underneath. Neither click overran anything, so this is not the
         fence's path; the resolution above is where it is fixed.
 
-        WHAT REMAINS, stated rather than implied: two clicks on DIFFERENT
+        WHAT REMAINS, stated rather than implied. First, two clicks on DIFFERENT
         sessions in that window still produce a spawn and a switch. That is one
         outcome each for two distinct requests rather than two for one, and it
         is arguably correct — the superseded click really is about a session
         that is not on screen. It is called out here because the guarantee
         above is per click, and a reader is owed the boundary of it.
+
+        Second, and this is why the guarantee above is conditional: a wedge that
+        outlasts ``VIEWER_RESUME_TIMEOUT_S`` and then ``VIEWER_ABANDON_SETTLE_S``
+        on top of it can still deliver both, in the one ordering where ``apply``
+        was serviced early enough that a navigation EXISTS. The settle hop below
+        expires too, so ``abandon`` never runs, nothing fences the live
+        navigation, and the bare ``raise`` answers failure while the switch
+        commits behind it. That residue predates this change — it is the
+        ``except`` arm's ``raise``, which reproduces identically before it — and
+        removing it needs a fence that does not depend on the app answering at
+        all, which is a larger change than this one. It is recorded because the
+        headline would otherwise deny it.
 
         A cancelled navigation cannot half-swap the app: ``SessionNavigation``
         commits with no await between its final generation check and
@@ -15642,12 +15660,16 @@ class OperatorApp(App[None]):
                 # Starting the switch now would deliver BOTH outcomes, which is
                 # the whole defect; refusing is what makes the endpoint's answer
                 # true after the fact rather than merely true when it was given.
-                loop.call_soon_threadsafe(
-                    _set_unless_done,
-                    future,
-                    None,
-                    TimeoutError(f"gave up on {session_id} before this hop was serviced"),
-                )
+                #
+                # CANCELLED RATHER THAN FAILED, because nobody is left to read a
+                # failure. `abandoned` is only ever set after `wait_for` has
+                # already cancelled `hop_and_wait`, so the `await future` that
+                # would have retrieved an exception here no longer exists —
+                # resolving it with one instead made asyncio report "Future
+                # exception was never retrieved" on stderr at collection time.
+                # A cancellation carries the same "this hop produced nothing"
+                # and is not owed a reader.
+                loop.call_soon_threadsafe(future.cancel)
                 return
             try:
                 task = self._select_sidebar_session(session_id)
