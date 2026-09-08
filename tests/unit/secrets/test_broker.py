@@ -770,6 +770,111 @@ def test_the_operator_terminal_works_after_unlock_but_a_detached_script_does_not
     assert SECRET_VALUE.decode() not in text, text
 
 
+def test_a_session_registered_on_a_terminal_grant_dies_with_that_terminal(
+    hardened_broker: SecretBroker, config_root: Path, tmp_path: Path
+) -> None:
+    """QA Q8: the unlock grant must be bounded by the terminal's LIFETIME.
+
+    §13 says the grant lasts as long as the shell the operator unlocked in, and
+    for a plain process that held: kill the shell and its children are denied.
+    But a process inside that terminal may `register` ITSELF as a session —
+    correctly permitted, since it descends from an unlocked terminal — and a
+    registered session is an INDEPENDENT authorizing entry. QA measured the
+    escape end to end: with the granting shell SIGKILLed and the squatter
+    reparented to launchd, it was still served the secret, while a control
+    process was denied at the same moment. The grant was bounded by the
+    BROKER's lifetime, not the terminal's, which is not what the doc promises.
+
+    Driven with real processes because the whole mechanism is what the kernel
+    reports about a lineage; a faked pid would prove nothing about it. The
+    squatter is a grandchild that registers, then reports whether it can still
+    retrieve after its granting shell is gone.
+    """
+    root = str(Path(__file__).resolve().parents[3])
+    started = tmp_path / "squatter-registered"
+    verdict = tmp_path / "squatter-verdict"
+    squatter = tmp_path / "squat.py"
+    squatter.write_text(textwrap.dedent(f"""
+        import os, sys, time
+        sys.path.insert(0, {root!r})
+        from pathlib import Path
+        from local_operator.secrets import client
+        base = Path({str(config_root)!r})
+        # Register while the granting terminal is still alive: this is the
+        # escalation under test, and it is ALLOWED at this moment.
+        channel = client.register_session(base, session_id="squatter")
+        open({str(started)!r}, "w").write("registered" if channel else "refused")
+        # Wait for the granting shell to be killed, then ask again.
+        while not os.path.exists({str(tmp_path / "shell-is-dead")!r}):
+            time.sleep(0.1)
+        try:
+            value = client.retrieve("DEMO_TOKEN", base)
+            open({str(verdict)!r}, "w").write(f"SERVED {{value.decode()}}")
+        except Exception as exc:
+            open({str(verdict)!r}, "w").write(f"DENIED {{type(exc).__name__}}: {{exc}}")
+        """))
+    # One shell: it unlocks (taking the grant on ITSELF as the unlocker's
+    # parent), then launches the squatter as its own descendant, then reports
+    # its pid so the test can kill exactly that shell.
+    unlock = tmp_path / "unlock.py"
+    unlock.write_text(textwrap.dedent(f"""
+        import sys, socket
+        sys.path.insert(0, {root!r})
+        from local_operator.secrets.protocol import PROTOCOL_VERSION, recv_frame, send_frame
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(20)
+        s.connect({str(hardened_broker.path)!r})
+        send_frame(s, {{"version": PROTOCOL_VERSION, "op": "unlock",
+                        "passphrase": "test-passphrase"}})
+        assert recv_frame(s).get("ok")
+        """))
+    # `A && B &` would make bash fork a SUBSHELL to hold the `&&` list, and the
+    # grant would land on that subshell rather than on the shell this test can
+    # kill — measured: killing the outer bash then left a live grant holder and
+    # the assertion below failed against a working fix. Sequencing with `;`
+    # keeps the unlock in the shell itself, which is also the shape a real
+    # prompt has.
+    shell = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            f"{sys.executable} {unlock}; "
+            f"nohup {sys.executable} {squatter} >/dev/null 2>&1 & "
+            "sleep 300",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not started.exists():
+            time.sleep(0.1)
+        assert started.exists(), "the squatter never reported back"
+        assert started.read_text() == "registered", (
+            "the squatter could not register inside the granted terminal, so this test "
+            "is no longer exercising the escape it exists for"
+        )
+
+        # Kill the granting terminal. Its grant, and everything that borrowed
+        # standing from it, must stop authorizing.
+        shell.kill()
+        shell.wait(timeout=30)
+    finally:
+        with suppress(OSError):
+            shell.kill()
+    (tmp_path / "shell-is-dead").write_text("dead")
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline and not verdict.exists():
+        time.sleep(0.1)
+    assert verdict.exists(), "the squatter never answered after the terminal died"
+    text = verdict.read_text()
+    assert text.startswith(
+        "DENIED"
+    ), f"a session registered on a dead terminal's grant is still served: {text}"
+    assert SECRET_VALUE.decode() not in text, text
+
+
 def test_registrations_are_bounded(broker: SecretBroker, config_root: Path) -> None:
     """R4: registrations must not exhaust the broker for legitimate callers.
 

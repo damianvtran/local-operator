@@ -528,7 +528,11 @@ def _harden(args: argparse.Namespace) -> int:
 
 
 def _unlock(args: argparse.Namespace) -> int:
-    """Unlock a hardened store for this boot by unwrapping the key into the broker."""
+    """Unlock a hardened store for this boot by unwrapping the key into the broker.
+
+    Also tells the operator that this terminal gained standing, which is the
+    part of the mechanism they can act on (review R9).
+    """
     from local_operator.secrets.client import ensure_broker, unlock
     from local_operator.secrets.keys import key_mode as current_mode
 
@@ -542,7 +546,18 @@ def _unlock(args: argparse.Namespace) -> int:
         _err("Could not start the secret broker, so there is nowhere to hold the unlocked key.")
         return 2
     unlock(_read_passphrase("Passphrase for the secret store: "))
+    # **The grant is stated at the moment it starts applying (review R9).** The
+    # operator has just given this terminal standing to read every secret for
+    # as long as the shell lives, and that is a materially different mechanism
+    # from "a script that runs `lop`" — anything here can talk to the broker
+    # socket directly. Learning it from §9 of a design document is learning it
+    # too late, so it is said here, in two lines, where the decision is made.
     _err("Unlocked. The broker holds the key in memory until it exits or the machine reboots.")
+    _err(
+        "This terminal is now authorized: anything you run in it can read every secret "
+        "until this shell exits. Other terminals are not. Run `lop secret broker stop` to "
+        "revoke it sooner."
+    )
     return 0
 
 

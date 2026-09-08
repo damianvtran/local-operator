@@ -144,7 +144,13 @@ def add_parser(subparsers: Any) -> None:
         "harden",
         help="Wrap the master key with a passphrase; unlock once per boot afterwards",
     )
-    actions.add_parser("unlock", help="Unlock a hardened store for this boot")
+    actions.add_parser(
+        "unlock",
+        help=(
+            "Unlock a hardened store for this boot; authorizes THIS terminal to read "
+            "secrets until the shell exits"
+        ),
+    )
 
     broker_parser = actions.add_parser("broker", help="Inspect or control the secret broker")
     broker_actions = broker_parser.add_subparsers(dest="broker_command")

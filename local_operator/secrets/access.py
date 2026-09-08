@@ -67,11 +67,32 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
     ``passphrase`` mode the fallback does not exist — :func:`load_master_key`
     raises, because the unwrapped key lives only in broker memory.
 
-    ``create`` short-circuits the broker: initialising a brand-new store has no
-    key to fetch yet, and starting a daemon to be told so is pure latency on
-    the one path where the operator is waiting.
+    ``create`` short-circuits the broker only when there is genuinely no key to
+    fetch: initialising a brand-new store has none yet, and starting a daemon
+    to be told so is pure latency on the one path where the operator is
+    waiting. **It must not short-circuit a store that already exists in
+    passphrase mode** — see below.
     """
-    if create:
+    hardened = key_mode(base) == "passphrase"
+
+    # **Why `create` is not honoured in the hardened tier (QA Q9).** `set` is
+    # the only verb passing `create=True`, and taking the short-circuit above
+    # sent it straight to `load_master_key(create=True)`, which raises in
+    # passphrase mode because there is deliberately no key on disk. The result
+    # was that a hardened store could never accept a NEW secret even while
+    # unlocked, with no workaround (`update` refuses unknown names) and an
+    # error telling the operator to run the `unlock` they had just run
+    # successfully. A hardened store was therefore frozen at whatever it held
+    # when it was hardened — which breaks the harden-then-migrate sequence this
+    # whole tier exists for.
+    #
+    # The short-circuit was always about latency on a store that does not yet
+    # exist. A hardened store BY DEFINITION exists (its wrapped key is on
+    # disk), so there is nothing to create and the broker is the only holder of
+    # the key: fall through to the normal path, which serves an authorized
+    # caller and gives a locked store the actionable "run `lop secret unlock`"
+    # instead of the key-file message.
+    if create and not hardened:
         return load_master_key(base, create=True)
 
     # Imported here, not at module scope: this module is on the path of every
@@ -84,7 +105,6 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
         fetch_master_key,
     )
 
-    hardened = key_mode(base) == "passphrase"
     try:
         if ensure_broker(base):
             return fetch_master_key(base)

@@ -552,5 +552,29 @@ def test_harden_restart_unlock_get_round_trip(cli) -> None:
         status = cli("status")
         assert status.returncode == 0, status.stderr
         assert b"passphrase" in status.stdout
+
+        # **The whole lifecycle, not just `get` (QA Q9).** This test stopped at
+        # `get`, and that is precisely why the tier shipped unable to accept a
+        # NEW secret: `set` was the one verb passing `create=True`, which
+        # short-circuited the broker and hit the "no key on disk" refusal, so a
+        # hardened store was frozen at whatever it held when it was hardened —
+        # with no workaround, since `update` refuses unknown names. That is the
+        # harden-then-migrate sequence this tier exists for. One `set` after the
+        # unlock would have caught it, so every verb the operator needs after
+        # unlocking is exercised here rather than one.
+        added = cli("set", "JOURNEY_TWO", stdin=b"second-value\n")
+        assert added.returncode == 0, added.stderr
+        assert cli("get", "JOURNEY_TWO").stdout == b"second-value"
+
+        assert cli("update", "JOURNEY_TWO", stdin=b"updated-value\n").returncode == 0
+        assert cli("get", "JOURNEY_TWO").stdout == b"updated-value"
+
+        listed = cli("list")
+        assert listed.returncode == 0, listed.stderr
+        assert b"JOURNEY_TWO" in listed.stdout and b"JOURNEY" in listed.stdout
+
+        assert cli("rm", "JOURNEY_TWO", "--yes").returncode == 0
+        assert cli("get", "JOURNEY_TWO").returncode == 2
+        assert b"JOURNEY_TWO" not in cli("list").stdout
     finally:
         cli("broker", "stop")

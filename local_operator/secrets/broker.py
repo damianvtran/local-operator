@@ -40,6 +40,7 @@ import os
 import socket
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -48,7 +49,7 @@ from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.peer import (
     PeerAuthenticationUnavailable,
     ProcessIdentity,
-    authorize,
+    authorize_by,
     parent_pid,
     peer_identity,
     process_info,
@@ -120,6 +121,13 @@ class _Session:
     identity: ProcessIdentity
     connection: socket.socket
     session_id: str | None
+    #: The unlocked TERMINAL this session's standing rests on, when it had no
+    #: standing of its own. ``None`` for a session that registered under the
+    #: keyfile tier's ticket-only rule or that descended from another
+    #: registered session. A session holding this is revoked when that terminal
+    #: dies, which is what keeps the unlock grant bounded by the terminal's
+    #: lifetime rather than the broker's (QA Q8).
+    granting_terminal: int | None = None
     #: Serialises writes to this session's connection. Two concurrent
     #: retrievals attributed to the same session would otherwise interleave
     #: their notify frames on one stream and each read the other's ack.
@@ -477,20 +485,121 @@ class SecretBroker:
         return False
 
     def _authorize(self, identity: ProcessIdentity) -> tuple[bool, str]:
-        """Ancestry check against the registered sessions.
+        """Ancestry check against the registered sessions."""
+        allowed, reason, _ = self._authorize_by(identity)
+        return allowed, reason
+
+    def _authorize_by(self, identity: ProcessIdentity) -> tuple[bool, str, int | None]:
+        """:meth:`_authorize`, also reporting WHICH entry admitted the caller.
 
         The registry is COPIED under the lock and the walk runs outside it: the
         walk makes syscalls per hop, and holding the lock across them would let
         one slow walk stall every other session's registration.
         """
+        terminals = self._live_terminals()
         with self._lock:
             sessions = {pid: session.identity for pid, session in self._sessions.items()}
             # A terminal that unlocked this broker authorizes its descendants
             # exactly as a registered session does (see `_grant_terminal`).
             # Merged here rather than kept in a second walk so there is ONE
             # authorization path to reason about and audit.
-            sessions.update(self._terminals)
-        return authorize(identity, sessions)
+            sessions.update(terminals)
+        allowed, reason, by = authorize_by(identity, sessions)
+        if not allowed or by is None:
+            return allowed, reason, None
+        return allowed, reason, self._grant_behind(by, terminals)
+
+    def _grant_behind(self, authorizer: int, terminals: dict[int, ProcessIdentity]) -> int | None:
+        """Which granted TERMINAL an authorization ultimately rests on, if any.
+
+        **Standing is inherited, or the bound is one hop deep (QA Q8).** A
+        squatter admitted by the unlocked terminal registers as a session; its
+        child then registers as a *descendant of that session*, whose authorizer
+        is the squatter rather than the terminal. Without this, the child's
+        ``granting_terminal`` would be ``None`` and it would survive the sweep
+        that removes its parent — the same escape one level down. So a session
+        admitted by another session inherits whatever that session's standing
+        rested on, and one sweep revokes the whole chain.
+
+        ``None`` means the authorization stands on its own: a session that
+        registered under the keyfile tier's ticket-only rule, or one whose chain
+        reaches a session with no borrowed standing.
+        """
+        if authorizer in terminals:
+            return authorizer
+        with self._lock:
+            session = self._sessions.get(authorizer)
+        return session.granting_terminal if session is not None else None
+
+    def _live_terminals(self) -> dict[int, ProcessIdentity]:
+        """Granted terminals whose process is still the one that unlocked, evicting the rest.
+
+        **Why entries are dropped rather than merely skipped (review R10).** A
+        dead grant authorizes nobody either way, but :func:`authorize` STOPS the
+        walk on a registered-pid/identity mismatch rather than continuing past
+        it. So a stale entry whose pid was recycled onto an unrelated process
+        that happens to sit in a legitimate caller's ancestry denies that caller
+        with a confusing "pid was reused" message — it fails toward locking the
+        operator out of their own credentials. Reaping here also bounds
+        ``_terminals``, which was otherwise the one unbounded dict on the
+        security path, asymmetric with the ``MAX_SESSIONS`` cap this PR added
+        for R4.
+
+        Called on the authorization path rather than on a timer: it is one
+        ``process_info`` per grant (typically one), and a grant that just died
+        must stop authorizing on the NEXT request, not at the next tick.
+        """
+        with self._lock:
+            snapshot = dict(self._terminals)
+        live = {
+            pid: identity
+            for pid, identity in snapshot.items()
+            if (current := process_info(pid)) is not None and identity.same_process_as(current)
+        }
+        dead = set(snapshot) - set(live)
+        if dead:
+            with self._lock:
+                for pid in dead:
+                    # Only if it is still the same grant: an unlock between the
+                    # snapshot and here may have re-granted this pid.
+                    if self._terminals.get(pid) is snapshot[pid]:
+                        del self._terminals[pid]
+            # **The grant is bounded by the terminal's LIFETIME, and this is
+            # what makes that true (QA Q8).** A process inside a granted
+            # terminal may register itself as a session, and a registered
+            # session is an independent authorizing entry: killing the terminal
+            # left the self-registered squatter serving secrets to its own
+            # descendants for the broker's whole life, while a control shell in
+            # the same terminal was correctly denied. Measured, not theorised.
+            # Standing that was borrowed from a terminal ends with it, so the
+            # sessions admitted on that basis are revoked here.
+            self._revoke_sessions_granted_by(dead)
+        return live
+
+    def _revoke_sessions_granted_by(self, terminals: set[int]) -> None:
+        """Deregister sessions whose only standing was a now-dead granted terminal.
+
+        Their channels are closed as well as dropped: closing is what the
+        session's own client observes as revocation, and a session left holding
+        an open channel it believes is live would keep receiving §6 notify
+        frames for retrievals it is no longer entitled to see.
+        """
+        with self._lock:
+            revoked = [
+                session
+                for session in self._sessions.values()
+                if session.granting_terminal in terminals
+            ]
+            for session in revoked:
+                del self._sessions[session.identity.pid]
+        for session in revoked:
+            self._audit(
+                session.identity,
+                "register",
+                f"revoked:the terminal that authorized this session ({session.granting_terminal}) "
+                "has exited",
+            )
+            self._close_quietly(session.connection)
 
     # --- operations ---------------------------------------------------------
 
@@ -538,8 +647,9 @@ class SecretBroker:
         # session. `keyfile` mode keeps the ticket-only path, where §8 already
         # concedes that a caller able to read the ticket could read the master
         # key beside it.
+        granting_terminal: int | None = None
         if not self._is_keyfile_tier():
-            allowed, why = self._authorize(identity)
+            allowed, why, granting_terminal = self._authorize_by(identity)
             if not allowed:
                 reason = (
                     "this store is hardened, so registering a session also requires descending "
@@ -553,6 +663,12 @@ class SecretBroker:
             identity=identity,
             connection=connection,
             session_id=str(request.get("session_id") or "") or None,
+            # Recorded so this session dies with the terminal it borrowed its
+            # standing from (QA Q8). `None` when the session had standing of
+            # its own — it descended from another registered session, or the
+            # keyfile tier admitted it on the ticket alone — in which case no
+            # terminal's death should revoke it.
+            granting_terminal=granting_terminal,
         )
         with self._lock:
             previous = self._sessions.get(identity.pid)
@@ -598,14 +714,22 @@ class SecretBroker:
         killed with SIGKILL whose socket lingers in the kernel. A session that
         is gone MUST stop authorizing its descendants promptly, which is the
         property §2.1 rests on.
+
+        There is a THIRD way this loop ends and it is not an error: the broker
+        itself may close the channel out from under the watcher when a grant is
+        revoked (:meth:`_revoke_sessions_granted_by`). Every operation on the
+        connection is therefore inside the `try`, including the `settimeout`
+        that used to sit above it — a revocation racing this loop otherwise
+        raised `EBADF` on a daemon thread, which surfaces as an unhandled
+        thread exception rather than the orderly teardown it actually is.
         """
         try:
             while not self._stopping.is_set():
                 current = process_info(session.identity.pid)
                 if current is None or not current.same_process_as(session.identity):
                     break
-                session.connection.settimeout(1.0)
                 try:
+                    session.connection.settimeout(1.0)
                     # The session sends nothing on this channel except acks,
                     # which _notify_session consumes under the write lock. A
                     # read here that returns b"" means the far end closed.
@@ -619,7 +743,11 @@ class SecretBroker:
                         except OSError:
                             break
                         finally:
-                            session.connection.setblocking(True)
+                            # Restoring blocking mode is best-effort for the
+                            # same reason: a revoked channel is already closed
+                            # and the restore is meaningless, not a failure.
+                            with suppress(OSError):
+                                session.connection.setblocking(True)
                 except OSError:
                     break
                 self._stopping.wait(1.0)

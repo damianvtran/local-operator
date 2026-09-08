@@ -418,6 +418,66 @@ def _walk(start: int, max_depth: int = MAX_ANCESTRY_DEPTH):
         pid = parent
 
 
+def authorize_by(
+    peer: ProcessIdentity, sessions: dict[int, ProcessIdentity]
+) -> tuple[bool, str, int | None]:
+    """:func:`authorize`, plus WHICH registry entry admitted the peer.
+
+    The third element is the pid of the authorizing entry (the peer itself when
+    it is registered, otherwise the ancestor that vouched for it), or ``None``
+    on a denial. The broker needs it to bind a registration's standing to
+    whatever granted it — a session admitted only because it descends from an
+    unlocked terminal must not outlive that terminal (QA Q8). Splitting it out
+    here rather than re-walking in the broker keeps ONE ancestry implementation
+    to reason about and audit.
+    """
+    if not sessions:
+        return False, "no lop session is registered with the broker", None
+    depth = 0
+    for index, identity in enumerate(_walk(peer.pid)):
+        registered = sessions.get(identity.pid)
+        if registered is None:
+            depth += 1
+            continue
+        # At the HEAD of the chain the authoritative sample is ``peer`` — the
+        # identity the kernel reported for THIS connection, carrying the
+        # pidversion from the audit token — rather than ``identity``, which is a
+        # re-resolution of a bare pid and is exactly what `peer_identity`
+        # documents as the thing never to authorize on. Further up the chain
+        # there is no connection to read, so the walk's sample is all there is.
+        #
+        # These used to be two comparisons: this one against ``identity``, and a
+        # second against ``peer`` in the index-0 branch below. The second was
+        # unreachable (review R8) — a truthful ``identity`` sampled from the same
+        # pid can only disagree with ``registered`` when this one already does —
+        # so it read as a live control while being unfalsifiable. One comparison
+        # against the right sample is the honest form.
+        candidate = peer if index == 0 else identity
+        # A registered pid whose process is not the one that registered it: the
+        # session died and the pid came back around. Never authorized, and the
+        # walk stops rather than continuing past an impostor.
+        if not registered.same_process_as(candidate):
+            return (
+                False,
+                (
+                    f"pid {identity.pid} is not the session that registered it "
+                    "(the registered session has exited and its pid was reused)"
+                ),
+                None,
+            )
+        if index > 0:
+            return (
+                True,
+                (
+                    f"descendant of registered session {identity.pid} "
+                    f"(start {identity.start_time} matches)"
+                ),
+                identity.pid,
+            )
+        return True, f"registered session {identity.pid} acting for itself", identity.pid
+    return False, f"no registered lop session among {depth} ancestor(s)", None
+
+
 def authorize(peer: ProcessIdentity, sessions: dict[int, ProcessIdentity]) -> tuple[bool, str]:
     """Is ``peer`` a registered session, or a live descendant of one?
 
@@ -435,40 +495,10 @@ def authorize(peer: ProcessIdentity, sessions: dict[int, ProcessIdentity]) -> tu
     by the ticket (:func:`~local_operator.secrets.keys.registration_ticket`),
     and only then does a session speak for itself here.
 
-    Returns ``(allowed, reason)``; the reason is recorded in the audit trail
-    and shown to the operator, so it is written to be read by a human deciding
-    whether a denial was correct.
+    Returns ``(allowed, reason)``; the reason is recorded in the audit trail and
+    shown to the operator, so it is written to be read by a human deciding
+    whether a denial was correct. Callers that also need the authorizing entry
+    use :func:`authorize_by`.
     """
-    if not sessions:
-        return False, "no lop session is registered with the broker"
-    depth = 0
-    for index, identity in enumerate(_walk(peer.pid)):
-        registered = sessions.get(identity.pid)
-        if registered is None:
-            depth += 1
-            continue
-        # A registered pid whose process is not the one that registered it: the
-        # session died and the pid came back around. Never authorized, and the
-        # walk stops rather than continuing past an impostor.
-        if not registered.same_process_as(identity):
-            return False, (
-                f"pid {identity.pid} is not the session that registered it "
-                "(the registered session has exited and its pid was reused)"
-            )
-        if index > 0:
-            return True, (
-                f"descendant of registered session {identity.pid} "
-                f"(start {identity.start_time} matches)"
-            )
-        # The peer IS the session. Verify the connect-time pin, which is what
-        # makes `peer_identity`'s "everything downstream compares against the
-        # value returned here" contract true (review R7): ``peer`` carries the
-        # pidversion the kernel reported for THIS connection, and a re-read of
-        # the pid must still be that same incarnation.
-        if not registered.same_process_as(peer):
-            return False, (
-                f"pid {identity.pid} is registered but is not the process on this "
-                "connection (the registered session has exited and its pid was reused)"
-            )
-        return True, f"registered session {identity.pid} acting for itself"
-    return False, f"no registered lop session among {depth} ancestor(s)"
+    allowed, reason, _ = authorize_by(peer, sessions)
+    return allowed, reason

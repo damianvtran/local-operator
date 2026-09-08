@@ -686,7 +686,9 @@ for the key file, and it does not stop one at the socket either.
 The passphrase mode is what converts "targeted attacker wins" into "targeted
 attacker must run code that impersonates a lop session *while the broker is
 unlocked*, or trip a visible authorization prompt". Between reboot and the
-first `lop secret unlock`, an attacker with the whole disk gets nothing.
+first `lop secret unlock`, an attacker with the whole disk gets nothing *from
+this store* — whatever plaintext `.env` files have not been migrated yet are
+of course still readable (review R11).
 
 ---
 
@@ -716,10 +718,34 @@ against the following, and no design confined to one macOS user account can.**
    Protected by the same `task_for_pid` boundary as the broker — meaningful, but
    it is the same single control.
 
-4. **The unlock window in passphrase mode.** Once you unlock after a reboot, the
-   broker serves silently until it exits. An attacker active during that window
-   is in case 1. The passphrase protects the store **at rest**, not while you
-   are using it.
+4. **The terminal you unlock in is authorized for as long as it lives.**
+   `lop secret unlock` records the shell it was typed in as an authorizing
+   ancestor, because without it the operator's own `lop secret get` — which has
+   no lop session above it — would be denied and the tier would be unusable.
+   The consequence is wider than case 1 and is a *different* mechanism than
+   case 1 describes: a process in that terminal does not need to run `lop` at
+   all, it can speak to the broker socket directly and be authorized on lineage
+   alone. Measured, not inferred:
+
+   - **Served**, for the shell's whole life: direct children, subshells, `( )`,
+     grandchildren, `xargs` and `nohup` children, a `make` invocation running an
+     unrelated Makefile, and a *later, unrelated* command run in that terminal
+     long after the unlock. Anything you run there can read every secret.
+   - **Denied**: any other terminal, a fresh shell started after the granting
+     shell exits, and anything that detaches (a `setsid` child orphans to
+     launchd and leaves the lineage).
+
+   The grant is in memory only, is pinned to the shell's process identity so a
+   recycled pid inherits nothing, and dies with the shell or with the broker —
+   `lop secret broker stop`/`restart` revokes it, and there is no separate
+   relock verb. A session that registered itself *inside* the granted terminal
+   is revoked with that terminal too, so the grant cannot be promoted into
+   something that outlives the shell (QA Q8).
+
+   So: once you unlock after a reboot the broker serves silently until it
+   exits, and the practical boundary during that window is **the terminal**,
+   not the process. Treat an unlocked terminal as holding the whole store. The
+   passphrase protects the store **at rest**, not while you are using it.
 
 5. **A file secret during its command.** §7 writes plaintext to a 0700 dir for
    the duration of one command. An attacker sampling the filesystem in that
@@ -743,8 +769,9 @@ against the following, and no design confined to one macOS user account can.**
 the automated "scan the disk for credentials" malware that a bad link actually
 drops, and makes a targeted attacker either impersonate lop or trip a macOS
 password prompt — but anything running as you that is willing to run `lop`
-itself can still read them, so it is a large and worthwhile increase in cost,
-not a guarantee.*
+itself can still read them, and in the hardened tier anything at all running in
+a terminal you have unlocked can read them, so it is a large and worthwhile
+increase in cost, not a guarantee.*
 
 That is a real improvement over 58 plaintext keys at a predictable path. It is
 not a vault, and it should not be described as one.
@@ -926,9 +953,24 @@ lifeline — it is consulted per retrieval. So:
 >   session. The detached attacker does not descend from that shell and remains
 >   denied, verified as real processes against an unlocked broker.
 >
-> The residual risk is §9.1 and §9.4 unchanged, and is not widened: anything
-> the operator runs *in that terminal* while the broker is unlocked can read
-> secrets, exactly as anything that runs `lop` itself can.
+> **The residual risk IS widened, and §9.4 now says so.** An earlier draft of
+> this note claimed it was not — that the grant was covered by §9.1's "a script
+> that runs `lop` itself". That is wrong and the correction matters: a process
+> in the granted terminal does not have to run `lop`, it can speak to the
+> socket directly and be authorized on lineage alone. The honest statement is
+> that anything running in an unlocked terminal — including build tools invoked
+> there — can read every secret for as long as that shell lives. It stays
+> strictly narrower than the ancestry-free access it replaces, and the detached
+> attacker remains denied.
+>
+> The grant is bounded by the terminal's LIFETIME, which required a fix rather
+> than only a doc change (QA Q8): a process inside the granted terminal may
+> register itself as a session, and a registered session is an independent
+> authorizing entry, so killing the shell used to leave the self-registered
+> squatter serving secrets for the broker's whole life. A session admitted
+> *because* it descended from a granted terminal now records that terminal, and
+> is revoked when the terminal dies; standing is inherited down a chain of such
+> registrations, so one sweep removes the whole chain rather than the first hop.
 >
 > Verified end to end through the real CLI with the passphrase typed at a pty:
 > `set` → `get` → `harden` → broker restart (a reboot) → `get` refused, 0 bytes
