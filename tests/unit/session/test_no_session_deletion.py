@@ -381,8 +381,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/browser_bridge/install.py::uninstall",
         "<path>.unlink",
-        "plist/unit FILEs; state_store.remove()",
-        2,
+        # 4, not 2: this root's own plist/unit, PLUS the registration a
+        # pre-per-root build left under the shared default name. A config root
+        # with a suffixed supervisor name inherits that file, and leaving it
+        # behind made `uninstall` report success while the daemon kept running.
+        # Both are supervisor config FILEs the user asked to remove — never a
+        # session, transcript or state directory.
+        "plist/unit FILEs (own + one inherited from a pre-per-root build)",
+        4,
     ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
