@@ -1929,7 +1929,13 @@ async def test_a_switch_that_overruns_the_bound_cannot_also_commit():
             try:
                 detail = future.result(timeout=5)
                 switched = True
-            except Exception:
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
                 detail = ""
                 switched = False
 
@@ -2106,7 +2112,13 @@ async def test_a_click_the_app_services_late_cannot_start_a_switch_at_all():
             try:
                 detail = future.result(timeout=5)
                 switched = True
-            except Exception:
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
                 detail = ""
                 switched = False
 
@@ -2282,7 +2294,13 @@ async def test_a_hop_the_pool_starts_late_is_refused_rather_than_fenced():
             try:
                 detail = future.result(timeout=5)
                 switched = True
-            except Exception:
+            except (TimeoutError, RuntimeError):
+                # NARROW ON PURPOSE. The endpoint answers failure with exactly
+                # these two -- the bound expiring, or "could not display" -- so
+                # catching `Exception` here would file a genuine defect in the
+                # click path (an AttributeError in `apply`, say) as a perfectly
+                # ordinary spawn, and the assertion below would pass while the
+                # thing it guards was broken.
                 detail = ""
                 switched = False
 
@@ -2370,7 +2388,10 @@ async def test_a_click_superseded_by_a_click_for_the_same_session_does_not_spawn
                 try:
                     future.result(timeout=5)
                     outcomes.append("switch")
-                except Exception:
+                except (TimeoutError, RuntimeError):
+                    # Narrow for the same reason as the tests above: only these
+                    # two mean "the click spawns", and an unexpected error
+                    # recorded as a spawn would let this pass vacuously.
                     outcomes.append("spawn")
 
         # THE INVARIANT IS AGREEMENT, NOT A COUNT. Whether the second click
