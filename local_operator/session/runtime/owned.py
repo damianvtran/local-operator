@@ -53,7 +53,10 @@ from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
-from local_operator.session.runtime.types import runtime_must_complete
+from local_operator.session.runtime.types import (
+    RUNNING_SUBAGENT_STATUSES,
+    runtime_must_complete,
+)
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
@@ -3741,6 +3744,65 @@ class OwnedSessionHandle(SessionHandle):
             setter(self.is_conversationally_active())
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
+        self._publish_subagents()
+
+    def subagent_counts(self) -> tuple[int | None, int | None]:
+        """``(running, queued)`` subagent trajectories, or ``(None, None)``.
+
+        Deliberately NOT folded into :meth:`is_conversationally_active`, which
+        drops subagents on purpose (a session whose children are working is not
+        itself mid-reply). This is the orthogonal fact ``/info`` needs to answer
+        "how many agent trajectories are running across this machine", and it is
+        published on the record because a subagent graph is in-process state no
+        other session can observe.
+
+        The roster is ONE flat read: ``SubagentComms.nodes()`` already contains
+        every nested descendant, so counting is a filter over that list and must
+        never have a recursive walk added on top — that would double count every
+        node below depth 0. The statuses counted as running mirror the ones
+        ``info.collect`` uses, so the record and this session's own tree cannot
+        disagree.
+
+        ``(None, None)`` on an unreadable roster rather than ``(0, 0)``: an
+        unanswerable probe is not a measurement of zero, and the reader's
+        lower-bound caveat depends on being able to tell the two apart.
+        """
+        session = self._session
+        try:
+            comms = getattr(session, "subagent_comms", None)
+            if comms is None:
+                return (None, None)
+            nodes = comms.nodes()
+        except Exception:  # noqa: BLE001 — an unhealthy session still publishes
+            logger.debug("could not read the subagent roster", exc_info=True)
+            return (None, None)
+        running = queued = 0
+        for node in nodes:
+            status = str(getattr(node, "status", "") or "")
+            if status in RUNNING_SUBAGENT_STATUSES:
+                running += 1
+            elif status == "queued":
+                queued += 1
+        return (running, queued)
+
+    def _publish_subagents(self) -> None:
+        """Keep the record's subagent counts in step with the roster.
+
+        Driven from ``_publish_busy`` — i.e. from ``_notify`` — because a
+        subagent launching or settling IS a session event, so the transition
+        publish is sub-second under any real workload while the 15 s heartbeat
+        floor bounds a missed publish. ``set_subagents`` de-duplicates, so the
+        steady-state cost is one dict walk plus two comparisons per event.
+        """
+        server = self._registrant
+        setter = getattr(server, "set_subagents", None)
+        if not callable(setter):
+            return
+        try:
+            running, queued = self.subagent_counts()
+            setter(running, queued)
+        except Exception:  # noqa: BLE001 — a stale count is not worth a turn
+            logger.debug("could not publish the subagent counts", exc_info=True)
 
     def _check_loop_thread(self) -> None:
         """The registrant calls handle methods on its own loop; owned sessions

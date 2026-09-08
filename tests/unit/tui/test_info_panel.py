@@ -956,3 +956,159 @@ def test_the_depth_fold_row_is_a_section_summary_not_a_child_row() -> None:
     # Base indent — the same two cells every top-level row in the section uses,
     # not the cap's child indent.
     assert len(row) - len(row.lstrip()) == 2, f"fold is not at base indent: {row!r}"
+
+
+# -- the fleet tally ----------------------------------------------------------
+
+
+def _unwrapped(text: str) -> str:
+    """One line, so a phrase assertion is not defeated by ``note``'s wrapping.
+
+    ``_Body.note`` wraps at the body width and re-indents every continuation, so
+    a sentence under test is routinely split mid-phrase at a width the test did
+    not choose.
+    """
+    return " ".join(text.split())
+
+
+def _fleet_sessions(**overrides: Any) -> SessionsInfo:
+    base: dict[str, Any] = dict(
+        lines=(),
+        total=3,
+        live=3,
+        busy=2,
+        subagents_reporting=3,
+        subagents_unreported=0,
+        fleet_subagents_running=5,
+        fleet_subagents_queued=1,
+        fleet_session_trajectories=2,
+        fleet_trajectories=7,
+    )
+    base.update(overrides)
+    return SessionsInfo(**base)
+
+
+def test_the_header_answers_the_fleet_question_not_this_session_only() -> None:
+    """The operator's actual question, on the header line.
+
+    The section used to say "none running" on a host with a dozen busy windows,
+    because the only number it had was this session's tree.
+    """
+    text = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)))
+    assert "3 runtimes · 7 trajectories" in text
+    assert "7 total" in text
+    assert "2 sessions + 5 subagents" in text
+
+
+def test_the_first_frame_shows_this_session_and_says_the_fleet_is_still_checking() -> None:
+    """The tree is live (first frame); the fleet comes from the ~900 ms worker.
+
+    So the header must not print a fleet number it does not have yet. It reuses
+    ``checking…`` — the screen's ONE loading word — rather than a zero it would
+    then revise upward, which is the flash this rule exists to prevent.
+    """
+    text = _text(None, _live(running=2))
+    assert "this session: 2 running · fleet checking…" in text
+    assert "7 trajectories" not in text
+
+
+def test_a_quiet_fleet_says_none_running_rather_than_zero() -> None:
+    """A zero in a count column reads as a failed probe; a word does not."""
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(
+                busy=0,
+                fleet_subagents_running=0,
+                fleet_session_trajectories=0,
+                fleet_trajectories=0,
+            ),
+            agents=AgentsInfo(),
+        )
+    )
+    assert "3 runtimes · none running" in text
+
+
+def test_the_lower_bound_caveat_appears_only_when_a_session_did_not_report() -> None:
+    """A permanent disclaimer is wallpaper; a conditional one is information.
+
+    "lower bound" is the load-bearing phrase: it distinguishes "2 sessions could
+    not report" from "2 sessions have no subagents" without making the reader
+    cross-reference the degraded block.
+    """
+    mixed = _text(
+        _snapshot(sessions=_fleet_sessions(subagents_unreported=2), agents=AgentsInfo(running=1))
+    )
+    assert "2 sessions run an older build" in mixed
+    assert "lower bound" in mixed
+
+    clean = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)))
+    assert "lower bound" not in clean
+
+
+def test_a_wedged_session_is_named_as_possibly_stale() -> None:
+    """Its counts are real but as of its last heartbeat, and the screen says so
+    rather than presenting them as current."""
+    text = _text(_snapshot(sessions=_fleet_sessions(wedged=1), agents=AgentsInfo()))
+    assert "1 session is wedged" in text
+    assert "last heartbeat" in text
+
+
+def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:
+    """THE REGRESSION, as an assertion.
+
+    "No subagents have been launched in this session" is a statement of FACT. It
+    must not appear when the roster could not be read — that is the fabricated
+    zero a follower window used to show on a host full of subagents.
+    """
+    text = _text(
+        _snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(roster_unread=True)),
+        _live(roster_unread=True),
+    )
+    assert "No subagents have been launched" not in text
+    assert "could not be read" in text
+    assert "could not read the roster" in text
+
+
+def test_a_genuinely_empty_session_still_says_so() -> None:
+    """The honest empty state must survive: a fresh session has no subagents and
+    the screen should say that plainly rather than hedging."""
+    text = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo()))
+    assert "No subagents have been launched in this session." in text
+
+
+def test_the_closing_note_promises_counts_only_when_someone_else_reported() -> None:
+    """The note claims knowledge of other windows, so it must be true.
+
+    On an all-older fleet nobody reported, and the older wording — other
+    sessions report busy/pending and memory — is still exactly right.
+    """
+    tree = (SubagentLine(job_id="j1", label="reviewer", status="running"),)
+    known = _text(
+        _snapshot(
+            sessions=_fleet_sessions(),
+            agents=AgentsInfo(tree=tree, running=1, cross_session_known=True),
+        )
+    )
+    assert "Other sessions report counts." in _unwrapped(known)
+
+    unknown = _text(
+        _snapshot(
+            sessions=_fleet_sessions(subagents_unreported=3, subagents_reporting=0),
+            agents=AgentsInfo(tree=tree, running=1, cross_session_known=False),
+        )
+    )
+    assert "busy, pending and memory" in _unwrapped(unknown)
+
+
+def test_the_header_meta_sheds_to_the_short_form_on_a_narrow_frame() -> None:
+    """Below ``_NOTE_MIN`` the header keeps the fleet NUMBER and drops the rest.
+
+    The trajectory count is the fact the section exists to report, so it is what
+    survives the shed; the runtime denominator is still on its own row below.
+    """
+    text = _text(
+        _snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)),
+        width=52,
+    )
+    assert "7 trajectories" in text
+    assert "3 runtimes · 7 trajectories" not in text

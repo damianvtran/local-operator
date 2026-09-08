@@ -54,6 +54,7 @@ from local_operator.harness.types import (
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -2307,6 +2308,17 @@ class SnapshotSubagentComms:
             prompt=job.prompt or "",
             agent_role=job.agent_role or "",
             effort=job.effort or "",
+            # The LIFECYCLE fields, not merely the graph ones. Every consumer
+            # that asks "what is running" reads these off the node through a
+            # defaulted ``getattr`` — ``info.collect``'s tally and
+            # ``build_subagent_tree``'s status column both do — so omitting
+            # them does not raise, it silently answers "0 running" over a
+            # roster of live children and renders every row as ``unknown``.
+            # That is a wrong number that passes a "the tree appears now"
+            # check, which is why the projection carries them even though the
+            # hierarchy navigation this facade was built for never asked.
+            status=job.status,
+            live=job.status in RUNNING_SUBAGENT_STATUSES,
             # Launch-row reconciliation, read off the node by
             # ``_refresh_subagent_view`` exactly as it is on an owner. Defaulted
             # rather than conditional: an older owner sends neither field, and
@@ -2342,6 +2354,24 @@ class SnapshotSubagentComms:
             # placeholder tier 2 would have sent.
             launch_prompts=_restore_elided_launch_prompts(job),
         )
+
+    def nodes(self) -> list[Any]:
+        """The complete roster, matching ``SubagentComms.nodes()``.
+
+        The facade's docstring claims it answers the SAME methods the app calls
+        on ``_subagent_comms``, and this one was missing — the hierarchy view it
+        was built for always starts from a known job id, so nothing needed a
+        roster until ``/info`` asked one for its tally. Its absence was not a
+        crash but a fabricated zero: ``collect_live`` skipped the whole branch
+        and a follower window reported "no subagents" for a session that had
+        several, with nothing named as degraded.
+
+        One flat list including nested descendants, like the owner's: the
+        canonical jobs stream carries every depth tagged with its true
+        ``parent_job_id``, so consumers count with ``len()`` over a filter and
+        never a recursive walk.
+        """
+        return list(self._nodes.values())
 
     def node(self, job_id: str) -> Any | None:
         return self._nodes.get(self._aliases.get(job_id, job_id))

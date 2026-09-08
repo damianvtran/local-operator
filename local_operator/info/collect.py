@@ -319,12 +319,36 @@ def collect_sessions(
                 # Same getattr defaulting as the live-state fields above.
                 version=getattr(rec, "version", "") or "",
                 source_ref=getattr(rec, "source_ref", "") or "",
+                # NOT coerced to 0. Same getattr defaulting as the fields
+                # above, but the default is ``None`` and stays ``None``: a
+                # runtime predating these fields has not told us it has no
+                # subagents, and ``or 0`` here would silently turn every
+                # older peer into a confident zero in the fleet total.
+                subagents_running=getattr(rec, "subagents_running", None),
+                subagents_queued=getattr(rec, "subagents_queued", None),
                 is_self=self_pid is not None and rec.pid == self_pid,
             )
         )
 
     builds = {(line.version, line.source_ref) for line in lines if line.state == "live"}
     builds.discard(("", ""))
+
+    # The population is every RUNNING PROCESS: ``live`` and ``wedged`` both
+    # name a pid that exists, and a runtime that has merely gone quiet for 45 s
+    # can still have children burning tokens — dropping it would under-report
+    # exactly the fleet somebody opens this screen to understand. It serves its
+    # last published counts and the renderer's caveat says they are as of its
+    # last heartbeat. A ``stale`` record is excluded outright: the scan above
+    # just DELETED its file because the pid is gone, so it is not a runtime.
+    live_lines = [line for line in lines if line.state in ("live", "wedged")]
+    reporting = [line for line in live_lines if line.subagents_running is not None]
+    fleet_running = sum(line.subagents_running or 0 for line in reporting)
+    # Session trajectories and subagent trajectories are DISJOINT by
+    # construction, which is what makes adding them legal: a subagent never
+    # publishes a SessionRecord of its own (``harness.subagent`` builds a bare
+    # Session with no registrant), so nothing is counted both as a runtime's
+    # own turn and as somebody's child.
+    session_trajectories = sum(1 for line in live_lines if line.busy)
     return SessionsInfo(
         lines=tuple(lines),
         total=len(lines),
@@ -339,6 +363,12 @@ def collect_sessions(
         # not be measured", and only the first should suppress the column.
         usage_available=not live_pids
         or any(line.rss_bytes is not None or line.footprint_bytes is not None for line in lines),
+        subagents_reporting=len(reporting),
+        subagents_unreported=len(live_lines) - len(reporting),
+        fleet_subagents_running=fleet_running,
+        fleet_subagents_queued=sum(line.subagents_queued or 0 for line in reporting),
+        fleet_session_trajectories=session_trajectories,
+        fleet_trajectories=session_trajectories + fleet_running,
     )
 
 
@@ -370,6 +400,15 @@ def session_rows(root: Path | None = None) -> list[dict[str, Any]]:
             "detached": line.detached,
             "version": line.version,
             "source_ref": line.source_ref,
+            # Added deliberately, not incidentally: ``--json`` is a published
+            # surface whose key list is pinned against a pre-extraction
+            # snapshot, so adding keys breaks that test BY DESIGN and the
+            # expectation is updated in the same change. A fleet consumer
+            # counting trajectories across a host wants these, and ``null``
+            # (not 0) is what an older runtime contributes — the same
+            # unreported-vs-zero distinction the screen makes.
+            "subagents_running": line.subagents_running,
+            "subagents_queued": line.subagents_queued,
         }
         for line in info.lines
     ]
@@ -490,12 +529,21 @@ def _require_root(root: Path) -> Path:
     return root
 
 
-def collect_agents(live: "LiveState", errors: list[tuple[str, str]]) -> AgentsInfo:
+def collect_agents(
+    live: "LiveState",
+    errors: list[tuple[str, str]],
+    sessions: SessionsInfo | None = None,
+) -> AgentsInfo:
     """Profile and team counts (filesystem walks) over the live tree.
 
     The TREE itself is not read here — it was captured on the event loop by
     :func:`collect_live`, deliberately, so a ``/new`` during this ~900 ms
     snapshot cannot swap the session under an already-painted header.
+
+    ``sessions`` is the already-completed scan, threaded in only to answer
+    whether anyone ELSE reported subagent counts. It is optional so this stays
+    callable on its own, and its absence means "no fleet knowledge", which is
+    the honest reading of not having looked.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.paths import config_dir
@@ -533,11 +581,24 @@ def collect_agents(live: "LiveState", errors: list[tuple[str, str]]) -> AgentsIn
         at_capacity=live.at_capacity,
         max_depth=live.max_depth,
         deeper=live.deeper,
-        # Always False today: nothing about another session's subagents is
-        # observable without a new control-socket op and a PROTOCOL_VERSION
-        # bump. The field is the seam that lets the screen become truthful
-        # later without a copy edit.
-        cross_session_known=False,
+        roster_unread=bool(getattr(live, "roster_unread", False)),
+        # Whether at least one OTHER live runtime reported its counts — not
+        # whether the feature exists. The note this gates claims knowledge of
+        # other windows, so on a single-session host, or one where every peer
+        # runs an older build, it must stay False and the screen must keep
+        # saying only this session is visible.
+        cross_session_known=(
+            sessions is not None
+            and any(
+                # The same population the roll-ups use: a running pid, whether
+                # or not it has gone quiet. A ``stale`` record's process is
+                # gone, so its counts describe nothing.
+                line.state in ("live", "wedged")
+                and not line.is_self
+                and line.subagents_running is not None
+                for line in sessions.lines
+            )
+        ),
     )
 
 
@@ -691,6 +752,8 @@ class LiveState:
         "at_capacity",
         "max_depth",
         "deeper",
+        "roster_unread",
+        "errors",
         "mcp_configured",
         "mcp_connected",
         "mcp_failed",
@@ -724,6 +787,15 @@ _LIVE_DEFAULTS: dict[str, Any] = {
     "at_capacity": False,
     "max_depth": 0,
     "deeper": 0,
+    #: The roster could not be READ, which is not the same fact as an empty
+    #: roster. Held on the live capture because the tree is drawn from it on
+    #: the first frame, before the worker's snapshot exists.
+    "roster_unread": False,
+    #: Probe failures from the live pass, forwarded into the snapshot's
+    #: ``degraded`` block. They used to be collected and DROPPED — the list was
+    #: local to ``collect_live`` and had nowhere to go — so a live probe that
+    #: failed left the screen with a default and no disclosure anywhere.
+    "errors": (),
     "mcp_configured": 0,
     "mcp_connected": 0,
     "mcp_failed": 0,
@@ -751,6 +823,11 @@ def collect_live(
     on the event loop, and what the caller relies on when it pushes the screen
     before starting the worker.
     """
+    # Function-local like every other cross-package import here (see the
+    # module docstring). ``runtime.types`` is stdlib-only by contract, but the
+    # convention is what keeps that true.
+    from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
+
     errors: list[tuple[str, str]] = []
     tree: tuple[SubagentLine, ...] = ()
     deepest = 0
@@ -765,12 +842,37 @@ def collect_live(
     # is "safe on the paint path", turning a wedged session into a crash on the
     # one screen that exists to describe it.
     comms = _attr(session, "subagent_comms", None) if session is not None else None
-    if comms is not None:
-        nodes = _safe("live.subagents", comms.nodes, [], errors)
+    roster_unread = False
+    if session is not None and comms is None:
+        # A session object that cannot answer for its own roster. This was
+        # silent: the branch below was skipped, the counts stayed 0 and NOTHING
+        # was recorded, so the screen stated "no subagents have been launched"
+        # about a session it had never asked. That is the one failure mode
+        # ``_safe`` does not catch, because nothing raised — the default was
+        # simply returned and believed. Named here so it renders as UNKNOWN and
+        # appears in the degraded block, like every probe that fails loudly.
+        roster_unread = True
+        errors.append(("live.subagents", "session exposes no subagent_comms"))
+    elif comms is not None:
+        # ``lambda: comms.nodes()`` and not ``comms.nodes``: the bare attribute
+        # is resolved as an ARGUMENT, before ``_safe`` enters its try, so a
+        # comms object lacking the method raised straight out of a function
+        # whose whole contract is "safe on the paint path".
+        nodes = _safe("live.subagents", lambda: list(comms.nodes()), None, errors)
+        if nodes is None:
+            # The read was attempted and failed. ``_safe`` already named it in
+            # ``errors``; the flag is what stops the renderer printing a
+            # confident zero over a roster nobody managed to read.
+            roster_unread = True
+            nodes = []
         tree, deepest, deeper = build_subagent_tree(nodes)
         for node in nodes:
             status = str(getattr(node, "status", "") or "")
-            if status in ("running", "starting", "pausing"):
+            # The shared predicate, not a local literal: the runtime publishes
+            # ``subagents_running`` from the same set, and a divergence would
+            # put a fleet total on the header that disagrees with the tree
+            # drawn directly beneath it.
+            if status in RUNNING_SUBAGENT_STATUSES:
                 running += 1
             elif status == "queued":
                 queued += 1
@@ -798,6 +900,8 @@ def collect_live(
         at_capacity=at_capacity,
         max_depth=deepest,
         deeper=deeper,
+        roster_unread=roster_unread,
+        errors=tuple(errors),
         mcp_configured=len(getattr(startup, "configured", ()) or ()),
         mcp_connected=len(getattr(startup, "connected", ()) or ()),
         mcp_failed=len(failures),
@@ -838,7 +942,11 @@ def collect_snapshot(live: LiveState, *, root: Path | None = None) -> InfoSnapsh
     documented in ``mobile/resources.py``). Each block is guarded independently
     so one wedged filesystem costs its own section and nothing else.
     """
-    errors: list[tuple[str, str]] = []
+    # Seeded with the LIVE pass's failures rather than starting empty: those
+    # probes ran on the event loop where this function cannot reach them, and
+    # dropping them meant a failure with a named reason vanished before the
+    # degraded block that exists to print it.
+    errors: list[tuple[str, str]] = list(getattr(live, "errors", ()) or ())
     self_pid = os.getpid()
     sessions = _safe(
         "sessions",
@@ -865,7 +973,9 @@ def collect_snapshot(live: LiveState, *, root: Path | None = None) -> InfoSnapsh
             errors,
         ),
         sessions=sessions,
-        agents=_safe("agents", lambda: collect_agents(live, errors), AgentsInfo(), errors),
+        agents=_safe(
+            "agents", lambda: collect_agents(live, errors, sessions), AgentsInfo(), errors
+        ),
         env=_safe("env", lambda: collect_env(live, errors), EnvInfo(), errors),
         degraded=tuple(errors),
         captured_at=time.time(),

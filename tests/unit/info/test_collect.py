@@ -56,6 +56,8 @@ class _Record:
     detached: bool = False
     version: str = "0.51.6"
     source_ref: str = "abc1234"
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
 
 
 @dataclass
@@ -674,3 +676,219 @@ def test_a_registry_that_returns_zero_on_a_missing_root_is_still_degraded() -> N
     # The value is still the dataclass default; it is the DEGRADED entry that
     # makes the screen render `—` instead of that default.
     assert agents.teams == 0
+
+
+# -- the fleet tally ----------------------------------------------------------
+#
+# The operator's question is "how many agent trajectories are running on this
+# machine", and the whole hazard is answering it with a confident number whose
+# terms are silently missing. Every test below is about the difference between
+# "reported zero" and "did not report".
+
+
+def test_a_mixed_fleet_excludes_the_unreported_and_names_how_many() -> None:
+    """An older runtime is UNREPORTED, never a zero.
+
+    The normal state of this host is a mixed fleet — windows are replaced a few
+    at a time — so this is the common case, not a transient. Folding a
+    non-reporting session in as 0 would make the total look complete while
+    silently dropping every subagent those windows are running.
+    """
+    records = [
+        (_Record(pid=1, busy=True, subagents_running=3, subagents_queued=1), "live"),
+        (_Record(pid=2, subagents_running=0, subagents_queued=0), "live"),
+        (_OldRecord(3, "tui", "s", "c", "/tmp", "m", 0.0, 0.0), "live"),
+    ]
+    info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+    assert info.subagents_reporting == 2
+    assert info.subagents_unreported == 1
+    assert info.fleet_subagents_running == 3
+    assert info.fleet_subagents_queued == 1
+    # pid 2 REPORTED zero and is counted as reporting; pid 3 did not report at
+    # all. Collapsing the two is the defect this pair exists to catch.
+    assert info.lines[1].subagents_running == 0
+    assert info.lines[2].subagents_running is None
+
+
+def test_an_all_older_fleet_is_not_a_confident_zero() -> None:
+    """Nothing reported, so the total is 0 WITH the caveat's denominator set."""
+    records = [
+        (_OldRecord(1, "tui", "s", "c", "/tmp", "m", 0.0, 0.0), "live"),
+        (_OldRecord(2, "tui", "s", "c", "/tmp", "m", 0.0, 0.0), "live"),
+    ]
+    info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+    assert info.subagents_reporting == 0
+    assert info.subagents_unreported == 2
+    assert info.fleet_subagents_running == 0
+    # The screen renders a caveat off this, which is what stops the zero above
+    # reading as a measurement.
+    assert collect_agents(LiveState(), [], info).cross_session_known is False
+
+
+def test_a_wedged_runtime_contributes_its_last_counts_and_a_stale_one_does_not() -> None:
+    """A quiet pid can still have children burning tokens; a dead one cannot.
+
+    ``wedged`` means no heartbeat for 45 s — the process is still there. ``stale``
+    means ``registry.scan`` just DELETED the record because the pid is gone.
+    Dropping the wedged session would under-report exactly the broken fleet this
+    screen is opened to explain.
+    """
+    records = [
+        (_Record(pid=1, subagents_running=1), "live"),
+        (_Record(pid=2, busy=True, subagents_running=2), "wedged"),
+        (_Record(pid=3, subagents_running=9), "stale"),
+    ]
+    info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+    assert info.fleet_subagents_running == 3, "wedged in, stale out"
+    assert info.subagents_reporting == 2
+
+
+def test_session_and_subagent_trajectories_are_disjoint_and_added() -> None:
+    """A subagent never publishes a record, so the two sets cannot overlap.
+
+    ``harness.subagent`` builds a bare ``Session`` with no registrant, so a
+    child is never also a runtime. That is the invariant that makes the
+    addition legal rather than a double count.
+    """
+    records = [
+        (_Record(pid=1, busy=True, subagents_running=2), "live"),
+        (_Record(pid=2, busy=True, subagents_running=0), "live"),
+        (_Record(pid=3, busy=False, subagents_running=1), "live"),
+    ]
+    info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+    assert info.fleet_session_trajectories == 2
+    assert info.fleet_subagents_running == 3
+    assert info.fleet_trajectories == 5
+
+
+def test_cross_session_known_means_somebody_ELSE_reported() -> None:
+    """Not "the feature is compiled in" — the note it gates claims knowledge of
+    OTHER windows, and on a single-session host that claim is false."""
+    solo = collect_sessions(
+        scan=_scan([(_Record(pid=1, subagents_running=4), "live")]),
+        usage=_usage({}),
+        self_pid=1,
+        now=0.0,
+    )
+    assert collect_agents(LiveState(), [], solo).cross_session_known is False
+
+    pair = collect_sessions(
+        scan=_scan(
+            [
+                (_Record(pid=1, subagents_running=4), "live"),
+                (_Record(pid=2, subagents_running=0), "live"),
+            ]
+        ),
+        usage=_usage({}),
+        self_pid=1,
+        now=0.0,
+    )
+    assert collect_agents(LiveState(), [], pair).cross_session_known is True
+
+
+def test_nested_subagents_are_counted_once() -> None:
+    """``nodes()`` is already the COMPLETE roster including every descendant.
+
+    So the count is a flat ``len()`` over a filter. A recursive child walk added
+    on top would count every node below depth 0 twice, which is the specific
+    trap the roster's own docstring warns about.
+    """
+
+    class _Comms:
+        def nodes(self) -> list[Any]:
+            return [
+                _Node(job_id="a", label="reviewer"),
+                _Node(job_id="b", label="scout", parent_job_id="a"),
+                _Node(job_id="c", label="coder", parent_job_id="b"),
+            ]
+
+    class _Session:
+        subagent_comms = _Comms()
+
+    live = collect_live(_Session())
+    assert live.running == 3, "one per roster entry, not per path through the tree"
+    assert len(live.tree) == 3
+
+
+def test_a_follower_session_reports_its_own_subagents() -> None:
+    """The §1.3 regression: a ``RemoteSession``-backed window showed ZERO.
+
+    ``collect_live`` reads the PUBLIC ``subagent_comms``; ``RemoteSession`` only
+    held ``_subagent_comms``, so the branch was skipped, the counts stayed 0 and
+    nothing was recorded as degraded. Every attached window is on this path, so
+    the screen said "no subagents" on a host full of them.
+
+    Asserts the COUNT, not merely that rows exist: the naive fix (adding
+    ``nodes()`` without projecting ``status``) makes the tree appear while the
+    tally stays 0 and every row renders ``unknown``.
+    """
+    from local_operator.session.frontend_state import JobState, SnapshotSubagentComms
+    from local_operator.session.remote import RemoteSession
+
+    assert hasattr(RemoteSession, "subagent_comms"), "the public name is the contract"
+
+    comms = SnapshotSubagentComms(
+        [
+            JobState(id="j1", type="task", status="running", label="reviewer"),
+            JobState(id="j2", type="task", status="running", label="scout", parent_job_id="j1"),
+            JobState(id="j3", type="task", status="queued", label="qa"),
+            JobState(id="j4", type="task", status="completed", label="coder"),
+        ]
+    )
+    follower = RemoteSession.__new__(RemoteSession)
+    follower._subagent_comms = comms
+
+    live = collect_live(follower)
+    assert live.running == 2, f"the follower must report 2 running, got {live.running}"
+    assert live.queued == 1
+    assert live.settled == 1
+    assert live.roster_unread is False
+    assert [row.status for row in live.tree].count("running") == 2
+    assert all(row.status for row in live.tree), "a node with no status renders as 'unknown'"
+
+
+def test_a_session_with_no_comms_facade_is_degraded_not_zero() -> None:
+    """The silent-default failure: nothing raised, so nothing was named.
+
+    ``_safe`` catches probes that RAISE. This one returned a default and was
+    believed, which is how the screen came to state "no subagents have been
+    launched" about a session it had never actually asked.
+    """
+
+    class _Opaque:
+        pass
+
+    live = collect_live(_Opaque())
+    assert live.roster_unread is True
+    assert "live.subagents" in {name for name, _ in live.errors}
+    # And the flag reaches the snapshot the renderer reads.
+    snapshot = collect_snapshot(live, root=Path("/nonexistent-info-root"))
+    assert snapshot.agents.roster_unread is True
+    assert "live.subagents" in {name for name, _ in snapshot.degraded}
+
+
+def test_a_comms_object_without_nodes_degrades_instead_of_raising() -> None:
+    """``collect_live`` runs on the PAINT PATH and must never raise.
+
+    The guard was ``_safe("live.subagents", comms.nodes, ...)``, which resolves
+    the attribute as an ARGUMENT — before ``_safe`` enters its try — so a comms
+    object lacking the method took the app down rather than degrading.
+    """
+
+    class _NoNodes:
+        pass
+
+    class _Session:
+        subagent_comms = _NoNodes()
+
+    live = collect_live(_Session())  # must not raise
+    assert live.roster_unread is True
+    assert live.running == 0 and live.tree == ()
+    assert "live.subagents" in {name for name, _ in live.errors}
+
+
+def test_no_session_at_all_is_not_reported_as_a_failed_roster() -> None:
+    """The CLI path passes ``session=None``. That is not a failed probe."""
+    live = collect_live(None)
+    assert live.roster_unread is False
+    assert live.errors == ()

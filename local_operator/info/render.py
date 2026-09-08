@@ -281,12 +281,32 @@ def build_export(snapshot: InfoSnapshot) -> str:
             lines.append(f"      {relativise_home(line.cwd)} · {line.model_label or '—'}")
 
     lines += ["", "## Agents and subagents"]
+    if sessions.available:
+        # The fleet answer FIRST: it is the question the section is opened
+        # with, and the per-session detail below it is the breakdown.
+        # ``live + wedged``: both name a running pid and both contribute to the
+        # sum below, so the denominator printed here has to match it.
+        lines.append(
+            f"  runtimes          {sessions.live + sessions.wedged} total — "
+            f"{sessions.live} live · {sessions.wedged} wedged"
+        )
+        lines.append(
+            f"  trajectories      {sessions.fleet_trajectories} total — "
+            f"{sessions.fleet_session_trajectories} sessions + "
+            f"{sessions.fleet_subagents_running} subagents"
+        )
     lines.append(f"  profiles          {agents.profiles}")
     lines.append(f"  teams             {agents.teams}")
-    lines.append(
-        f"  subagents         {agents.running} running · {agents.queued} queued · "
-        f"{agents.settled} settled (retained)"
-    )
+    if agents.roster_unread:
+        # An unreadable roster is not a roster of zero, in the export exactly
+        # as on screen — this text is what lands in a bug report, where a
+        # fabricated zero is hardest to challenge.
+        lines.append("  this session      — (could not read the roster)")
+    else:
+        lines.append(
+            f"  this session      {agents.running} running · {agents.queued} queued · "
+            f"{agents.settled} settled (retained)"
+        )
     if agents.max_running is not None:
         lines.append(
             f"  capacity          {agents.max_running} concurrent"
@@ -295,11 +315,23 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if agents.tree:
         lines.append(f"  tree (this session only, depth {agents.max_depth}):")
         lines += _tree_lines(agents.tree, agents.deeper)
+    elif agents.roster_unread:
+        lines.append("  roster unreadable — no tree")
     else:
         lines.append("  no subagents launched in this session")
-    # Stated, not implied: only this session's tree is observable, so a report
-    # that showed one tree could otherwise be read as a fleet-wide total.
-    lines.append("  (other sessions report busy/pending and memory only)")
+    # Stated, not implied: the COUNTS above are fleet-wide and the TREE is not,
+    # so a report showing one tree could otherwise be read as the whole story.
+    if agents.cross_session_known:
+        lines.append("  (only this session's tree is drawn; other sessions report counts)")
+    else:
+        lines.append("  (other sessions report busy/pending and memory only)")
+    if sessions.available and sessions.subagents_unreported:
+        # "lower bound", not a total: the sum above excluded every session that
+        # did not report, and a bug report must not present it as complete.
+        lines.append(
+            f"  ({sessions.subagents_unreported} sessions run an older build and do not "
+            "report subagents — lower bound)"
+        )
 
     lines += [
         "",

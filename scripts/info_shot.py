@@ -2,6 +2,7 @@
 
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
+             fleet | fleet-mixed | fleet-unread
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the
@@ -295,6 +296,113 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
             captured_at=CAPTURED_AT,
         )
 
+    if scenario in ("fleet", "fleet-mixed", "fleet-unread"):
+        # THE REPORTED CASE: a host running a dozen sessions with children in
+        # several of them, which used to render "none running".
+        #
+        # ``fleet-mixed`` adds runtimes on an OLDER build (``subagents_running``
+        # is None, not 0) plus a wedged one, which is the normal state of this
+        # host mid-upgrade and the state the lower-bound caveat exists for.
+        # ``fleet-unread`` is the follower defect's honest rendering: the
+        # roster could not be READ, so the screen must say so rather than
+        # denying that any subagent was launched.
+        mixed = scenario == "fleet-mixed"
+        unread = scenario == "fleet-unread"
+        lines = (
+            _session_line(
+                4243,
+                "Investigate request latency",
+                is_self=True,
+                busy=True,
+                subagents_running=2,
+                subagents_queued=1,
+            ),
+            _session_line(4244, "Add /move command", busy=True, subagents_running=3),
+            _session_line(4245, "OSWorld benchmark", subagents_running=0),
+            # In ``fleet-mixed`` these two run an OLDER build: they publish no
+            # counts at all, which is ``None`` and NOT zero. That is what the
+            # lower-bound caveat is computed from.
+            _session_line(
+                4246,
+                "Sidebar wakes first",
+                busy=True,
+                subagents_running=None if mixed else 1,
+            ),
+            _session_line(4247, "Credential broker", subagents_running=None if mixed else 0),
+        ) + (
+            (
+                _session_line(
+                    4248,
+                    "Wedged runtime",
+                    state="wedged",
+                    heartbeat_age_s=310.0,
+                    busy=True,
+                    subagents_running=2,
+                ),
+            )
+            if mixed
+            else ()
+        )
+        live_count = sum(1 for line in lines if line.state == "live")
+        reporting = [line for line in lines if line.subagents_running is not None]
+        running = sum(line.subagents_running or 0 for line in reporting)
+        busy = sum(1 for line in lines if line.busy)
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=live_count,
+            wedged=sum(1 for line in lines if line.state == "wedged"),
+            busy=busy,
+            build_skew=mixed,
+            subagents_reporting=len(reporting),
+            subagents_unreported=len(lines) - len(reporting),
+            fleet_subagents_running=running,
+            fleet_subagents_queued=sum(line.subagents_queued or 0 for line in reporting),
+            fleet_session_trajectories=busy,
+            fleet_trajectories=busy + running,
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                roster_unread=unread,
+                running=0 if unread else 2,
+                queued=0 if unread else 1,
+                settled=0 if unread else 3,
+                max_running=4,
+                max_depth=0 if unread else 1,
+                cross_session_known=True,
+                tree=(
+                    ()
+                    if unread
+                    else (
+                        SubagentLine(
+                            job_id="j1",
+                            label="reviewer",
+                            status="running",
+                            depth=0,
+                            agent_role="reviewer",
+                        ),
+                        SubagentLine(
+                            job_id="j2",
+                            label="scout",
+                            status="running",
+                            depth=1,
+                            agent_role="scout",
+                        ),
+                        SubagentLine(job_id="j3", label="qa-tester", status="queued", depth=0),
+                        SubagentLine(job_id="j4", label="coder", status="completed", depth=0),
+                    )
+                ),
+            ),
+            env=_env(),
+            degraded=((("live.subagents", "session exposes no subagent_comms"),) if unread else ()),
+            captured_at=CAPTURED_AT,
+        )
+
     # populated: the reference frame.
     return InfoSnapshot(
         install=_install(),
@@ -349,6 +457,7 @@ def live_for(scenario: str) -> LiveState:
         max_running=agents.max_running,
         max_depth=agents.max_depth,
         deeper=agents.deeper,
+        roster_unread=agents.roster_unread,
     )
 
 
