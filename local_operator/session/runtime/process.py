@@ -487,7 +487,12 @@ async def amain() -> int:
     loop = asyncio.get_running_loop()
     try:
         handle: OwnedSessionHandle = await spawn_owned_session(
-            loop, cwd=cwd, provider=provider, model_id=model_id, resume=resume
+            loop,
+            cwd=cwd,
+            provider=provider,
+            model_id=model_id,
+            resume=resume,
+            model_selection_override=os.environ.get("LOP_MODEL_SELECTION_OVERRIDE") == "1",
         )
     except SessionLeaseHeldError as exc:
         # LOSING THE LEASE IS NOT AN ERROR. Under ``engage_runtime`` every

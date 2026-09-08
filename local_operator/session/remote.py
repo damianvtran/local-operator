@@ -256,6 +256,15 @@ _BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
 #: moment before it would have succeeded.
 _BACKGROUND_YIELD_BUDGET_S = 1.0
 
+#: Shown to the USER verbatim: the TUI relays a refused bind's text straight
+#: into a notice, so this is product copy rather than an internal diagnostic.
+#: It therefore names no runtime vocabulary ("owner"), and ends in the same
+#: next step every sibling refusal on this seam offers, because a refusal the
+#: reader cannot act on reads as a dead end (design D1, UX U1).
+_MODEL_INTENT_PENDING = (
+    "still starting this conversation on the model you asked for; " "try that again in a moment"
+)
+
 #: Bounded retry of the INITIAL bind. A first attempt that loses its race with
 #: a retiring runtime, or that hits an owner whose loop is momentarily busy, is
 #: a transient — the owner is typically answering seconds later, and before
@@ -416,6 +425,8 @@ class RemoteSession:
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
+        self._birth_model: ModelSpec | None = None
+        self._model_selection_override = False
         self._takeover_factory = takeover_factory
         self._surface = surface
         self._desktop_visible = False
@@ -781,6 +792,8 @@ class RemoteSession:
         cwd: str,
         takeover_factory: Callable[[], Any],
         surface: str = "terminal",
+        initial_model: ModelSpec | None = None,
+        model_selection_override: bool = False,
     ) -> "RemoteSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -806,6 +819,8 @@ class RemoteSession:
         )
         self._cwd = cwd
         self._can_go_cold = True
+        self._birth_model = initial_model
+        self._model_selection_override = model_selection_override
         state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
@@ -850,7 +865,7 @@ class RemoteSession:
         The checkpoint is authoritative for what it carries and the synthesised
         state is authoritative for the rest, so the two are merged rather than
         one replacing the other: ``cwd`` and the model come from THIS process
-        (the config may have changed since; the checkpoint's copy is history),
+        (using the shared conversation-selection reader, not mutable defaults),
         while the roster, todos, title and costs come from disk. ``jobs`` are
         stamped ``restored`` for the same reason the session's own restore does
         — a restored row has no in-process trajectory, and the panel says so
@@ -1168,7 +1183,25 @@ class RemoteSession:
                 config = ConfigManager(config_dir=self._config_dir)
                 provider = str(config.get_config_value("hosting", "") or "")
                 model_id = str(config.get_config_value("model_name", "") or "")
-                model = FrontendModelSpec(provider=provider, model_id=model_id)
+                from local_operator.session.model_selection import read_model_selection
+
+                saved = read_model_selection(self._config_dir / "sessions" / self._session_id)
+                if self._birth_model is not None and (
+                    saved is None or self._model_selection_override
+                ):
+                    model = FrontendModelSpec(**self._birth_model.model_dump())
+                elif saved is not None:
+                    model = FrontendModelSpec(
+                        provider=saved.provider,
+                        model_id=saved.model_id,
+                        reasoning_effort=saved.effort,
+                    )
+                else:
+                    if provider and not model_id:
+                        from local_operator.model.defaults import default_model_for
+
+                        model_id = default_model_for(provider) or ""
+                    model = FrontendModelSpec(provider=provider, model_id=model_id)
             except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 logger.debug("cold state could not read the configured model", exc_info=True)
             if model is None:
@@ -1680,10 +1713,20 @@ class RemoteSession:
         # Recovery already owns its dial/sync and signals _owner_ready. A
         # prompt or steer must wait on that promise, not start a competing
         # initial attachment merely because its connected socket is not ready.
-        if not self._can_go_cold or not self.is_cold or self._disposed or self._recovering:
+        if not self._can_go_cold or self._disposed:
+            return
+        if self._recovering:
+            if self._model_selection_override and self._birth_model is not None:
+                raise ConnectionError(_MODEL_INTENT_PENDING)
+            return
+        if not self.is_cold and not self._model_selection_override:
             return
         async with self._bind_lock_for(foreground=foreground):
             await self._bind_under_lock(foreground=foreground)
+            # Cover every winning-owner path, including another attach/recovery
+            # completing during an await. A failed model RPC is not a failed
+            # socket bind and must remain a visible, retryable pending intent.
+            await self._consume_model_override()
 
     @asynccontextmanager
     async def _bind_lock_for(self, *, foreground: bool) -> AsyncIterator[None]:
@@ -1732,7 +1775,9 @@ class RemoteSession:
         statement and cannot drift from the `finally` that clears it. Not a
         public seam: the guards below assume the lock is held.
         """
-        if not self.is_cold or self._disposed or self._recovering:
+        if self._disposed or self._recovering:
+            return
+        if not self.is_cold:
             return
         from local_operator.mobile.attach_client import find_owner_record
         from local_operator.session.runtime.launch import (
@@ -1756,7 +1801,10 @@ class RemoteSession:
             await engage_runtime(
                 self._session_id,
                 self._cwd,
-                WarmErrand(),
+                WarmErrand(
+                    initial_model=self._birth_model,
+                    model_selection_override=self._model_selection_override,
+                ),
                 config_dir=self._config_dir,
                 # The engage yields TIME, not the runtime: a candidate it
                 # spawned keeps constructing and the foreground caller's own
@@ -1903,6 +1951,34 @@ class RemoteSession:
                 delay = min(delay * _BIND_RETRY_FACTOR, _BIND_RETRY_DELAY_CAP_S)
         if last_error is not None:
             raise last_error
+
+    async def _consume_model_override(self) -> None:
+        """A warm engagement proves ownership exists, not that intent landed.
+
+        A missing spec is "nothing to consume" rather than an error: only a
+        RESOLVED selection can be sent, and treating its absence as a pending
+        intent makes the state unrecoverable from every caller.
+
+        Another cold viewer may have started the winning owner with a different
+        selection. Only the existing model RPC's success acknowledgement means
+        this viewer's deliberate override was consumed. Keep it across failed
+        acknowledgements, and never promote an ordinary birth seed to a switch.
+        """
+        if not self._model_selection_override:
+            return
+        client, requested = self._client, self._birth_model
+        if requested is None:
+            # Nothing to consume. The CLI pairs a raw ``--model`` flag with no
+            # resolved spec whenever the machine has no usable configuration
+            # yet, and a pending intent that can never be satisfied would
+            # refuse every later call — including the ``/model`` the refusal
+            # invites. Clearing it restores the ordinary unconfigured path.
+            self._model_selection_override = False
+            return
+        if client is None or self._recovering or self.is_cold:
+            raise ConnectionError(_MODEL_INTENT_PENDING)
+        await client.set_model(requested.provider, requested.model_id)
+        self._model_selection_override = False
 
     async def _bind_to(
         self,
@@ -2931,6 +3007,27 @@ class RemoteSession:
         self._streaming = state.streaming
         self._generation = state.generation
         self._model = state.selected_model
+        # Keep the concrete primary seen at birth OR on an attached owner. A
+        # speculatively warmed owner can retire before its first durable row;
+        # a connected viewer must still seed its successor with that selection,
+        # not whatever global default happened to change while it was idle.
+        from local_operator.providers.registry import get_provider_definition
+
+        selected = state.selected_model
+        if (
+            selected is not None
+            and selected.model_id
+            # The first winning-owner snapshot may still name another model;
+            # it must not overwrite explicit intent before the RPC consumes it.
+            and not self._model_selection_override
+            and (
+                self._birth_model is None
+                or (self._birth_model.provider, self._birth_model.model_id)
+                != (selected.provider, selected.model_id)
+            )
+            and get_provider_definition(selected.provider) is not None
+        ):
+            self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
         self.jobs.replace(state.jobs)
         self._subagent_comms.replace(state.jobs)
         self.wake_scheduler.replace(state.wakes)
