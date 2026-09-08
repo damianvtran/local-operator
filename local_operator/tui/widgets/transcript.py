@@ -41,6 +41,7 @@ from typing import (
     Literal,
     Protocol,
     Sequence,
+    cast,
 )
 
 from rich.cells import cell_len
@@ -48,12 +49,14 @@ from rich.console import Console, RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual import events
+from textual._arrange import DockArrangeResult
 from textual.binding import Binding
 from textual.containers import ScrollableContainer
 from textual.content import Content
 from textual.events import Key
 from textual.geometry import Size
-from textual.scrollbar import ScrollDown, ScrollTo, ScrollUp
+from textual.reactive import Reactive
+from textual.scrollbar import ScrollBar, ScrollDown, ScrollTo, ScrollUp
 from textual.selection import Selection
 from textual.widget import Widget
 from textual.widgets import Static
@@ -3054,12 +3057,20 @@ class TranscriptView(ScrollableContainer):
         """
         additions = list(blocks)
         if not additions:
+            if on_settled is not None:
+                on_settled()
             return
         index = max(0, min(index, len(self._blocks)))
         old_scroll = self.scroll_y if anchor_offset is None else anchor_offset
+        # A fixed prefix (the older-history notice or delegation header) does
+        # not move when rows are inserted below it. Anchoring that prefix at
+        # y=0 therefore replaced the reader's content with the incoming page.
+        # Hold retained CONTENT at/after the insertion seam, including its gap
+        # below the viewport top when the prefix was visible.
+        candidates = self._blocks[index:]
         anchor_block = next(
-            (block for block in self._blocks if block.virtual_region.bottom > old_scroll),
-            self._blocks[-1] if self._blocks else None,
+            (block for block in candidates if block.virtual_region.bottom > old_scroll),
+            candidates[-1] if candidates else None,
         )
         anchor_gap = anchor_block.virtual_region.y - old_scroll if anchor_block is not None else 0.0
         # A reader who is FOLLOWING THE TAIL is not holding a position for this
@@ -3104,70 +3115,22 @@ class TranscriptView(ScrollableContainer):
             self._remeasure_empty_state()
 
             def restore_anchor() -> None:
-                # Release the held anchor whatever happens next: the settle is
-                # over, and leaving it armed would have `_size_updated` pin the
-                # reader against ordinary later growth (a streaming message, a
-                # card unfolding) that has nothing to do with this insert.
-                self._insert_anchor = None
-                if anchor_block is None or anchor_block.parent is not self:
-                    if on_settled is not None:
-                        on_settled()
-                    return
+                # Read the CURRENT transaction: input during layout may have
+                # changed its gap. A closed-over pre-insert gap would undo the
+                # reader's newer movement in this last callback.
+                held, self._insert_anchor = self._insert_anchor, None
                 if self._tail_anchor.following:
-                    # The reader is on the tail (see the arming guard above):
-                    # restoring a held offset here would drag them off the end
-                    # they never left. Land them on it instead, and only then
-                    # hand the gate back.
                     self._scroll_to_tail()
-                    if on_settled is not None:
-                        on_settled()
-                    return
-                # Inside the programmatic guard: this scroll is the insert's
-                # own, not a reader's, so it must not release the tail anchor
-                # (`watch_scroll_y` skips the resync) — and, for the resume
-                # page-back path, must not be read as a reader arriving at the
-                # top. The restored offset can be inside the page trigger
-                # zone by construction: the rows above were just inserted, so
-                # the anchor lands where it was, which was the top.
+                elif held is not None:
+                    block, gap = held
+                    if block.parent is self:
+                        target = max(0.0, block.virtual_region.y - gap)
+                        if abs(self.scroll_y - target) >= 0.5:
+                            with self._tail_anchor.programmatic_scroll():
+                                self.scroll_to(y=target, animate=False, immediate=True)
+                # Do not stop a newer animation merely to restore an offset
+                # arrange() already held exactly on every painted frame.
                 with self._tail_anchor.programmatic_scroll():
-                    # `immediate=True` for the SAME reason `_reanchor_insert`
-                    # needs it, and its omission here was the deeper half of
-                    # that defect. Textual's `scroll_to` defers the offset
-                    # change with `call_after_refresh` unless `immediate`, so
-                    # the deferred `_scroll_to` runs AFTER this `with` block
-                    # has exited — outside the very guard that marks the
-                    # scroll as this widget's own. `watch_scroll_y` then reads
-                    # `programmatic == False` and treats the insert's own
-                    # restore as a READER's scroll, with two measured
-                    # consequences: it resyncs the tail anchor to
-                    # `at_end=False` (so a resume whose fill inserted at y=0
-                    # stops following the tail and lands the reader on the
-                    # OLDEST row instead of the newest), and it drives the
-                    # resume page-back hook, which spends `_resume_in_zone` on
-                    # a scroll no human made and leaves a wheel reader parked
-                    # at the top unable to earn another page.
-                    #
-                    # Traced on a 401-message resume at 120x200:
-                    #   scroll_to y=0 programmatic=True   <- inside the guard
-                    #   APPLY     y=0 programmatic=False  <- deferred, outside
-                    #
-                    # Applying inside the guard makes that window not exist
-                    # rather than not matter — the same trade the `on_settled`
-                    # placement below already documents.
-                    self.scroll_to(
-                        y=max(0, anchor_block.virtual_region.y - anchor_gap),
-                        animate=False,
-                        immediate=True,
-                    )
-                    # INSIDE the guard, not after it: `on_settled` re-opens the
-                    # caller's page gate, and the guard is what keeps THIS
-                    # widget's own restore scroll from being reported to that
-                    # caller as a reader's scroll. Releasing outside the guard
-                    # left a frame where the gate was open and the offset sat
-                    # inside the trigger zone — harmless only while every
-                    # consumer ALSO edge-triggers on zone entry, which is a
-                    # contract too easy to regress silently. Releasing inside
-                    # makes the window not exist rather than not matter.
                     if on_settled is not None:
                         on_settled()
 
@@ -3617,7 +3580,7 @@ class TranscriptView(ScrollableContainer):
         self._tail_anchor.acquire()
         self.call_after_refresh(self._scroll_to_tail)
 
-    def note_user_scroll(self, *, continuous: bool = False) -> None:
+    def note_user_scroll(self, *, continuous: bool = False, upward: bool = True) -> None:
         """A person moved the viewport: release, then re-decide where they land.
 
         Public because a scroll gesture does not always arrive as an event on
@@ -3625,14 +3588,10 @@ class TranscriptView(ScrollableContainer):
         outside it, and a click on an affordance is as much a user scroll as
         the wheel is.
 
-        ``continuous`` marks a free-running gesture (wheel, scrollbar drag)
-        rather than a discrete act (keystroke, click on an affordance, or a
-        caller announcing a gesture by hand). The distinction matters to the
-        page-back latch: a wheel notch arriving while the viewport is already
-        clamped at the top moves NOTHING, so it is not evidence the reader
-        left and came back — re-arming on it let a held wheel mount a page per
-        notch while the reader sat at y=0. A discrete act at the top IS an
-        ask ("show me the next older page"), so it re-arms.
+        ``continuous`` retains the free-running/discrete distinction for
+        consumers such as the subagent view. ``upward`` supplies actual input
+        direction: even a notch clamped at zero can request older history,
+        whereas a downward notch and a passive layout correction cannot.
         """
         self._tail_anchor.note_user_scroll()
         # After the refresh, not now: the scroll this call is reporting has not
@@ -3642,7 +3601,10 @@ class TranscriptView(ScrollableContainer):
         # anchor straight back rather than leaving it released forever.
         self.call_after_refresh(self._resync_tail_anchor)
         if self._on_user_scroll is not None:
-            self._on_user_scroll(continuous=continuous)
+            # Positional provenance preserves the hook's existing variadic
+            # contract for other transcript consumers. True/False is actual
+            # directional input; None below is only an offset observation.
+            self._on_user_scroll(upward, continuous=continuous)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Re-decide following from every offset the viewport actually rests at.
@@ -3660,6 +3622,12 @@ class TranscriptView(ScrollableContainer):
         """
         super().watch_scroll_y(old_value, new_value)
         if not self._tail_anchor.programmatic:
+            if self._insert_anchor is not None:
+                block, gap = self._insert_anchor
+                # New user travel changes the transaction's reading position.
+                # Internal compensation uses set_reactive/programmatic_scroll
+                # and never comes through this observation path.
+                self._insert_anchor = (block, gap - (new_value - old_value))
             self._tail_anchor.resync(at_end=self.is_near_bottom())
             # The page-back trigger rides the same watch, scheduled for after
             # the refresh rather than answered here. `note_user_scroll` fires
@@ -3671,13 +3639,9 @@ class TranscriptView(ScrollableContainer):
             # gate open — see `OperatorApp._check_resume_page`), so the many
             # firings of one animated gesture collapse into ONE page (M1/U1).
             if self._on_user_scroll is not None:
-                # NOT the re-arm: the watch reports OFFSET MOTION, which is
-                # travel evidence rather than a gesture, and it fires for the
-                # clamped 1->0 step of a wheel already pinned at the top.
-                # Passing continuous=True keeps the page-back latch's re-arm
-                # rule intact (a clamped notch earns nothing) while still
-                # scheduling the at-rest check that lands the gesture.
-                self._on_user_scroll(continuous=True)
+                # Observation can complete motion already requested by input,
+                # but must never arm demand by itself (including layout clamps).
+                self._on_user_scroll(None, continuous=True)
 
     def _resync_tail_anchor(self) -> None:
         # Not while the viewport is still travelling: an animated page-up is
@@ -3698,6 +3662,55 @@ class TranscriptView(ScrollableContainer):
         """
         with self._tail_anchor.programmatic_scroll():
             self.scroll_to(y=self.max_scroll_y, animate=False, immediate=True, force=True)
+
+    def arrange(self, size: Size, optimal: bool = False) -> DockArrangeResult:
+        """Apply the insertion anchor before the compositor places child rows.
+
+        `_size_updated` runs AFTER reflow calculated screen coordinates. An
+        immediate scroll there still paints one displaced frame, then corrects
+        it on the next reflow. Fresh placements here already include authored
+        heights/gaps, and the compositor reads scroll_offset immediately after
+        arrange returns. This is the same pre-placement seam Textual uses for
+        its own anchored container; no second layout or historical-height
+        estimate is needed.
+        """
+        result = super().arrange(size, optimal)
+        held = self._insert_anchor
+        if held is not None and not self._tail_anchor.following:
+            block, gap = held
+            for placement in result.placements:
+                if placement.widget is block:
+                    target = max(0.0, placement.region.y - gap)
+                    # The previous max_scroll_y is stale until _size_updated.
+                    # Bypass that old clamp exactly as Textual's native anchor
+                    # does; the fresh content extent bounds the destination.
+                    target = min(target, max(0, result.total_region.bottom - size.height))
+                    if abs(target - self.scroll_y) >= 0.5 and self.app.animator.is_being_animated(
+                        self, "scroll_y"
+                    ):
+                        # A newer key gesture can start during insertion. Its
+                        # animation holds old absolute endpoints; finish its
+                        # remaining requested travel in the new coordinates
+                        # instead of letting the next tick undo compensation.
+                        remaining = self.scroll_target_y - self.scroll_y
+                        target = min(
+                            max(0.0, target + remaining),
+                            max(0, result.total_region.bottom - size.height),
+                        )
+                        self._insert_anchor = (block, placement.region.y - target)
+                        self.app.animator.force_stop_animation(self, "scroll_y")
+                    elif self.app.animator.is_being_animated(self, "scroll_y"):
+                        # No geometry compensation is needed on this frame.
+                        # Do not overwrite a newer animation's destination with
+                        # its intermediate offset: it would finish at y=0 with
+                        # target_y still midway, keeping page demand unsettled
+                        # forever despite the animation having completed.
+                        break
+                    self.set_reactive(Widget.scroll_y, target)
+                    self.set_reactive(cast(Reactive[float], Widget.scroll_target_y), target)
+                    self.vertical_scrollbar.set_reactive(ScrollBar.position, target)
+                    break
+        return result
 
     def _size_updated(
         self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True
@@ -3780,23 +3793,42 @@ class TranscriptView(ScrollableContainer):
     # messages — and a scroll arriving through one of them came from a person.
 
     def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        self.note_user_scroll(continuous=True)
+        # We invoke the native handler explicitly. Prevent Textual's MRO
+        # dispatch from invoking it a second time, and own a vertical notch
+        # even when clamped: bubbling it back through the screen can redispatch
+        # the same physical input after a page has already consumed its demand.
+        event.prevent_default()
+        if not (event.ctrl or event.shift):
+            self.note_user_scroll(continuous=True, upward=False)
+            event.stop()
         super()._on_mouse_scroll_down(event)
 
     def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        self.note_user_scroll(continuous=True)
+        # We invoke the native handler explicitly. Prevent Textual's MRO
+        # dispatch from invoking it a second time, and own a vertical notch
+        # even when clamped: bubbling it back through the screen can redispatch
+        # the same physical input after a page has already consumed its demand.
+        event.prevent_default()
+        if not (event.ctrl or event.shift):
+            self.note_user_scroll(continuous=True, upward=True)
+            event.stop()
         super()._on_mouse_scroll_up(event)
 
     def _on_scroll_to(self, message: ScrollTo) -> None:
-        self.note_user_scroll(continuous=True)
+        message.prevent_default()
+        self.note_user_scroll(
+            continuous=True, upward=message.y is not None and message.y < self.scroll_y
+        )
         super()._on_scroll_to(message)
 
     def _on_scroll_up(self, event: ScrollUp) -> None:
+        event.prevent_default()
         self.note_user_scroll(continuous=True)
         super()._on_scroll_up(event)
 
     def _on_scroll_down(self, event: ScrollDown) -> None:
-        self.note_user_scroll(continuous=True)
+        event.prevent_default()
+        self.note_user_scroll(continuous=True, upward=False)
         super()._on_scroll_down(event)
 
     def action_scroll_up(self) -> None:
@@ -3804,7 +3836,7 @@ class TranscriptView(ScrollableContainer):
         super().action_scroll_up()
 
     def action_scroll_down(self) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(upward=False)
         super().action_scroll_down()
 
     def action_page_up(self) -> None:
@@ -3812,7 +3844,7 @@ class TranscriptView(ScrollableContainer):
         super().action_page_up()
 
     def action_page_down(self) -> None:
-        self.note_user_scroll()
+        self.note_user_scroll(upward=False)
         super().action_page_down()
 
     def action_scroll_home(self) -> None:
