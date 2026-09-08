@@ -15285,9 +15285,14 @@ class OperatorApp(App[None]):
         ALL THREE KINDS, EXPLICITLY. ``complete`` carries the session's last
         assistant line. ``error`` and ``interrupted`` carry the house sentence
         for that state (``BODIES[kind]`` — "Stopped with an error" / "Stopped
-        before finishing"). Any kind outside :data:`CONTEXTS`, and every case
-        where no snippet may be shown or none exists, degrades to
-        ``BODY_BACKGROUND``.
+        before finishing"). Every case where no snippet may be shown or none
+        exists degrades to ``BODY_BACKGROUND``.
+
+        THREE IS ALL THIS EVER SEES. The caller coerces any kind outside
+        :data:`CONTEXTS` to ``complete``, so a fourth kind does not arrive here
+        as itself — it arrives as ``complete`` and takes the snippet path. See
+        the non-complete branch for why that makes the coercion, not this
+        helper, the first thing to change when a kind is added.
 
         WHAT THIS REPLACED AND WHY. The body was the fixed sentence
         ``BODY_BACKGROUND`` — "You were in another session" — which states a
@@ -15382,9 +15387,25 @@ class OperatorApp(App[None]):
             #
             # `BODIES[kind]` rather than `BODY_BACKGROUND`: the house vocabulary
             # already says the true thing for these states and says more than
-            # the routing sentence does. Unknown kinds keep the neutral fallback
-            # — the same default-to-quiet discipline `digest_subtitle` follows,
-            # so a future kind cannot inherit a claim written for another one.
+            # the routing sentence does.
+            #
+            # THE DEFAULT IS DEFENSIVE, NOT REACHABLE — and a future kind does
+            # NOT land on it. The caller coerces any kind outside `CONTEXTS` to
+            # `complete` before this runs, so every kind arriving here is a
+            # `CONTEXTS` key, and `CONTEXTS` and `BODIES` are declared over the
+            # same key set; the `.get` therefore always hits. What happens to a
+            # genuinely new kind is the opposite of quiet: it is coerced to
+            # `complete` upstream and takes the SNIPPET path under the
+            # `Complete` subtitle, never reaching this branch at all.
+            #
+            # So ADDING A FOURTH KIND STARTS AT THE COERCION, not here. Teach it
+            # the new kind first — otherwise the snippet gate above announces
+            # the new state as a completion and shows a last assistant line for
+            # it, which is review round 1's M1 in a new place. The fallback is
+            # kept anyway because unreachable-but-correct costs nothing and a
+            # `KeyError` inside the 1 s completion poll is not a trade worth
+            # making (review round 2 MINOR-1 ≡ QA Q-3: the earlier wording here
+            # claimed a default-to-quiet safety property this code lacks).
             return BODIES.get(kind, BODY_BACKGROUND)
         if not session_names_in_notifications():
             return BODY_BACKGROUND
