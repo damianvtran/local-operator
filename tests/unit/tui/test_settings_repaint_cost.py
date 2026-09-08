@@ -147,30 +147,40 @@ async def test_a_cursor_move_does_not_resolve_a_theme_colour_per_row(
 
     The bound is an ABSOLUTE number rather than a multiple of the viewport,
     because after the fix the count is a property of the PAINTERS and no longer
-    of the list at all. Measured post-fix, it does not move with either the
-    rows or the window:
+    of the list at all. Measured post-fix at ``_SIZE``, and flat under a
+    Hotkeys-sized registry, which is the property that matters here:
 
         rows  96 -> 216 (registry inflated) : 61.0/press both
-        size  100x30, 140x40, 200x50        : 61.0/press
-        size  80x24, 70x20 (footer sheds)   : 44.0/press
+        size  100x30, 120x32, 140x40, 200x50: 61.0/press
+        size  80x24, 70x20, 60x20 (footer sheds): 44.0/press
 
-    WHY 80 AND NOT THE PROFILE'S PROPOSED 40. The profile's figure assumed the
-    residual would be the settings painters alone. It is not: 44 of the 61 come
-    from ``HintButton._build``, the FOOTER, which resolves two-to-four colours
-    per hint on every paint and is shared with ``OrgChartView`` and
-    ``SubagentView``. Fixing it means changing a widget three views depend on,
-    which is outside this change and would collide with the concurrent hotkeys
-    work; 40 is not reachable without it, and a bound the code cannot meet is
-    a red suite rather than a guard.
+    THE BOUND IS 65, AND IT IS DELIBERATELY TIGHT ENOUGH TO FAIL ALONE.
+    It was 80, and at 80 this guard did not do its job: reverting the
+    ``_RowStyles`` hoist — the exact optimisation it names — took the count to
+    only 71.0 and the test stayed GREEN, so it was really re-detecting the lazy
+    compose that G3 already covers. A guard that cannot go red for the thing it
+    guards is a decoration.
 
-    So this holds the line where this change actually left it — the per-ROW
-    cost is gone (552 -> 61, and flat in row count, which is the property the
-    Hotkeys section needs) — with headroom for the footer's own shedding
-    ladder rather than pretending the footer was fixed here.
+    65 is chosen against the measured pair, not by taste: 61.0 for the correct
+    code and 71.0 for the hoist reverted, both stable to the count across every
+    geometry above and under an inflated registry. It sits inside that 10-count
+    gap with 4 counts of headroom below and 6 above, and this suite pins the
+    terminal size, so the 44.0 of the shed footer ladder is not in play. The
+    mutation is re-run in the PR's remediation round rather than asserted here.
+
+    WHY NOT THE PROFILE'S PROPOSED 40. That figure assumed the residual would
+    be the settings painters alone. It is not: 44 of the 61 come from
+    ``HintButton._build``, the FOOTER, which resolves two-to-four colours per
+    hint on every paint and is shared with ``OrgChartView`` and
+    ``SubagentView`` — independently confirmed by a caller-attributing spy at
+    exactly 44.0/press. Reaching 40 means changing a widget three views depend
+    on, which is outside this change; a bound the code cannot meet is a red
+    suite rather than a guard. What this change owns is the per-ROW cost, and
+    that is gone (552 -> 61, flat in row count).
     """
     counts = await _measure(monkeypatch)
 
-    assert counts.per_press("semantic_color") <= 80, counts.summary()
+    assert counts.per_press("semantic_color") <= 65, counts.summary()
 
 
 @pytest.mark.asyncio
