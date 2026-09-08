@@ -77,9 +77,28 @@ default, leaving 4099 for the browser bridge and 4098 for the mobile relay.
 `--gateway-port` selects it at creation. It must differ from every
 harness port and remains fixed for that tunnel. Revoke and recreate to change
 it, so a running connector never targets a port before the proof gateway owns
-its listener. Ports below 1024 and arbitrary upstream URLs are
-rejected. Harnesses run separately; the tunnel does not install OpenCode or
-change its server's bind address.
+its listener. Ports below 1024 and arbitrary upstream URLs are rejected: a
+harness is always dialed on loopback at a numeric port, never at a URL the
+cloud supplies. Harness ports are additionally pinned on this device to the
+record the last local `create`, `connect`, or `configure` stored, so changing a
+harness port in the console alone stops the connector until you re-approve it
+locally. That keeps a console session from silently repointing a harness at an
+unrelated loopback service and handing it this device's relay credentials. The
+connector writes the reason and the remedy to
+`~/.local-operator/tunnel/service.log`:
+
+```
+Tunnel connector stopped: Harness port for local-operator changed in the console. Run lop tunnel connect again.
+Tunnel connector stopped: Harness opencode is not approved on this device. Run lop tunnel connect again.
+```
+
+`lop tunnel status` reports the cloud's own view and does not show harness
+ports, so it still reads `Status: active` while the connector is refusing to
+start — that log is where this state is visible. Run `lop tunnel connect` to
+accept the console's current ports on this device; the connector restarts on
+its own once the record matches. Harnesses run
+separately; the tunnel does not install OpenCode or change its server's bind
+address.
 
 For an OpenCode server that requires Basic authentication, create a private
 file outside any repository containing `{"username":"...","password":"..."}`,
