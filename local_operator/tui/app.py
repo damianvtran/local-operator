@@ -4840,6 +4840,7 @@ class OperatorApp(App[None]):
             self._sidebar_focus_restore = ref(self.focused) if self.focused is not None else None
         sidebar.set_open(opened)
         self._sync_sidebar_layout(self.size)
+        self._sync_boot_layout()
         if self._sidebar_timer is not None:
             if opened:
                 self._sidebar_timer.resume()
@@ -11271,7 +11272,24 @@ class OperatorApp(App[None]):
         transcript = self._transcript_view()
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        # The card is centred by the stylesheet in `box` — the screen's own
+        # A docked sidebar has already displaced the transcript AND reduced the
+        # composer's containing box. Reusing the screen width here spends that
+        # space twice: at 190 columns the notice started 23 cells right of the
+        # composer. Use the sidebar's resolved layout inputs, not last frame's
+        # widget regions, so toggles and resizes land on the same painted frame.
+        sidebar = self._session_sidebar
+        sidebar_width = sidebar.styles.width
+        if (
+            sidebar.display
+            and not self.query_one("#session-workspace").has_class("sidebar-overlay")
+            and sidebar_width is not None
+        ):
+            box = max(0, box - int(sidebar_width.value))
+            # The existing card class keeps the stylesheet's 75-cell floor even
+            # when a docked sidebar leaves less room; match that composer rather
+            # than changing its layout as a side effect of moving a notice.
+            card = max(BOOT_CARD_MIN_WIDTH, boot_card_width(box))
+        # The card is centred by the stylesheet in `box` — the main lane's
         # content box — so the offset that lands a notice on the card's column
         # has to be computed against THAT box, then rebased into the transcript's
         # coordinate space. The block cannot be centred BY the stylesheet:
@@ -11300,7 +11318,8 @@ class OperatorApp(App[None]):
         # (`box=83`, `card=75`, `d=8 == BOOT_CARD_MIN_INSET`) and 84 (`d=7`) the
         # last uncarded one; 86 is merely the lowest carded width that drifts,
         # since 85's `d` is even.
-        offset = max(0, (box - card) // 2 - transcript.styles.gutter.left)
+        # A flush card still needs the gutter rebased out of its local origin.
+        offset = max(0, (box - card) // 2) - transcript.styles.gutter.left
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
             if card_up:
