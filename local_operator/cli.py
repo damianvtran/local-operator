@@ -1385,6 +1385,13 @@ def browser_command(args: argparse.Namespace) -> int:
         if supervisor not in (browser_install.LABEL, browser_install.SYSTEMD_UNIT):
             print(f"supervisor:          {supervisor}")
             print(f"config root:         {result.get('config_root')}")
+        # An inherited registration explains a daemon running under a name this
+        # build would not otherwise mention, so name the file to act on.
+        legacy = result.get("legacy_registration")
+        if legacy:
+            print(f"legacy install:      {legacy}")
+            print("                     (written by an older build under the shared name;")
+            print("                      'lop browser uninstall' removes it)")
         return 0 if result["healthy"] else 1
     if command == "pair":
         if args.reset:

@@ -18,7 +18,9 @@ mocks systemd cannot prove what systemd does.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -394,13 +396,65 @@ def test_two_different_isolated_roots_do_not_collide(
 def test_the_label_is_stable_across_equivalent_spellings_of_one_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Otherwise ``/tmp/x`` and ``/tmp/./x`` would manage two different daemons."""
+    """Two paths naming ONE directory must produce one daemon, not two.
+
+    Through a real SYMLINK, which is what makes this a test of ``.resolve()``.
+    An earlier version compared ``/tmp/x`` against ``/tmp/x/./`` and passed with
+    ``.resolve()`` deleted, because ``pathlib`` collapses ``./`` in its own
+    constructor (``str(Path("/tmp/x/./")) == "/tmp/x"``) — it named symlink
+    canonicalisation and measured string normalisation ``Path`` did for free.
+    A symlink survives that constructor, so only a real ``resolve()`` collapses
+    it.
+    """
     root = tmp_path / "root"
     root.mkdir()
+    link = tmp_path / "link-to-root"
+    link.symlink_to(root, target_is_directory=True)
+    # Guard the guard: if these were already equal as strings the assertion
+    # below would hold with no canonicalisation at all.
+    assert str(link) != str(root)
+
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
-    plain = install.label()
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root) + "/./")
-    assert install.label() == plain
+    through_real_path = install.label()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(link))
+    assert install.label() == through_real_path
+
+
+def test_the_digest_is_stable_across_processes(tmp_path: Path) -> None:
+    """The label must survive a restart, so its digest cannot be salted.
+
+    ``hash()`` is randomised per process by ``PYTHONHASHSEED``, so swapping
+    sha256 for it would give the SAME process one stable label — passing every
+    in-process assertion — while the next ``lop`` invocation computed a
+    different one and lost track of the daemon it installed. Nothing else in
+    the suite would catch that, so this pins the value across a real
+    interpreter boundary rather than within one.
+    """
+    root = tmp_path / "stable-root"
+    root.mkdir()
+    program = (
+        "import os, sys;"
+        "sys.path.insert(0, os.environ['LO_REPO']);"
+        "from local_operator.browser_bridge import install;"
+        "print(install.label())"
+    )
+    env = {
+        **os.environ,
+        "LOCAL_OPERATOR_CONFIG_DIR": str(root),
+        "LO_REPO": str(Path(install.__file__).resolve().parents[2]),
+    }
+    seen = set()
+    for seed in ("0", "1", "12345"):
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            env={**env, "PYTHONHASHSEED": seed},
+        )
+        assert result.returncode == 0, result.stderr
+        seen.add(result.stdout.strip())
+    assert len(seen) == 1, f"label changed across PYTHONHASHSEED values: {seen}"
+    assert seen.pop().startswith("com.local-operator.browser.")
 
 
 def test_the_plist_and_unit_paths_follow_the_label(isolated_root: Path) -> None:
@@ -462,3 +516,163 @@ def test_uninstall_carries_an_error_string_for_the_cli_to_print(
     result = install.uninstall()
     assert result["ok"] is False
     assert str(result.get("error", "")).strip(), "a failed uninstall must say why"
+
+
+# --------------------------------------------------------------------------
+# A1 — a config root that INHERITS a pre-per-root build's registration.
+#
+# `LOCAL_OPERATOR_CONFIG_DIR` is a documented setting, and a `$HOME` that
+# differs from the passwd home suffixes the label too. For those users the
+# released build registered the DEFAULT name while this build looks for a
+# suffixed one, so every entry point has to resolve the inherited one or it
+# reports a success it did not achieve.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def inherited_darwin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path) -> Path:
+    """A legacy plist exactly as the released build wrote it, under a suffixed root."""
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    legacy = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
+    legacy.write_text("<plist>released build</plist>", encoding="utf-8")
+    return legacy
+
+
+def test_uninstall_removes_the_registration_an_older_build_left(
+    inherited_darwin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduced before this fix: ``{'ok': True, 'steps': ['no LaunchAgent was
+    installed']}`` while the plist stayed on disk and its daemon kept running —
+    the same false success ``uninstall`` exists to prevent."""
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+    result = install.uninstall()
+    assert result["ok"] is True
+    assert not inherited_darwin.exists(), "the inherited plist must actually be removed"
+    assert any(a[0] == "bootout" and str(inherited_darwin) in a[-1] for a in calls)
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("older build" in str(step) for step in steps)
+
+
+def test_uninstall_does_not_claim_a_removal_it_did_not_make(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No own install and nothing inherited: still says so plainly."""
+    home = tmp_path / "empty-home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(install, "_passwd_home", lambda: home)
+    monkeypatch.setattr(
+        install, "_launchctl", lambda *a: subprocess.CompletedProcess(list(a), 0, "", "")
+    )
+    result = install.uninstall()
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("no LaunchAgent was installed" in str(step) for step in steps)
+    assert not any("older build" in str(step) for step in steps)
+
+
+def test_status_counts_an_inherited_registration_as_installed(
+    inherited_darwin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "installed: no" beside a running daemon sends the user to reinstall on
+    top of what they already have."""
+    monkeypatch.setattr(install, "health", lambda *a, **k: None)
+    result = install.status()
+    assert result["installed"] is True
+    assert result["legacy_registration"] == str(inherited_darwin)
+
+
+def test_status_reports_no_legacy_registration_for_a_default_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default root is adopted, never orphaned, so nothing to report."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(install._default_config_root()))
+    monkeypatch.setattr(install, "health", lambda *a, **k: None)
+    assert install.status()["legacy_registration"] is None
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_service_action_targets_the_inherited_label(
+    action: str, inherited_darwin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise start/stop/restart address a service that was never registered
+    while the real daemon keeps running."""
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+    install.service_action(action)
+    targets = [a[-1] for a in calls]
+    assert any(t.endswith(f"/{install.LABEL}") or t == str(inherited_darwin) for t in targets)
+    assert not any(install.label() in t for t in targets), "must not use the suffixed name"
+
+
+def test_an_own_registration_wins_over_an_inherited_one(
+    inherited_darwin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adoption is only for a root with no install of its own."""
+    install.plist_path().write_bytes(b"<plist>this root</plist>")
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+    install.service_action("start")
+    assert any(install.label() in a[-1] for a in calls)
+
+
+def test_the_legacy_lookup_searches_the_passwd_home_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
+) -> None:
+    """A redirected ``$HOME`` must not hide a registration written under the
+    passwd home — the released build ran with ``$HOME`` at its normal value."""
+    passwd_home = tmp_path / "passwd-home"
+    (passwd_home / "Library" / "LaunchAgents").mkdir(parents=True)
+    legacy = passwd_home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
+    legacy.write_text("<plist/>", encoding="utf-8")
+    redirected = tmp_path / "redirected-home"
+    (redirected / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: redirected))
+    monkeypatch.setattr(install, "_passwd_home", lambda: passwd_home)
+    assert install.legacy_registration() == legacy
+
+
+def test_the_legacy_unit_is_resolved_on_linux_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
+) -> None:
+    """Same exposure through the fixed systemd unit name."""
+    home = tmp_path / "linux-home"
+    unit_dir = home / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    legacy = unit_dir / install.SYSTEMD_UNIT
+    legacy.write_text("[Service]\n", encoding="utf-8")
+    monkeypatch.setattr(install.sys, "platform", "linux")
+    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(install, "_passwd_home", lambda: home)
+    assert install.legacy_registration() == legacy
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    install.service_action("start")
+    assert any(install.SYSTEMD_UNIT in c and install.systemd_unit() not in c for c in calls)

@@ -42,6 +42,22 @@ SYSTEMD_UNIT = "local-operator-browser.service"
 _DEFAULT_CONFIG_DIRNAME = ".local-operator"
 
 
+def _passwd_home() -> Path:
+    """The uid's home from the passwd database, ignoring ``$HOME``.
+
+    The supervisor namespace is keyed by UID (launchd's ``gui/<uid>``, systemd's
+    ``--user`` instance) and does not move when ``$HOME`` is redirected, so
+    anything reasoning about "the default install" has to anchor here rather
+    than on :meth:`Path.home`, which reads ``$HOME``.
+    """
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, OSError):  # pragma: no cover - no pwd on win32
+        return Path.home()
+
+
 def _default_config_root() -> Path:
     """The config root that owns the DEFAULT supervisor name.
 
@@ -55,13 +71,7 @@ def _default_config_root() -> Path:
     default, and reuse the real daemon's label — which is the collision this
     exists to prevent.
     """
-    try:
-        import pwd
-
-        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except (ImportError, KeyError, OSError):  # pragma: no cover - no pwd on win32
-        home = Path.home()
-    return home / _DEFAULT_CONFIG_DIRNAME
+    return _passwd_home() / _DEFAULT_CONFIG_DIRNAME
 
 
 def _root_suffix() -> str:
@@ -538,26 +548,62 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     }
 
 
+def _own_registration_exists() -> bool:
+    """Whether this config root has a supervisor file under its OWN name."""
+    if sys.platform == "darwin":
+        return plist_path().exists()
+    if sys.platform.startswith("linux"):
+        return systemd_path().exists()
+    return False
+
+
+def _legacy_paths() -> list[Path]:
+    """Every place a pre-per-root build could have written this user's registration.
+
+    BOTH homes, and that is the correction this needed. ``Path.home()`` reads
+    ``$HOME``, but the released build ran under whatever ``$HOME`` was at the
+    time — normally the passwd home. An agent or a service running with a
+    redirected ``$HOME`` therefore looked in a directory the legacy install was
+    never written to, found nothing, and reported the orphan as absent. The two
+    coincide in the common case, so the list is de-duplicated rather than
+    assumed distinct.
+    """
+    homes: list[Path] = []
+    for home in (Path.home(), _passwd_home()):
+        if home not in homes:
+            homes.append(home)
+    if sys.platform == "darwin":
+        return [home / "Library" / "LaunchAgents" / f"{LABEL}.plist" for home in homes]
+    if sys.platform.startswith("linux"):
+        return [home / ".config" / "systemd" / "user" / SYSTEMD_UNIT for home in homes]
+    return []
+
+
 def legacy_registration() -> Path | None:
     """A registration written by a pre-per-root build that this root now orphans.
 
-    Only ever non-``None`` for a NON-default config root: the default root's
-    name is unchanged, so an existing install stays exactly where it was and
-    is adopted, not orphaned. An isolated root, though, may find a plist or
-    unit that an older build wrote under the shared default name while running
-    under this same root — that file is no longer addressable by the CLI, so
-    the honest move is to name it rather than leave a running daemon nobody
-    can stop.
+    Only ever non-``None`` when this root's supervisor name is SUFFIXED: the
+    default root's name is unchanged, so an existing install stays exactly
+    where it was and is adopted, not orphaned. Two things produce a suffix and
+    both are ordinary user situations rather than just test isolation — a
+    ``LOCAL_OPERATOR_CONFIG_DIR`` (a documented setting), and a ``$HOME`` that
+    differs from the passwd home.
+
+    Such a user upgrading from a released build has a registration under the
+    SHARED default name that this build no longer addresses. Left unresolved
+    that produced a false success: ``uninstall`` reported "no LaunchAgent was
+    installed" and exited 0 while the daemon kept running — the same "claimed
+    success it did not achieve" shape :func:`uninstall` was fixed to remove,
+    reintroduced on a different path. So every entry point that manages a
+    supervisor — install, uninstall, start/stop/restart, status — resolves it
+    the same way, on both platforms.
     """
     if not _root_suffix():
         return None
-    if sys.platform == "darwin":
-        legacy = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-    elif sys.platform.startswith("linux"):
-        legacy = Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
-    else:
-        return None
-    return legacy if legacy.exists() else None
+    for legacy in _legacy_paths():
+        if legacy.exists():
+            return legacy
+    return None
 
 
 def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object]:
@@ -572,12 +618,29 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
     steps: list[str] = []
     ok = True
     supervisor = _supervisor()
+    # A registration this root inherits from a pre-per-root build is part of
+    # what "uninstall" means to the user: leaving it behind while reporting
+    # success is the false-success shape this function exists to avoid. It is
+    # removed under the LEGACY name, which is the name it was registered with.
+    orphan = legacy_registration()
     if supervisor == "launchctl":
         if not dry_run:
             existed = plist_path().exists()
             _launchctl("bootout", _domain(), str(plist_path()))
             plist_path().unlink(missing_ok=True)
-            steps.append("removed the LaunchAgent" if existed else "no LaunchAgent was installed")
+            if orphan is not None:
+                _launchctl("bootout", _domain(), str(orphan))
+                orphan.unlink(missing_ok=True)
+                steps.append(f"removed the LaunchAgent an older build left at {orphan}")
+            steps.append(
+                "removed the LaunchAgent"
+                if existed
+                else (
+                    "no LaunchAgent was installed under this config root's name"
+                    if orphan is not None
+                    else "no LaunchAgent was installed"
+                )
+            )
         else:
             steps.append("removed the LaunchAgent")
     elif supervisor == "systemctl":
@@ -585,6 +648,12 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
             existed = systemd_path().exists()
             disabled = _systemctl_user("disable", "--now", systemd_unit())
             systemd_path().unlink(missing_ok=True)
+            if orphan is not None:
+                # Disable by UNIT NAME: systemd addresses units by name, and the
+                # legacy unit is the one an older build enabled.
+                _systemctl_user("disable", "--now", SYSTEMD_UNIT)
+                orphan.unlink(missing_ok=True)
+                steps.append(f"removed the systemd unit an older build left at {orphan}")
             _systemctl_user("daemon-reload")
             if disabled.returncode and existed:
                 ok = False
@@ -596,7 +665,11 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
                 steps.append(
                     "removed the systemd user service"
                     if existed
-                    else "no systemd user service was installed"
+                    else (
+                        "no systemd user service was installed under this config " "root's name"
+                        if orphan is not None
+                        else "no systemd user service was installed"
+                    )
                 )
         else:
             steps.append("removed the systemd user service")
@@ -622,11 +695,19 @@ def service_action(action: str) -> dict[str, object]:
         # restart raised FileNotFoundError out of the CLI on a systemd-less
         # Linux and on win32, which fell into the same branch.
         return {"ok": False, "error": NO_SUPERVISOR_ERROR}
+    # A root whose own registration does not exist but which INHERITS one from a
+    # pre-per-root build must act on the inherited name, or start/stop/restart
+    # address a service that was never registered: launchctl answers "no such
+    # service" while the real daemon keeps running. Only when this root has no
+    # install of its own — an existing per-root install always wins.
+    orphan = legacy_registration()
+    adopted = orphan is not None and not _own_registration_exists()
     if supervisor == "launchctl":
-        target = f"{_domain()}/{label()}"
-        if action in ("start", "restart") and plist_path().exists():
+        target = f"{_domain()}/{LABEL if adopted else label()}"
+        plist = orphan if adopted and orphan is not None else plist_path()
+        if action in ("start", "restart") and plist.exists():
             if _launchctl("print", target).returncode:
-                loaded = _launchctl("bootstrap", _domain(), str(plist_path()))
+                loaded = _launchctl("bootstrap", _domain(), str(plist))
                 if loaded.returncode:
                     return {"ok": False, "error": loaded.stderr.strip()[:300]}
         args = {
@@ -641,10 +722,11 @@ def service_action(action: str) -> dict[str, object]:
     # before the manager started) fails start/restart with "not found" until
     # something reloads it. Reload once, then retry, rather than making the
     # user discover `systemctl --user daemon-reload` themselves.
-    result = _systemctl_user(action, systemd_unit())
+    unit = SYSTEMD_UNIT if adopted else systemd_unit()
+    result = _systemctl_user(action, unit)
     if result.returncode and action in ("start", "restart") and systemd_path().exists():
         _systemctl_user("daemon-reload")
-        result = _systemctl_user(action, systemd_unit())
+        result = _systemctl_user(action, unit)
     return {"ok": result.returncode == 0, "error": _translate_systemctl_error(result.stderr)}
 
 
@@ -653,8 +735,13 @@ def status(port: int | None = None) -> dict[str, object]:
     resolved_port = port or (current.port if current else DEFAULT_PORT)
     probe = health(resolved_port)
     pairing = pairing_status()
+    # An inherited registration counts as installed: reporting "installed: no"
+    # while a pre-per-root build's daemon is running is the same false answer
+    # `uninstall` was fixed for, and it is what sends a user to reinstall on
+    # top of a daemon they already have.
+    orphan = legacy_registration()
     return {
-        "installed": plist_path().exists() if sys.platform == "darwin" else systemd_path().exists(),
+        "installed": _own_registration_exists() or orphan is not None,
         "healthy": probe is not None,
         "health": probe,
         "port": resolved_port,
@@ -671,4 +758,8 @@ def status(port: int | None = None) -> dict[str, object]:
         # there is no way to tell which instance you are talking to.
         "supervisor": label() if sys.platform == "darwin" else systemd_unit(),
         "config_root": str(config_dir()),
+        # Named, not merely folded into `installed`: this is the one thing that
+        # explains why a daemon is running under a name the CLI would not
+        # otherwise mention, and it tells the user which file to act on.
+        "legacy_registration": str(orphan) if orphan is not None else None,
     }
