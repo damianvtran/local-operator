@@ -271,14 +271,14 @@ class SecretBroker:
         removing it would strand a live daemon behind a missing rendezvous
         point.
         """
-        if self._bound_inode is None:
-            self._path.unlink(missing_ok=True)
-            return
-        try:
-            if self._path.stat().st_ino != self._bound_inode:
-                return  # a successor owns this path now; leave it alone
-        except OSError:
-            return  # already gone
+        if self._bound_inode is not None:
+            try:
+                if self._path.stat().st_ino != self._bound_inode:
+                    return  # a successor owns this path now; leave it alone
+            except OSError:
+                return  # already gone
+        # One unlink, deliberately: the tree guard counts call sites of this
+        # shape, and a single reviewable site is easier to keep honest than two.
         self._path.unlink(missing_ok=True)
         self._bound_inode = None
 

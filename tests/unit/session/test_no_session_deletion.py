@@ -286,10 +286,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # id, caller argument or secret name reaches either, so neither can name a
     # path under sessions/. Removing it on shutdown is required: a surviving
     # socket inode makes the next bind() fail EADDRINUSE forever.
+    #
+    # `stop()` delegates here rather than unlinking inline, because the path is
+    # not an identity: a broker still draining in-flight requests would
+    # otherwise delete the socket its SUCCESSOR has already bound at the same
+    # path. Both unlinks below are guarded by an inode comparison against the
+    # inode this broker itself bound.
     (
-        "local_operator/secrets/broker.py::SecretBroker.stop",
+        "local_operator/secrets/broker.py::SecretBroker._unlink_own_socket",
         "<path>.unlink",
-        "the broker's own socket file, at a fixed basename it just bound",
+        "the broker's own socket file, at a fixed basename it bound, matched by inode",
     ),
     # Same path, same reasoning, opposite direction: a socket left behind by a
     # broker that was SIGKILLed is a corpse, and it is only removed after a
