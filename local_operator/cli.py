@@ -100,17 +100,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--agent",
         "--agent-name",
         type=str,
-        help="Name of the agent to use for this session.  If not provided, the default"
-        " agent will be used which does not persist its session.",
+        help="Select a legacy named agent (creates it if missing). Without --train, "
+        "use a separate persisted session; exec --profile attaches a reusable role instead.",
         dest="agent_name",
     )
     parent_parser.add_argument(
         "--train",
         action="store_true",
-        help="Enable training mode for the operator.  The agent's conversation history will be"
-        " saved to the agent's directory after each completed task.  This allows the agent to"
-        " learn from its experiences and improve its performance over time.  Omit this flag to"
-        " have the agent not store the conversation history, thus resetting it after each session.",
+        help="Use the legacy agent history directory (or an autosave agent) instead "
+        "of a separate session. Ordinary sessions are also persisted and resumable; "
+        "--resume takes precedence over this directory selection.",
     )
 
     # Main parser
@@ -759,13 +758,45 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     exec_parser = subparsers.add_parser(
         "exec",
-        help="Execute a single command without starting interactive mode",
+        help="Execute a task or goal loop in a persisted session without starting the TUI",
         parents=[parent_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  lop exec 'Review the change' --team release --background\n"
+            "  printf 'Inspect this report' | lop exec --profile reviewer\n"
+            "  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n"
+            "  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n"
+            "  lop exec --status JOB_ID\n\n"
+            "Resume restores the transcript, team, profile, goal and name first; explicit\n"
+            "startup flags override their own slots. Team and profile may coexist. A loop\n"
+            "runs after the optional initial prompt; --loop N counts continuations only.\n"
+            "Saved loop progress is visible on resume, but iterations never replay automatically.\n"
+            "A goal alone does not run a model. Prompts are literal, not slash commands.\n"
+            "--goal only SETS the objective; unlike the TUI's /goal it does not also\n"
+            "send that text as a message, because the prompt is exec's message channel.\n"
+            "--agent/--agent-id select legacy agent data and are mutually exclusive.\n"
+            "Default non-TTY approvals deny. --control may wait for a supervisor; --yolo\n"
+            "is an explicit override, never implied by --background or --team.\n"
+            "Foreground events/text use stdout; receipts use stderr. Detached runs log\n"
+            "both streams and print distinct job/session IDs. Use lop --resume SESSION_ID\n"
+            "to view a live run or resume a finished one; exec refuses a live owner."
+        ),
     )
     exec_parser.add_argument(
         "command",
         type=str,
-        help="The command to execute",
+        nargs="?",
+        default=None,
+        help="Literal prompt; '-' or omitted with piped stdin reads stdin; optional for a loop",
+    )
+    from local_operator.exec_startup import add_startup_arguments
+
+    add_startup_arguments(exec_parser)
+    exec_parser.add_argument(
+        "--status",
+        metavar="JOB_ID",
+        help="Read a durable background-job status as JSON; does not start a session",
     )
     # --- Additive exec flags (rewrite) ------------------------------------
     exec_parser.add_argument(
@@ -789,12 +820,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--control",
         action="store_true",
         help=(
-            "Publish a session record and serve the control socket for this run, "
-            "so an external supervisor can steer, cancel and answer gates "
-            "mid-run. Prints the endpoint on stderr. Off by default. "
-            "Note: this routes tool approvals to the supervisor, so a run "
-            "WITHOUT --yolo parks on each gate until one answers (then denies). "
-            "An unattended run wants --control --yolo."
+            "Route approvals and questions to an attached supervisor (may wait). "
+            "Without this flag non-TTY approvals deny; discovery and live attachment "
+            "are available either way. --yolo remains an explicit approval override."
         ),
     )
 
@@ -4254,11 +4282,56 @@ def main() -> int:
                         file=sys.stderr,
                     )
                     return 1
-            from local_operator.exec_mode import ExecArgs, run_exec
+            from local_operator.exec_mode import ExecArgs, job_status, run_exec
 
+            if args.status:
+                import json
+
+                from local_operator.exec_startup import STARTUP_FIELDS
+
+                run_options = (
+                    *STARTUP_FIELDS,
+                    "background",
+                    "control",
+                    "resume",
+                    "agent_name",
+                    "agent_id",
+                    "yolo",
+                    "train",
+                )
+                if args.command is not None or any(getattr(args, key, None) for key in run_options):
+                    print(
+                        "--status cannot be combined with a prompt or run options", file=sys.stderr
+                    )
+                    return 1
+                state = job_status(args.status)
+                if not state:
+                    # Every other refusal in this feature names a recovery
+                    # command; this one had none to name (there is no `lop
+                    # exec --list`), so it names where the answer actually
+                    # lives. Also carries the `exec failed: ` prefix its
+                    # siblings all use, which it was alone in omitting.
+                    from local_operator.exec_mode import JOBS_FILE, logs_dir
+
+                    print(
+                        f"exec failed: No exec job {args.status!r}; job IDs are printed "
+                        f"by --background and recorded in {logs_dir() / JOBS_FILE}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print(json.dumps(state, ensure_ascii=False))
+                return 0
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
+                team=args.team,
+                profile=args.profile,
+                goal=args.goal,
+                clear_goal=args.clear_goal,
+                loop=args.loop,
+                loop_goal=args.loop_goal,
+                name=args.name,
+                effort=args.effort,
                 agent_name=args.agent_name,
                 agent_id=getattr(args, "agent_id", None),
                 yolo=args.yolo,
