@@ -258,6 +258,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> .env",
     ),
+    # Same shape as the credentials writer above: a temp FILE inside the
+    # secrets directory replacing master.key in that same directory. Both
+    # paths come from `keys.key_path()`, which is `config_dir()/secrets/` plus
+    # a fixed basename — no caller input and no session id reaches either, so
+    # neither can name a path under sessions/.
+    (
+        "local_operator/secrets/keys.py::replace_master_key",
+        "os.replace",
+        "temp FILE -> master.key, both under config_dir()/secrets",
+    ),
+    # `lop secret file` materialises a file-shaped secret for the lifetime of
+    # one command. The directory removed is the one `tempfile.mkdtemp()`
+    # returned to this same function moments earlier, under $TMPDIR — it is
+    # never derived from a session id, a config dir or any caller input, so it
+    # cannot name a session directory. Removing it is the point: it holds
+    # decrypted plaintext that must not outlive the command (design §7).
+    (
+        "local_operator/secrets/handlers.py::_file",
+        "shutil.rmtree",
+        "the mkdtemp() dir this function just created under $TMPDIR",
+    ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
         "os.unlink",
