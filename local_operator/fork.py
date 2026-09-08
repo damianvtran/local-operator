@@ -208,6 +208,10 @@ def fork_session(
     try:
         claim_session(fork_dir)
         fork_dir.mkdir(parents=True, exist_ok=True)
+        # A fork inherits journal bytes, never its parent's creation identity.
+        from local_operator.session.creation import ensure_session_created_at
+
+        ensure_session_created_at(fork_dir, time.time())
     except OSError as exc:
         raise ForkError(f"cannot create the fork's session directory: {exc}") from exc
 

@@ -238,6 +238,10 @@ export interface SessionSummary {
 	subagents_running: number;
 	todos_open: number;
 	mtime: number;
+	/** Immutable conversation birth; absent on older daemons, never activity. */
+	created_at?: number;
+	/** Latest outcome; only unseen non-streaming outcomes affect list priority. */
+	completion_kind?: string;
 }
 
 export interface SlashCommand {

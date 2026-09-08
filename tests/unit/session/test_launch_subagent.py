@@ -2448,10 +2448,17 @@ async def test_hub_ask_reaches_a_child_under_the_eager_task_factory(tmp_path, mo
         job_id = parent._launch_subagent(label="reviewer", prompt="review the diff")
         comms = parent.subagent_comms
 
-        # The eager runner attached before record_launch ran; the fix must have
-        # merged, so the live child is still addressable right now.
+        # Birth publication now runs in a worker, so construction legitimately
+        # suspends before attach even with an eager task factory. Reproduce the
+        # original attach-before-record ordering explicitly after real startup;
+        # simply waiting and dropping this merge check would lose the old guard.
+        await wait_for(lambda: comms._records[job_id].child is not None)
+        attached = comms._records[job_id].child
+        comms.record_launch(job_id, "reviewer", prompt="review the diff")
         record = comms._records[job_id]
-        assert record.child is not None, "attach was clobbered by record_launch"
+        assert (
+            record.child is attached and attached is not None
+        ), "attach was clobbered by record_launch"
         assert record.session_dir is not None
 
         # The child is parked in its slow tool call; ask it mid-run, exactly

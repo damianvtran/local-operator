@@ -137,11 +137,15 @@ def test_the_index_is_written_outside_every_session_directory(tmp_path: Path):
     session = tmp_path / "sessions" / "9999aaaa"
     _write(session, ("user", "anything"))
     before = session.stat().st_mtime
+    # Transcript construction owns its birth sidecar. Indexing may add no
+    # file of its own inside the session, regardless of existing bookkeeping.
+    before_files = set(session.iterdir())
     build_index(tmp_path, ["9999aaaa"])
     assert index_path(tmp_path).is_file()
     assert (tmp_path / "sessions") not in index_path(tmp_path).parents
     assert session.stat().st_mtime == before
-    assert list(session.iterdir()) == [session / "transcript.jsonl"]
+    assert set(session.iterdir()) == before_files
+    assert session / "transcript.jsonl" in before_files
 
 
 def test_a_session_that_vanished_mid_scan_is_skipped(tmp_path: Path):

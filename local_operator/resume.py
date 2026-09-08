@@ -1343,6 +1343,9 @@ class SessionRow(NamedTuple):
     #: session was deliberately stopped.
     wakes: int = 0
     wakes_dormant: bool = False
+    #: Immutable conversation birth, not transcript activity or runtime start.
+    #: Unknown legacy dates tie at zero and are ordered by session id.
+    created_at: float = 0.0
 
 
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per

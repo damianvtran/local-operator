@@ -1801,7 +1801,12 @@ async def _prepare(
     # flag is read here rather than threaded through the signature because it
     # is set by `_spawn_runtime` on the child's environment and consumed only
     # on this path.
-    transcript = Transcript(
+    # Construction publishes immutable birth metadata before this runtime is
+    # discoverable. Its fsync (and existing full-history replay) must not park
+    # sibling sessions on the event loop; publication cannot be delayed until
+    # the first turn without changing an empty live row's creation sort key.
+    transcript = await asyncio.to_thread(
+        Transcript,
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
     )

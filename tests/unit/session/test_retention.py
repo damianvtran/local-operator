@@ -259,6 +259,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     pins them to the canonical constants so a renamed sidecar cannot quietly
     start counting as activity again."""
     from local_operator import resume
+    from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
 
@@ -273,6 +274,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         resume.TITLE_SCAN_SENTINEL_NAME,
         resume.ORIGIN_CACHE_NAME,
         SUBAGENT_ROSTER_SIDECAR,
+        CREATED_AT_NAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 
