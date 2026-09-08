@@ -1252,6 +1252,7 @@ class StatusLine:
     def update(
         self,
         *,
+        connection: str | None = None,
         model_label: str | None = None,
         model_name: str | None = None,
         effort: str | None = None,
@@ -1275,6 +1276,8 @@ class StatusLine:
         approvals_always: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
+        if connection is not None:
+            self._connection = connection
         if model_label is not None:
             self._model_label = model_label
         if model_name is not None:
@@ -1560,6 +1563,16 @@ class StatusLine:
         seam = Style(color=theme_mod.semantic_color("faint"))
         accent = Style(color=theme_mod.semantic_color("accent"))
 
+        connection = getattr(self, "_connection", "")
+        if connection:
+            # Connection authority outranks live cost/model details from a saved
+            # checkpoint. Reuse the existing row so reconnect never moves the
+            # transcript or steals the reader's scroll anchor.
+            left = Text(connection, style=muted)
+            left.truncate(max(0, width), overflow="ellipsis")
+            right = Text(self._conversation_name, style=dim)
+            right.truncate(max(0, width - left.cell_len - 3), overflow="ellipsis")
+            return self._compose(left, right, width, dim)
         fitted = self._fit(width, dim, muted, seam, accent)
         if fitted is not None:
             dropped, left, right = fitted

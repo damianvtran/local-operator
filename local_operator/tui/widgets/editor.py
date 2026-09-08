@@ -2946,6 +2946,9 @@ class Editor(TextArea):
         # explicit user decisions without introducing a visible transition mode.
         blocked = getattr(self.app, "composer_submission_blocked", None)
         if callable(blocked) and blocked():
+            refused = getattr(self.app, "composer_submission_refused", None)
+            if callable(refused):
+                refused()
             return
         text = self.text
         # Bang-mode is a MODE, but a recalled `! ls` is TEXT that still means

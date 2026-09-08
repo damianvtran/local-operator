@@ -3365,7 +3365,7 @@ class OperatorApp(App[None]):
                 ):
                     return
                 source.presentation_revision += 1
-                if not self._is_current(source):
+                if not self._is_current(source) or source.display_only:
                     self._reduce_hidden_session_event(source, message)
                     return
         if (
@@ -3704,14 +3704,23 @@ class OperatorApp(App[None]):
             source.preparations += 1
             return source
         directory = config_dir()
-        record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
 
         async def no_takeover() -> Any:
             # Match the CLI viewer policy: discovery/preparation must never
             # turn this TUI into an owner or recursively create a cold facade.
             raise RuntimeError("a sidebar viewer never takes over a session")
 
-        if record is not None and owner is not None:
+        if not speculative:
+            remote = await RemoteSession.saved_preview(
+                session_id,
+                config_dir=directory,
+                cwd=str(getattr(self._session, "cwd", "")),
+                takeover_factory=no_takeover,
+            )
+        else:
+            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
+            if record is None or owner is None:
+                raise RuntimeError("The prepared owner is no longer active")
             remote = await RemoteSession.connect(
                 record,
                 session_id,
@@ -3719,18 +3728,13 @@ class OperatorApp(App[None]):
                 takeover_factory=no_takeover,
                 display_window=True,
             )
-        else:
-            if speculative:
-                raise RuntimeError("The prepared owner is no longer active")
-            if self._resume_factory is None:
-                raise RuntimeError("This launcher cannot reopen an inactive conversation")
-            remote = await self._resume_factory(session_id)
         if not isinstance(remote, RemoteSession):
             raise RuntimeError("Sidebar navigation requires an owner-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
             source = SessionInteraction(remote)
+            source.display_only = remote.is_cold
             source.draft = await self._sidebar_drafts.get(session_id)
             if source.draft.approve_all is None:
                 source.draft.approve_all = self._approvals_default_auto
@@ -3763,16 +3767,16 @@ class OperatorApp(App[None]):
             self._sidebar_prior_workers.discard(worker)
 
     async def _prepare_sidebar_session(
-        self, session_id: str, *, speculative: bool = False
+        self, session_id: str, *, speculative: bool = False, refresh: bool = False
     ) -> tuple[SessionInteraction, SessionPresentation]:
         from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_catalog import session_directory_name
 
         if not session_directory_name(session_id):
             raise ValueError("The conversation identifier is not valid")
-        if self._session is not None and self._session.session_id == session_id:
+        if not refresh and self._session is not None and self._session.session_id == session_id:
             return self._interaction, self._capture_sidebar_presentation()
-        if not speculative:
+        if not speculative and not refresh:
             await self._drain_sidebar_prior_transitions()
         source = await self._lease_sidebar_source(session_id, speculative=speculative)
         replay: PreparedReplay | None = None
@@ -3781,41 +3785,30 @@ class OperatorApp(App[None]):
             session = source.session
             if not isinstance(session, RemoteSession):
                 raise RuntimeError("Sidebar navigation requires an owner-backed session")
-            if session.is_cold:
-                if speculative:
-                    raise RuntimeError("The prepared owner is no longer ready")
-                # NO outer wall clock. The removed `wait_for(..., 15)` was not
-                # redundant with anything — it was DESTRUCTIVE: it replaced
-                # `_ensure_bound`'s `ConnectionError`, which carries a sentence
-                # worth showing, with a bare `TimeoutError` whose `str()` is the
-                # empty string, so the sidebar's "Could not open conversation:
-                # {error}" rendered with nothing after the colon. It was also
-                # the last bare wall clock left on this seam, which is the shape
-                # this change exists to replace (review round 2, MINOR-1).
-                #
-                # BUT it was the only thing bounding this call at 15 s, so be
-                # precise about what does bound it now (review round 3, M3-2).
-                # `_FOREGROUND_BIND_BUDGET_S` (15 s) covers only the retry/sync
-                # half: that deadline is computed AFTER `engage_runtime` has
-                # returned, and the foreground engage passes no `deadline_s`, so
-                # it takes `DEFAULT_DEADLINE_S` (30 s) first. Worst case here is
-                # therefore ~45 s, not 15 s — measured 30.00 s in the engage
-                # alone against a stalling owner. That is a deliberate trade,
-                # not an oversight: capping the foreground engage would halve
-                # the spawn/discovery window on a cold start, which is the path
-                # this change exists to make more reliable, and the wait is
-                # cancellable and reports progress rather than being silent.
-                # Do not re-add an outer `wait_for` to "restore" the 15 s; bound
-                # the engage itself if that worst case ever needs shortening.
-                await session._ensure_bound()
-            if session.is_cold:
-                raise RuntimeError("The conversation has not finished connecting")
-            await session.ensure_display_current()
-            gate = session.frontend_state.pending_gate
+            # Canonical synchronization belongs to the source connection task,
+            # never to a click waiting for its first useful viewport.
+            if speculative and session.is_cold:
+                raise RuntimeError("The prepared owner is no longer ready")
+            if speculative or refresh:
+                await session.ensure_display_current()
+            if not refresh:
+                # A successful hidden bind is not a committed canonical view:
+                # its saved anchor and live projection still need reconciliation
+                # on return. Only that source's canonical commit clears this.
+                source.display_only = (
+                    source.display_only or session.is_cold or not session.display_history_current
+                )
+            gate = (
+                None if source.display_only and not refresh else session.frontend_state.pending_gate
+            )
             if gate is not None and gate.kind not in {"ask", "approval"}:
                 raise RuntimeError("This viewer does not support the conversation's pending input")
             cached = self._sidebar_presentations.get(session_id)
-            if cached is not None and self._sidebar_presentation_current(cached, source, gate):
+            if (
+                not refresh
+                and cached is not None
+                and self._sidebar_presentation_current(cached, source, gate)
+            ):
                 # Reinsert so dict order is recency: eviction pops the OLDEST
                 # key, and a hit must count as a use or a hot pair of sessions
                 # would evict each other the moment a third is visited.
@@ -3832,8 +3825,12 @@ class OperatorApp(App[None]):
             replay = PreparedReplay()
             welcome: WelcomeView | None = None
             revision = source.presentation_revision
-            if not source.draft.following_tail and source.draft.scroll_anchor_id:
-                if not await session.ensure_display_anchor(source.draft.scroll_anchor_id):
+            if refresh and not source.draft.following_tail and source.draft.scroll_anchor_id:
+                scroll_revision = source.scroll_revision
+                if (
+                    not await session.ensure_display_anchor(source.draft.scroll_anchor_id)
+                    and scroll_revision == source.scroll_revision
+                ):
                     # A canonical compaction can remove an old anchor. The owner
                     # explicitly reset that seek; never pretend another row is it.
                     source.draft.following_tail = True
@@ -3846,6 +3843,17 @@ class OperatorApp(App[None]):
                 bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
             )
+            preview_unavailable = (
+                not replay.blocks
+                and source.display_only
+                and getattr(session, "saved_preview_partial", False)
+            )
+            if preview_unavailable:
+                replay.blocks.append(
+                    NoticeBlock(
+                        "Saved preview unavailable. Connect to load the conversation.", "note"
+                    )
+                )
             self._mark_pending_tool_rows(replay.blocks, session)
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
@@ -3866,7 +3874,7 @@ class OperatorApp(App[None]):
             # tests of "is this conversation empty" on the two halves of one
             # switch would eventually disagree, and the visible failure is a
             # target that arrives with no empty state and no way to grow one.
-            if not conversation_started(replay.blocks):
+            if not preview_unavailable and not conversation_started(replay.blocks):
                 welcome = WelcomeView(
                     lambda: session_welcome_info(
                         session,
@@ -3882,12 +3890,20 @@ class OperatorApp(App[None]):
                 for block in replay.blocks:
                     replay.view.append_block(block)
             replay.view.follow_tail()
-            # Preparation waits for layout, not for a guessed sleep. The commit
-            # can then reveal already measured rows without replaying history.
-            laid_out = asyncio.Event()
-            self.call_after_refresh(laid_out.set)
-            await laid_out.wait()
-            if not source.draft.following_tail and source.draft.scroll_anchor_id:
+            # Retained/canonical views benefit from a measured parked layout.
+            # A first saved view has no existing geometry to preserve: painting
+            # it offscreen first adds a whole extra layout/frame before useful
+            # content appears. Reveal those real rows immediately; the commit's
+            # compositor-map gate still waits for their actual visible paint.
+            if not source.display_only or refresh:
+                laid_out = asyncio.Event()
+                self.call_after_refresh(laid_out.set)
+                await laid_out.wait()
+            if (
+                (not source.display_only or refresh)
+                and not source.draft.following_tail
+                and source.draft.scroll_anchor_id
+            ):
                 replay.view.restore_navigation_anchor(
                     source.draft.scroll_anchor_id,
                     source.draft.scroll_anchor_part,
@@ -3907,7 +3923,10 @@ class OperatorApp(App[None]):
             )
         except BaseException:
             if replay is not None and replay.view.parent is not None:
-                await replay.view.remove()
+                # AwaitRemove joins Textual's own message-pump tasks. A
+                # second navigation/shutdown cancellation must not travel
+                # through that gather and cancel the widget pumps themselves.
+                await asyncio.shield(replay.view.remove())
             raise
         finally:
             source.preparations -= 1
@@ -3997,10 +4016,12 @@ class OperatorApp(App[None]):
             )
 
     def _sidebar_gate_surface_ready(self, source: SessionInteraction) -> bool:
-        if (
-            not self._is_current(source)
-            or getattr(source.session, "is_cold", False)
-            or not getattr(source.session, "display_history_current", True)
+        if not self._is_current(source) or (
+            not source.display_only
+            and (
+                getattr(source.session, "is_cold", False)
+                or not getattr(source.session, "display_history_current", True)
+            )
         ):
             return False
         view = self._transcript_view()
@@ -4069,6 +4090,8 @@ class OperatorApp(App[None]):
         # the entire state (jobs, usage, trajectories) on every display, which
         # profiling measured as the largest single cost of the cold frame. A
         # reduced facade without the narrow accessor still falls back below.
+        if source.display_only:
+            return self._ask_screen is None and self._approval is None
         session = source.session
         gate = getattr(session, "pending_gate", None)
         if gate is None and not hasattr(session, "pending_gate"):
@@ -4171,7 +4194,7 @@ class OperatorApp(App[None]):
         if isinstance(current, RemoteSession):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
-            else:
+            elif not self._interaction.display_only:
                 current.resume_viewer_gates()
         if session_id:
             self._begin_sidebar_transition()
@@ -4421,7 +4444,7 @@ class OperatorApp(App[None]):
         ):
             return
         if presentation.replay.view.is_mounted:
-            await presentation.replay.view.remove()
+            await asyncio.shield(presentation.replay.view.remove())
         await self._release_sidebar_source(source)
 
     def _park_sidebar_aside(self, source: SessionInteraction) -> None:
@@ -4475,11 +4498,11 @@ class OperatorApp(App[None]):
         session = source.session
         if session is None or session.session_id != session_id:
             raise RuntimeError("The prepared conversation identity changed")
-        if source is self._interaction:
+        if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
-        if not isinstance(session, RemoteSession) or session.is_cold:
-            raise RuntimeError("The conversation is not ready for input")
-        if (
+        if not isinstance(session, RemoteSession):
+            raise RuntimeError("The conversation is not owner-backed")
+        if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
         ):
@@ -4487,12 +4510,15 @@ class OperatorApp(App[None]):
 
             raise PreparationInvalidated("canonical replay changed during preparation")
         outgoing = self._interaction
+        refreshing = outgoing is source
+        focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not isinstance(previous, RemoteSession):
             raise RuntimeError("Sidebar navigation requires an owner-backed current session")
-        self._close_subagent_view()
-        self._close_org_chart_view()
-        self._close_settings_view()
+        if not refreshing:
+            self._close_subagent_view()
+            self._close_org_chart_view()
+            self._close_settings_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
             # The outgoing draft was frozen at ``pending``; the editor holds
@@ -4512,27 +4538,16 @@ class OperatorApp(App[None]):
             outgoing.draft.history_stash = recall.stash
             outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
         self._sidebar_transition_from = None
-        old_view = self._transcript_view()
-        outgoing.draft.following_tail = old_view.is_following_tail
-        if not outgoing.draft.following_tail:
-            top = old_view.content_region.y
-            anchor = next(
-                (
-                    block
-                    for block in old_view.blocks()
-                    if block.navigation_anchor_id and block.display and block.region.bottom > top
-                ),
-                None,
-            )
-            if anchor is not None:
-                outgoing.draft.scroll_anchor_id = anchor.navigation_anchor_id
-                outgoing.draft.scroll_anchor_part = anchor.navigation_anchor_part
-                outgoing.draft.scroll_offset = top - anchor.region.y
+        if (not refreshing or source.scroll_revision != source.preview_scroll_revision) and (
+            not outgoing.display_only
+            or outgoing.scroll_revision != outgoing.preview_scroll_revision
+        ):
+            self._capture_sidebar_scroll(outgoing)
         outgoing_presentation = None
         if previous is not None:
             self._sidebar_sources[previous.session_id] = outgoing
             outgoing_presentation = self._capture_sidebar_presentation()
-            if self._admit_sidebar_presentation(
+            if outgoing is not source and self._admit_sidebar_presentation(
                 previous.session_id, outgoing, outgoing_presentation
             ):
                 self._sidebar_presentations[previous.session_id] = outgoing_presentation
@@ -4670,11 +4685,17 @@ class OperatorApp(App[None]):
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
-            self._submit_boot_prompt(session)
-            session.resume_viewer_gates()
+            if not source.display_only:
+                self._submit_boot_prompt(session)
+                session.resume_viewer_gates()
             self._session_sidebar.current_id = session_id
             self._session_sidebar.refresh()
-            if source.draft.focus_id == "@transcript":
+            if refreshing and focused_before_refresh is not None:
+                if focused_before_refresh is old_view:
+                    incoming.replay.view.focus()
+                elif focused_before_refresh.is_mounted:
+                    focused_before_refresh.focus()
+            elif source.draft.focus_id == "@transcript":
                 incoming.replay.view.focus()
             else:
                 editor.focus()
@@ -4703,16 +4724,187 @@ class OperatorApp(App[None]):
             self.run_worker(
                 self._release_sidebar_preparation((self._sidebar_sources[evicted_id], evicted))
             )
-        if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+        if not refreshing and self.query_one("#session-workspace").has_class("sidebar-overlay"):
             # A drawer cannot count as a correct visible conversation while it
             # covers the response. Pinned wide sidebars stay open.
             self._set_sidebar_open(False)
         self._start_resume_fill()
-        return self._await_sidebar_frame(source, generation)
+        self._show_sidebar_connection(source)
+        if not source.draft.following_tail and source.draft.scroll_anchor_id:
+            scroll_revision = source.scroll_revision
+            view = incoming.replay.view
+
+            def restore_revealed_anchor() -> None:
+                if (
+                    not self._is_current(source)
+                    or generation != self._sidebar_navigation.generation
+                    or self._transcript_view() is not view
+                ):
+                    return
+                if source.scroll_revision != scroll_revision:
+                    self._capture_sidebar_scroll(source)
+                    return
+                # Offscreen measurement is not final visible geometry for a
+                # wrapped viewport. Re-anchor after reveal, and let the normal
+                # painted-map gate verify the resulting frame, not a timer.
+                view.restore_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
+
+            self.call_after_refresh(restore_revealed_anchor)
+        ready = self._await_sidebar_frame(source, generation)
+        if source.display_only:
+            source.preview_scroll_revision = source.scroll_revision
+
+            # Even background socket work can receive a large synchronous
+            # projection in this same event loop. Start it AFTER the measured
+            # useful frame, not just after swapping the presentation fields.
+            def connect_after_paint(frame: asyncio.Future[None]) -> None:
+                if not frame.cancelled() and not source.retired:
+                    self._start_sidebar_connection(source)
+
+            ready.add_done_callback(connect_after_paint)
+        return ready
+
+    def _capture_sidebar_scroll(self, source: SessionInteraction) -> None:
+        old_view = self._transcript_view()
+        source.draft.following_tail = old_view.is_following_tail
+        if not source.draft.following_tail:
+            top = old_view.content_region.y
+            anchor = next(
+                (
+                    block
+                    for block in old_view.blocks()
+                    if block.navigation_anchor_id and block.display and block.region.bottom > top
+                ),
+                None,
+            )
+            if anchor is not None:
+                source.draft.scroll_anchor_id = anchor.navigation_anchor_id
+                source.draft.scroll_anchor_part = anchor.navigation_anchor_part
+                source.draft.scroll_offset = top - anchor.region.y
+
+    def _show_sidebar_connection(self, source: SessionInteraction) -> None:
+        if not self._is_current(source):
+            return
+        status = ""
+        if source.display_only:
+            saved = (
+                "Saved excerpt"
+                if getattr(source.session, "saved_preview_partial", False)
+                else "Saved"
+            )
+            status = (
+                f"{saved} · Connection unavailable · Reselect to retry"
+                if source.connection_error
+                else f"{saved} · Connecting…"
+            )
+        if self._status is not None:
+            self._status.update(connection=status)
+        editor = self._editor()
+        if editor.read_only:
+            editor.placeholder = READ_ONLY_PLACEHOLDER
+        elif self._aside_is_open():
+            editor.placeholder = ASIDE_PLACEHOLDER
+        elif editor.shell_mode:
+            editor.placeholder = SHELL_PLACEHOLDER
+        else:
+            editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
+
+    def _start_sidebar_connection(self, source: SessionInteraction) -> None:
+        if source.connection_task is not None and not source.connection_task.done():
+            return
+        source.connection_error = ""
+        source.connection_task = asyncio.create_task(self._connect_sidebar_source(source))
+
+        def settled(task: asyncio.Task[None]) -> None:
+            if task.cancelled():
+                return
+            if task.exception() is not None:
+                logger.error("sidebar connection cleanup failed", exc_info=task.exception())
+            # An evicted hidden source can have been held solely by this task.
+            # Recheck after it settles, when retained_for_local_work no longer
+            # counts the connection; otherwise that viewer never gets released.
+            if self.is_running and not source.retired and not self._is_current(source):
+                self.run_worker(self._release_sidebar_source(source))
+
+        source.connection_task.add_done_callback(settled)
+
+    async def _connect_sidebar_source(self, source: SessionInteraction) -> None:
+        """Reconcile a saved view without holding the navigation coordinator.
+
+        A source owns its socket task. Hidden completion must not select itself,
+        and a cancellation-resistant attach cannot hold the latest-wins lock.
+        Reuse prepared widgets and the final generation fence for canonical
+        replacement, rather than inventing a second replay/event reducer.
+        """
+        from local_operator.session.remote import RemoteSession
+        from local_operator.tui.session_navigation import PreparationInvalidated
+
+        prepared = None
+        retry = False
+        cancelled = False
+        try:
+            session = source.session
+            if not isinstance(session, RemoteSession):
+                return
+            await session._ensure_bound()
+            await session.ensure_display_current()
+            if source.retired or not self._is_current(source):
+                return
+            if self._sidebar_navigation.requested_id:
+                navigation = self._sidebar_navigation._task
+                if navigation is not None:
+                    await asyncio.shield(navigation)
+            if source.retired or not self._is_current(source):
+                return
+            generation = self._sidebar_navigation.generation
+            if source.scroll_revision != source.preview_scroll_revision:
+                self._capture_sidebar_scroll(source)
+            scroll_revision = source.scroll_revision
+            prepared = await self._prepare_sidebar_session(session.session_id, refresh=True)
+            if source.scroll_revision != scroll_revision:
+                retry = True
+                return
+            if (
+                source.retired
+                or not self._is_current(source)
+                or generation != self._sidebar_navigation.generation
+                or self._sidebar_navigation.requested_id
+            ):
+                return
+            source.display_only = False
+            source.command_frame_pending = True
+            ready = self._commit_sidebar_session(session.session_id, prepared, generation)
+            prepared = None
+            if ready is not None:
+                await ready
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except PreparationInvalidated:
+            source.display_only = True
+            retry = True
+        except Exception as error:
+            source.display_only = True
+            source.connection_error = str(error) or "Connection unavailable"
+        finally:
+            if prepared is not None:
+                await self._release_sidebar_preparation(prepared)
+            source.command_frame_pending = False
+            if not source.retired and not cancelled:
+                self._show_sidebar_connection(source)
+                if retry and self._is_current(source):
+                    asyncio.get_running_loop().call_soon(self._start_sidebar_connection, source)
 
     def on_session_sidebar_selected(self, message: SessionSidebar.Selected) -> None:
         message.stop()
         if self._session is not None and self._session.session_id == message.session_id:
+            if self._interaction.display_only:
+                self._start_sidebar_connection(self._interaction)
+                self._show_sidebar_connection(self._interaction)
             if self._sidebar_navigation.requested_id:
                 self._sidebar_navigation.cancel()
             # Selecting the attached session is a no-op navigation, so nothing
@@ -5637,6 +5829,8 @@ class OperatorApp(App[None]):
         # back (review round 2, F6). An update arrives only after adoption has
         # finished, so by then a spec with the dial off means someone turned
         # it off — the user, or `Session._on_fast_refused`.
+        if self._interaction.display_only:
+            return
         self._reconcile_fast_choice(state)
         self._apply_frontend_state(state)
 
@@ -6247,7 +6441,13 @@ class OperatorApp(App[None]):
         would tell the naming errand this conversation is already named and
         retire the one call that could give it a real one.
         """
-        if self._status is None or session.conversation_name or self._provisional_name:
+        if self._status is None or session.conversation_name:
+            return
+        if self._provisional_name:
+            # The source retains its provisional name across a park, while the
+            # shared footer was cleared for the other conversation. Restore the
+            # retained identity without running another naming operation.
+            self._status.update(conversation_name=self._provisional_name)
             return
         opener = getattr(session, "history_opener_text", None)
         if isinstance(opener, str):
@@ -7004,6 +7204,10 @@ class OperatorApp(App[None]):
             return
         upward = args[0] if args else True
         if upward is not None:
+            # Reader movement, for saved-position ownership, on the same
+            # provenance the paging demand uses: a passive layout correction
+            # must not discard an anchor still being restored.
+            self._interaction.scroll_revision += 1
             self._resume_fill_active = False
             self._resume_in_zone = bool(upward)
         if self._resume_pending_tail and view.scroll_y > 0 and view.is_near_bottom():
@@ -8009,6 +8213,7 @@ class OperatorApp(App[None]):
         # would report a number for history no longer on screen — until the new
         # session's first turn happened to end.
         self._status.update(
+            connection="",
             model_label=MODEL_PENDING,
             # Cleared with the label it describes: a name left standing beside
             # `MODEL_PENDING` would be the dead session's model.
@@ -8736,9 +8941,62 @@ class OperatorApp(App[None]):
                 if editor.argument_command in ("team", "teams", "agent", "agents"):
                     self._fill_name_argument_list(editor, editor.argument_command)
 
-    def composer_submission_blocked(self) -> bool:
-        """Whether Editor must retain rather than submit its current draft."""
-        return self._session_transition_pending or self._model_activation_pending is not None
+    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings"})
+
+    def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
+        """One authority boundary for Enter, shortcuts and async continuations.
+
+        A socket object can exist before its canonical sync. Never derive
+        permission from that object or queue a user mutation until it binds.
+        Local draft clearing, copy and exiting do not require owner authority.
+
+        Scoped to the SOURCE deliberately. ``_session_transition_pending`` is a
+        different state with its own better answers — ``/stop`` says "still
+        starting" there, and ``/reload`` owns the window — so folding it in
+        here would replace those with this method's generic refusal.
+        """
+        source = source or self._interaction
+        return (
+            self._is_current(source)
+            and not source.retired
+            and not source.display_only
+            and not source.command_frame_pending
+            and not self._sidebar_navigation.requested_id
+        )
+
+    def _allow_source_command(self, source: SessionInteraction | None = None) -> bool:
+        if self._source_commands_ready(source):
+            return True
+        if source is None or self._is_current(source):
+            hint = (
+                " Select this session again to retry." if self._interaction.connection_error else ""
+            )
+            self._notice(f"Commands unavailable until connected.{hint}", "warning")
+        return False
+
+    def composer_submission_refused(self) -> None:
+        if self._interaction.display_only or self._interaction.command_frame_pending:
+            hint = (
+                " Select this session again to retry." if self._interaction.connection_error else ""
+            )
+            self._notice(f"Send unavailable until connected.{hint}", "warning")
+
+    def composer_submission_blocked(
+        self, text: str | None = None, *, shell: bool | None = None
+    ) -> bool:
+        """Check the draft, or the immutable payload after Editor clears it."""
+        if self._session_transition_pending or self._model_activation_pending is not None:
+            return True
+        if self._source_commands_ready():
+            return False
+        try:
+            editor = self._editor()
+        except NoMatches:
+            return True
+        if (editor.shell_mode if shell is None else shell) or self._aside_is_open():
+            return True
+        entry = slash_command_for(editor.text if text is None else text)
+        return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
         """Build a RemoteSession and adopt it like any ordinary resume.
@@ -11944,7 +12202,7 @@ class OperatorApp(App[None]):
 
     def on_editor_submitted(self, message: EditorSubmitted) -> None:
         """Slash commands run synchronously BEFORE any prompt is sent."""
-        if self.composer_submission_blocked():
+        if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
             # already have been posted, so return the draft rather than routing
@@ -12727,6 +12985,9 @@ class OperatorApp(App[None]):
         loop would immediately submit the next — the user would have to press
         Ctrl+C once per remaining iteration to actually stop.
         """
+        if not self._allow_source_command():
+            self._abort_shell_command()
+            return
         if self._loop_running:
             self._loop_cancelled = True
         # A turn parked on an approval cannot see the abort signal until the
@@ -12833,6 +13094,8 @@ class OperatorApp(App[None]):
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
         if self._close_settings_view():
+            return
+        if not self._allow_source_command():
             return
         # A live `ask` picker takes Escape as "leave this question unanswered",
         # which is what its own footer advertises (`esc skip`) and what its
@@ -14839,6 +15102,7 @@ class OperatorApp(App[None]):
             len(self.screen_stack) != 1
             or not self.app_focus
             or self._session_transition_pending
+            or self._interaction.display_only
             or self._sidebar_frame_pending
         ):
             return False
@@ -16135,6 +16399,15 @@ class OperatorApp(App[None]):
                 pass
             except WorkerFailed:
                 logger.debug("sidebar prewarm failed during shutdown", exc_info=True)
+        connections = [
+            source.connection_task
+            for source in self._interactions.values()
+            if source.connection_task is not None and not source.connection_task.done()
+        ]
+        for connection in connections:
+            connection.cancel()
+        if connections:
+            await asyncio.gather(*connections, return_exceptions=True)
         await self._sidebar_navigation.close()
         await self._sidebar_drafts.close()
         if self._sidebar_timer is not None:
@@ -20340,14 +20613,8 @@ class OperatorApp(App[None]):
         parts = text.split(maxsplit=1)
         entry = slash_command_for(text)
         command = f"/{entry.name}" if entry is not None else parts[0].lower()
-        if self._sidebar_navigation.requested_id and command not in (
-            "/sidebar",
-            "/help",
-            "/settings",
-        ):
-            self._system_notice(
-                "Wait for the conversation to open before sending a command", "warning"
-            )
+        if not self._source_commands_ready() and command not in self._SAVED_LOCAL_COMMANDS:
+            self._allow_source_command()
             return
         arg = parts[1].strip() if len(parts) > 1 else ""
         # The argument of a ``consumes_prompt`` command with its collapsed
@@ -21456,6 +21723,8 @@ class OperatorApp(App[None]):
         on screen says the next launch comes back on the old one — so the command
         that fixes that was reachable only by already knowing it existed.
         """
+        if arg and not self._allow_source_command():
+            return
         session = self._session
         if not arg:
             # The persist-hint notice is NOT printed here: reopening the list
@@ -21665,6 +21934,11 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
     ) -> None:
+        # Resolution can yield across a view switch. Recheck the captured
+        # session, then the shared readiness boundary, immediately before any
+        # setter or cold-bind task can be created.
+        if session is not self._session or not self._allow_source_command():
+            return
         old_label = session.model_label
         # The DESTINATION is derived from the spec this command resolved, never
         # re-read from ``session.model_label`` after ``set_model``. On a local
@@ -22260,6 +22534,8 @@ class OperatorApp(App[None]):
         spec (the embedders and pilot fakes this module degrades for) would
         otherwise get a line announcing a level nothing is running.
         """
+        if not self._allow_source_command():
+            return False
         session = self._session
         spec = _model_spec(session)
         if session is None or spec is None or not hasattr(session, "set_model"):
@@ -22293,6 +22569,8 @@ class OperatorApp(App[None]):
         REPLACED under a running app, and READ BACK rather than trusted so a
         receipt is never printed for a state the session is not carrying.
         """
+        if not self._allow_source_command():
+            return False
         session = self._session
         spec = _model_spec(session)
         if session is None or spec is None or not hasattr(session, "set_model"):
@@ -23629,6 +23907,8 @@ class OperatorApp(App[None]):
         useful response is to begin the login, not to refuse and make them retype
         the provider name into a different command.
         """
+        if not self._allow_source_command():
+            return
         notice = self._notice
         if not row.connected:
             notice(f"{row.provider} needs a login first — starting it now", "warning")
@@ -25653,6 +25933,9 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        if not self._source_commands_ready():
+            panel.set_notice("Connect before adding this aside to the conversation")
+            return
         pairs = panel.fork_messages()
         if not pairs:
             panel.set_notice("ask something first — there is nothing to fork")
@@ -25681,6 +25964,8 @@ class OperatorApp(App[None]):
         user asked to keep is what they are left looking at, rather than a
         popup over it.
         """
+        if session is not self._session or not self._source_commands_ready():
+            return
         messages: list[Message] = []
         for question, answer in pairs:
             messages.append(Message.user(question))
@@ -25688,7 +25973,10 @@ class OperatorApp(App[None]):
         try:
             await session.adopt_aside(messages)
         except Exception as error:  # noqa: BLE001 — surfaced, never swallowed
-            self._system_notice(f"could not fork the aside: {error}", "warning")
+            if session is self._session:
+                self._system_notice(f"could not fork the aside: {error}", "warning")
+            return
+        if session is not self._session:
             return
         self._close_aside()
         for question, answer in pairs:

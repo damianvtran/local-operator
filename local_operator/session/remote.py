@@ -521,6 +521,7 @@ class RemoteSession:
         self._history: list[Any] = []
         self._live_history: dict[str, Any] = {}
         self._display_window_requested = False
+        self.saved_preview_partial = False
         self._owner_record: SessionRecord | None = None
         self._display_refresh_lock = asyncio.Lock()
         self._display_refresh_task: asyncio.Task[None] | None = None
@@ -781,6 +782,62 @@ class RemoteSession:
             self._discard_rejected_client()
             raise
         self._finish_sync()
+        return self
+
+    @classmethod
+    async def saved_preview(
+        cls,
+        session_id: str,
+        *,
+        config_dir: Path,
+        cwd: str,
+        takeover_factory: Callable[[], Any],
+    ) -> "RemoteSession":
+        """Expose saved rows without waiting on a runtime or loading its journal.
+
+        This is a display facade, not canonical input readiness. The sidebar
+        keeps mutation gates closed until the usual owner sync finishes. Keep
+        config/auth resolution off this path too: even metadata can block on an
+        external provider. The authenticated snapshot supplies it on binding.
+        """
+        from local_operator.session.frontend_state import FrontendModelSpec
+        from local_operator.session.saved_preview import (
+            SavedPreview,
+            read_saved_preview,
+        )
+
+        try:
+            preview = await asyncio.to_thread(
+                read_saved_preview, config_dir / "sessions" / session_id
+            )
+        except FileNotFoundError:
+            from local_operator.mobile.attach_client import find_owner_record
+
+            # A speculative live owner can deliberately defer creating its
+            # journal until its first write. Only an actual discoverable owner
+            # proves that empty state; a stale catalog row proves nothing.
+            record, owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+            if record is None or owner is None:
+                raise FileNotFoundError("This conversation is no longer available") from None
+            preview = SavedPreview([], False, record.cwd or cwd)
+        self = cls(config_dir=config_dir, session_id=session_id, takeover_factory=takeover_factory)
+        self._cwd = preview.cwd or cwd
+        self.saved_preview_partial = preview.partial
+        self._can_go_cold = True
+        self._display_window_requested = True
+        self._bind_history(preview.messages, None, drop_history_duplicates=True)
+        model = FrontendModelSpec(provider="", model_id="")
+        self._install_frontend(
+            FrontendSessionState(
+                session_id=session_id,
+                epoch=f"cold-{session_id}",
+                cwd=self._cwd,
+                selected_model=model,
+                effective_model=model,
+            )
+        )
+        self._finish_sync()
+        self._owner_ready.set()
         return self
 
     @classmethod
