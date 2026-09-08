@@ -48,29 +48,42 @@ def tunnel_path(value: dict[str, Any]) -> str:
     return "/" + quote(identifier, safe="")
 
 
-def pinned_harness_ports(value: dict[str, Any]) -> dict[str, int] | None:
+def pinned_harness_ports(value: dict[str, Any]) -> tuple[dict[str, int] | None, str]:
     """The harness ports the operator last approved from this device.
 
     `lop tunnel create/connect/configure` persist the whole cloud record
     locally, so `record.harnesses` is the device's own copy of the port map an
-    operator ran a local command to accept. Returns None — meaning "no usable
-    pin" — for a record written before the field existed or hand-edited into a
-    shape we cannot trust, so callers can fall back rather than strand a device
-    whose config predates this check.
+    operator ran a local command to accept. Returns `(None, reason)` — meaning
+    "no usable pin" — for a record written before the field existed or
+    hand-edited into a shape we cannot trust, so callers can fall back rather
+    than strand a device whose config predates this check.
+
+    One unusable entry disables the pin for the whole record, so the reason
+    names that entry: without it an operator reading the fallback warning knows
+    the pin is off but not which line of config.json to repair.
     """
     record = value.get("record")
     harnesses = record.get("harnesses") if isinstance(record, dict) else None
     if not isinstance(harnesses, list) or not harnesses:
-        return None
+        return None, "this tunnel configuration predates it"
     pinned: dict[str, int] = {}
-    for harness in harnesses:
+    for position, harness in enumerate(harnesses, start=1):
         if not isinstance(harness, dict) or not isinstance(harness.get("id"), str):
-            return None
+            return None, f"stored harness entry {position} has no usable id"
+        if harness["id"] in pinned:
+            # The same silent last-wins ambiguity the JWKS loader refuses on a
+            # repeated kid (gateway.OriginVerifier): two entries claiming one
+            # id leave the approved port decided by serialization order rather
+            # than by the operator, and this file is hand-editable. Fall back
+            # and name it instead of picking a winner. Falling back rather than
+            # raising keeps the untrustworthy-shape contract above: a bad local
+            # record must never strand a device that the cloud still serves.
+            return None, f"stored harness {harness['id']} is listed twice"
         try:
             pinned[harness["id"]] = config.port(harness.get("port"))
         except ValueError:
-            return None
-    return pinned
+            return None, f"stored harness {harness['id']} has an unusable port"
+    return pinned, ""
 
 
 def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> None:
@@ -91,11 +104,11 @@ def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> 
     those commands (they are what write `record`); re-pinning from the polled
     record here would restore exactly the silent repointing this prevents.
     """
-    pinned = pinned_harness_ports(value)
+    pinned, unpinnable = pinned_harness_ports(value)
     if pinned is None:
         print(
-            "Warning: this tunnel configuration predates harness port pinning, so console "
-            "port changes are not verified locally. Run lop tunnel connect to pin them.",
+            f"Warning: harness port pinning is inactive ({unpinnable}), so console port "
+            "changes are not verified locally. Run lop tunnel connect to pin them.",
             flush=True,
         )
         return
@@ -104,7 +117,17 @@ def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> 
         # so its port cannot carry a credential and is not worth an outage.
         if not harness["enabled"]:
             continue
-        if pinned.get(harness["id"]) != harness["port"]:
+        approved = pinned.get(harness["id"])
+        if approved is None:
+            # A harness the console ADDED since the last local command. The
+            # remedy is the same, but reporting it as a port change describes
+            # an event that did not happen and sends the operator hunting for
+            # a port they never set.
+            raise ValueError(
+                f"Harness {harness['id']} is not approved on this device. "
+                "Run lop tunnel connect again."
+            )
+        if approved != harness["port"]:
             raise ValueError(
                 f"Harness port for {harness['id']} changed in the console. "
                 "Run lop tunnel connect again."
@@ -316,9 +339,25 @@ async def run() -> int:
 def main() -> int:
     try:
         return asyncio.run(run())
-    except (ValueError, OSError, httpx.HTTPError):
+    except ValueError as failure:
         # Service logs contain operational state, never upstream bodies,
-        # request URLs, or a traceback containing credential arguments.
+        # request URLs, or a traceback containing credential arguments, and
+        # printing a ValueError's text keeps that property: every ValueError
+        # this package raises is a fixed literal carrying at most a harness id,
+        # a tunnel status, or an HTTP status code (api.py deliberately refuses
+        # to echo provider bodies). The only ValueErrors run() does not author
+        # are json.JSONDecodeError on a corrupt config.json or /connect body,
+        # whose message is a byte offset and never the document, and int() on a
+        # hand-edited credential_id, which is a local row id and not a secret.
+        # This is the only place the remedy is written down: suppressing it is
+        # what left the harness-port refusal telling the operator to check a
+        # Radient login that is fine, with nothing naming lop tunnel connect.
+        print(f"Tunnel connector stopped: {failure}", flush=True)
+        return 1
+    except (OSError, httpx.HTTPError):
+        # These carry text this module did not author: httpx echoes the full
+        # request URL (query string included) and OSError echoes filesystem
+        # paths, so only the generic line is safe here.
         print(
             "Tunnel connector stopped; check lop tunnel status and your Radient login.", flush=True
         )

@@ -789,6 +789,28 @@ def _stored(connection: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     return value
 
 
+def _pinned_service(tmp_path, monkeypatch, connection, console_port):
+    """Config and stubs for a service whose /connect serves `console_port`."""
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    stored = _stored(connection, gateway_port=free)
+    stored["record"]["harnesses"][0]["port"] = 4098
+    config.save(stored)
+    served = copy.deepcopy(connection)
+    served["gateway_port"] = served["tunnel"]["gateway_port"] = free
+    served["tunnel"]["harnesses"][0]["port"] = console_port
+    api = AsyncMock()
+    api.request.return_value = served
+    monkeypatch.setattr(service, "RadientTunnels", lambda *args: api)
+    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    monkeypatch.setattr(service, "load_password", lambda: "private-local-password")
+    return service
+
+
 def test_harness_port_change_in_the_console_alone_cannot_repoint_the_tunnel(connection):
     """A3: the console may replace harness ports wholesale, and the gateway
     attaches this device's relay credential to whatever answers on them. Only
@@ -821,25 +843,9 @@ async def test_service_refuses_to_publish_a_connector_on_an_unpinned_harness_por
     cloudflared launches. 4098 is the matching (pinned) port and must still
     start; 4096 is the repointed one and must not.
     """
-    from local_operator.tunnels import service
-
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    with closing(socket.socket()) as probe:
-        probe.bind(("127.0.0.1", 0))
-        free = probe.getsockname()[1]
-    stored = _stored(connection, gateway_port=free)
-    stored["record"]["harnesses"][0]["port"] = 4098
-    config.save(stored)
-    served = copy.deepcopy(connection)
-    served["gateway_port"] = served["tunnel"]["gateway_port"] = free
-    served["tunnel"]["harnesses"][0]["port"] = console_port
-    api = AsyncMock()
-    api.request.return_value = served
-    monkeypatch.setattr(service, "RadientTunnels", lambda *args: api)
-    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    service = _pinned_service(tmp_path, monkeypatch, connection, console_port)
     launched = AsyncMock(side_effect=AssertionError("connector launched on an unpinned port"))
     monkeypatch.setattr(service.asyncio, "create_subprocess_exec", launched)
-    monkeypatch.setattr(service, "load_password", lambda: "private-local-password")
     if console_port == 4098:
         # The matching case must get all the way to launching the connector,
         # which is where this stub deliberately stops it.
@@ -849,6 +855,55 @@ async def test_service_refuses_to_publish_a_connector_on_an_unpinned_harness_por
     with pytest.raises(ValueError, match="Run lop tunnel connect again"):
         await service.run()
     launched.assert_not_called()
+
+
+def test_the_refusal_reaches_the_operator_through_the_supervised_entry_point(
+    tmp_path, monkeypatch, connection, capsys
+):
+    """M1: run() raises the right words, but launchd executes main(), and
+    StandardOutPath/StandardErrorPath are service.log — so whatever main()
+    prints is the entirety of what the operator can read.
+
+    Asserting on the exception object proves nothing here: the previous round
+    did exactly that while main() swallowed the message and sent the operator
+    to a Radient login that was fine. This drives the real entry point and
+    reads the bytes, and it is the observable docs/tunnels.md promises.
+    """
+    service = _pinned_service(tmp_path, monkeypatch, connection, 4096)
+    launched = AsyncMock(side_effect=AssertionError("connector launched on an unpinned port"))
+    monkeypatch.setattr(service.asyncio, "create_subprocess_exec", launched)
+
+    assert service.main() == 1
+
+    logged = capsys.readouterr().out
+    assert "Harness port for local-operator changed in the console." in logged
+    assert "Run lop tunnel connect again." in logged
+    # The old generic line sent the operator to two places that are both fine.
+    assert "your Radient login" not in logged
+    launched.assert_not_called()
+
+
+def test_main_still_withholds_error_text_it_did_not_author(tmp_path, monkeypatch, capsys):
+    """The suppression exists so upstream bodies, request URLs and filesystem
+    paths stay out of a log the operator may paste into a support thread.
+    Surfacing this package's own refusals must not widen that."""
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    leaky = httpx.HTTPStatusError(
+        "Server error '500' for url 'https://api.radienthq.com/v1/tunnels/t-1?k=SECRET'",
+        request=httpx.Request("POST", "https://api.radienthq.com/v1/tunnels/t-1?k=SECRET"),
+        response=httpx.Response(500),
+    )
+
+    async def fail():
+        raise leaky
+
+    monkeypatch.setattr(service, "run", fail)
+    assert service.main() == 1
+    logged = capsys.readouterr().out
+    assert "SECRET" not in logged
+    assert "check lop tunnel status and your Radient login" in logged
 
 
 def test_matching_harness_ports_still_connect_after_pinning(connection):
@@ -872,15 +927,65 @@ def test_matching_harness_ports_still_connect_after_pinning(connection):
         service.enforce_harness_ports(added, stored)
 
 
+def test_a_console_added_harness_is_refused_as_unapproved_not_as_a_port_change(connection):
+    """m2: refusing an added harness is right, but calling it a port change
+    describes an event that never happened and sends the operator hunting for
+    a port they never set. Both refusals name the same remedy."""
+    from local_operator.tunnels import service
+
+    stored = _stored(connection)
+    added = copy.deepcopy(connection)
+    added["tunnel"]["harnesses"].append(
+        {"id": "opencode", "enabled": True, "port": 4096, "hostname": "abc123-oc.radienthq.com"}
+    )
+    with pytest.raises(ValueError) as failure:
+        service.enforce_harness_ports(added, stored)
+    assert "opencode is not approved on this device" in str(failure.value)
+    assert "changed in the console" not in str(failure.value)
+    assert "lop tunnel connect" in str(failure.value)
+
+
+def test_a_harness_listed_twice_in_the_stored_record_disables_the_pin(connection, capsys):
+    """m1: two entries claiming one id leave the approved port decided by
+    serialization order rather than by the operator, exactly the last-wins
+    ambiguity the JWKS loader refuses on a repeated kid. Falling back keeps a
+    hand-edited local file from stranding a device the cloud still serves."""
+    from local_operator.tunnels import service
+
+    stored = _stored(connection)
+    stored["record"]["harnesses"] = [
+        {"id": "local-operator", "enabled": True, "port": 4096, "hostname": HOST},
+        {"id": "local-operator", "enabled": True, "port": 4098, "hostname": HOST},
+    ]
+    assert service.pinned_harness_ports(stored)[0] is None
+    # Without the guard the second entry wins and 4098 is silently approved.
+    served = copy.deepcopy(connection)
+    served["tunnel"]["harnesses"][0]["port"] = 4098
+    service.enforce_harness_ports(served, stored)
+    assert "listed twice" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
-    "record",
-    [None, {}, {"harnesses": []}, {"harnesses": "not-a-list"}, {"harnesses": [{"id": "x"}]}],
+    "record,names",
+    [
+        (None, "predates"),
+        ({}, "predates"),
+        ({"harnesses": []}, "predates"),
+        ({"harnesses": "not-a-list"}, "predates"),
+        ({"harnesses": [{"id": "x"}]}, "harness x has an unusable port"),
+        ({"harnesses": [{"port": 4098}]}, "entry 1 has no usable id"),
+    ],
 )
 def test_absent_local_harness_record_warns_instead_of_stranding_the_device(
-    connection, capsys, record
+    connection, capsys, record, names
 ):
     """Upgrade safety: hard-failing on config written before this field existed
-    would convert a security fix into a fleet outage nobody can fix remotely."""
+    would convert a security fix into a fleet outage nobody can fix remotely.
+
+    n1: one bad entry disables the pin for the whole record, so the warning
+    names it — otherwise the operator knows the pin is off but not which line
+    of config.json to repair.
+    """
     from local_operator.tunnels import service
 
     stored = _stored(connection)
@@ -891,7 +996,9 @@ def test_absent_local_harness_record_warns_instead_of_stranding_the_device(
     moved = copy.deepcopy(connection)
     moved["tunnel"]["harnesses"][0]["port"] = 4096
     service.enforce_harness_ports(moved, stored)
-    assert "harness port pinning" in capsys.readouterr().out
+    warning = capsys.readouterr().out
+    assert "harness port pinning is inactive" in warning
+    assert names in warning
 
 
 @pytest.mark.asyncio
