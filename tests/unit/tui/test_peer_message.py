@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 from rich.cells import cell_len
+from rich.text import Text
 
 from local_operator.harness.types import PeerMessageDeliveredEvent
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
@@ -296,6 +297,12 @@ class TestPeerCard:
         assert block._row_count == 1
         assert len(block._build_row(100).plain.splitlines()) == 1
         assert block.spans_multiple_rows() is False
+        # `settled_rows()` feeds `project_settled_rows`, which decides how much
+        # history fits; a value that disagrees with the painted frame spends
+        # another block's budget. It is finalized by `__init__`, so it reports
+        # rather than returning the not-yet-settled 0.
+        assert block.is_finalized() is True
+        assert block.settled_rows() == block._row_count == 1
 
     def test_the_collapsed_row_names_the_sender_before_the_snippet(self) -> None:
         """Identity leads: the row builder truncates the composed summary from
@@ -344,7 +351,7 @@ class TestPeerCard:
         assert block.can_expand() is True
         assert block.toggle_expanded() is True
         rendered = block._build_content(100).plain
-        assert 'peer message from "lo-release-window"' in rendered
+        assert '"lo-release-window" · pid 48213' in rendered
         assert "pid 48213" in rendered
         assert "anthropic/claude-opus-5" in rendered
         # Every paragraph of the body, not just the snippet's first sentence.
@@ -352,6 +359,11 @@ class TestPeerCard:
             first_words = " ".join(paragraph.split()[:5])
             assert first_words in " ".join(rendered.split()), first_words
         assert block.spans_multiple_rows() is True
+        # The same accounting control as collapsed, on the branch where the
+        # count actually varies: expanded, `settled_rows()` must still be the
+        # rows the card painted.
+        assert block.settled_rows() == block._row_count
+        assert block._row_count == len(rendered.splitlines())
 
     def test_activate_toggles_like_the_rest_of_the_ledger(self) -> None:
         block = PeerMessageBlock("note", {"pid": 3, "conversation_name": "peer"})
@@ -443,18 +455,113 @@ class TestPeerCardHardening:
         """A newline split the label into rows the block never counted — its
         height is PINNED to that count, so the extra row painted outside the
         reserved space — and an escape sequence would re-ink the transcript
-        from inside a label."""
-        block = PeerMessageBlock(
-            "body",
-            {"pid": 7, "conversation_name": "line1\nline2\nline3", "model_label": "m\x1b[31m"},
-        )
+        from inside a label.
+
+        **`pid` is attacked here too, and it is the reason this test was
+        extended.** The original version passed a clean `pid: 7` and put the
+        payload only in the sibling fields — so the one field that skipped
+        `_sanitize_sender_field` was the one field the hostile-input guard did
+        not touch. Every advisory field the card renders is hostile in this
+        test now; a new one must be added here as well as to the ladder.
+        """
+        hostile_name: dict[str, object] = {
+            "pid": 7,
+            "conversation_name": "line1\nline2\nline3",
+            "model_label": "m\x1b[31m",
+        }
+        # Both paths, for every field: `pid` is rendered on the collapsed row
+        # AND on the expanded identity line, so a guard on one is half a guard.
+        # A str pid is the realistic hostile shape — nothing on the wire ever
+        # coerces it to int (see `_sender_pid`).
+        hostile_pid: dict[str, object] = {
+            "pid": "42\nROW-A\nROW-B",
+            "conversation_name": "",
+            "model_label": "",
+        }
+        hostile_pid_escape: dict[str, object] = {"pid": "1\x1b[31mRED", "conversation_name": ""}
+        for label, sender in (
+            ("name", hostile_name),
+            ("pid-newlines", hostile_pid),
+            ("pid-escape", hostile_pid_escape),
+        ):
+            block = PeerMessageBlock("body", sender)
+            row = block._build_row(100).plain
+            assert "\n" not in row, label
+            assert "\x1b" not in row, label
+            # The pinned height and every count derived from it must agree
+            # with the single row actually painted. A newline in an unbounded
+            # field made `_row_count`/`settled_rows()` report 3 against a
+            # CSS-pinned 1-row widget.
+            assert block._row_count == 1, label
+            assert block.settled_rows() == 1, label
+            assert block.spans_multiple_rows() is False, label
+            # The identity line in the EXPANSION is bounded the same way.
+            assert "\x1b" not in block._header(100), label
+            assert "\n" not in block._header(100), label
+
+    def test_a_hostile_pid_cannot_smuggle_chrome_into_a_copy(self) -> None:
+        """The other half of the unsanitized-pid defect: `copy_row_is_chrome`.
+
+        With the collapsed card reporting `_chrome_rows = 1`, newlines injected
+        through `pid` pushed rows 1 and 2 of the app's own label past the chrome
+        boundary and into the clipboard — `'W-A\\nW-B — ping'`, which is neither
+        chrome the user wanted nor the peer's message. The card is entirely
+        chrome while collapsed, so a drag over it must yield nothing at all.
+        """
+        block = PeerMessageBlock("ping", {"pid": "42\nROW-A\nROW-B"})
+        rendered: Text = block._build_content(100)
+        assert len(rendered.plain.splitlines()) == 1
+        # Collapsed, EVERY painted row is the app's own label, so a drag over
+        # the card must find no body rows to hand to the clipboard.
+        assert block._chrome_rows == 1
+        assert all(block.copy_row_is_chrome(index) for index in range(block._row_count))
+        # And the pid still identifies the sender rather than being dropped:
+        # a rejected pid would erase an address the reader could act on.
+        assert "42" in block._build_row(100).plain
+
+    def test_a_control_sequence_in_the_message_body_never_reaches_the_row(self) -> None:
+        """The peer's BODY is peer-controlled text on a `height: 1` pinned row.
+
+        `ESC[2K` + `ESC[1A` is erase-line plus cursor-up — the pair `ansi.py`
+        names as the highest-value forgery target the app has, and the exact
+        way a row escapes the box the CSS pins it to and repaints the receipts
+        above it. Rich also mis-measures an escape, so the width arithmetic
+        the one-row guarantee rests on is computed against a wrong cell count.
+
+        Every sibling on this spine already strips: `ToolCard` given the same
+        payload paints no escape. Two summaries on one ledger treating one
+        trust boundary two opposite ways is the drift this pins shut.
+        """
+        hostile = "benign note\x1b[2K\x1b[1A\x1b[2KFORGED: gates are green\x1b[0m"
+        block = PeerMessageBlock(hostile, {"pid": 7, "conversation_name": "attacker"})
         row = block._build_row(100).plain
-        assert "\n" not in row
         assert "\x1b" not in row
+        assert "[2K" not in row  # the whole sequence goes, not just its ESC
+        assert "[1A" not in row
         assert block._row_count == 1
-        # The identity line in the EXPANSION is bounded the same way.
-        assert "\x1b" not in block._header(100)
-        assert "\n" not in block._header(100)
+        # A Cf character is not a control sequence and survives the strip, so
+        # it is dropped separately — a bidi override in the body would reorder
+        # the glyphs around it, including the sender name beside it.
+        import unicodedata
+
+        bidi = PeerMessageBlock("a\u202eb\u200dc", {"pid": 7, "conversation_name": "p"})
+        assert not [c for c in bidi._build_row(100).plain if unicodedata.category(c) == "Cf"]
+
+    def test_the_body_and_copy_stay_byte_verbatim_despite_the_snippet_strip(self) -> None:
+        """The strip is the SNIPPET's, not the body's.
+
+        `text()` feeds `/copy`, and the expansion is what the reader opened the
+        card to read: both must return exactly what the peer sent, or the block
+        stops being a faithful record of another session's words. This is the
+        constraint that makes the fix snippet-only rather than a body sanitize.
+        """
+        body = "first para with \x1b[31mescape\x1b[0m inside\n\nsecond para — kept"
+        block = PeerMessageBlock(body, {"pid": 7, "conversation_name": "peer-a"})
+        assert block.text() == body  # byte-identical, escapes and all
+        assert "\x1b" not in block._build_row(100).plain
+        block.toggle_expanded()
+        rendered = block._build_content(100).plain
+        assert "first para" in rendered and "second para" in rendered
 
     def test_a_giant_sender_name_cannot_own_the_viewport(self) -> None:
         """Sanitization fixed the SHAPE of an advisory field; this bounds its
@@ -512,7 +619,7 @@ class TestPeerCardHardening:
             assert not [c for c in row if unicodedata.category(c) == "Cf"], label
             assert not [c for c in header if unicodedata.category(c) == "Cf"], label
             # The addressing field survives intact and in order.
-            assert "(pid 48213)" in header, label
+            assert "pid 48213" in header, label
 
     def test_a_wider_pane_never_makes_the_identity_line_taller(self) -> None:
         """Wrapping must be monotonic in the right direction. The model label
@@ -682,3 +789,123 @@ async def test_a_narrow_pane_keeps_the_one_row_guarantee() -> None:
         await pilot.pause()
         assert block.size.height == 1
         assert block._row_count == 1
+
+
+class TestPeerCardSeamAndExpansionHeader:
+    """The two design-round findings: the seam glyph and the identity line.
+
+    Both are about a card whose own content competes with its structure —
+    the kind of defect that only shows up against real traffic, which is why
+    the frames that found them were seeded with actual peer broadcasts.
+    """
+
+    def test_the_seam_is_not_a_glyph_the_prose_also_uses(self) -> None:
+        """Agent-to-agent prose here is full of em-dashes, so an em-dash seam
+        put the same glyph in a structural and a prose role on one line with
+        nothing to tell them apart. `·` is what the neighbouring `send` row
+        already reserves for structure."""
+        body = "my PR #744 merged at 9f2ac13 — Release: patch, retainable cost estimate"
+        row = PeerMessageBlock(body, {"pid": 3, "conversation_name": "lo-usage-panel"})
+        rendered = row._build_row(120).plain
+        assert '"lo-usage-panel" · my PR #744' in rendered
+        # Exactly one structural separator, and the prose em-dash survives
+        # untouched — the point is that the two are now distinguishable.
+        head, seam, tail = rendered.partition(" · ")
+        assert seam and "·" not in tail
+        assert "—" in tail
+
+    def test_the_expansion_header_leads_with_what_the_expansion_adds(self) -> None:
+        """The identity line used to open `peer message from "<name>"`, which
+        restated the summary row's own opening; the pid and model — the only
+        facts the expansion actually adds — were buried mid-sentence."""
+        header = PeerMessageBlock(LONG_BODY, LONG_SENDER)._header(96)
+        assert header == '"lo-release-window" · pid 48213 · anthropic/claude-opus-5'
+        assert "peer message from" not in header
+
+    def test_the_expansion_header_is_a_step_brighter_than_the_summary(self) -> None:
+        """Hierarchy is headline -> header -> body. Painted at the summary's
+        own `dim` the identity line read as a dimmer continuation of the
+        headline, leaving the blank row to do the structural work alone."""
+        from local_operator.tui import theme as theme_mod
+
+        block = PeerMessageBlock(LONG_BODY, LONG_SENDER)
+        block.toggle_expanded()
+        content = block._build_content(96)
+        inks = {}
+        for span in content.spans:
+            row = content.plain[: span.start].count("\n")
+            colour = getattr(span.style, "color", None)
+            if colour is not None and row not in inks:
+                inks[row] = colour.triplet.hex if colour.triplet else str(colour)
+        summary, identity, body = inks[0], inks[1], inks[3]
+        assert summary == theme_mod.semantic_color("dim")
+        assert identity == theme_mod.semantic_color("muted")
+        assert body == theme_mod.semantic_color("fg")
+        assert len({summary, identity, body}) == 3
+
+    def test_an_absurdly_narrow_pane_still_paints_one_honest_row(self) -> None:
+        """What a sub-six-cell card looks like — the question the review asked.
+
+        Not the `name_budget < 2` branch: `width` is clamped to >= 10 before
+        the budget is computed, so that branch is unreachable from any pane
+        size and is documented in the source as a structural guard rather than
+        a width case. What actually happens is the normal row, truncated to a
+        real `…`, still exactly one row, still carrying the ledger's left edge.
+        """
+        from local_operator.tui.glyphs import tool_icon
+
+        block = PeerMessageBlock(LONG_BODY, LONG_SENDER)
+        for width in (1, 3, 5, 6, 8):
+            row = block._build_row(width).plain
+            assert len(row.splitlines()) == 1, width
+            assert row.startswith(tool_icon("peer")), (width, row)
+            # Honest about what it dropped rather than silently cutting.
+            assert row.endswith("…"), (width, row)
+        # And it comes back: the degradation is a function of width, not a
+        # latched state.
+        assert "lo-release-window" in block._build_row(100).plain
+
+    def test_a_narrow_expansion_wraps_at_the_same_floor_the_fit_test_uses(self) -> None:
+        """`MIN_BODY` floored `_header`'s fit test but not `_build_content`'s
+        wrap width, so a pane a few cells wide turned a two-line note into 40
+        rows of one-character columns while the collapsed row stayed correctly
+        clamped at 1. Both halves of the arithmetic now share one floor."""
+        block = PeerMessageBlock("hello there peer", LONG_SENDER)
+        block.toggle_expanded()
+        counts = [len(block._build_content(w).plain.splitlines()) for w in (1, 3, 5, 8, 12)]
+        assert max(counts) <= 12, counts
+        # Monotonic in the right direction: narrower never yields fewer rows,
+        # and no width explodes relative to its neighbour.
+        assert counts == sorted(counts, reverse=True), counts
+
+    def test_an_empty_body_expands_to_its_identity_and_no_whitespace(self) -> None:
+        """The expand affordance must not promise detail and deliver blanks.
+
+        `_body_rows` always yields at least one entry, so a peer that sent
+        nothing rendered a blank separator followed by a blank indented line.
+        The identity line still earns the expansion — pid and model are exactly
+        what the collapsed row has no budget for.
+        """
+        for body in ("", "   ", "\n\n"):
+            block = PeerMessageBlock(body, {"pid": 9, "conversation_name": "lo-empty"})
+            block.toggle_expanded()
+            rows = block._build_content(96).plain.splitlines()
+            assert rows[-1].strip(), (body, rows)
+            assert "pid 9" in rows[-1]
+            assert block._row_count == len(rows)
+            # No dangling seam on the collapsed row either, when there is no
+            # snippet to put after it.
+            assert not block._build_row(96).plain.rstrip().endswith("·"), body
+
+    def test_an_interior_paragraph_break_is_not_trimmed_with_the_trailing_ones(self) -> None:
+        """The blank row BETWEEN paragraphs is the break the peer typed.
+
+        Trimming every empty row (rather than only trailing ones) would reflow
+        their message into a single block — a quiet corruption of the one thing
+        the expansion exists to show faithfully.
+        """
+        block = PeerMessageBlock("para one here.\n\npara two here.", {"pid": 9})
+        block.toggle_expanded()
+        rows = block._build_content(96).plain.splitlines()
+        body = rows[block._chrome_rows :]
+        assert [row.strip() for row in body] == ["para one here.", "", "para two here."]
