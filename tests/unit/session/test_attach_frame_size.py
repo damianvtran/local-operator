@@ -1983,6 +1983,37 @@ def test_read_label_refuses_a_name_that_is_not_a_derived_label() -> None:
         store.read_label("not_a_property_at_all")
 
 
+def test_read_label_refuses_a_label_that_is_not_a_str() -> None:
+    """An allow-listed name whose value is not a `str` must FAIL, not stringify.
+
+    Review round 1 (MINOR): the boundary used to read
+    ``return str(getattr(...))``, so a label property whose return type drifted
+    — a tuple-shaped label rendering ``(a, b)`` — passed silently. The
+    coercion could never share state (``str()`` always builds fresh); what it
+    hid was the CONTRACT: a non-str is exactly the shape the allow-list's
+    closure test exists to catch, and the boundary is where a drift it missed
+    has to stop. Now a `TypeError`, the label sibling of ``read_field``'s
+    ``KeyError`` on a non-allowlisted name.
+
+    Reached by swapping the store's state for one whose label is not a str,
+    which exercises the boundary directly without mutating the pydantic model
+    class behind it.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store._state = SimpleNamespace(model_label=("openai", "gpt-4o"))  # type: ignore[assignment]
+
+    with pytest.raises(TypeError):
+        store.read_label("model_label")
+
+    # The boundary still serves a genuine str from a genuine state.
+    store._state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        selected_model=FrontendModelSpec(provider="openai", model_id="gpt-4o"),
+    )
+    assert store.read_label("model_label") == "openai/gpt-4o"
+
+
 def _spec_state() -> FrontendSessionState:
     """A state carrying both specs, a roster and a usage row."""
     return FrontendSessionState(
