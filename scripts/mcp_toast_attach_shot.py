@@ -32,6 +32,12 @@ trees still agree where they should.
 
 Deterministic: the outcome is fixed, the toast's own dismissal timer is far
 longer than the capture, and nothing here animates.
+
+Every wait here POLLS for the condition rather than spending a fixed number of
+ticks. A fixed budget raced the boot announce and tripped this script's own
+assertion in 2 of 11 runs on an idle machine (UX round 1, U6) — the app is fine,
+but the next person re-capturing evidence reads a script flake as a product
+regression. AGENTS.md's timing section: wait on the event, never on the clock.
 """
 
 from __future__ import annotations
@@ -83,6 +89,20 @@ class _IdentifiedMcpSession(McpSession):
         return self._session_id
 
 
+async def _until(pilot, predicate) -> bool:  # type: ignore[no-untyped-def]
+    """Pause until ``predicate()`` holds, or the budget runs out.
+
+    Returns whether it held, so a caller asserting the NEGATIVE — a toast that
+    must stay absent — can still spend the full budget looking for it instead
+    of concluding from a frame that had not settled yet.
+    """
+    for _ in range(200):
+        await pilot.pause()
+        if predicate():
+            return True
+    return False
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -95,11 +115,10 @@ async def main() -> None:
 
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test(size=size) as pilot:
-        for _ in range(6):
-            await pilot.pause()
-
         toast = app.query_one(Toast)
-        assert toast.display is True, "the BOOT announce is expected on both trees"
+        assert await _until(
+            pilot, lambda: toast.display
+        ), "the BOOT announce is expected on both trees"
         boot_message = toast.message
 
         if os.environ.get("LO_MCP_TOAST_SHOT_STAGE") == "boot":
@@ -128,8 +147,12 @@ async def main() -> None:
         # THE ATTACH under test: a sidebar click onto a sibling session that
         # shares this process's MCP servers.
         app._adopt_session(second, replay_history=False)
-        for _ in range(6):
-            await pilot.pause()
+        # The expected outcome here is ABSENCE, which no condition can confirm
+        # early — so this one spends the whole budget on purpose, and captures
+        # whatever the toast is doing by the end of it. On the pre-fix tree the
+        # poll trips as soon as the re-announce lands, which is the frame that
+        # script exists to capture.
+        await _until(pilot, lambda: toast.display)
 
         save_capture(app, out)
         band = _band(app)
