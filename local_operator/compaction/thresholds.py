@@ -458,8 +458,15 @@ def should_compact(
 ) -> bool:
     """Whether the current context exceeds the compaction threshold.
 
-    Strictly greater-than so a context exactly on the threshold is stable;
-    ``window_tokens <= 0`` (unknown window) never triggers.
+    Strictly greater-than so a context exactly on the threshold is stable.
+
+    ``window_tokens <= 0`` (unknown window) disables the TOKEN term only. It is
+    not a short-circuit for the whole function, because the byte term does not
+    depend on knowing the window: a request over the provider's size cap is
+    refused whether or not the harness could resolve a context length for the
+    route. Guarding both was how an image-heavy session on a model with no
+    published window kept 413-ing with the byte trigger configured and inert —
+    the one configuration where the backstop is the ONLY trigger there is.
 
     ``advisory_ok`` is the compaction advisor's ONLY entry point into the
     trigger, and it is deliberately a parameter of THIS function rather than a
@@ -504,13 +511,14 @@ def should_compact(
     every caller but the plan gate passes) the function is byte-identical to
     its previous form.
     """
-    if not settings.enabled or settings.strategy == "off" or window_tokens <= 0:
+    if not settings.enabled or settings.strategy == "off":
         return False
-    threshold = resolve_threshold_tokens(window_tokens, settings)
-    if advisory_ok and getattr(settings, "advisor_enabled", False):
-        threshold = min(threshold, resolve_advisor_floor_tokens(window_tokens, settings))
-    if context_tokens > threshold:
-        return True
+    if window_tokens > 0:
+        threshold = resolve_threshold_tokens(window_tokens, settings)
+        if advisory_ok and getattr(settings, "advisor_enabled", False):
+            threshold = min(threshold, resolve_advisor_floor_tokens(window_tokens, settings))
+        if context_tokens > threshold:
+            return True
     byte_trigger = resolve_wire_bytes_trigger(settings)
     return byte_trigger > 0 and wire_bytes > byte_trigger
 

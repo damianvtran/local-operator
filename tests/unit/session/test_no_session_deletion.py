@@ -492,6 +492,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "in-memory context .replace()",
     ),
+    (
+        "local_operator/evaluation/runner/provider_client.py"
+        "::ProviderModelClient._enforce_wire_fit",
+        "<path>.replace",
+        "in-memory context .replace()",
+    ),
     # -- unlink/remove of FILES the same function owns (locks, caches, sidecars,
     #    temp files, install artefacts). A session directory is never the arg.
     (

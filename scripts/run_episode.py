@@ -429,17 +429,39 @@ def _model_client(
     episode_id: str,
     task_id: str,
     keep_recent_frames: int,
+    reasoning_effort: str | None = None,
 ) -> Any:
     from local_operator.evaluation.runner.provider_client import (
         create_provider_model_client,
     )
     from local_operator.model.configure import build_model_spec
 
+    model_spec = build_model_spec(provider, model)
+    if reasoning_effort is not None:
+        # Validated against the model's OWN ladder rather than a fixed list of
+        # level names: the ladder differs per model, and the client silently
+        # DROPS an effort the spec does not list (providers/clients.py
+        # ``_reasoning_effort``). Dropping it is right mid-episode, where the
+        # alternative is losing the turn — but here it would mean a paid run
+        # quietly executing at the default effort while the operator believed
+        # otherwise, and comparing that against published maximum-effort
+        # numbers. Fail before anything is allocated instead.
+        ladder = model_spec.reasoning_efforts
+        if reasoning_effort not in ladder:
+            raise ValueError(
+                f"{provider}/{model} does not accept reasoning effort "
+                f"{reasoning_effort!r}; its ladder is "
+                f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
+            )
+        # ModelSpec is mutable at runtime by design — this is the same field
+        # ``/effort`` writes — so setting it here is the supported path.
+        model_spec.reasoning_effort = reasoning_effort
+
     return create_provider_model_client(
         auth_store=auth_store,
         settings=settings,
         route=route,
-        model_spec=build_model_spec(provider, model),
+        model_spec=model_spec,
         artifact_root=artifact_root,
         episode_id=episode_id,
         # The label this run wears in ``/analytics``. The task is what a human
@@ -564,6 +586,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
     parser.add_argument("--keep-recent-frames", type=int, default=3)
     parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="reasoning effort level for the decision model (e.g. high, max); "
+        "omit to leave the model spec's own default. Published comparison "
+        "numbers are produced at maximum effort, so a run meant to be read "
+        "against them has to say so explicitly",
+    )
+    parser.add_argument(
         "--no-store",
         action="store_true",
         help="never open the credential store: every secret must be on --secret-env "
@@ -677,6 +707,18 @@ async def run(args: argparse.Namespace) -> int:
             # runner's ``synthetic_model`` label are what keep it from being
             # read as a result.
             "model_client": args.model_client,
+            # The effort the decisions were made at, beside the route they were
+            # made on. A score is not comparable across effort levels, and the
+            # published numbers this run is read against are at maximum effort,
+            # so the bundle has to carry the level rather than leave it to the
+            # operator's memory of which flags were passed. Absent when not
+            # overridden: the effective value is then the model table's
+            # documented default for the route already stamped above.
+            **(
+                {"reasoning_effort": args.reasoning_effort}
+                if args.reasoning_effort is not None
+                else {}
+            ),
             "script": "scripts/run_episode.py",
             # Apparatus disclosure: the infra overrides REQUESTED for this run
             # (instance type, root volume size, system proxy policy). A score on
@@ -705,17 +747,24 @@ async def run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_PREFLIGHT
-        model_client = _model_client(
-            auth_store=auth_store,
-            settings={},
-            provider=provider,
-            model=model,
-            route=route,
-            artifact_root=config.artifact_root,
-            episode_id=episode_id,
-            task_id=args.task_id,
-            keep_recent_frames=args.keep_recent_frames,
-        )
+        try:
+            model_client = _model_client(
+                auth_store=auth_store,
+                settings={},
+                provider=provider,
+                model=model,
+                route=route,
+                artifact_root=config.artifact_root,
+                episode_id=episode_id,
+                task_id=args.task_id,
+                keep_recent_frames=args.keep_recent_frames,
+                reasoning_effort=args.reasoning_effort,
+            )
+        except ValueError as error:
+            # An unusable effort level is the operator's to fix before anything
+            # is allocated, which is exactly what EXIT_PREFLIGHT means here.
+            print(str(error), file=sys.stderr)
+            return EXIT_PREFLIGHT
 
     runner = EpisodeRunner(
         spec,
