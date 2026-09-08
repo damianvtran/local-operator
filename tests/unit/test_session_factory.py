@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -2377,6 +2378,135 @@ def test_lop_never_writes_the_imported_file(
 
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
     assert system_prompt_file() == tmp_path / "config" / "system_prompt.md"
+
+
+# --- The provenance half of the same assembly (`lop config instructions`) ---
+#
+# `resolve_user_instructions` exists so the report and the prompt cannot
+# disagree; these pin that they come from ONE assembly rather than two that
+# happen to agree today. `test_cli_config_instructions.py` covers the rendered
+# command; here the contract is the records themselves.
+
+
+def test_the_resolver_returns_the_same_text_load_user_instructions_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper is a projection of the resolver, not a parallel path.
+
+    If these ever diverge, every caller of ``load_user_instructions`` — the
+    session factory and every subagent — is running a prompt the report does
+    not describe, which is the defect ``lop config instructions`` exists to
+    make impossible.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("- NATIVE", encoding="utf-8")
+    _write_ecosystem_file(tmp_path, "- IMPORTED")
+
+    assembled, sources = session_factory.resolve_user_instructions("- PROFILE")
+
+    assert assembled == session_factory.load_user_instructions("- PROFILE")
+    assert [source.label for source in sources] == [
+        "imported",
+        "system_prompt.md",
+        "agent profile",
+    ]
+
+
+def test_the_resolver_reports_no_imported_source_when_there_is_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default install. ``system_prompt.md`` is still reported, with zero
+    characters, because the path is the answer to "where would it go"."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    assert [source.label for source in sources] == ["system_prompt.md"]
+    assert sources[0].chars == 0
+
+
+def test_the_resolver_marks_a_byte_identical_import_as_collapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read but not included: the two numbers together are what let an
+    operator confirm the dedup fired rather than infer it from a total."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Shared rule."
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+    _write_ecosystem_file(tmp_path, shared)
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    imported = sources[0]
+    assert imported.collapsed is True
+    assert (imported.chars, imported.included) == (len(shared), 0)
+    assert assembled.count(shared) == 1
+
+
+def test_the_resolver_does_not_collapse_a_superset_native_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The context cost #822 reports: the digest covers the WHOLE file, so
+    shared-rules-plus-an-overlay pays for both copies on every cached request.
+    Pinned as behaviour so the guide's warning stays true."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Shared rule."
+    (tmp_path / "config" / "system_prompt.md").write_text(
+        f"{shared}\n- lop-only extra.", encoding="utf-8"
+    )
+    _write_ecosystem_file(tmp_path, shared)
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    assert sources[0].collapsed is False
+    assert sources[0].included == len(shared)
+    assert assembled.count(shared) == 2
+
+
+def test_the_resolver_reports_a_truncated_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file over the per-file 64 KiB read cap. ``chars`` is what was read
+    and ``included`` what survived the instructions budget, so the row states
+    the loss rather than reporting the smaller number as the whole file."""
+    from local_operator.ecosystem_instructions import MAX_FILE_BYTES
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ecosystem_file(tmp_path, "z" * (MAX_FILE_BYTES * 3))
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    assert sources[0].truncated is True
+    assert sources[0].chars == MAX_FILE_BYTES
+    assert sources[0].included <= session_factory.MAX_USER_INSTRUCTIONS_CHARS
+
+
+def test_the_resolver_can_stay_silent_for_the_provenance_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """``lop config instructions`` prints the provenance itself, so the INFO
+    record would land on stderr immediately above the box repeating it. Every
+    session path keeps the log — it is the only trace a running session leaves
+    of an import it never named."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_ecosystem_file(tmp_path, "- Shared rule.")
+
+    with caplog.at_level(logging.INFO, logger="local_operator.ecosystem_instructions"):
+        session_factory.resolve_user_instructions(log_provenance=False)
+    assert not caplog.records
+
+    with caplog.at_level(logging.INFO, logger="local_operator.ecosystem_instructions"):
+        session_factory.load_user_instructions()
+    assert any("loaded ecosystem instructions" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -44,7 +44,8 @@ from local_operator.ansi import sanitize_prompt_line
 # startup path that ``test_import_graph`` guards.
 from local_operator.ecosystem_instructions import (
     content_digest,
-    load_ecosystem_instructions,
+    log_ecosystem_provenance,
+    read_ecosystem_instructions,
 )
 from local_operator.harness.types import AgentMessage, Message
 
@@ -745,6 +746,182 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class InstructionSource:
+    """One contributor to the assembled custom instructions, as assembled.
+
+    The accounting half of :func:`resolve_user_instructions`, and the reason
+    that function exists at all. ``lop config instructions`` answers "what
+    instructions am I actually running" from these records rather than from its
+    own reimplementation of the budget arithmetic below — a report derived from
+    a second copy of that arithmetic would drift from the prompt on the first
+    change to either, which is the same class of divergence (documentation
+    disagreeing with the code in the same install) that issue #822 reported.
+
+    ``chars`` is what the source held; ``included`` is what survived the
+    collapse and the cap, so a row can state the difference rather than
+    reporting the smaller number as the whole truth. ``path`` is ``None`` for
+    the agent profile, whose prompt comes from the registry database and has no
+    file an operator could open.
+    """
+
+    label: str
+    path: Path | None
+    chars: int
+    included: int
+    collapsed: bool
+    truncated: bool
+    #: The file exists but could not be read (permissions, a fifo swapped in).
+    #: Distinct from a zero-length file: one is a mistake to fix, the other is
+    #: the ordinary state of an install that simply has no such file, and
+    #: reporting both as "empty" sends the operator to the wrong one.
+    unreadable: bool = False
+
+
+def resolve_user_instructions(
+    agent_prompt: str = "",
+    *,
+    log_provenance: bool = True,
+) -> tuple[str, list[InstructionSource]]:
+    """Assemble the custom instructions AND account for where they came from.
+
+    Split out of :func:`load_user_instructions` — whose docstring carries the
+    behavioural contract — so the provenance surface reads the same assembly
+    the prompt does. See :class:`InstructionSource` for why a second
+    implementation of this arithmetic was not acceptable.
+
+    The returned records are in ASSEMBLY order, which is the fact operators get
+    wrong and the reason the report exists at all.
+
+    ``log_provenance=False`` is for the ONE caller whose entire output already
+    IS the provenance (``lop config instructions``): there the INFO record
+    would print the same file and size to stderr immediately above the box
+    reporting it, so the command would contradict nothing and repeat
+    everything. Every session path leaves it on — the log is the only trace a
+    running session leaves of an import it did not name.
+    """
+    parts: list[str] = []
+    # ``is_file()`` follows symlinks deliberately: pointing the file at a
+    # dotfiles checkout is a normal way to version instructions.
+    path = app_config_dir() / "system_prompt.md"
+    try:
+        if path.is_file():
+            parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except OSError:
+        pass
+
+    # Each source is bounded on its OWN budget before joining. Capping only
+    # the joined string let a full-size global file consume the whole budget
+    # and silently discard the selected agent's profile prompt entirely,
+    # inverting the documented layering: the machine-wide file would discard
+    # the profile the operator explicitly chose.
+    #
+    # The split is a FLOOR each way, never a flat tax. Subtracting the
+    # reserve unconditionally cut a 64k global file to 48k even with no agent
+    # selected, handing the 16k to nobody; capping the profile at the reserve
+    # unconditionally did the mirror image to a large profile when the global
+    # file was small. So each source may spend whatever the other leaves,
+    # down to its own guaranteed share.
+    global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
+    agent_raw = agent_prompt.strip()
+    # The digest is handed down so a shared file byte-identical to the native
+    # one is dropped rather than duplicated into every cached request.
+    ecosystem_records = read_ecosystem_instructions(
+        skip_digests=frozenset({content_digest(global_raw)} if global_raw else ())
+    )
+    if log_provenance:
+        log_ecosystem_provenance(ecosystem_records)
+    ecosystem_raw = "\n\n".join(record.text for record in ecosystem_records if record.text).strip()
+
+    # The "\n\n" joins are only emitted between sources that SURVIVE, so the
+    # characters are only withheld then. Keyed off the agent text alone, a
+    # profile that fits the documented cap exactly was truncated by two
+    # characters while a global file of the same size passed whole.
+    present = sum(1 for raw in (ecosystem_raw, global_raw, agent_raw) if raw)
+    separator = 2 * max(0, present - 1)
+    # Bounded in ascending order of ownership: the imported file first, then
+    # the profile, and the operator's own file takes the remainder. Each may
+    # spend what the others leave, down to its own floor — so a lone 64k source
+    # is still whole, and no source is taxed for room the others never use.
+    ecosystem_text = _bound_instructions(
+        ecosystem_raw,
+        "imported user-scope instructions",
+        max(
+            _ECOSYSTEM_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - len(agent_raw) - separator,
+        ),
+    )
+    agent_text = _bound_instructions(
+        agent_raw,
+        "the selected agent's profile",
+        max(
+            _AGENT_INSTRUCTIONS_RESERVE,
+            MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(global_raw) - separator,
+        ),
+    )
+    global_text = _bound_instructions(
+        global_raw,
+        str(path),
+        MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(agent_text) - separator,
+    )
+
+    # The whole-source cap is reported per imported FILE rather than against
+    # the joined block: with several override paths the operator needs to know
+    # which file lost text, and the join is what the budget acts on. Attributing
+    # the cut to the last file read is the only accurate answer, since the
+    # earlier ones are what consumed the budget.
+    ecosystem_cut = len(ecosystem_raw) - len(ecosystem_text)
+    sources: list[InstructionSource] = []
+    for index, record in enumerate(ecosystem_records):
+        is_last_contributor = index == max(
+            (i for i, r in enumerate(ecosystem_records) if r.text), default=-1
+        )
+        sources.append(
+            InstructionSource(
+                label="imported",
+                path=record.path,
+                chars=record.chars,
+                included=(
+                    max(0, record.chars - ecosystem_cut)
+                    if is_last_contributor
+                    else (record.chars if record.text else 0)
+                ),
+                collapsed=record.collapsed,
+                # Truncated by the per-FILE 64 KiB read cap, or by the shared
+                # instructions budget landing on this file.
+                truncated=record.truncated or (is_last_contributor and ecosystem_cut > 0),
+                unreadable=record.unreadable,
+            )
+        )
+    sources.append(
+        InstructionSource(
+            label="system_prompt.md",
+            path=path,
+            chars=len(global_raw),
+            included=len(global_text),
+            collapsed=False,
+            truncated=len(global_text) < len(global_raw),
+        )
+    )
+    if agent_raw:
+        sources.append(
+            InstructionSource(
+                label="agent profile",
+                path=None,
+                chars=len(agent_raw),
+                included=len(agent_text),
+                collapsed=False,
+                truncated=len(agent_text) < len(agent_raw),
+            )
+        )
+
+    # Imported first, native second, profile last: later text is read as the
+    # more specific instruction, so lop's own file outranks the shared one and
+    # the chosen profile outranks both.
+    assembled = "\n\n".join(part for part in (ecosystem_text, global_text, agent_text) if part)
+    return assembled, sources
+
+
 def load_user_instructions(agent_prompt: str = "") -> str:
     """Read the operator's standing custom instructions for the system prompt.
 
@@ -786,71 +963,7 @@ def load_user_instructions(agent_prompt: str = "") -> str:
     ``utf-8-sig`` strips a BOM that a Windows editor writes; without it the
     ``\ufeff`` survives into the prompt ahead of the first rule.
     """
-    parts: list[str] = []
-    # ``is_file()`` follows symlinks deliberately: pointing the file at a
-    # dotfiles checkout is a normal way to version instructions.
-    path = app_config_dir() / "system_prompt.md"
-    try:
-        if path.is_file():
-            parts.append(path.read_text(encoding="utf-8-sig", errors="replace"))
-    except OSError:
-        pass
-
-    # Each source is bounded on its OWN budget before joining. Capping only
-    # the joined string let a full-size global file consume the whole budget
-    # and silently discard the selected agent's profile prompt entirely,
-    # inverting the documented layering: the machine-wide file would discard
-    # the profile the operator explicitly chose.
-    #
-    # The split is a FLOOR each way, never a flat tax. Subtracting the
-    # reserve unconditionally cut a 64k global file to 48k even with no agent
-    # selected, handing the 16k to nobody; capping the profile at the reserve
-    # unconditionally did the mirror image to a large profile when the global
-    # file was small. So each source may spend whatever the other leaves,
-    # down to its own guaranteed share.
-    global_raw = "\n\n".join(part.strip() for part in parts if part.strip())
-    agent_raw = agent_prompt.strip()
-    # The digest is handed down so a shared file byte-identical to the native
-    # one is dropped rather than duplicated into every cached request.
-    ecosystem_raw = load_ecosystem_instructions(
-        skip_digests=frozenset({content_digest(global_raw)} if global_raw else ())
-    ).strip()
-
-    # The "\n\n" joins are only emitted between sources that SURVIVE, so the
-    # characters are only withheld then. Keyed off the agent text alone, a
-    # profile that fits the documented cap exactly was truncated by two
-    # characters while a global file of the same size passed whole.
-    present = sum(1 for raw in (ecosystem_raw, global_raw, agent_raw) if raw)
-    separator = 2 * max(0, present - 1)
-    # Bounded in ascending order of ownership: the imported file first, then
-    # the profile, and the operator's own file takes the remainder. Each may
-    # spend what the others leave, down to its own floor — so a lone 64k source
-    # is still whole, and no source is taxed for room the others never use.
-    ecosystem_text = _bound_instructions(
-        ecosystem_raw,
-        "imported user-scope instructions",
-        max(
-            _ECOSYSTEM_INSTRUCTIONS_RESERVE,
-            MAX_USER_INSTRUCTIONS_CHARS - len(global_raw) - len(agent_raw) - separator,
-        ),
-    )
-    agent_text = _bound_instructions(
-        agent_raw,
-        "the selected agent's profile",
-        max(
-            _AGENT_INSTRUCTIONS_RESERVE,
-            MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(global_raw) - separator,
-        ),
-    )
-    global_text = _bound_instructions(
-        global_raw,
-        str(path),
-        MAX_USER_INSTRUCTIONS_CHARS - len(ecosystem_text) - len(agent_text) - separator,
-    )
-    # Imported first, native second, profile last: later text is read as the
-    # more specific instruction, so lop's own file outranks the shared one and
-    # the chosen profile outranks both.
-    return "\n\n".join(part for part in (ecosystem_text, global_text, agent_text) if part)
+    return resolve_user_instructions(agent_prompt)[0]
 
 
 def _bound_instructions(text: str, source: str, limit: int) -> str:

@@ -20,6 +20,7 @@ Use the CLI to avoid guessing:
 local-operator config create
 local-operator config open
 local-operator config list
+local-operator config instructions
 ```
 
 `config create` and `config open` print the resolved backend path. Main files under that root include:
@@ -39,7 +40,7 @@ Standing user preferences — commit conventions, review gates, where projects l
 <config root>/system_prompt.md
 ```
 
-That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `AGENTS.md` mechanism and no `custom_instructions` key in `config.yml`; writing either does nothing.
+That single file is what the desktop UI's Settings → **Instructions** box edits and what `GET`/`PATCH /v1/config/system-prompt` reads and writes, so the CLI, TUI, server, and desktop app all share one definition of "custom instructions". There is no `custom_instructions` key in `config.yml`; writing one does nothing. A user-scope `AGENTS.md` **is** read, but from the shared agent-tool directory and read-only — see "Imported instructions" below.
 
 To install or update them, write the file directly, resolving the root by the rule at the top of this guide so the commands stay correct under `LOCAL_OPERATOR_CONFIG_DIR`:
 
@@ -68,6 +69,29 @@ How the content is used:
 The content is capped at 64,000 characters, past which it is truncated with an explicit marker and a logged warning, because it is re-sent as the cached prefix of every request. The global file and an agent profile's prompt are bounded separately so neither can crowd the other out: each is guaranteed at least 16,000 characters and may spend whatever the other leaves, so a file under that share costs the other source nothing.
 
 Keep the file free of secrets and of absolute home paths (prefer `~/`) when it may be shared. For task-specific knowledge that should load only when relevant, prefer a skill (`extensions` guide) over adding bulk here: this file is in context for every single turn.
+
+### Imported instructions (`~/.agents/AGENTS.md`)
+
+Local Operator also reads `~/.agents/AGENTS.md`, the tool-neutral user-scope file Claude Code, Codex, opencode and droid have converged on, so one set of standing preferences serves every harness without a second copy under a lop-specific name. That directory and no other by default because Local Operator already scans `~/.agents/skills`; `~/.local-operator/AGENTS.md` is deliberately **not** read, since with both it and `system_prompt.md` present there would be no single answer to what `GET /v1/config/system-prompt` returns or where `PATCH` writes.
+
+- **Read-only.** `system_prompt.md` remains the sole write target of Settings → **Instructions** and `GET`/`PATCH /v1/config/system-prompt`. Local Operator never writes an imported file.
+- **Order and precedence**: imported file first, then `system_prompt.md`, then the selected agent profile's prompt. Later text reads as the more specific instruction, so your own `system_prompt.md` wins over the shared file and the profile outranks both.
+- **Redirect or disable** with `LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS`: a colon-separated path list that *replaces* the default set, and an **empty value disables the import entirely**.
+
+```bash
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=~/.config/AGENTS.md:~/team/AGENTS.md
+export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=   # off
+```
+
+Each imported file is capped at 64 KiB at read; the assembled result is then bounded on the same 64,000-character budget described above, where the imported text is a third source with its own 16,000-character floor, so it can neither crowd out nor be crowded out by the other two.
+
+**Watch the duplicate collapse.** Content byte-identical to `system_prompt.md` (whitespace-stripped) is loaded once instead of twice. The collapse is keyed on a digest of the **whole file**, so a `system_prompt.md` that is a *superset* of the shared file — shared rules plus a lop-only overlay, the natural arrangement when maintaining one rule set across harnesses — does **not** collapse, and you pay for both copies in the cached prefix of every request, in every session and every subagent. Check with:
+
+```bash
+local-operator config instructions
+```
+
+It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. Two rows both reporting non-zero "Included" for the same rules means no collapse: either keep the shared file and the lop-only file **disjoint**, or make them byte-identical.
 
 ## Set the default provider and model
 
