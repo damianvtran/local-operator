@@ -24,12 +24,20 @@ longer exists. Every client connects for itself; see
 :mod:`local_operator.secrets.client`.
 
 **What authorization actually means here, stated without overclaiming.** A peer
-is authorized iff it is a live descendant of a registered, still-live lop
-session. That proves LINEAGE, not INTENT (design §9.1): a script that runs as
-a child of an agent's shell inherits that lineage and is allowed, and a script
-that simply runs ``lop`` itself becomes a legitimate session. This is a large
-increase in attacker cost over a plaintext key file — it stops the detached,
-reparented script that a bad link actually drops — and it is **not** a vault.
+is authorized iff it is a registered, still-live lop session, or a live
+descendant of one. Becoming a registered session is not free: it requires the
+registration ticket from the 0700 secrets directory (design §2.1, review R1) —
+before that gate existed, any process could register itself and, because the
+ancestry walk yields the peer first, become its own authorizing ancestor.
+
+That proves LINEAGE, not INTENT (design §9.1): a script that runs as a child of
+an agent's shell inherits that lineage and is allowed, and a script that simply
+runs ``lop`` itself becomes a legitimate session. And what it is worth depends
+entirely on the tier — in ``keyfile`` mode the ticket and the master key sit in
+the same directory, so an attacker who can take one has the other and this
+boundary stops nobody; in ``passphrase`` mode the key is not on disk at all and
+the boundary is load-bearing. §8's table states this per tier. It is a real
+increase in attacker cost over a plaintext key file, and it is **not** a vault.
 
 **Code-signature verification is not available.** ``csops(CS_OPS_CDHASH)``
 returned rc=-1 for a sibling process on this machine (spike 1), so "is the peer
@@ -411,12 +419,21 @@ def _walk(start: int, max_depth: int = MAX_ANCESTRY_DEPTH):
 
 
 def authorize(peer: ProcessIdentity, sessions: dict[int, ProcessIdentity]) -> tuple[bool, str]:
-    """Is ``peer`` a live descendant of one of the registered ``sessions``?
+    """Is ``peer`` a registered session, or a live descendant of one?
 
     ``sessions`` maps pid to the identity pinned when that session registered.
     A pid found in it is only accepted when the identity still matches, so a
     session that died and whose pid was reissued to an attacker's process
     authorizes nothing.
+
+    **A peer that is itself registered is authorized as itself, not by its own
+    ancestry (review R1).** ``_walk`` yields the peer as the first element of
+    its own chain, so treating that hop like any other made every process that
+    registered itself its own authorizing ancestor — the second half of the
+    unauthenticated-``register`` bypass. Gating ``register`` closed the door;
+    this keeps the peer from being its own key. Standing to register is proven
+    by the ticket (:func:`~local_operator.secrets.keys.registration_ticket`),
+    and only then does a session speak for itself here.
 
     Returns ``(allowed, reason)``; the reason is recorded in the audit trail
     and shown to the operator, so it is written to be read by a human deciding
@@ -425,19 +442,33 @@ def authorize(peer: ProcessIdentity, sessions: dict[int, ProcessIdentity]) -> tu
     if not sessions:
         return False, "no lop session is registered with the broker"
     depth = 0
-    for identity in _walk(peer.pid):
+    for index, identity in enumerate(_walk(peer.pid)):
         registered = sessions.get(identity.pid)
-        if registered is not None:
-            if registered.same_process_as(identity):
-                return True, (
-                    f"descendant of registered session {identity.pid} "
-                    f"(start {identity.start_time} matches)"
-                )
-            # The pid is registered but the process behind it is not the one
-            # that registered: the session died and the pid came back around.
+        if registered is None:
+            depth += 1
+            continue
+        # A registered pid whose process is not the one that registered it: the
+        # session died and the pid came back around. Never authorized, and the
+        # walk stops rather than continuing past an impostor.
+        if not registered.same_process_as(identity):
             return False, (
                 f"pid {identity.pid} is not the session that registered it "
                 "(the registered session has exited and its pid was reused)"
             )
-        depth += 1
+        if index > 0:
+            return True, (
+                f"descendant of registered session {identity.pid} "
+                f"(start {identity.start_time} matches)"
+            )
+        # The peer IS the session. Verify the connect-time pin, which is what
+        # makes `peer_identity`'s "everything downstream compares against the
+        # value returned here" contract true (review R7): ``peer`` carries the
+        # pidversion the kernel reported for THIS connection, and a re-read of
+        # the pid must still be that same incarnation.
+        if not registered.same_process_as(peer):
+            return False, (
+                f"pid {identity.pid} is registered but is not the process on this "
+                "connection (the registered session has exited and its pid was reused)"
+            )
+        return True, f"registered session {identity.pid} acting for itself"
     return False, f"no registered lop session among {depth} ancestor(s)"

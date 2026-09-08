@@ -115,7 +115,17 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
         # broker is the only holder, and a denial is enforced below. That is
         # the same boundary §8's table draws, implemented rather than widened.
         if hardened:
-            raise
+            # Re-worded rather than re-raised. The broker's own reason is about
+            # ANCESTRY ("no lop session is registered with the broker"), which
+            # is accurate and useless to the person reading it: in this tier a
+            # denial almost always means the store has not been unlocked since
+            # the last reboot, and the ancestry wording sends the operator
+            # hunting a session problem they cannot act on. Say what to do.
+            raise BrokerDenied(
+                "This store is hardened with a passphrase and this caller is not authorized "
+                "to use the unlocked key. If you have not unlocked it since the last reboot, "
+                "run `lop secret unlock`."
+            ) from None
     except SecretStoreError:
         # Anything else — no broker, a wedged one, a version mismatch — is an
         # availability problem, and §13 requires the store to keep working in

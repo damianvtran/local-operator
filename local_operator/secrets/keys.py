@@ -42,6 +42,16 @@ FILE_MODE = 0o600
 #: whose mode was loosened after the fact is exactly the case worth catching.
 _FORBIDDEN_MODE_BITS = 0o077
 
+#: File holding the registration ticket: the secret a process must present to
+#: claim it is a lop session (design §2.1, PR-2 review R1). See
+#: :func:`registration_ticket` for why this is a file rather than a property of
+#: the connecting process.
+TICKET_FILENAME = "register.ticket"
+
+#: Ticket length. 32 bytes from the OS CSPRNG — the same budget as the master
+#: key, because a guessable ticket is a self-registration bypass.
+TICKET_BYTES = 32
+
 
 def secrets_dir(base: Path | None = None) -> Path:
     """The directory holding the store, the key and the audit log.
@@ -135,6 +145,61 @@ def write_private_file(path: Path, data: bytes) -> None:
     finally:
         os.close(descriptor)
     os.chmod(path, FILE_MODE)
+
+
+def ticket_path(base: Path | None = None) -> Path:
+    """Path to the registration ticket."""
+    return secrets_dir(base) / TICKET_FILENAME
+
+
+def registration_ticket(base: Path | None = None) -> bytes:
+    """The secret a caller must present to register itself as a lop session.
+
+    **Why a file secret and not a property of the process.** Review finding R1
+    was that ``register`` was unauthenticated, and the obvious repairs are all
+    unsound against the actual threat model. Measured on this machine rather
+    than assumed: the attacker shape §8 cares about is a double-forked
+    ``setsid`` script, and a same-uid process can forge *every* signal the
+    kernel exposes about itself — it reparents to launchd (``ppid=1``, which
+    is also what a real detached session has), becomes a session leader, and
+    can even allocate its own pty via ``pty.fork()`` so a controlling-tty check
+    passes. There is therefore NO process-shape predicate that separates a
+    genuine session from the malware, and code-signature verification is
+    unavailable here (``csops`` denied, §2.1). Requiring the registrant to *be*
+    an ancestor of itself is what created the bypass in the first place.
+
+    What remains is a secret the attacker cannot read. This file is 0600 inside
+    the 0700 secrets directory, so it is exactly as reachable as the master key
+    — which is the point, and why this is honest rather than circular:
+
+    - In ``keyfile`` mode the master key sits beside it, so an attacker who can
+      read the ticket could have read the key directly and skipped the broker
+      entirely. The ticket costs that attacker nothing they did not already
+      have, and §8 now says so plainly instead of claiming the socket stops
+      them.
+    - In ``passphrase`` mode there is no unwrapped key on disk. The ticket is
+      the ONLY thing on disk, and holding it grants standing to *ask* — it does
+      not unwrap anything. An attacker with the ticket still needs the broker
+      to be unlocked, and unlocking needs the passphrase, which is never on
+      disk in any form. That is the tier the design nominates as load-bearing,
+      and it is the tier where this check does real work.
+
+    Created lazily and never rotated in place: a rotation would deregister
+    every live session on a machine the operator runs ~10 of them on, and the
+    ticket protects standing to ask rather than the secrets themselves.
+    """
+    path = ticket_path(base)
+    if path.exists():
+        check_mode(path)
+        ticket = path.read_bytes()
+        if len(ticket) == TICKET_BYTES:
+            return ticket
+        # A truncated or padded ticket is damage, not an attack signal: rewrite
+        # it rather than bricking registration for every session on the host.
+    ensure_secrets_dir(base)
+    ticket = os.urandom(TICKET_BYTES)
+    write_private_file(path, ticket)
+    return ticket
 
 
 def load_master_key(base: Path | None = None, *, create: bool = False) -> bytes:

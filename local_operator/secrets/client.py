@@ -41,6 +41,7 @@ from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
     decode_bytes,
+    encode_bytes,
     ensure_runtime_dir,
     lock_path,
     recv_frame,
@@ -91,6 +92,12 @@ def request(
     Opens its own connection unless one is supplied, because peer
     authentication happens per connection and a shared one would attribute
     every caller to whoever opened it.
+
+    **No ticket is attached here.** Only ``register`` presents one (see
+    :func:`register_session`), and it is deliberately not sent on ``key`` or
+    ``retrieve``: the broker does not accept it in place of ancestry on those
+    verbs, so including it would put a file secret on the wire for every
+    retrieval while buying nothing. A secret that is not needed is not sent.
     """
     owned = connection is None
     link = connection if connection is not None else _connect(socket_path(base))
@@ -276,8 +283,19 @@ def register_session(
     Returns ``None`` when no broker could be started, so a session boots
     normally without a store rather than failing — the store is an optional
     capability, not a boot dependency (§13).
+
+    The registration ticket is read from the 0700 secrets directory and
+    presented here; a caller that cannot read it is not entitled to register
+    (review R1). Failing to read it returns ``None`` for the same reason a
+    missing broker does: no store this boot, but the session still starts.
     """
     if not ensure_broker(base):
+        return None
+    try:
+        from local_operator.secrets.keys import registration_ticket
+
+        ticket = registration_ticket(base)
+    except (SecretStoreError, OSError):
         return None
     try:
         connection = _connect(socket_path(base))
@@ -290,6 +308,7 @@ def register_session(
                 "version": PROTOCOL_VERSION,
                 "op": "register",
                 "session_id": session_id,
+                "ticket": encode_bytes(ticket),
             },
         )
         reply = recv_frame(connection)

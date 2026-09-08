@@ -20,6 +20,8 @@ import sys
 import textwrap
 import threading
 import time
+from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -245,13 +247,18 @@ def test_a_dead_sessions_descendants_stop_being_authorized(
     assert os.getpid() not in (status.get("sessions") or []), "a dead session stayed registered"
 
 
-def test_a_peer_cannot_register_a_pid_it_does_not_own(
-    broker: SecretBroker, config_root: Path
-) -> None:
-    """The pid comes from the kernel, never from the request body.
+def test_register_without_a_ticket_is_refused(broker: SecretBroker, config_root: Path) -> None:
+    """`register` is AUTHENTICATED; an unticketed caller gets nothing (review R1).
 
-    A self-declared pid would let any process register an arbitrary victim and
-    then authorize its own descendants through it.
+    This test previously asserted ``ok`` on this exact frame, documenting the
+    hole as intended behaviour — which is why 141 green tests missed a complete
+    authentication bypass. ``register`` used to be dispatched before the
+    authorization gate, and because the ancestry walk yields the peer as the
+    first element of its own chain, any process that registered itself became
+    its own authorizing ancestor and could then ask for the master key.
+
+    Both halves are asserted here: the registration is refused, and no session
+    appears in the broker's table as a result of trying.
     """
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(5)
@@ -262,7 +269,45 @@ def test_a_peer_cannot_register_a_pid_it_does_not_own(
             {"version": PROTOCOL_VERSION, "op": "register", "pid": 1, "session_id": "forged"},
         )
         reply = recv_frame(connection)
-        assert reply.get("ok")
+        assert not reply.get("ok"), reply
+        assert reply.get("code") == "unauthorized", reply
+        assert "ticket" in str(reply.get("error", "")).lower(), reply
+    finally:
+        connection.close()
+
+    status = client.broker_status(config_root) or {}
+    assert os.getpid() not in (status.get("sessions") or []), "the refusal still registered a pid"
+
+
+def test_a_peer_cannot_register_a_pid_it_does_not_own(
+    broker: SecretBroker, config_root: Path
+) -> None:
+    """The pid comes from the kernel, never from the request body.
+
+    A self-declared pid would let any process register an arbitrary victim and
+    then authorize its own descendants through it. Ticketed here, since
+    registration is authenticated (R1) — the point under test is that a VALID
+    registrant still cannot choose which pid it registers.
+    """
+    from local_operator.secrets.keys import registration_ticket
+    from local_operator.secrets.protocol import encode_bytes
+
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(5)
+    connection.connect(str(broker.path))
+    try:
+        send_frame(
+            connection,
+            {
+                "version": PROTOCOL_VERSION,
+                "op": "register",
+                "pid": 1,
+                "session_id": "forged",
+                "ticket": encode_bytes(registration_ticket(config_root)),
+            },
+        )
+        reply = recv_frame(connection)
+        assert reply.get("ok"), reply
         # Registered as the CONNECTING process, not the pid it asked for.
         assert reply.get("registered") == os.getpid()
     finally:
@@ -273,7 +318,11 @@ def test_a_peer_cannot_register_a_pid_it_does_not_own(
 
 
 def test_session_is_notified_before_the_child_is_served(
-    broker: SecretBroker, config_root: Path, master_key: bytes, broker_store: SecretStore
+    broker: SecretBroker,
+    config_root: Path,
+    master_key: bytes,
+    broker_store: SecretStore,
+    tmp_path: Path,
 ) -> None:
     """The §6 invariant, proven by making the ack SLOW.
 
@@ -281,6 +330,12 @@ def test_session_is_notified_before_the_child_is_served(
     notification wins the race anyway. Delaying the ack separates the two
     designs: if the ordering is a real invariant the retrieval cannot return
     until the ack completes, so its elapsed time is bounded below by the delay.
+
+    The retrieval runs in a CHILD process, which is what §6 case (2) actually
+    describes: the session process itself never triggers a notice, because a
+    value it fetches lands in its own memory where it registers the redaction
+    directly — and demanding an ack from the very process blocked on the reply
+    would deadlock it.
     """
     ack_delay = 0.75
     channel = client.register_session(config_root, session_id="slow-session")
@@ -297,15 +352,20 @@ def test_session_is_notified_before_the_child_is_served(
 
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
+    script = tmp_path / "child.py"
+    script.write_text(_retrieve_script(config_root))
     try:
         started = time.monotonic()
-        value = client.retrieve("DEMO_TOKEN", config_root)
+        result = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, timeout=60
+        )
         elapsed = time.monotonic() - started
     finally:
         thread.join(timeout=5)
         channel.close()
 
-    assert value == SECRET_VALUE
+    assert "OK" in result.stdout, f"{result.stdout}{result.stderr}"
+    assert SECRET_VALUE.decode() in result.stdout
     assert notified == [("DEMO_TOKEN", SECRET_VALUE)]
     assert elapsed >= ack_delay, (
         f"the retrieval returned in {elapsed:.3f}s despite a {ack_delay}s ack — "
@@ -315,15 +375,25 @@ def test_session_is_notified_before_the_child_is_served(
 
 
 def test_ordering_holds_for_concurrent_retrievals(
-    broker: SecretBroker, session: list[tuple[str, bytes]], config_root: Path
+    broker: SecretBroker, session: list[tuple[str, bytes]], config_root: Path, tmp_path: Path
 ) -> None:
-    """~10 concurrent sessions is the real workload (design §4)."""
+    """~10 concurrent sessions is the real workload (design §4).
+
+    Retrievals run as CHILD processes: only a descendant produces a §6 notice,
+    and this test is about those notices not interleaving or losing each
+    other's acks on one session's stream.
+    """
     errors: list[str] = []
+    script = tmp_path / "concurrent.py"
+    script.write_text(_retrieve_script(config_root))
 
     def fetch() -> None:
         try:
-            if client.retrieve("DEMO_TOKEN", config_root) != SECRET_VALUE:
-                errors.append("wrong value")
+            result = subprocess.run(
+                [sys.executable, str(script)], capture_output=True, text=True, timeout=60
+            )
+            if SECRET_VALUE.decode() not in result.stdout:
+                errors.append(f"wrong value: {result.stdout}{result.stderr}")
         except Exception as exc:  # noqa: BLE001 - reported below
             errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -331,20 +401,26 @@ def test_ordering_holds_for_concurrent_retrievals(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=30)
+        thread.join(timeout=60)
 
     assert not errors, errors
     assert len(session) == 10, f"expected 10 notifications, saw {len(session)}"
 
 
-def test_a_session_that_never_acks_does_not_block_retrieval_forever(
-    config_root: Path, master_key: bytes, broker_store: SecretStore
+def test_a_session_that_never_acks_denies_the_child_within_the_timeout(
+    config_root: Path, master_key: bytes, broker_store: SecretStore, tmp_path: Path
 ) -> None:
-    """A wedged session degrades to a bounded delay, not a hang.
+    """A wedged session DENIES the descendant, bounded, rather than leaking (R3).
 
-    Denying the retrieval instead would convert a cosmetic risk (a secret in a
-    transcript) into a functional failure (the agent's command fails), which is
-    the worse trade — see ``SecretBroker._notify_session``.
+    This test used to assert the opposite — that the value was served anyway
+    after the timeout — which made §6's "invariant" language false: a session
+    that never acks is precisely the case where nothing downstream can scrub
+    the value, because a `$( )` retrieval never passes through any filter. An
+    attacker who controls whether the session acks could choose that outcome
+    deliberately.
+
+    What must still hold is that it is BOUNDED: the child gets a clear refusal
+    quickly, never a hang.
     """
     instance = SecretBroker(
         config_root, key_provider=lambda: master_key, idle_shutdown_s=0, notify_ack_timeout_s=0.5
@@ -352,10 +428,17 @@ def test_a_session_that_never_acks_does_not_block_retrieval_forever(
     instance.start()
     channel = client.register_session(config_root, session_id="wedged")
     assert channel is not None
+    # Never read from `channel`, so no ack is ever sent.
+    script = tmp_path / "child.py"
+    script.write_text(_retrieve_script(config_root))
     try:
         started = time.monotonic()
-        assert client.retrieve("DEMO_TOKEN", config_root) == SECRET_VALUE
+        result = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, timeout=60
+        )
         elapsed = time.monotonic() - started
+        assert "DENIED" in result.stdout, f"{result.stdout}{result.stderr}"
+        assert SECRET_VALUE.decode() not in result.stdout, "an unscrubbable value was served"
         assert elapsed < 8, f"a silent session stalled the retrieval for {elapsed:.1f}s"
     finally:
         channel.close()
@@ -521,3 +604,284 @@ def test_a_runtime_dir_owned_by_another_user_is_refused(
     monkeypatch.setattr(protocol.os, "getuid", lambda: impostor)
     with pytest.raises(ProtocolError, match="owned by uid"):
         protocol.ensure_runtime_dir(directory)
+
+
+# --- the R1 bypass, as real processes (review round 1) ----------------------
+
+
+@pytest.fixture
+def hardened_broker(config_root: Path, master_key: bytes, broker_store: SecretStore):
+    """An UNLOCKED passphrase-tier broker: the tier where ancestry is load-bearing.
+
+    Built by actually hardening the store — `wrap_master_key` removes the
+    plaintext key file — so `key_mode` reports `passphrase` and the broker's
+    tier-dependent checks take the same branch they take in production. A
+    fixture that merely withheld the key provider would leave a `master.key` on
+    disk and test the wrong tier.
+    """
+    from local_operator.secrets.keys import wrap_master_key
+
+    wrap_master_key(config_root, master_key, "test-passphrase")
+    instance = SecretBroker(config_root, idle_shutdown_s=0)
+    instance.start()
+    instance.unlock_with_key(master_key)  # as `lop secret unlock` would
+    try:
+        yield instance
+    finally:
+        instance.stop(timeout=5)
+
+
+def _self_register_exploit(config_root: Path, socket_file: Path, output: Path) -> str:
+    """The reviewer's exploit: double-fork + setsid, then talk raw frames.
+
+    Reparented to launchd (ppid 1) — the exact shape §8's table calls a
+    "Detached script" — and it speaks the protocol directly rather than going
+    through the client, because the client is ours and an attacker's would not
+    be. It presents the registration ticket too: an attacker that can reach the
+    socket can read that file, so a fix that relied on the ticket alone in this
+    tier would be no fix at all.
+    """
+    from local_operator.secrets.keys import registration_ticket
+    from local_operator.secrets.protocol import encode_bytes
+
+    ticket = encode_bytes(registration_ticket(config_root))
+    return textwrap.dedent(f"""
+        import os, sys, socket, time
+        if os.fork():
+            os._exit(0)
+        os.setsid()
+        time.sleep(0.5)
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[3])!r})
+        from local_operator.secrets.protocol import (
+            PROTOCOL_VERSION, recv_frame, send_frame, decode_bytes,
+        )
+        lines = [f"ppid={{os.getppid()}}"]
+
+        def call(**fields):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect({str(socket_file)!r})
+            send_frame(s, {{"version": PROTOCOL_VERSION, "ticket": {ticket!r}, **fields}})
+            return s, recv_frame(s)
+
+        held, reply = call(op="register", session_id="impostor")
+        lines.append(f"register_ok={{bool(reply.get('ok'))}}")
+        for op, field in (("retrieve", "value"), ("key", "key")):
+            s, reply = call(op=op, name="DEMO_TOKEN")
+            if reply.get("ok"):
+                lines.append(f"LEAKED {{op}} {{decode_bytes(reply[field])!r}}")
+            else:
+                lines.append(f"denied {{op}}: {{reply.get('code')}}")
+            s.close()
+        held.close()
+        open({str(output)!r}, "w").write("\\n".join(lines))
+        """)
+
+
+def test_self_registration_cannot_buy_the_master_key(
+    hardened_broker: SecretBroker, config_root: Path, tmp_path: Path
+) -> None:
+    """R1: a detached process may not make itself a session and read everything.
+
+    Reproduces the reviewer's exploit verbatim against an unlocked
+    passphrase-tier broker. Before the fix this printed the canary value and a
+    32-byte master key from one 60-byte JSON frame; the ancestry walk yielded
+    the peer as the first element of its own chain, so registering was enough
+    to become one's own authorizing ancestor.
+
+    Asserts BOTH halves: the registration is refused, and neither the value nor
+    the key is ever served.
+    """
+    output = tmp_path / "exploit.out"
+    script = tmp_path / "exploit.py"
+    script.write_text(_self_register_exploit(config_root, hardened_broker.path, output))
+    subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not output.exists():
+        time.sleep(0.1)
+    assert output.exists(), "the detached attacker never reported back"
+    text = output.read_text()
+
+    assert "ppid=1" in text, f"the attacker was not actually detached: {text}"
+    assert "register_ok=False" in text, f"self-registration was allowed: {text}"
+    assert "LEAKED" not in text, text
+    assert SECRET_VALUE.decode() not in text, text
+
+
+def test_the_operator_terminal_works_after_unlock_but_a_detached_script_does_not(
+    hardened_broker: SecretBroker, config_root: Path, tmp_path: Path
+) -> None:
+    """The hardened tier must be USABLE, and only by the one who unlocked it.
+
+    Two properties that have to hold together, which is why they are asserted
+    in one test: unlocking grants the operator's own shell standing for this
+    boot (without it, `harden` bricks the store — QA Q2), and that grant must
+    not extend to the detached attacker running as the same uid (without that,
+    it is R1 by another door).
+    """
+    root = str(Path(__file__).resolve().parents[3])
+    # Unlock and then retrieve, from ONE shell: the grant is given to the
+    # parent of the unlocking process, so the retrieval has to descend from
+    # that same shell to prove the grant works the way an operator uses it.
+    unlock = tmp_path / "unlock.py"
+    unlock.write_text(textwrap.dedent(f"""
+        import sys, socket
+        sys.path.insert(0, {root!r})
+        from local_operator.secrets.protocol import PROTOCOL_VERSION, recv_frame, send_frame
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(20)
+        s.connect({str(hardened_broker.path)!r})
+        send_frame(s, {{"version": PROTOCOL_VERSION, "op": "unlock",
+                        "passphrase": "test-passphrase"}})
+        print(recv_frame(s).get("ok"))
+        """))
+    fetch = tmp_path / "terminal_get.py"
+    fetch.write_text(textwrap.dedent(f"""
+        import sys
+        sys.path.insert(0, {root!r})
+        from pathlib import Path
+        from local_operator.secrets import client
+        value = client.retrieve("DEMO_TOKEN", Path({str(config_root)!r}))
+        print("TERMINAL", value.decode())
+        """))
+    shell = subprocess.run(
+        ["bash", "-c", f"{sys.executable} {unlock} && {sys.executable} {fetch}"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert "TERMINAL" in shell.stdout, f"{shell.stdout}{shell.stderr}"
+    assert SECRET_VALUE.decode() in shell.stdout, "the unlocking terminal was denied its own store"
+
+    # Same broker, now unlocked: the detached attacker still gets nothing.
+    output = tmp_path / "after-unlock.out"
+    script = tmp_path / "after-unlock.py"
+    script.write_text(_self_register_exploit(config_root, hardened_broker.path, output))
+    subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not output.exists():
+        time.sleep(0.1)
+    assert output.exists(), "the detached attacker never reported back"
+    text = output.read_text()
+    assert "ppid=1" in text, text
+    assert "register_ok=False" in text, f"self-registration was allowed post-unlock: {text}"
+    assert "LEAKED" not in text, text
+    assert SECRET_VALUE.decode() not in text, text
+
+
+def test_registrations_are_bounded(broker: SecretBroker, config_root: Path) -> None:
+    """R4: registrations must not exhaust the broker for legitimate callers.
+
+    Registration is authenticated now, so this is no longer a free
+    unauthenticated flood — but a runaway or compromised caller that holds the
+    ticket must still not be able to wedge the daemon, and the session watchers
+    must draw from their own budget rather than the request workers'.
+    """
+    from local_operator.secrets.broker import MAX_SESSIONS, MAX_WORKERS
+    from local_operator.secrets.keys import registration_ticket
+    from local_operator.secrets.protocol import encode_bytes
+
+    ticket = encode_bytes(registration_ticket(config_root))
+    held: list[socket.socket] = []
+    try:
+        # Registrations are keyed by the KERNEL-reported pid, and every
+        # connection here comes from this one process, so these all collapse
+        # onto one slot: re-registration replaces rather than accumulates,
+        # which is itself the first half of the bound.
+        # A fixed, small flood: enough to prove one pid cannot accumulate
+        # slots, and independent of MAX_SESSIONS so raising that constant
+        # cannot turn this test into an fd-exhaustion error instead of an
+        # assertion failure.
+        for _ in range(40):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(5)
+            connection.connect(str(broker.path))
+            send_frame(
+                connection,
+                {"version": PROTOCOL_VERSION, "op": "register", "ticket": ticket},
+            )
+            recv_frame(connection)
+            held.append(connection)
+
+        status = client.broker_status(config_root) or {}
+        sessions = status.get("sessions") or []
+        assert len(sessions) == 1, f"one pid took {len(sessions)} session slots: {sessions}"
+
+        # The cap must be real rather than incidental to that collapsing, and
+        # it must be budgeted apart from the request workers — the R4 failure
+        # was 64 registrations starving every legitimate caller.
+        assert MAX_SESSIONS < MAX_WORKERS, (
+            f"MAX_SESSIONS ({MAX_SESSIONS}) must stay below MAX_WORKERS ({MAX_WORKERS}) so a "
+            "full session table cannot consume the capacity requests need"
+        )
+        # And the broker must still answer a fresh caller after the flood.
+        assert client.is_running(config_root), "the broker stopped answering after a flood"
+    finally:
+        for connection in held:
+            with suppress(OSError):
+                connection.close()
+
+
+def test_register_is_audited(broker: SecretBroker, config_root: Path, master_key: bytes) -> None:
+    """R5: the verb that grants standing to ask must appear in the chain (§12).
+
+    Both outcomes: without an audit record of a denial, the R1 bypass would
+    have left no trace at all.
+    """
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(5)
+    connection.connect(str(broker.path))
+    try:
+        send_frame(connection, {"version": PROTOCOL_VERSION, "op": "register"})
+        assert not recv_frame(connection).get("ok")
+    finally:
+        connection.close()
+
+    channel = client.register_session(config_root, session_id="audited")
+    assert channel is not None
+    try:
+        events = [
+            entry.event
+            for entry in SecretStore(master_key, base=config_root).audit_entries(limit=50)
+        ]
+    finally:
+        channel.close()
+    assert any("register" in event for event in events), events
+    assert any("deny:register" in event for event in events), events
+
+
+def test_a_peer_is_not_its_own_authorizing_ancestor() -> None:
+    """R1, second half: `_walk` yields the peer first, and that must not authorize.
+
+    Unit-level on purpose. The end-to-end tests above prove the DOOR is shut
+    (`register` is authenticated), so they stay green even with this half
+    reverted — which is exactly why it needs its own guard: if a later change
+    ever reopens registration, self-as-own-ancestor must not silently become a
+    second bypass again. The two halves are independent, and the review asked
+    for both to hold alone.
+
+    Asserts the distinction that matters: a peer registered as a session is
+    authorized AS ITSELF (its own pin verified), while an UNREGISTERED peer
+    gets nothing from appearing at the head of its own ancestry chain.
+    """
+    from local_operator.secrets.peer import authorize, process_info
+
+    me = process_info(os.getpid())
+    assert me is not None
+
+    # Not registered: appearing first in one's own walk must not authorize.
+    allowed, reason = authorize(me, {})
+    assert not allowed, reason
+
+    # A registered session speaking for itself is allowed, and the reason says
+    # so explicitly rather than claiming a descendant relationship.
+    allowed, reason = authorize(me, {me.pid: me})
+    assert allowed, reason
+    assert "acting for itself" in reason, reason
+
+    # The pid pin still governs: a same-pid impostor with a different identity
+    # is refused even though the pid is registered.
+    impostor = replace(me, unique_id=(me.unique_id or 0) + 1, start_time=me.start_time + 1)
+    allowed, reason = authorize(me, {me.pid: impostor})
+    assert not allowed, reason

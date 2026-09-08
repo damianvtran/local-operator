@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -461,3 +463,94 @@ def test_secret_help_does_not_promise_a_vault(cli) -> None:
     text = helped.stdout.lower()
     for overclaim in (b"vault", b"unbreakable", b"military-grade", b"hacker-proof"):
         assert overclaim not in text
+
+
+def _typed_cli(config: Path, arguments: list[str], answers: list[str]) -> tuple[int, str]:
+    """Run ``lop secret ...`` on a real pty, typing ``answers`` at each prompt.
+
+    ``harden`` and ``unlock`` read through ``getpass``, which opens
+    ``/dev/tty``: without a pty they take the "no terminal" refusal branch and
+    the success path is never exercised. That is exactly why CI missed QA's Q2
+    — the only ``unlock`` test asserted the keyfile rejection, which returns
+    before the broker is contacted.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    environment.update(
+        HOME=str(config.parent / "home"),
+        LOCAL_OPERATOR_CONFIG_DIR=str(config),
+        PYTHONPATH=str(REPO_ROOT),
+        TERM="xterm-256color",
+    )
+    environment.pop("NO_COLOR", None)
+
+    pid, handle = pty.fork()
+    if pid == 0:  # pragma: no cover - the child execs immediately
+        os.environ.clear()
+        os.environ.update(environment)
+        os.execv(sys.executable, [sys.executable, "-m", "local_operator.cli", "secret", *arguments])
+    pending = list(answers)
+    captured = b""
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(handle, 4096)
+        except OSError:  # the child closed the pty
+            break
+        if not chunk:
+            break
+        captured += chunk
+        # Answer as each prompt appears, and keep draining meanwhile: a pty
+        # buffer that fills while nobody reads blocks the child on write.
+        if pending and b"assphrase" in chunk:
+            os.write(handle, (pending.pop(0) + "\n").encode())
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status), captured.decode(errors="replace")
+
+
+def test_harden_restart_unlock_get_round_trip(cli) -> None:
+    """The passphrase tier must be enterable AND usable (QA Q2).
+
+    The tier the design nominates as load-bearing had never worked end to end
+    in either direction: `unlock` was dispatched behind the ancestry gate, so
+    it required descending from a registered session — while nothing in
+    shipping code registered one. After `harden` the correct passphrase was
+    refused and even `status` failed, with the plaintext key already deleted.
+
+    This drives the whole operator journey through the real CLI, including the
+    broker restart that stands in for a reboot, because every step in
+    isolation passed while the sequence did not.
+    """
+    config: Path = cli.config
+    passphrase = "journey-passphrase"
+
+    assert cli("set", "JOURNEY", stdin=b"journey-value\n").returncode == 0
+    assert cli("get", "JOURNEY").stdout == b"journey-value"
+
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+    assert "hardened" in output
+
+    try:
+        # A reboot, in effect: the unlocked key lives only in broker memory.
+        assert cli("broker", "restart").returncode == 0
+
+        # Before unlocking there is no key anywhere, so this must fail cleanly
+        # and print nothing on stdout.
+        locked = cli("get", "JOURNEY")
+        assert locked.returncode == 2
+        assert locked.stdout == b""
+
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        assert "Unlocked" in output
+
+        # And the store is reachable again from the operator's own terminal.
+        served = cli("get", "JOURNEY")
+        assert served.returncode == 0, served.stderr
+        assert served.stdout == b"journey-value"
+
+        status = cli("status")
+        assert status.returncode == 0, status.stderr
+        assert b"passphrase" in status.stdout
+    finally:
+        cli("broker", "stop")

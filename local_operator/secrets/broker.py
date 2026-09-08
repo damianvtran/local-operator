@@ -35,6 +35,7 @@ from "died", which §13 requires never to be ambiguous.
 from __future__ import annotations
 
 import errno
+import hmac
 import os
 import socket
 import threading
@@ -48,6 +49,7 @@ from local_operator.secrets.peer import (
     PeerAuthenticationUnavailable,
     ProcessIdentity,
     authorize,
+    parent_pid,
     peer_identity,
     process_info,
 )
@@ -55,6 +57,7 @@ from local_operator.secrets.protocol import (
     MAX_SOCKET_PATH,
     PROTOCOL_VERSION,
     ProtocolError,
+    decode_bytes,
     encode_bytes,
     ensure_runtime_dir,
     lock_path,
@@ -84,6 +87,21 @@ IDLE_SHUTDOWN_S = 30 * 60.0
 #: sessions (§4); this bounds a runaway or hostile caller from spawning
 #: unbounded threads while leaving generous headroom.
 MAX_WORKERS = 64
+
+#: Ceiling on registered sessions, budgeted SEPARATELY from ``MAX_WORKERS``
+#: (review R4). A session watcher is long-lived while a request worker is
+#: short-lived, so drawing both from one pool let 64 registrations starve every
+#: legitimate caller — measured, and a denial of the operator's entire
+#: credential set in passphrase mode. The operator runs ~10 sessions (§4); 32
+#: is generous headroom for that and still far below the worker budget, so a
+#: full session table can never consume the capacity requests need.
+MAX_SESSIONS = 32
+
+#: Unlock backoff after a wrong passphrase: first delay, and the ceiling.
+#: `unlock` is reachable without ancestry (it authenticates by passphrase), so
+#: it is an online oracle unless a wrong guess costs increasing time (R6).
+UNLOCK_BACKOFF_BASE_S = 0.25
+UNLOCK_BACKOFF_MAX_S = 8.0
 
 
 class BrokerError(SecretStoreError):
@@ -134,12 +152,27 @@ class SecretBroker:
         self._server: socket.socket | None = None
         self._accept_thread: threading.Thread | None = None
         self._workers: set[threading.Thread] = set()
+        #: Long-lived session watchers, budgeted apart from ``_workers`` (R4).
+        #: One per registered session for that session's whole life, so
+        #: counting them against the request budget let registrations starve
+        #: retrievals; they are bounded by ``MAX_SESSIONS`` instead.
+        self._watchers: set[threading.Thread] = set()
         self._stopping = threading.Event()
 
-        #: Guards ``_sessions`` and ``_workers`` only. Never held across I/O.
+        #: Guards ``_sessions``, ``_workers`` and ``_watchers`` only. Never
+        #: held across I/O.
         self._lock = threading.Lock()
         self._sessions: dict[int, _Session] = {}
         self._last_activity = time.monotonic()
+        #: Inode of the socket THIS broker bound, so shutdown never unlinks a
+        #: successor's socket at the same path. See :meth:`start`.
+        self._bound_inode: int | None = None
+        #: Consecutive wrong passphrases, reset by a successful unlock (R6).
+        self._unlock_failures = 0
+        #: Terminals that proved knowledge of the passphrase by unlocking this
+        #: broker, pinned by identity. Authorizing ancestors for this boot in
+        #: the hardened tier only — see :meth:`_grant_terminal`.
+        self._terminals: dict[int, ProcessIdentity] = {}
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -183,6 +216,17 @@ class SecretBroker:
                 raise BrokerError(f"another broker is already listening on {self._path}") from exc
             raise BrokerError(f"could not bind the broker socket {self._path}: {exc}") from exc
         os.chmod(self._path, 0o600)
+        # Remember WHICH inode we bound. `stop()` unlinks by path, and a path
+        # is not an identity: a broker that is still draining in-flight
+        # requests while its replacement has already bound a fresh socket at
+        # the same path would otherwise delete the SUCCESSOR's socket on its
+        # way out, leaving a live daemon nothing can connect to. Found by
+        # `broker restart` (QA Q4), which makes that overlap routine rather
+        # than rare.
+        try:
+            self._bound_inode = self._path.stat().st_ino
+        except OSError:  # pragma: no cover - the bind just succeeded
+            self._bound_inode = None
         server.listen(MAX_WORKERS)
         # A timeout on accept() is what lets the accept loop notice _stopping
         # and the idle deadline; a blocking accept would only wake on a
@@ -219,6 +263,25 @@ class SecretBroker:
         finally:
             probe.close()
 
+    def _unlink_own_socket(self) -> None:
+        """Remove the socket file only if it is still the one we bound.
+
+        Compared by inode rather than by path: see :meth:`start`. A successor
+        broker that has already rebound the path owns a DIFFERENT inode, and
+        removing it would strand a live daemon behind a missing rendezvous
+        point.
+        """
+        if self._bound_inode is None:
+            self._path.unlink(missing_ok=True)
+            return
+        try:
+            if self._path.stat().st_ino != self._bound_inode:
+                return  # a successor owns this path now; leave it alone
+        except OSError:
+            return  # already gone
+        self._path.unlink(missing_ok=True)
+        self._bound_inode = None
+
     def stop(self, timeout: float = 5.0) -> None:
         """Stop accepting, let in-flight requests finish, then clean up."""
         self._stopping.set()
@@ -232,7 +295,7 @@ class SecretBroker:
             self._accept_thread.join(timeout=timeout)
             self._accept_thread = None
         with self._lock:
-            workers = list(self._workers)
+            workers = list(self._workers) + list(self._watchers)
             sessions = list(self._sessions.values())
             self._sessions.clear()
         for worker in workers:
@@ -242,7 +305,7 @@ class SecretBroker:
                 session.connection.close()
             except OSError:  # pragma: no cover
                 pass
-        self._path.unlink(missing_ok=True)
+        self._unlink_own_socket()
         # Drop the key reference on the way out. Python offers no guarantee the
         # bytes are scrubbed from the heap, so this is hygiene, not erasure,
         # and is not claimed as more than that.
@@ -378,7 +441,27 @@ class SecretBroker:
         if operation == "status":
             self._handle_status(connection)
             return False
+        if operation == "unlock":
+            # **Before the ancestry gate, deliberately (QA Q2).** `unlock`
+            # presents the passphrase, and the passphrase IS its
+            # authentication — a stronger one than ancestry, since it is never
+            # on disk in any form while the ticket and the key file are. Behind
+            # the gate this verb was unreachable: unlocking required descending
+            # from a registered session, and in a freshly-booted hardened store
+            # there are no sessions yet, so `harden` bricked the store outright.
+            # Ordering it here is what makes the passphrase tier enterable.
+            self._handle_unlock(connection, identity, request)
+            return False
 
+        # **No ticket shortcut on data operations, in either tier.** A ticket
+        # is a FILE, and the detached attacker reads files owned by this uid as
+        # easily as the operator does, so accepting one in place of ancestry
+        # here would serve exactly the script §8 promises to stop — measured,
+        # as a regression, when an earlier revision of this fix did that. The
+        # operator's own terminal is served instead by proving knowledge of the
+        # passphrase (`_grant_terminal`) in the hardened tier, and by
+        # `access.py`'s key-file fallback in the keyfile tier, where §8 already
+        # concedes the broker is not the boundary.
         allowed, reason = self._authorize(identity)
         if not allowed:
             self._audit_denial(identity, operation, reason)
@@ -389,8 +472,6 @@ class SecretBroker:
             self._handle_key(connection, identity)
         elif operation == "retrieve":
             self._handle_retrieve(connection, identity, request)
-        elif operation == "unlock":
-            self._handle_unlock(connection, request)
         else:
             self._reply_error(connection, "protocol", f"unknown operation {operation!r}")
         return False
@@ -404,6 +485,11 @@ class SecretBroker:
         """
         with self._lock:
             sessions = {pid: session.identity for pid, session in self._sessions.items()}
+            # A terminal that unlocked this broker authorizes its descendants
+            # exactly as a registered session does (see `_grant_terminal`).
+            # Merged here rather than kept in a second walk so there is ONE
+            # authorization path to reason about and audit.
+            sessions.update(self._terminals)
         return authorize(identity, sessions)
 
     # --- operations ---------------------------------------------------------
@@ -411,13 +497,58 @@ class SecretBroker:
     def _handle_register(
         self, connection: socket.socket, identity: ProcessIdentity, request: dict[str, Any]
     ) -> bool:
-        """Register the CONNECTING process as a live session.
+        """Register the CONNECTING process as a live session, if entitled.
 
         A session may only register ITSELF. The pid is taken from the kernel's
         view of the connection, never from the request body — a self-declared
         pid would let any process register an arbitrary victim pid and then
         authorize its own descendants through it.
+
+        **Entitlement is a ticket, because no process-shape check is sound
+        (review R1).** Registration used to be unauthenticated, and since
+        :func:`~local_operator.secrets.peer._walk` yielded the peer as the first
+        element of its own ancestry, any process that registered itself became
+        its own authorizing ancestor — one frame from a detached script to the
+        master key. The repair cannot be "check that the peer looks like a
+        session": measured here, a same-uid attacker forges ppid 1, session
+        leadership and even a controlling tty (``pty.fork``), and code
+        signatures are unreadable (§2.1). So the registrant presents a secret
+        from the 0700 secrets directory instead — see
+        :func:`~local_operator.secrets.keys.registration_ticket` for why that is
+        honest per tier rather than circular.
+
+        Compared in constant time: the ticket is a fixed-length secret and a
+        length-independent early-exit comparison would leak its bytes to a peer
+        allowed to retry.
         """
+        if not self._ticket_is_valid(request.get("ticket")):
+            reason = "the caller did not present a valid session registration ticket"
+            self._audit_denial(identity, "register", reason)
+            self._reply_error(connection, "unauthorized", reason)
+            return False
+        # **In the hardened tier the ticket alone is not enough, and this is
+        # the finding my own adversarial test caught.** A detached `setsid`
+        # attacker reads the 0600 ticket exactly as it reads any file owned by
+        # this uid, so a ticket-only gate let it register itself against an
+        # UNLOCKED passphrase-tier broker and retrieve the canary — R1
+        # reopened by a different door. Nothing on disk can separate that
+        # attacker from the operator, so in this tier a registrant must also
+        # descend from something that proved knowledge of the passphrase: a
+        # granted terminal (`_grant_terminal`) or an already-registered
+        # session. `keyfile` mode keeps the ticket-only path, where §8 already
+        # concedes that a caller able to read the ticket could read the master
+        # key beside it.
+        if not self._is_keyfile_tier():
+            allowed, why = self._authorize(identity)
+            if not allowed:
+                reason = (
+                    "this store is hardened, so registering a session also requires descending "
+                    f"from an unlocked terminal or a registered session ({why})"
+                )
+                self._audit_denial(identity, "register", reason)
+                self._reply_error(connection, "unauthorized", reason)
+                return False
+
         session = _Session(
             identity=identity,
             connection=connection,
@@ -425,10 +556,27 @@ class SecretBroker:
         )
         with self._lock:
             previous = self._sessions.get(identity.pid)
-            self._sessions[identity.pid] = session
-            self._last_activity = time.monotonic()
+            # Re-registration by the same pid replaces rather than adds, so a
+            # session that reconnects cannot consume a second slot.
+            if previous is None and len(self._sessions) >= MAX_SESSIONS:
+                over_capacity = True
+            else:
+                over_capacity = False
+                self._sessions[identity.pid] = session
+                self._last_activity = time.monotonic()
+        if over_capacity:
+            # R4: registrations used to be free AND unbounded, so 64 of them
+            # exhausted the worker budget and wedged the broker for every
+            # legitimate caller — a denial of the operator's whole credential
+            # set. Refuse loudly and audit it instead of closing the connection
+            # silently, so the cause is in the chain rather than invisible.
+            reason = f"the broker already holds {MAX_SESSIONS} registered sessions"
+            self._audit_denial(identity, "register", reason)
+            self._reply_error(connection, "unavailable", reason)
+            return False
         if previous is not None:
             self._close_quietly(previous.connection)
+        self._audit(identity, "register", "allow")
         send_frame(connection, {"ok": True, "registered": identity.pid})
 
         watcher = threading.Thread(
@@ -438,7 +586,7 @@ class SecretBroker:
             daemon=True,
         )
         with self._lock:
-            self._workers.add(watcher)
+            self._watchers.add(watcher)
         watcher.start()
         return True
 
@@ -481,7 +629,7 @@ class SecretBroker:
                     del self._sessions[session.identity.pid]
             self._close_quietly(session.connection)
             with self._lock:
-                self._workers.discard(threading.current_thread())
+                self._watchers.discard(threading.current_thread())
 
     def _handle_status(self, connection: socket.socket) -> None:
         with self._lock:
@@ -518,25 +666,129 @@ class SecretBroker:
         self._audit(identity, "key", "allow")
         send_frame(connection, {"ok": True, "key": encode_bytes(key)})
 
-    def _handle_unlock(self, connection: socket.socket, request: dict[str, Any]) -> None:
-        """Unwrap the passphrase-wrapped key and cache it for this boot."""
+    def _ticket_is_valid(self, offered: Any) -> bool:
+        """Does ``offered`` match this store's registration ticket?
+
+        Compared with :func:`hmac.compare_digest` so a peer that may retry
+        cannot walk the ticket out byte by byte off the timing of an early
+        exit. A missing or unreadable ticket file denies rather than opening
+        registration: failing closed is the only safe direction for the verb
+        that grants standing to ask for the key.
+        """
+        from local_operator.secrets.keys import registration_ticket
+
+        if not isinstance(offered, str) or not offered:
+            return False
+        try:
+            expected = registration_ticket(self._base)
+            candidate = decode_bytes(offered)
+        except (SecretStoreError, OSError, ValueError):
+            return False
+        return hmac.compare_digest(candidate, expected)
+
+    def _is_keyfile_tier(self) -> bool:
+        """Is the master key on disk unwrapped (``keyfile``), or only wrapped?
+
+        The tier decides how much a ticket is worth. In ``keyfile`` mode the
+        ticket sits beside ``master.key``, so a caller able to read one could
+        read the other and decrypt the store with no broker at all — §8 records
+        that this tier stops nobody at the socket. In ``passphrase`` mode the
+        only unwrapped copy is in this process's memory, so a file secret
+        proves nothing and lineage from the passphrase is required instead.
+
+        Fails closed (treats the store as hardened) if the mode cannot be read,
+        because the hardened path is the one with the stricter check.
+        """
+        from local_operator.secrets.keys import key_mode
+
+        try:
+            return key_mode(self._base) == "keyfile"
+        except OSError:  # pragma: no cover - unreadable dir fails closed
+            return False
+
+    def _handle_unlock(
+        self, connection: socket.socket, identity: ProcessIdentity, request: dict[str, Any]
+    ) -> None:
+        """Unwrap the passphrase-wrapped key and cache it for this boot.
+
+        Reached BEFORE the ancestry gate (see :meth:`_dispatch`), so the
+        passphrase is doing the authenticating here. Every attempt is audited
+        and a wrong one costs an increasing delay: without that this is an
+        online guessing oracle bounded only by scrypt's ~180 ms (review R6).
+        The backoff is applied before the reply rather than by refusing, so a
+        legitimate operator who mistypes is slowed rather than locked out of
+        their own store — the failure mode that matters when the alternative is
+        an unreachable credential set.
+        """
         from local_operator.secrets.keys import unwrap_master_key
 
         passphrase = request.get("passphrase")
         if not isinstance(passphrase, str) or not passphrase:
             self._reply_error(connection, "protocol", "unlock requires a passphrase")
             return
+        with self._lock:
+            failures = self._unlock_failures
+        if failures:
+            # Geometric, capped: 0.25s, 0.5s … 8s. Enough to make sustained
+            # guessing pointless against scrypt's cost, short enough that a
+            # human retry never looks hung.
+            time.sleep(min(UNLOCK_BACKOFF_BASE_S * (2 ** (failures - 1)), UNLOCK_BACKOFF_MAX_S))
         try:
-            self._key = unwrap_master_key(self._base, passphrase)
+            key = unwrap_master_key(self._base, passphrase)
         except SecretStoreError as exc:
+            with self._lock:
+                self._unlock_failures += 1
+            self._audit_denial(identity, "unlock", "wrong passphrase")
             self._reply_error(connection, "passphrase", str(exc))
             return
+        self._key = key
+        with self._lock:
+            self._unlock_failures = 0
+        self._grant_terminal(identity)
+        self._audit(identity, "unlock", "allow")
         send_frame(connection, {"ok": True})
+
+    def _grant_terminal(self, identity: ProcessIdentity) -> None:
+        """Let the terminal that just unlocked keep using the store this boot.
+
+        **The problem this solves, and why nothing simpler works.** In
+        ``passphrase`` mode the operator's own ``lop secret get`` is denied by
+        construction (§13): typed at a shell prompt it has no lop session among
+        its ancestors. Every disk-based credential fails to fix this, because
+        the detached `setsid` attacker runs as the same uid and reads any file
+        the operator can — measured: honouring the registration ticket here
+        served that attacker the unwrapped key, which is R1 all over again.
+
+        So the grant is seeded by the ONE secret that is never on disk in any
+        form: the passphrase the operator just typed. Whoever proved knowledge
+        of it gets their PARENT — the shell they typed it into — recorded as an
+        authorizing ancestor for this boot, exactly like a registered session.
+        A later ``lop secret get`` in that same terminal descends from that
+        shell and is served; the detached attacker, reparented to launchd, does
+        not descend from it and stays denied.
+
+        The residual risk is stated rather than hidden: anything the operator
+        subsequently runs *inside that terminal* can read secrets while the
+        broker is unlocked. That is §9.1's acknowledged limit ("a script that
+        runs `lop` itself") and §9.4's unlock window, not a new hole — and it
+        is strictly narrower than the ancestry-free access this replaces.
+
+        Pinned by identity like every other entry, so a shell that exits and
+        whose pid is recycled authorizes nothing.
+        """
+        parent = parent_pid(identity.pid)
+        if parent is None or parent <= 0:
+            return
+        terminal = process_info(parent)
+        if terminal is None:
+            return
+        with self._lock:
+            self._terminals[terminal.pid] = terminal
 
     def _handle_retrieve(
         self, connection: socket.socket, identity: ProcessIdentity, request: dict[str, Any]
     ) -> None:
-        """Decrypt one secret and return it — AFTER the session has acked.
+        """Decrypt one secret and return it — AFTER the owning session acks.
 
         **This ordering is the §6 invariant and the reason retrieval goes
         through the broker at all.** A value fetched as ``$(lop secret get X)``
@@ -546,9 +798,24 @@ class SecretBroker:
         that owns this peer and WAITS FOR THE ACK before replying to the child.
         Because the child cannot print a value it has not received, and it
         cannot receive one before the session has confirmed it is scrubbing,
-        the registration strictly precedes any possible output. That converts a
-        race into an ordering guarantee, at the cost of one sub-millisecond
-        round trip.
+        the registration strictly precedes any possible output.
+
+        **It is an invariant because it fails closed (review R3).** It used to
+        serve the value anyway after a 2 s timeout, which made the word
+        "guarantee" false: a session that never acked — including one an
+        attacker kept from acking — leaked the value into the transcript it was
+        meant to be scrubbed from. A descendant that cannot be covered by the
+        filter is now DENIED rather than served, because the whole reason this
+        path exists is that nothing downstream can catch the value afterwards.
+        The cost is bounded and honest: the caller gets a clear error naming the
+        wedged session, not a hang.
+
+        **The session retrieving for ITSELF is not subject to this and must not
+        be.** That is §6 case (1), where the value is returned into the
+        session's own process and it registers the redaction directly — there
+        is nothing to notify, and demanding an ack from the very process
+        blocked on this reply would deadlock the operator's terminal for a
+        notice it does not need.
         """
         name = request.get("name")
         if not isinstance(name, str) or not name:
@@ -571,10 +838,20 @@ class SecretBroker:
             self._reply_error(connection, "store", str(exc))
             return
 
-        # Notify BEFORE replying. Failure to notify does not deny the
-        # retrieval; see _notify_session for why.
-        if session is not None:
-            self._notify_session(session, name=name, value=value)
+        # Notify BEFORE replying, and fail closed when the notice is not
+        # acknowledged (R3). `is_self` is the session asking for its own value:
+        # §6 case (1), which needs no notice and cannot ack itself.
+        is_self = session is not None and session.identity.same_process_as(identity)
+        if session is not None and not is_self:
+            if not self._notify_session(session, name=name, value=value):
+                reason = (
+                    f"session {session.identity.pid} did not acknowledge the redaction notice "
+                    f"within {self._notify_ack_timeout_s:g}s, so this value cannot be kept out "
+                    "of its transcript and was not served"
+                )
+                self._audit_denial(identity, "retrieve", reason)
+                self._reply_error(connection, "unredactable", reason)
+                return
         send_frame(connection, {"ok": True, "value": encode_bytes(value)})
 
     def _session_for(self, identity: ProcessIdentity) -> _Session | None:
@@ -592,14 +869,25 @@ class SecretBroker:
     def _notify_session(self, session: _Session, *, name: str, value: bytes) -> bool:
         """Tell the session to redact ``value``, and wait for its ack.
 
-        Bounded by :data:`NOTIFY_ACK_TIMEOUT_S`. **A timeout serves the value
-        anyway**, and that is a deliberate choice worth defending: this
-        notification is a redaction-quality mechanism, not an access control.
-        Denying a retrieval because a session's UI thread was slow would turn a
-        cosmetic risk (a secret appearing in a transcript) into a functional
-        failure (an agent's command failing), and the operator would rightly
-        disable the whole feature. The value is already authorized; what is at
-        stake is only whether the transcript filter learned about it first.
+        Bounded by :data:`NOTIFY_ACK_TIMEOUT_S`. Returns whether the session
+        acknowledged; the caller DENIES the retrieval when it did not (R3).
+
+        **Why failing closed is right here, having previously served anyway.**
+        The earlier reasoning was that denying turns a cosmetic risk into a
+        functional failure. It does not hold: §6 exists precisely because a
+        value taken through ``$( )`` is invisible to every filter downstream,
+        so an unacknowledged notice does not mean "the transcript is slightly
+        at risk", it means this secret WILL be written to the operator's
+        transcript in plaintext with nothing left to catch it. That is not
+        cosmetic, and an attacker who controls whether the session acks could
+        choose it deliberately. A denial, by contrast, is visible and
+        recoverable: the caller gets an error naming the wedged session.
+
+        The blast radius is deliberately narrow. Only a descendant retrieval
+        can be denied this way — a session fetching its own value never reaches
+        here (see :meth:`_handle_retrieve`), so a wedged UI cannot lock the
+        operator out of their own store, and ``lop secret get`` typed in a
+        terminal with no session ancestor has no notice to wait for.
 
         The per-session write lock serialises concurrent retrievals attributed
         to the same session, so two notifications cannot interleave on one
@@ -635,9 +923,15 @@ class SecretBroker:
         try:
             from local_operator.secrets.store import SecretStore
 
-            if self._key is None:
-                return
-            SecretStore(self._key, base=self._base).record_broker_event(
+            # Resolve through `_master_key`, not `self._key`. In `keyfile` mode
+            # the key arrives lazily from `_key_provider` and `self._key` stays
+            # None until something forces it, so a bare None check silently
+            # dropped EVERY audit row in the default tier — including the
+            # `register` rows R5 asks for. A locked passphrase-tier broker
+            # genuinely has no key and still returns early, which is correct:
+            # there is no chain to append to until it is unlocked.
+            key = self._master_key()
+            SecretStore(key, base=self._base).record_broker_event(
                 event=event,
                 outcome=outcome,
                 pid=identity.pid,
