@@ -1572,8 +1572,9 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
     from local_operator.exec_worker import build_parser
 
     argv = build_worker_argv("hi", ExecArgs(resume="sess-abc123"))
-    assert "--resume" in argv
-    assert argv[argv.index("--resume") + 1] == "sess-abc123"
+    # `--resume=<id>` as one item: every value-carrying option uses the `=`
+    # form so a value beginning with `-` cannot be read as the next option.
+    assert "--resume=sess-abc123" in argv
 
     # And the worker on the other side accepts what was serialized — parsed from
     # the real argv minus the `python [flags] -m <module>` prefix, so the test
@@ -1584,7 +1585,7 @@ def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:
     assert build_parser().parse_args(argv[argv.index("-m") + 2 :]).resume == "sess-abc123"
 
     # Nothing is emitted when nothing was asked for.
-    assert "--resume" not in build_worker_argv("hi", ExecArgs())
+    assert not any(a.startswith("--resume") for a in build_worker_argv("hi", ExecArgs()))
 
 
 def test_a_bare_resume_classifies_sessions_before_resolving_latest(tmp_path, monkeypatch) -> None:

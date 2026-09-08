@@ -1713,8 +1713,14 @@ class OwnedSessionHandle(SessionHandle):
         self._check_loop_thread()
         spec = self._session.model
         if effort not in spec.reasoning_efforts:
-            ladder = ", ".join(spec.reasoning_efforts) or "no rungs"
-            raise ValueError(f"{spec.model_id} accepts {ladder}, not '{effort}'")
+            # Split rather than falling through to one sentence: joining an
+            # EMPTY ladder produced "accepts no rungs, not 'turbo'", a double
+            # negative that reads as though the value were nearly right, and
+            # "rung" is internal vocabulary no user-facing surface uses.
+            if not spec.reasoning_efforts:
+                raise ValueError(f"{spec.model_id} has no reasoning-effort levels; drop --effort")
+            ladder = ", ".join(spec.reasoning_efforts)
+            raise ValueError(f"{spec.model_id} accepts {ladder} \u2014 not '{effort}'")
         self._session.set_model(spec.model_copy(update={"reasoning_effort": effort}))
         self._refresh_state()
         return f"effort: {effort}"

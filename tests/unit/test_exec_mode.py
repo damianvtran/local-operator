@@ -280,7 +280,12 @@ def test_build_worker_argv_roundtrip() -> None:
     # without it a background exec started inside a checkout of this project
     # runs that checkout (see local_operator.interpreter).
     assert argv[:4] == [sys.executable, "-P", "-m", "local_operator.exec_worker"]
-    assert argv[4:6] == ["--prompt", "do it"]
+    # `--opt=value`, never two argv items: a value that begins with `-` (a name
+    # like `-nightly`, a goal phrased `-- verify everything`) would otherwise
+    # read as the next OPTION and kill the worker at parse_args, before
+    # `--job-id` is honoured — so no terminal ledger row, and reconciliation
+    # mislabels a run that never started as `interrupted`.
+    assert argv[4] == "--prompt=do it"
     # Every set flag serializes; parse it back through the worker parser.
     parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
     assert parsed.prompt == "do it"
@@ -349,7 +354,10 @@ def test_run_exec_publishes_without_replacing_default_gates(fake_factory, capsys
     fake_factory(session)
     assert exec_mode.run_exec("say hello", ExecArgs()) == 0
     assert session.approval_handler is original
-    assert "lop exec control" in capsys.readouterr().err
+    # `session:`, not `control:` — discovery is published for every run now, so
+    # the noun has to report the MODE. Printing the name of the flag the user
+    # did not pass told them the supervised gate was installed; it is not.
+    assert "lop exec session" in capsys.readouterr().err
 
 
 def test_run_exec_control_prints_the_endpoint_on_stderr(fake_factory, monkeypatch, capsys) -> None:
@@ -765,14 +773,15 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     # index error rather than naming the cause. Deriving it means another
     # interpreter flag later cannot silently reintroduce that.
     assert argv[1] == SAFE_PATH_FLAG
-    assert argv[argv.index("-m") :][:4] == [
+    assert argv[argv.index("-m") :][:3] == [
         "-m",
         "local_operator.exec_worker",
-        "--prompt",
-        "write a long report about penguins",
+        "--prompt=write a long report about penguins",
     ]
     assert "--json" in argv and "--yolo" in argv
-    assert "--job-id" in argv  # CL-09 terminal-record wiring
+    # `--job-id=<id>`, one item: see build_worker_argv on why every
+    # value-carrying option uses the `=` form.
+    assert any(a.startswith("--job-id=") for a in argv)  # CL-09 terminal-record wiring
     if sys.platform != "win32":
         assert kwargs.get("start_new_session") is True
 

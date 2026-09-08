@@ -88,7 +88,7 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
         if job_id:
             from local_operator.exec_mode import update_job_running
 
-            update_job_running(job_id, session, control)
+            update_job_running(job_id, session)
         print(control.endpoint_line, file=sys.stderr, flush=True)
     except BaseException:
         if control is not None:

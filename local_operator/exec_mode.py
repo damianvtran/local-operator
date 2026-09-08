@@ -141,15 +141,23 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     # this project would execute that checkout rather than the installed build,
     # silently answering with different code than `lop --version` reports.
     # Same defect as the runtime spawn; see :mod:`local_operator.interpreter`.
-    argv = python_argv("-m", "local_operator.exec_worker", "--prompt", command)
+    # EVERY value-carrying option uses the `--opt=value` form, never two argv
+    # items. argparse reads a following token that starts with `-` as the next
+    # OPTION, so `--name -nightly` (or a prompt phrased `-- verify everything`)
+    # dies at the worker's parse_args — before `--job-id` is honoured, so no
+    # terminal ledger row is ever written and reconciliation reports the run as
+    # `interrupted`: the vocabulary reserved for a worker killed mid-flight,
+    # for a run that never started. The `=` form is unambiguous for any value.
+    argv = python_argv("-m", "local_operator.exec_worker", f"--prompt={command}")
     from local_operator.exec_startup import STARTUP_FIELDS
 
     for field in STARTUP_FIELDS:
         value = getattr(exec_args, field)
-        if value is not None and value is not False:
-            argv.append("--" + field.replace("_", "-"))
-            if value is not True:
-                argv.append(str(value))
+        if value is None or value is False:
+            continue
+        option = "--" + field.replace("_", "-")
+        # `True` is a store_true flag, which carries no value to attach.
+        argv.append(option if value is True else f"{option}={value}")
     if exec_args.json_mode:
         argv.append("--json")
     if exec_args.yolo:
@@ -157,13 +165,13 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     if exec_args.train:
         argv.append("--train")
     if exec_args.agent_name:
-        argv.extend(["--agent", exec_args.agent_name])
+        argv.append(f"--agent={exec_args.agent_name}")
     if exec_args.agent_id:
-        argv.extend(["--agent-id", exec_args.agent_id])
+        argv.append(f"--agent-id={exec_args.agent_id}")
     if exec_args.hosting:
-        argv.extend(["--hosting", exec_args.hosting])
+        argv.append(f"--hosting={exec_args.hosting}")
     if exec_args.model:
-        argv.extend(["--model", exec_args.model])
+        argv.append(f"--model={exec_args.model}")
     if exec_args.control:
         # A detached run is the one that most needs steering — nobody is
         # watching its log — so the flag has to survive the process boundary.
@@ -176,7 +184,7 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
         # silently started a FRESH session in the worker and reported success
         # against the wrong history — the failure `ExecArgs.resume` exists to
         # prevent, one process boundary further out.
-        argv.extend(["--resume", exec_args.resume])
+        argv.append(f"--resume={exec_args.resume}")
     return argv
 
 
@@ -306,7 +314,7 @@ def _process_generation(pid: int) -> str | None:
     return _owner_start_token(pid)
 
 
-def update_job_running(job_id: str, session: Any, control: Any) -> None:
+def update_job_running(job_id: str, session: Any) -> None:
     from local_operator.session.runtime.registry import record_path
 
     update = {
@@ -369,7 +377,33 @@ def job_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
             }
             _append_job_update(update)
             result.update(update)
+    if result.get("status") == "running":
+        # "Waiting for you" and "working" are the two states a detached run can
+        # be in, and they are the ones a user must tell apart — a supervised run
+        # parked on a gate reports `running` forever, and neither --status nor
+        # the log said so. `lop sessions` already computes this from the live
+        # runtime record; read the same field rather than inventing a second
+        # source of truth. NOT persisted to the ledger: it is live state that
+        # goes stale the moment the gate is answered, whereas every ledger row
+        # is a durable fact about the run.
+        result["pending"] = _live_pending(result.get("runtime_path"))
     return result
+
+
+def _live_pending(runtime_path: str | None) -> str | None:
+    """What the live runtime says this run is blocked on, or ``None``.
+
+    Reads the record the run already publishes. Absent/unreadable/older-runtime
+    records answer ``None`` — an unknown answer must never be reported as a
+    parked gate, and a status read must not fail because a worker just exited.
+    """
+    if not runtime_path:
+        return None
+    try:
+        with open(runtime_path, encoding="utf-8") as handle:
+            return json.load(handle).get("pending") or None
+    except (OSError, ValueError):
+        return None
 
 
 def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
@@ -433,7 +467,7 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     job_id = uuid4().hex[:12]
     log_path = logs_root / f"exec-{timestamp}-{slugify(command)}-{job_id}.log"
     argv = build_worker_argv(command, exec_args)
-    argv.extend(["--job-id", job_id])
+    argv.append(f"--job-id={job_id}")
     popen_kwargs: dict[str, Any] = dict(
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
@@ -477,14 +511,51 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         time.sleep(0.05)
         state = job_status(job_id, reconcile=False)
     state = job_status(job_id)
-    print(f"Background job {job_id}: {state.get('status', 'starting')}", file=sys.stderr)
+    status = state.get("status", "starting")
+    # The job/session split is the receipt's whole reason for existing, but two
+    # twelve-hex ids in the same shape do not carry it on their own: say which
+    # is the execution receipt and which is the conversation, and give each an
+    # imperative rather than leaving `Session:` a bare parenthetical.
+    failure = _worker_failure(log_path) if status == "failed" else ""
+    # The reason is already written to a file whose path we hold, and the
+    # launcher is still in the foreground: making the user open a log to read a
+    # one-line validation error is a gap we can close for free.
+    print(
+        f"Background job {job_id}: {status} (execution receipt)"
+        + (f" \u2014 {failure}" if failure else ""),
+        file=sys.stderr,
+    )
     if state.get("session_id"):
         print(
-            f"Session: {state['session_id']} (lop --resume {state['session_id']})", file=sys.stderr
+            f"Session: {state['session_id']} (the conversation) \u2014 attach or resume: "
+            f"lop --resume {state['session_id']}",
+            file=sys.stderr,
         )
     print(f"Status: lop exec --status {job_id}", file=sys.stderr)
     print(f"Log: {log_path}", file=sys.stderr)
-    return 1 if state.get("status") in ("failed", "cancelled", "interrupted") else 0
+    if getattr(exec_args, "control", False):
+        # A supervised run can park on a gate and sit at `running` indefinitely.
+        # `lop sessions` is the one command that shows what a run NEEDS, and it
+        # was the one command this receipt never mentioned.
+        print("Waiting on you? lop sessions shows what a run needs", file=sys.stderr)
+    return 1 if status in ("failed", "cancelled", "interrupted") else 0
+
+
+def _worker_failure(log_path: Path) -> str:
+    """The worker's own last error line, for a launch that already failed.
+
+    Best-effort by contract: the receipt is strictly better with the reason and
+    must never be lost to a race on the log file, so any read problem yields an
+    empty string and the caller prints the plain status it already had.
+    """
+    try:
+        lines = [line.strip() for line in log_path.read_text(errors="replace").splitlines()]
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if line and not line.startswith("#"):
+            return line[:200]
+    return ""
 
 
 def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
@@ -536,7 +607,9 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
 STDIN_PROMPT_SENTINEL = "-"
 
 
-def resolve_prompt(command: str | None, *, stdin_text: str | None = None) -> str:
+def resolve_prompt(
+    command: str | None, *, stdin_text: str | None = None, has_loop: bool = False
+) -> str:
     """Return the prompt to run, reading stdin when ``command`` is ``-``.
 
     Resolved BEFORE the ``--background`` branch on purpose: the background
@@ -545,11 +618,20 @@ def resolve_prompt(command: str | None, *, stdin_text: str | None = None) -> str
     literal ``-`` — the same class of silent-wrong-input bug the ``resume``
     field documents having already been fixed once, one process boundary out.
 
+    ``has_loop`` reports that ``--loop``/``--loop-goal`` was given, which is a
+    DECLARATION that this run has no prompt. Without it an omitted positional
+    fell through to an unbounded ``sys.stdin.read()`` on any non-TTY stdin, and
+    a pipe whose writer stays open never sends EOF — so the documented
+    ``lop exec --goal X --loop 3`` hung forever, with no output, under every
+    supervisor that hands its child an inherited pipe (a CI runner, a cmux
+    surface, ``Popen(stdin=PIPE)``). An explicit ``-`` still reads, because
+    that is the user asking for stdin rather than merely inheriting one.
+
     ``stdin_text`` is injectable so the behaviour is testable without a real
     pipe on the process.
     """
     if command is None:
-        if stdin_text is None and sys.stdin.isatty():
+        if stdin_text is None and (has_loop or sys.stdin.isatty()):
             return ""
     elif command != STDIN_PROMPT_SENTINEL:
         return command
@@ -577,22 +659,39 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     """
     from local_operator.exec_startup import resolve_startup
 
+    has_loop = args.loop is not None or args.loop_goal is not None
     try:
         team = resolve_startup(args)
-        command = resolve_prompt(command)
+        command = resolve_prompt(command, has_loop=has_loop)
     except (ValueError, OSError) as exc:
         print(f"exec failed: {exc}", file=sys.stderr)
         return 1
     # The positional is optional so a loop-only or piped run can omit it
     # (argparse cannot express "required unless --loop/--loop-goal/stdin"), so
     # the requirement is enforced here — naming the ways to supply one rather
-    # than reporting a bare "empty prompt".
-    if not command.strip() and args.loop is None and args.loop_goal is None:
-        print(
-            "exec failed: no prompt. Pass one as an argument, pipe it on stdin "
-            "(or '-'), or run a loop with --loop/--loop-goal",
-            file=sys.stderr,
-        )
+    # than reporting a bare "empty prompt". Each refusal below answers the
+    # BELIEF that produced it, not merely the missing argument: a user who
+    # typed --goal expected the TUI's /goal, which also sends the text.
+    if not command.strip() and not has_loop:
+        if args.clear_goal:
+            print(
+                "exec failed: --clear-goal adjusts a run, it does not start one. "
+                "Pair it with --resume SESSION_ID plus a prompt or --loop.",
+                file=sys.stderr,
+            )
+        elif args.goal:
+            print(
+                "exec failed: --goal sets the objective but does not start work "
+                "(unlike the TUI's /goal). Add a prompt, pipe one on stdin (or "
+                "'-'), or run a loop with --loop N.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "exec failed: no prompt. Pass one as an argument, pipe it on stdin "
+                "(or '-'), or run a loop with --loop/--loop-goal",
+                file=sys.stderr,
+            )
         return 1
     if args.background:
         return _spawn_background(command, args)

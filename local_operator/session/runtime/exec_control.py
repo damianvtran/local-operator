@@ -70,6 +70,11 @@ class ExecControl:
     pid: int
     port: int
     record_path: str
+    #: Whether this run's approval gates were actually replaced by the
+    #: supervisor's (``exec --control``). Discovery is now published for every
+    #: run, so the mode is no longer implied by the surface existing, and
+    #: :attr:`endpoint_line` has to say which one the user is in.
+    supervised: bool = True
 
     @property
     def endpoint_line(self) -> str:
@@ -86,9 +91,19 @@ class ExecControl:
         key is already the owning account. Printing it into a supervisor's log
         would move the credential somewhere the permissions do not reach, so
         the line names the record instead and the supervisor reads it there.
+
+        The NOUN reports the mode, because the two are no longer the same
+        thing. Publication was separated from gate installation, so this line
+        is printed on every run — and printing ``control:`` for a run without
+        ``--control`` tells the user, in the product's own vocabulary (it is
+        the exact name of the flag they did not pass), that the supervised
+        gate is installed. It is not: an unsupervised run keeps the headless
+        deny gate. ``session:`` names what is actually true of every run, and
+        ``control:`` is kept for the gated case a supervisor greps for.
         """
+        label = "control" if self.supervised else "session"
         return (
-            f"lop exec control: session_id={self.session_id} pid={self.pid} "
+            f"lop exec {label}: session_id={self.session_id} pid={self.pid} "
             f"port={self.port} record={self.record_path}"
         )
 
@@ -187,6 +202,7 @@ async def start_exec_control(
         pid=record.pid,
         port=record.control_port,
         record_path=str(registry.record_path(record.pid, config_dir())),
+        supervised=supervised,
     )
 
 

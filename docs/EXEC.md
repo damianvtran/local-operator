@@ -79,6 +79,12 @@ an interactive one. With `--control`, work may park for a supervisor. Choose
 `--yolo` only when you intend that override; it is not required for an
 unattended run. Viewer attach/detach does not end the worker's work.
 
+A parked run stays `running` for as long as nobody answers it, so the status
+names what it is waiting on: `--status` reports `"pending": "approval"`
+alongside `"status": "running"`, and `lop sessions` shows the same thing in its
+`NEEDS` column. That field is live state read from the run's runtime record,
+not a durable ledger row, so it disappears once the gate is answered.
+
 A foreground run exits 0 on success and nonzero on failure/cancellation. A
 background launcher exits after readiness (or reports `starting` after a
 bounded wait); its exit code is **not** the eventual execution result. Follow
@@ -92,6 +98,6 @@ up a successor's resources.
 The job ID identifies the execution receipt; the session ID identifies the
 conversation. They are distinct. Receipts include the log path and, once ready,
 `lop --resume SESSION_ID`. The append-only job ledger lives under the same
-configuration root's `logs/exec_jobs.jsonl`; the ordinary transcript and
+configuration root's `logs/exec-jobs.jsonl`; the ordinary transcript and
 attachment stay in the normal session storage. Runtime discovery records are
 ephemeral; completed outcomes remain in the ledger after their record is gone.

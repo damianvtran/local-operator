@@ -4248,7 +4248,18 @@ def main() -> int:
                     return 1
                 state = job_status(args.status)
                 if not state:
-                    print(f"No exec job {args.status!r}", file=sys.stderr)
+                    # Every other refusal in this feature names a recovery
+                    # command; this one had none to name (there is no `lop
+                    # exec --list`), so it names where the answer actually
+                    # lives. Also carries the `exec failed: ` prefix its
+                    # siblings all use, which it was alone in omitting.
+                    from local_operator.exec_mode import JOBS_FILE, logs_dir
+
+                    print(
+                        f"exec failed: No exec job {args.status!r}; job IDs are printed "
+                        f"by --background and recorded in {logs_dir() / JOBS_FILE}",
+                        file=sys.stderr,
+                    )
                     return 1
                 print(json.dumps(state, ensure_ascii=False))
                 return 0

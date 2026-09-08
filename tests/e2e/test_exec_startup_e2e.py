@@ -181,6 +181,7 @@ def exec_server(tmp_path, monkeypatch):
 
     setattr(run, "release", release)
     setattr(run, "env", env)
+    setattr(run, "cwd", tmp_path)
     try:
         yield run, requests, root
     finally:
@@ -502,6 +503,134 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     assert len(requests) == before, "Status/reconciliation must never restart iterations"
     if termination != "kill":
         assert not Path(status["runtime_path"]).exists()
+
+
+def test_dash_leading_values_reach_the_detached_worker(exec_server):
+    """A value starting with ``-`` must survive the launcher/worker argv hop.
+
+    Forwarded as two argv items, ``--name -nightly`` reads as an OPTION to the
+    worker's argparse and dies at ``parse_args`` — before ``--job-id`` is
+    honoured, so no terminal ledger row is written and reconciliation reports
+    ``interrupted``: the word reserved for a worker killed mid-flight, for a
+    run that never started. The values most likely to lead with a dash are the
+    free-text ones this feature adds.
+    """
+    import time
+
+    from local_operator.exec_mode import job_status
+
+    run, _requests, _root = exec_server
+    # The `=` form is what a user must type for a dash-leading value; the
+    # launcher's own argparse rejects the two-token form just as the worker's
+    # does. The bug was that the launcher ACCEPTED this and then re-emitted it
+    # to the worker in the two-token form the worker cannot parse.
+    result = run(
+        "exec", "HOLD_FIXTURE", "--background", "--name=-nightly", "--goal=-- ship it", stdin=""
+    )
+    assert result.returncode == 0
+    job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
+
+    deadline = time.monotonic() + 20
+    state = job_status(job_id)
+    while time.monotonic() < deadline and state.get("status") == "starting":
+        time.sleep(0.05)
+        state = job_status(job_id)
+    # The worker actually booted, rather than dying at parse_args and being
+    # mislabelled `interrupted` by reconciliation.
+    assert state["status"] == "running", state
+    assert state["session_id"]
+
+    getattr(run, "release").set()
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and state["status"] in ("starting", "running"):
+        time.sleep(0.05)
+        state = job_status(job_id)
+    assert state["status"] == "succeeded", state
+
+
+def test_parked_supervised_run_is_distinguishable_from_working(exec_server):
+    """``--status`` must tell "waiting for you" apart from "working".
+
+    A supervised run parked on an approval sits at ``running`` indefinitely,
+    and that is the one state a user has to notice. ``lop sessions`` already
+    computes it; this asserts ``--status`` reports the same thing rather than
+    collapsing both states into ``running``.
+    """
+    import time
+
+    from local_operator.exec_mode import job_status
+
+    run, _requests, _root = exec_server
+    result = run(
+        "exec", "WRITE_FIXTURE", "--control", "--background", "--name", "Parked fixture", stdin=""
+    )
+    assert result.returncode == 0
+    # The receipt must name the command that shows what a run needs.
+    assert "lop sessions" in result.stderr
+    job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
+
+    # The gate parks asynchronously; wait for the state rather than sleeping.
+    deadline = time.monotonic() + 30
+    state = job_status(job_id)
+    while time.monotonic() < deadline and not state.get("pending"):
+        time.sleep(0.1)
+        state = job_status(job_id)
+    assert state["status"] == "running"
+    assert state["pending"] == "approval", state
+
+    # Live state only: it must never be frozen into the durable ledger, where
+    # every row is a fact that stays true.
+    persisted = (Path(state["log"]).parent / "exec-jobs.jsonl").read_text()
+    assert '"pending"' not in persisted
+
+
+def test_loop_only_run_does_not_block_on_an_inherited_open_pipe(exec_server):
+    """A loop-only run must not read a stdin that never closes.
+
+    Every other case here passes ``stdin=""`` through ``subprocess.run``, which
+    closes the pipe immediately — so the suite structurally could not see this.
+    A supervisor (CI runner, cmux surface, ``Popen(stdin=PIPE)``) hands its
+    child an inherited pipe and keeps the write end OPEN, so ``sys.stdin.read()``
+    never sees EOF and the documented ``exec --goal X --loop N`` hangs forever
+    with no output. This test therefore opens the pipe and deliberately never
+    writes to or closes it.
+    """
+    import subprocess as sp
+
+    run, _requests, _root = exec_server
+    env = getattr(run, "env")
+    process = sp.Popen(
+        [
+            sys.executable,
+            "-m",
+            "local_operator.cli",
+            "exec",
+            "--goal",
+            "Ship safely",
+            "--loop",
+            "1",
+        ],
+        env=env,
+        text=True,
+        stdin=sp.PIPE,  # held open on purpose; nothing is ever written or closed
+        stdout=sp.PIPE,
+        stderr=sp.PIPE,
+        cwd=getattr(run, "cwd"),
+    )
+    try:
+        # Generous relative to the run itself (the fixture answers instantly),
+        # but finite: before the fix this waited forever.
+        process.wait(timeout=45)
+    except sp.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise AssertionError("loop-only exec blocked on an inherited open stdin")
+    finally:
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+    stdout = process.stdout.read() if process.stdout else ""
+    stderr = process.stderr.read() if process.stderr else ""
+    assert process.returncode == 0, (stdout, stderr)
 
 
 def test_detached_worker_outliving_its_launcher_stays_running(exec_server):

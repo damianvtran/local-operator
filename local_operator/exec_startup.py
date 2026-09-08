@@ -72,6 +72,16 @@ def resolve_startup(args: Any) -> Any:
             raise ValueError(f"--loop must be between 1 and {MAX_LOOP_ITERATIONS}")
     if goal is not None and not goal.strip():
         raise ValueError("--loop-goal must not be empty")
+    # Decidable WITHOUT constructing anything: --loop needs a standing goal, and
+    # only a resumed session can supply one this run did not pass. Refusing in
+    # apply_startup instead left an empty session directory behind on every
+    # typo, which the goal-alone path (refused at preflight) never does.
+    if (
+        count is not None
+        and getattr(args, "goal", None) is None
+        and not getattr(args, "resume", None)
+    ):
+        raise ValueError("--loop requires --goal, or --resume a session that has one")
     team = None
     if getattr(args, "team", None):
         from local_operator.paths import config_dir
@@ -89,7 +99,19 @@ def resolve_startup(args: Any) -> Any:
             resolve_profile_or_specialist(args.profile, registry=AgentRegistry(config_dir()))[0]
             is None
         ):
-            raise ValueError(f"No role or specialist named {args.profile!r}; use 'lop agents list'")
+            # NOT 'lop agents list': that lists legacy AgentData records, which
+            # is the --agent/--agent-id world this flag is distinct from. On a
+            # fresh config it prints "No agents found." while --profile reviewer
+            # resolves a packaged seed perfectly well, so the one message whose
+            # job is "here is how to find the right name" pointed at the surface
+            # that structurally cannot contain it. Name the seeds instead.
+            from local_operator.agent_profiles import list_seeds
+
+            available = ", ".join(sorted(list_seeds()))
+            raise ValueError(
+                f"No role or specialist named {args.profile!r}. "
+                f"Available roles: {available}. Add your own with 'lop agents create'"
+            )
     return team
 
 
@@ -105,5 +127,10 @@ def apply_startup(session: Any, args: Any, team: Any) -> None:
         session.set_goal(args.goal)
     if getattr(args, "name", None) is not None:
         session.set_conversation_name(args.name)
+    # The second half of the check resolve_startup starts: only here, with the
+    # session built, can a RESUMED standing goal be consulted. resolve_startup
+    # already rejected the decidable case (no --goal and no --resume) before
+    # anything was constructed, so reaching this raise means the resumed session
+    # genuinely has no goal to continue.
     if getattr(args, "loop", None) is not None and not session.goal:
         raise ValueError("--loop requires --goal or a resumed standing goal")

@@ -88,16 +88,76 @@ def test_startup_roundtrip_worker_arguments():
         control=True,
     )
     argv = build_worker_argv("literal /team nope", args)
-    parsed = build_parser().parse_args(argv[argv.index("--prompt") :])
+    worker_argv = argv[argv.index("local_operator.exec_worker") + 1 :]
+    parsed = build_parser().parse_args(worker_argv)
     for key in ("team", "profile", "goal", "loop", "name", "effort", "control"):
         assert getattr(parsed, key) == getattr(args, key)
     assert parsed.prompt == "literal /team nope"
+
+
+def test_dash_leading_startup_values_survive_the_worker_argv_hop():
+    """Every value-carrying option must use the ``--opt=value`` form.
+
+    Forwarded as two argv items, a value beginning with ``-`` reads as the next
+    OPTION and the worker dies at ``parse_args`` — before ``--job-id`` is
+    honoured, so no terminal ledger row is written and the run is durably
+    mislabelled ``interrupted``. The free-text options this feature adds are
+    exactly the ones a user is likely to lead with a dash.
+    """
+    from local_operator.exec_worker import build_parser
+
+    args = ExecArgs(
+        team="-team",
+        profile="-role",
+        goal="-- verify every criterion",
+        name="-nightly",
+        effort="-high",
+        agent_name="-agent",
+        agent_id="-id",
+        hosting="-host",
+        model="-model",
+        resume="-sess",
+    )
+    argv = build_worker_argv("-- do the thing", args)
+    worker_argv = argv[argv.index("local_operator.exec_worker") + 1 :]
+    parsed = build_parser().parse_args(worker_argv)
+    assert parsed.prompt == "-- do the thing"
+    assert parsed.goal == "-- verify every criterion"
+    assert parsed.name == "-nightly"
+    assert (parsed.team, parsed.profile, parsed.effort) == ("-team", "-role", "-high")
+    assert (parsed.agent, parsed.agent_id) == ("-agent", "-id")
+    assert (parsed.hosting, parsed.model, parsed.resume) == ("-host", "-model", "-sess")
 
 
 def test_stdin_forms_preserve_literal_text():
     assert resolve_prompt(None, stdin_text="/team literal\n") == "/team literal"
     assert resolve_prompt("-", stdin_text="/team literal\n") == "/team literal"
     assert resolve_prompt("/team literal", stdin_text="ignored") == "/team literal"
+
+
+def test_loop_only_run_never_reads_an_inherited_stdin(monkeypatch):
+    """A loop-only run has DECLARED it has no prompt, so it must not read stdin.
+
+    Without this, an omitted positional fell through to an unbounded
+    ``sys.stdin.read()`` on any non-TTY stdin — and a pipe whose writer stays
+    open never sends EOF, so the documented ``exec --goal X --loop N`` hung
+    forever under any supervisor that hands its child an inherited pipe.
+    """
+    import sys as _sys
+
+    class _NeverEnds:
+        """Any read is the bug: a real inherited pipe would block here."""
+
+        def isatty(self):
+            return False
+
+        def read(self):
+            raise AssertionError("read a stdin that a loop-only run must not touch")
+
+    monkeypatch.setattr(_sys, "stdin", _NeverEnds())
+    assert resolve_prompt(None, has_loop=True) == ""
+    # An explicit `-` is the user ASKING for stdin, so it must still read.
+    assert resolve_prompt("-", stdin_text="piped") == "piped"
 
 
 @pytest.mark.asyncio
