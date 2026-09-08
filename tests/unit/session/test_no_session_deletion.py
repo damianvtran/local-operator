@@ -307,6 +307,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "the master.stage.<pid>.<random>.tmp temp FILE this call just wrote",
     ),
+    # Exclusive creation of master.key on concurrent first use: the payload is
+    # written to `master.key.new.<pid>.<random>` and hardlinked onto
+    # `master.key`, so only a complete file is ever published and only one
+    # caller can publish it. This unlink clears that temporary on EVERY exit —
+    # the lost race included, where the link left the target untouched. Both
+    # names come from `keys.key_path()` (config_dir()/secrets plus a fixed
+    # basename) and this process's own pid/random suffix; no caller input and
+    # no session id reaches either, so neither can name a path under sessions/.
+    (
+        "local_operator/secrets/keys.py::create_private_file",
+        "<path>.unlink",
+        "the master.key.new.<pid>.<random> temp FILE this call just wrote",
+    ),
     # `lop secret file` materialises a file-shaped secret for the lifetime of
     # one command. The directory removed is the one `tempfile.mkdtemp()`
     # returned to this same function moments earlier, under $TMPDIR — it is

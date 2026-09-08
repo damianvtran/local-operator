@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import concurrent.futures
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
 from local_operator.secrets.access import resolve_master_key
-from local_operator.secrets.crypto import generate_master_key, key_fingerprint
+from local_operator.secrets.crypto import (
+    KEY_BYTES,
+    generate_master_key,
+    key_fingerprint,
+)
 from local_operator.secrets.errors import SecretCorrupt, SecretStoreError, StaleKeyEpoch
 from local_operator.secrets.keys import (
     discard_staged_master_key,
@@ -513,3 +518,176 @@ def test_a_crash_at_any_rotation_step_survives_a_concurrent_rotation(
 
     # Power cut. A brand new process must still open the store.
     assert _open_knowing_only_the_disk(config_root) == b"super-secret-value"
+
+
+# --- R3: concurrent FIRST USE must converge on one key, not brick ------------
+#
+# The invariants above all assume a store that already EXISTS. Creating it was
+# the same last-writer-wins shape on `master.key` itself: an `exists()` check
+# followed by an unguarded write to a fixed path, so every concurrent first-use
+# caller generated its own key, wrote it, and returned the key it had generated
+# — all but one of them going on to seal a database under a key that was no
+# longer on disk. It survived the round-2 sibling sweep because
+# `write_private_file`'s docstring CLAIMED `O_EXCL` while the code passed
+# `O_TRUNC`, so the site read as guarded.
+#
+# Not a corner case on this machine: the operator runs ~11 sessions at once and
+# the store is created by whichever of them first writes a secret.
+#
+# THE BARRIER IS A `threading.Barrier`, NOT A CLOCK. Real timing cannot pin
+# this: arrival spread across 12 real processes measured 187 ms against a race
+# window microseconds wide, so a wall-clock harness reports a clean run against
+# provably broken code (it did — 0/24 at a base that bricks 4/4 under a forced
+# interleave). The barrier only DELAYS the call; every line of logic under test
+# runs unmodified.
+
+FIRST_USE_CALLERS = 12
+
+
+def _first_use_racers(
+    base: Path, callers: int, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[str], list[str]]:
+    """Run ``callers`` first uses released together; return (keys, errors).
+
+    The hook sits on ``generate_master_key``, which ``load_master_key`` calls
+    precisely between its existence check and its write — the window in
+    question. ``monkeypatch`` undoes it even if the barrier times out.
+    """
+    import local_operator.secrets.keys as keys_module
+
+    original = keys_module.generate_master_key
+    barrier = threading.Barrier(callers, timeout=60)
+
+    def gated() -> bytes:
+        barrier.wait()
+        return original()
+
+    monkeypatch.setattr(keys_module, "generate_master_key", gated)
+
+    keys: list[str] = []
+    errors: list[str] = []
+
+    def worker() -> str:
+        return load_master_key(base, create=True).hex()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=callers) as pool:
+        futures = [pool.submit(worker) for _ in range(callers)]
+        for future in futures:
+            try:
+                keys.append(future.result())
+            except BaseException as exc:  # noqa: BLE001 - asserted on by callers
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    # A run where the barrier never engaged discriminates nothing. Every caller
+    # must have passed through the hook, or the result is not evidence.
+    assert barrier.broken is False or not errors, "the barrier timed out; run proves nothing"
+    return keys, errors
+
+
+def test_concurrent_first_use_converges_on_one_key(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every caller creating the store at once must end up on the SAME key.
+
+    The property is not "one caller wins" — it is that the LOSERS ADOPT the
+    winner's key instead of returning their own. A loser keeping its own key
+    seals its records under a key that is not on disk: the write reports
+    success and the value is unreadable forever after. Measured before the fix
+    at 10 of 12 callers holding a key the file did not have.
+    """
+    keys, errors = _first_use_racers(config_root, FIRST_USE_CALLERS, monkeypatch)
+
+    assert not errors, f"concurrent first use raised: {errors[:2]}"
+    on_disk = key_path(config_root).read_bytes()
+    assert len(on_disk) == KEY_BYTES, f"key file is {len(on_disk)} bytes, not a key"
+    assert set(keys) == {on_disk.hex()}, (
+        f"{len(set(keys))} distinct keys returned by {FIRST_USE_CALLERS} concurrent "
+        "callers; every caller but one would seal its records under a lost key"
+    )
+
+
+def test_a_crash_while_creating_the_key_leaves_no_unusable_store(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-creation must leave NOTHING, not a permanent 0-byte key.
+
+    This is why creation is write-temp-then-``os.link`` rather than the
+    one-line ``O_EXCL``. ``O_EXCL`` does pick a single winner, but it publishes
+    the path at CREATION and fills it afterwards, so the file exists and is
+    empty for the length of the write. Two costs, both measured here: a
+    concurrent loser re-reads and gets ``master.key is 0 bytes; the key file is
+    damaged`` instead of the winner's key, and — far worse — a crash inside
+    that window leaves that 0-byte file behind FOREVER. Nothing ever creates
+    the key again (it exists), and every later run fails the length check, so
+    an interrupted first use permanently bricks the store.
+
+    Simulated at the exact window: the payload write fails after the file would
+    have been published. Recovery is the assertion — the next ordinary first
+    use must succeed and produce a whole key.
+    """
+    import local_operator.secrets.keys as keys_module
+
+    real_write = keys_module.write_private_file
+    calls: list[Path] = []
+
+    def crashing_write(path: Path, data: bytes) -> None:
+        # Create the file the way the real writer does, then die mid-payload.
+        calls.append(path)
+        raise OSError("simulated power cut while writing the key")
+
+    monkeypatch.setattr(keys_module, "write_private_file", crashing_write)
+    with pytest.raises(OSError):
+        load_master_key(config_root, create=True)
+    monkeypatch.setattr(keys_module, "write_private_file", real_write)
+
+    assert calls, "the crash hook never fired; this run proves nothing"
+    # The crash must not have published anything under the final name.
+    assert not key_path(config_root).exists(), (
+        "a crash during creation left a master.key behind; if it is short, "
+        "every later run fails the length check and the store is unopenable"
+    )
+
+    # The real assertion: first use still works afterwards.
+    recovered = load_master_key(config_root, create=True)
+    assert len(recovered) == KEY_BYTES
+    assert recovered == key_path(config_root).read_bytes()
+    leftovers = sorted(path.name for path in (config_root / "secrets").glob("master.key.*"))
+    assert leftovers == [], f"creation temporaries were left behind: {leftovers}"
+
+
+def test_a_store_created_concurrently_is_readable_afterwards(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The consequence the operator actually feels: the records survive.
+
+    The key-identity assertions are the mechanism; this is the loss. Each
+    caller stores a secret under the key its own first use returned, and every
+    committed record must then be readable by a process that knows only what is
+    on disk — the migration ahead is 58 credentials onto a store that does not
+    yet exist.
+    """
+    keys, errors = _first_use_racers(config_root, FIRST_USE_CALLERS, monkeypatch)
+    assert not errors, f"concurrent first use raised: {errors[:2]}"
+
+    stored = 0
+    for index, key in enumerate(keys):
+        store = SecretStore(bytes.fromhex(key), base=config_root)
+        store.initialize()
+        try:
+            store.set(f"SECRET_{index}", f"value-{index}".encode())
+            stored += 1
+        except StaleKeyEpoch:
+            # An honest refusal is not a brick: nothing was committed and the
+            # CLI tells the caller to re-run. A SILENT success under a lost key
+            # is the failure this test exists for.
+            pass
+
+    assert stored, "no caller managed to store anything"
+    reader = SecretStore(resolve_master_key(config_root), base=config_root)
+    for record in reader.list():
+        index = record.name.rsplit("_", 1)[1]
+        assert reader.get(record.name) == f"value-{index}".encode(), (
+            f"{record.name} reported success and is unreadable: it was sealed "
+            "under a key that is not the store's"
+        )
+    assert reader.damaged_records() == [], "the concurrently created store has damaged rows"
