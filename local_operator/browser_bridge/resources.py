@@ -119,6 +119,14 @@ class BrowserResource:
         )
         if self._is_new_execution_over_settled_scope():
             self.record.pop("terminal", None)
+            # The extension keeps its OWN copy of the terminal intent and used
+            # to clear it only when the generation string changed — which the
+            # unleased path deliberately never does, so retiring the record
+            # alone moved the refusal one layer down instead of removing it.
+            # DURABLE, and cleared only by an acknowledged recover: a run that
+            # dies between here and the bridge would otherwise leave the
+            # extension holding a terminal no later run could ever retire.
+            self.record["resumed_scope"] = True
             if self.record.get("retention") == "paused scope":
                 self.record["release_pause"] = True
         self._save()
@@ -201,6 +209,11 @@ class BrowserResource:
             "previous_generation": self.previous_generation,
             "previous_generations": self.record["bridge_generations"],
             "allocation_id": str(self.record["allocation_id"]),
+            # This owner is a NEW RUN over a scope that already settled. The
+            # generation is reused (B1), so it is the only evidence the
+            # extension has that a resume happened; without it the two sides
+            # disagree about what a resume is and `open` is refused forever.
+            "resumed_scope": bool(self.record.get("resumed_scope")),
         }
 
     async def recover(self) -> dict[str, Any]:
@@ -242,6 +255,12 @@ class BrowserResource:
             # Acknowledged CAS collapses the crash-replay chain. Before this
             # receipt every attempted generation remains a possible peer state.
             self.record["bridge_generations"] = [self.generation]
+        # The extension has now retired its copy, so the obligation is
+        # discharged. Held until the ACK rather than cleared when it was
+        # written: an unacknowledged resume must be replayed, and leaving it
+        # set would make a LATER finish's terminal clearable by a recover that
+        # is no longer a resume at all.
+        self.record.pop("resumed_scope", None)
         self.recovered = True
         self._save()
         return result

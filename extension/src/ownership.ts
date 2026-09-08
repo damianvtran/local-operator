@@ -86,7 +86,16 @@ export function withOwnership(
         if (scope.session !== session || (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation))) {
           throw new BridgeCommandError("owner_refused", "browser owner generation is stale");
         }
-        if (scope.generation !== generation) delete scope.terminal;
+        // A resume retires the ended scope. Keying this on the generation
+        // CHANGING was unreachable for an in-process child: that path
+        // deliberately reuses one generation per session (so a second live
+        // instance can never fence the incumbent), so the clear never fired
+        // and `open` below refused forever — the owner was told to resume and
+        // then refused for not having resumed. `resumed_scope` is the owner's
+        // own statement that this is a later run over a settled scope, and it
+        // is only reachable here past the proof/session/generation check
+        // above, so a foreign caller cannot use it to clear someone else's.
+        if (scope.generation !== generation || params.resumed_scope === true) delete scope.terminal;
         scope.generation = generation;
         await chrome.storage.session.set({ ownerScopes: all });
         const allocation = scope.allocations[String(params.allocation_id ?? "")];

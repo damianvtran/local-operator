@@ -338,3 +338,86 @@ async def test_old_extension_is_actionable_before_any_allocation(
         assert _control(protocol_peer)["tabs"] == 0
     finally:
         await session.dispose()
+
+
+def _unleased_session(root: Path) -> Session:
+    """A child as ``_build_child_session`` builds one: claimed, never leased.
+
+    The distinction is the whole point of this guard. Round 2 established that
+    an in-process child reuses ONE generation per session so a second live
+    instance cannot fence the incumbent; the leased ``_session`` above rotates
+    its generation on resume and therefore cannot observe anything that depends
+    on the generation staying the same.
+    """
+    from local_operator.session.retention import claim_session
+
+    directory = root / "sessions" / "synthetic-child"
+    claim_session(directory)
+
+    def stream(_request: Any, _signal: Any) -> Any:
+        async def events() -> Any:
+            if False:
+                yield None
+
+        return events()
+
+    return Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_resumed_unleased_child_can_open_again_across_the_bridge(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """A finalized subagent must be able to browse on a later run.
+
+    This crosses the WIRE deliberately. The unit guard for the same invariant
+    stops at ``allocate()``, which is a local sidecar write, so it could not
+    observe that the extension keeps its own copy of the terminal intent and
+    used to clear it only when the generation string changed — which the
+    unleased path never does. Both halves of the fence have to be retired, and
+    only a real ``open`` through the fixture proves it: the tab count is the
+    assertion, because a refusal here still returns a well-formed error.
+    """
+    first = _unleased_session(headless_tui_env)
+    try:
+        opened = await execute_browser(
+            "child-run1-open",
+            {"action": "open", "url": "https://example.test/"},
+            None,
+            None,
+            first._build_tool_context(),
+        )
+        assert not opened.is_error, opened.text
+        assert _control(protocol_peer)["tabs"] == 1
+        finished = await first.finish_browser_scope(
+            scope_id=first.session_id,
+            generation=first.browser_generation,
+            outcome="completed",
+        )
+        assert finished.state == "closed"
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await first.dispose()
+
+    # `hub op='resume'` relaunches the child over its own transcript directory.
+    resumed = _unleased_session(headless_tui_env)
+    try:
+        assert resumed.browser_generation == first.browser_generation, "B1 reuses the generation"
+        reopened = await execute_browser(
+            "child-run2-open",
+            {"action": "open", "url": "https://example.test/"},
+            None,
+            None,
+            resumed._build_tool_context(),
+        )
+        assert not reopened.is_error, reopened.text
+        # Run 2 allocated a REAL tab; the round-2 head reported 0 here.
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await resumed.dispose()
