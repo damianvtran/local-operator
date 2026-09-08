@@ -1339,11 +1339,37 @@ ASIDE_LAYOUT_CLASS = "aside"
 ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"
 ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 
-#: Parked sidebar presentations kept beside the active one, LRU-evicted. One
-#: made every non-adjacent click cold; four covers the handful of live
-#: conversations a user alternates between, at ~1.2 MiB RSS per parked view
-#: and no measurable per-frame cost (six parked: frame 16–17 ms, unchanged).
-RETAINED_PRESENTATIONS = 4
+#: Parked sidebar presentations kept beside the active one, LRU-evicted.
+#:
+#: This is a CAPACITY, not the memory bound: each parked view is admitted
+#: through `retainable()`'s per-view byte budget (`RETAIN_TEXT_BYTES`, via
+#: `_admit_sidebar_presentation`), which is what refuses the pathological
+#: 200 MB-journal case regardless of this count. The count exists to bound
+#: the number of live viewer sockets (a parked presentation pins its leased
+#: `RemoteSession` and its frontend subscription) and mounted transcript
+#: trees, so it has to be sized to the WORKING SET — the conversations a user
+#: alternates between — or every switch past it is a cold rebuild: connect,
+#: history window, replay, MOUNT, layout wait, teardown, on the event loop.
+#:
+#: One made every non-adjacent click cold. Four covered a handful of live
+#: conversations but was smaller than a real working set, and it read to the
+#: user as "switches get slower the longer I use it": a session that had
+#: touched three conversations hit the cache every time, the same session an
+#: hour later, having touched nine, hit it ~7% of the time — and `/reload`
+#: "fixed" it by emptying the working set. Measured on the assembled app,
+#: 40 switches over 8 live conversations, only this constant changed:
+#: 12/40 hits and 246 ms loop-CPU per switch at 4, 39/40 hits and 59 ms at 8;
+#: over 12 conversations, 6/40 and 219 ms at 4, 36/40 and 65 ms at 12.
+#:
+#: Twelve covers the 8–12 live sessions with turns running that is the
+#: reporting operator's normal population. Above the working set the count
+#: buys nothing (16 measured identical to 12), and each occupied slot costs
+#: ~1.5–2.4 MiB RSS (12 vs 4 at full occupancy: +11–17 MB) plus one live
+#: socket whose owner deltas are still delivered while parked. Per-frame
+#: cost stays nil — a parked view is `offset: 100vw` + `overlay: screen`, so
+#: the compositor's visible set (23 widgets) and keystroke latency (p90
+#: 88 vs 93 ms) are unchanged with 7 parked against 4.
+RETAINED_PRESENTATIONS = 12
 #: Ranked entries warmed per catalog poll. Two is the top of the list — the
 #: rows the eye lands on — without turning every poll into a prepare storm.
 PREWARM_PER_REFRESH = 2
@@ -4874,13 +4900,12 @@ class OperatorApp(App[None]):
             self.run_worker(self._release_sidebar_preparation((outgoing, outgoing_presentation)))
         if displaced is not None and displaced is not incoming:
             self.run_worker(self._release_sidebar_preparation((source, displaced)))
-        # Retain the most recently used presentations. One was the original
-        # bound, and it made every non-adjacent click cold; four covers the
-        # two-or-three live conversations a user actually alternates between
-        # at ~1.2 MiB RSS and no per-frame cost per parked view (measured with
-        # six parked). Dict order is recency — hits reinsert — so the oldest
-        # key is the LRU victim. Executing contexts stay alive without
-        # retaining their widgets, and drafts remain source-owned.
+        # Retain the most recently used presentations, up to the working-set
+        # capacity `RETAINED_PRESENTATIONS` documents (the byte budget per view
+        # was already applied at admission). Dict order is recency — hits
+        # reinsert — so the oldest key is the LRU victim. Executing contexts
+        # stay alive without retaining their widgets, and drafts remain
+        # source-owned.
         while len(self._sidebar_presentations) > RETAINED_PRESENTATIONS:
             evicted_id = next(iter(self._sidebar_presentations))
             evicted = self._sidebar_presentations.pop(evicted_id)
