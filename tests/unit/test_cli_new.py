@@ -870,6 +870,54 @@ def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
         assert all(thread != seen["loop_thread"] for thread in seen[key]), key
 
 
+def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`lop --model <id>` on an unconfigured machine (review round 2, F3).
+
+    The birth resolution raises, so setup mode reaches the viewer with no
+    resolved spec. Claiming an override there left a pending intent nothing
+    could satisfy, which refused every later call including the `/model` the
+    refusal invited. Asserted on what `main()` really passes to `cold`.
+    """
+    seen: dict[str, Any] = {}
+
+    async def fake_cold(*args, **kwargs):
+        seen["initial_model"] = kwargs.get("initial_model")
+        seen["override"] = kwargs.get("model_selection_override")
+        return object()
+
+    async def run_tui(session_factory, session_registry=None, **kwargs):
+        await session_factory()
+        return 0
+
+    def unconfigured(*args, **kwargs):
+        # The real error the factory raises, not a bare ValueError: only these
+        # subclasses route into setup mode, so a stand-in would exercise the
+        # fail-fast branch instead of the path under test.
+        from local_operator.session_factory import HostingNotConfiguredError
+
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    fake_tui = _fake_tui_module()
+    setattr(fake_tui, "run_tui", run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", unconfigured)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    with patch("sys.argv", ["program", "--model", "some-model"]):
+        assert main() == 0
+    assert seen["initial_model"] is None
+    assert (
+        seen["override"] is False
+    ), "an unresolved model must not be claimed as a deliberate override"
+
+
 def test_main_interactive_tty_uses_tui(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

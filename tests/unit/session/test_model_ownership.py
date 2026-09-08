@@ -214,6 +214,43 @@ async def test_factory_resolves_birth_off_loop_with_arguments_captured_before_ho
             await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_an_override_with_no_resolved_model_is_nothing_to_consume(tmp_path):
+    """The pairing the CLI builds on an unconfigured first run.
+
+    ``resolve_hosting_model`` raises on a machine with no usable configuration,
+    so setup mode reaches the viewer with ``initial_model=None`` while a raw
+    ``--model`` flag is still present. Every other test supplies a concrete
+    spec alongside the override, so this pairing was uncovered — and it wedged
+    the session permanently, refusing the prompt, the bind, and the ``/model``
+    the refusal invited (review round 2, F3).
+    """
+    config = ConfigManager(tmp_path)
+    config.update_config({"hosting": "test", "model_name": "working-a"})
+
+    async def no_takeover():
+        raise AssertionError("viewer cannot take ownership")
+
+    viewer = await RemoteSession.cold(
+        "unresolved",
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+        initial_model=None,
+        model_selection_override=True,
+    )
+    try:
+        # Nothing to send, so nothing is pending: the guard clears rather than
+        # holding an intent no later call could ever satisfy.
+        await viewer._consume_model_override()
+        assert viewer._model_selection_override is False
+        # And the same call again is still not an error.
+        await viewer._consume_model_override()
+        assert viewer._model_selection_override is False
+    finally:
+        await viewer.dispose()
+
+
 A = ModelSpec(provider="test", model_id="conversation-a", context_window=100_000)
 B = A.model_copy(update={"model_id": "default-b"})
 

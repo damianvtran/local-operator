@@ -256,6 +256,15 @@ _BACKGROUND_BIND_BUDGET_S = FRONTEND_SYNC_BACKSTOP_S
 #: moment before it would have succeeded.
 _BACKGROUND_YIELD_BUDGET_S = 1.0
 
+#: Shown to the USER verbatim: the TUI relays a refused bind's text straight
+#: into a notice, so this is product copy rather than an internal diagnostic.
+#: It therefore names no runtime vocabulary ("owner"), and ends in the same
+#: next step every sibling refusal on this seam offers, because a refusal the
+#: reader cannot act on reads as a dead end (design D1, UX U1).
+_MODEL_INTENT_PENDING = (
+    "still starting this conversation on the model you asked for; " "try that again in a moment"
+)
+
 #: Bounded retry of the INITIAL bind. A first attempt that loses its race with
 #: a retiring runtime, or that hits an owner whose loop is momentarily busy, is
 #: a transient — the owner is typically answering seconds later, and before
@@ -1707,8 +1716,8 @@ class RemoteSession:
         if not self._can_go_cold or self._disposed:
             return
         if self._recovering:
-            if self._model_selection_override:
-                raise ConnectionError("explicit model selection is waiting for its owner")
+            if self._model_selection_override and self._birth_model is not None:
+                raise ConnectionError(_MODEL_INTENT_PENDING)
             return
         if not self.is_cold and not self._model_selection_override:
             return
@@ -1946,6 +1955,10 @@ class RemoteSession:
     async def _consume_model_override(self) -> None:
         """A warm engagement proves ownership exists, not that intent landed.
 
+        A missing spec is "nothing to consume" rather than an error: only a
+        RESOLVED selection can be sent, and treating its absence as a pending
+        intent makes the state unrecoverable from every caller.
+
         Another cold viewer may have started the winning owner with a different
         selection. Only the existing model RPC's success acknowledgement means
         this viewer's deliberate override was consumed. Keep it across failed
@@ -1954,8 +1967,16 @@ class RemoteSession:
         if not self._model_selection_override:
             return
         client, requested = self._client, self._birth_model
-        if client is None or requested is None or self._recovering or self.is_cold:
-            raise ConnectionError("explicit model selection is waiting for its owner")
+        if requested is None:
+            # Nothing to consume. The CLI pairs a raw ``--model`` flag with no
+            # resolved spec whenever the machine has no usable configuration
+            # yet, and a pending intent that can never be satisfied would
+            # refuse every later call — including the ``/model`` the refusal
+            # invites. Clearing it restores the ordinary unconfigured path.
+            self._model_selection_override = False
+            return
+        if client is None or self._recovering or self.is_cold:
+            raise ConnectionError(_MODEL_INTENT_PENDING)
         await client.set_model(requested.provider, requested.model_id)
         self._model_selection_override = False
 

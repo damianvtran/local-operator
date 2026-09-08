@@ -4532,7 +4532,13 @@ def main() -> int:
                     cwd=os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,
-                    model_selection_override=bool(birth_args.hosting or birth_args.model),
+                    # Only a RESOLVED spec can be a deliberate override. Setup
+                    # mode leaves `initial_model` None when the machine has no
+                    # usable configuration yet, and claiming an override there
+                    # would assert an intent with nothing to apply.
+                    model_selection_override=(
+                        initial_model is not None and bool(birth_args.hosting or birth_args.model)
+                    ),
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason

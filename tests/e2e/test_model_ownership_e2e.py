@@ -26,6 +26,56 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.asyncio
+async def test_an_unresolved_model_flag_does_not_wedge_the_conversation(headless_tui_env):
+    """Review round 2, F3: the pairing setup mode builds must still run.
+
+    A raw ``--model`` flag with no resolvable configuration reached the viewer
+    as ``initial_model=None`` plus ``model_selection_override=True``, and the
+    pending intent then refused every later call permanently. Driven through
+    the real prompt path on a working machine, so a refusal here can only be
+    that guard rather than a genuine configuration failure.
+    """
+    import asyncio
+
+    from local_operator.session.remote import RemoteSession
+    from tests.e2e.watchdog import bounded
+
+    config = headless_tui_env
+    ConfigManager(config).update_config({"hosting": "test", "model_name": "working-a"})
+
+    async def no_takeover():
+        raise AssertionError("viewer must not become the owner")
+
+    viewer = await RemoteSession.cold(
+        "firstrunflag001",
+        config_dir=config,
+        cwd=str(config),
+        takeover_factory=no_takeover,
+        initial_model=None,
+        model_selection_override=True,
+    )
+    calls, ended = [], asyncio.Event()
+
+    def observe(event):
+        if event.type == "provider_turn_start":
+            calls.append((event.provider, event.model_id))
+        if event.type == "agent_end":
+            ended.set()
+
+    viewer.subscribe(observe)
+    try:
+        with bounded(60, "first run with an unresolved model flag"):
+            await viewer.prompt("the first message on a fresh machine")
+            await ended.wait()
+        assert calls == [("test", "working-a")]
+        assert viewer._model_selection_override is False
+    finally:
+        if viewer._client is not None:
+            await viewer._client.request_stop()
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_competing_cold_resumes_acknowledge_explicit_model_on_winning_owner(headless_tui_env):
     import asyncio
 
