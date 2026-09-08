@@ -109,6 +109,14 @@ class ExecArgs:
     #: mechanism. Carried through to the worker so `--background --control` is
     #: the same request run elsewhere, exactly like ``resume``.
     control: bool = False
+    team: str | None = None
+    profile: str | None = None
+    goal: str | None = None
+    clear_goal: bool = False
+    loop: int | None = None
+    loop_goal: str | None = None
+    name: str | None = None
+    effort: str | None = None
 
 
 def slugify(command: str, max_length: int = 40) -> str:
@@ -134,6 +142,14 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     # silently answering with different code than `lop --version` reports.
     # Same defect as the runtime spawn; see :mod:`local_operator.interpreter`.
     argv = python_argv("-m", "local_operator.exec_worker", "--prompt", command)
+    from local_operator.exec_startup import STARTUP_FIELDS
+
+    for field in STARTUP_FIELDS:
+        value = getattr(exec_args, field)
+        if value is not None and value is not False:
+            argv.append("--" + field.replace("_", "-"))
+            if value is not True:
+                argv.append(str(value))
     if exec_args.json_mode:
         argv.append("--json")
     if exec_args.yolo:
@@ -187,7 +203,14 @@ def _open_log_file(log_path: Path) -> Any:
     return os.fdopen(os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
 
 
-def _append_job_record(log_path: Path, prompt: str, pid: int, job_id: str | None = None) -> str:
+def _append_job_record(
+    log_path: Path,
+    prompt: str,
+    pid: int,
+    job_id: str | None = None,
+    *,
+    requested_team: str | None = None,
+) -> str:
     """Append the detached run as one JSONL record and return the job id.
 
     O_APPEND single-write (CL-11): POSIX guarantees atomicity for small
@@ -205,6 +228,9 @@ def _append_job_record(log_path: Path, prompt: str, pid: int, job_id: str | None
         "prompt": prompt,
         "log": str(log_path),
         "pid": pid,
+        "process_generation": _process_generation(pid),
+        "status": "starting",
+        "requested_team": requested_team,
         "finished_at": None,
         "exit_code": None,
     }
@@ -256,6 +282,11 @@ def update_job_exit(job_id: str, exit_code: int) -> None:
         "id": job_id,
         "finished_at": datetime.now().astimezone().isoformat(),
         "exit_code": exit_code,
+        "pid": os.getpid(),
+        "process_generation": _process_generation(os.getpid()),
+        "status": (
+            "succeeded" if exit_code == 0 else "cancelled" if exit_code in (130, 143) else "failed"
+        ),
     }
     try:
         fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -265,6 +296,80 @@ def update_job_exit(job_id: str, exit_code: int) -> None:
             os.close(fd)
     except OSError:
         pass
+
+
+def _process_generation(pid: int) -> str | None:
+    # Reuse the resource reaper's locale-stable start token; bare PID liveness
+    # must never credit a recycled process with keeping this job alive.
+    from local_operator.tools.group_reaper import _owner_start_token
+
+    return _owner_start_token(pid)
+
+
+def update_job_running(job_id: str, session: Any, control: Any) -> None:
+    from local_operator.session.runtime.registry import record_path
+
+    update = {
+        "id": job_id,
+        "session_id": session.session_id,
+        "pid": os.getpid(),
+        "process_generation": _process_generation(os.getpid()),
+        "status": "running",
+        "team": session.active_team_name,
+        "session_directory": str(session._transcript.directory),
+        "runtime_path": str(record_path(os.getpid())),
+    }
+    _append_job_update(update)
+
+
+def _append_job_update(update: dict[str, Any]) -> None:
+    path = _ensure_logs_dir() / JOBS_FILE
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (json.dumps(update, ensure_ascii=False) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def job_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+    """Fold the existing append-only ledger without allowing late spawn rows
+    to regress a worker's ready/terminal record. Dead owners are interrupted,
+    never successful, and reconciliation never acts on their resources.
+    """
+    result: dict[str, Any] = {}
+    rank = {
+        "starting": 0,
+        "running": 1,
+        "succeeded": 2,
+        "failed": 2,
+        "cancelled": 2,
+        "interrupted": 2,
+    }
+    current = -1
+    for row in read_job_records():
+        if row.get("id") != job_id:
+            continue
+        level = rank.get(row.get("status", "starting"), 0)
+        if level < current:
+            for key, value in row.items():
+                result.setdefault(key, value)
+            continue
+        result.update(row)
+        current = level
+    if reconcile and result.get("status") in ("starting", "running"):
+        from local_operator.tools.group_reaper import _owner_is_dead
+
+        generation = result.get("process_generation")
+        pid = result.get("pid")
+        if pid and generation and _owner_is_dead(pid, generation) is True:
+            update = {
+                "id": job_id,
+                "status": "interrupted",
+                "finished_at": datetime.now().astimezone().isoformat(),
+            }
+            _append_job_update(update)
+            result.update(update)
+    return result
 
 
 def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
@@ -325,9 +430,8 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
 
     logs_root = _ensure_logs_dir()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = logs_root / f"exec-{timestamp}-{slugify(command)}.log"
-
     job_id = uuid4().hex[:12]
+    log_path = logs_root / f"exec-{timestamp}-{slugify(command)}-{job_id}.log"
     argv = build_worker_argv(command, exec_args)
     argv.extend(["--job-id", job_id])
     popen_kwargs: dict[str, Any] = dict(
@@ -357,13 +461,30 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         log_handle.flush()
         process = subprocess.Popen(argv, stdout=log_handle, **popen_kwargs)
 
-    _append_job_record(log_path, command, process.pid, job_id=job_id)
+    _append_job_record(log_path, command, process.pid, job_id=job_id, requested_team=exec_args.team)
     # --json and --background are independent flags, so these notices must not
     # land on stdout: a consumer parsing the event stream would hit two
     # unparseable lines before any event.
-    print(f"Started background job {job_id}", file=sys.stderr)
+    import time
+
+    # Readiness is not completion: bound the launcher's wait and report an
+    # honest 'starting' receipt when provider/session initialization is slow.
+    deadline = time.monotonic() + 5.0
+    state = job_status(job_id, reconcile=False)
+    while state.get("status") == "starting" and time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+        state = job_status(job_id, reconcile=False)
+    state = job_status(job_id)
+    print(f"Background job {job_id}: {state.get('status', 'starting')}", file=sys.stderr)
+    if state.get("session_id"):
+        print(
+            f"Session: {state['session_id']} (lop --resume {state['session_id']})", file=sys.stderr
+        )
+    print(f"Status: lop exec --status {job_id}", file=sys.stderr)
     print(f"Log: {log_path}", file=sys.stderr)
-    return 0
+    return 1 if state.get("status") in ("failed", "cancelled", "interrupted") else 0
 
 
 def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
@@ -415,7 +536,7 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
 STDIN_PROMPT_SENTINEL = "-"
 
 
-def resolve_prompt(command: str, *, stdin_text: str | None = None) -> str:
+def resolve_prompt(command: str | None, *, stdin_text: str | None = None) -> str:
     """Return the prompt to run, reading stdin when ``command`` is ``-``.
 
     Resolved BEFORE the ``--background`` branch on purpose: the background
@@ -427,13 +548,16 @@ def resolve_prompt(command: str, *, stdin_text: str | None = None) -> str:
     ``stdin_text`` is injectable so the behaviour is testable without a real
     pipe on the process.
     """
-    if command != STDIN_PROMPT_SENTINEL:
+    if command is None:
+        if stdin_text is None and sys.stdin.isatty():
+            return ""
+    elif command != STDIN_PROMPT_SENTINEL:
         return command
     text = sys.stdin.read() if stdin_text is None else stdin_text
     return text.strip()
 
 
-def run_exec(command: str, args: ExecArgs) -> int:
+def run_exec(command: str | None, args: ExecArgs) -> int:
     """Entry point for the ``exec`` subcommand (README contract: exit 0 on
     success, non-zero on error).
 
@@ -451,16 +575,31 @@ def run_exec(command: str, args: ExecArgs) -> int:
     control socket) so a supervisor can steer and cancel it; the endpoint goes
     to STDERR because stdout is the payload stream.
     """
-    command = resolve_prompt(command)
-    if not command:
-        print("exec failed: empty prompt", file=sys.stderr)
+    from local_operator.exec_startup import resolve_startup
+
+    try:
+        team = resolve_startup(args)
+        command = resolve_prompt(command)
+    except (ValueError, OSError) as exc:
+        print(f"exec failed: {exc}", file=sys.stderr)
+        return 1
+    # The positional is optional so a loop-only or piped run can omit it
+    # (argparse cannot express "required unless --loop/--loop-goal/stdin"), so
+    # the requirement is enforced here — naming the ways to supply one rather
+    # than reporting a bare "empty prompt".
+    if not command.strip() and args.loop is None and args.loop_goal is None:
+        print(
+            "exec failed: no prompt. Pass one as an argument, pipe it on stdin "
+            "(or '-'), or run a loop with --loop/--loop-goal",
+            file=sys.stderr,
+        )
         return 1
     if args.background:
         return _spawn_background(command, args)
 
     import asyncio
 
-    from local_operator.headless_print import run_print_mode
+    from local_operator.exec_session import run_session
 
     factory = default_session_factory or _make_default_session_factory(args)
 
@@ -468,41 +607,11 @@ def run_exec(command: str, args: ExecArgs) -> int:
         session = factory()
         if asyncio.iscoroutine(session):
             session = await session
-        # Function-local by contract: the runtime pulls asyncio and the owned
-        # handle's composition root, and ``tests/unit/test_import_graph.py``
-        # pins what ``import local_operator.cli`` may load. Imported even when
-        # the flag is off is still too early — this module is imported by the
-        # CLI dispatch — so the import sits inside the run, not at module scope.
-        from local_operator.session.runtime.exec_control import maybe_start_exec_control
-
-        control = await maybe_start_exec_control(
-            session,
-            enabled=args.control,
-            cwd=os.getcwd(),
-            yolo=args.yolo,
-        )
-        if control is not None:
-            # STDERR: stdout carries the NDJSON event stream (or the final
-            # assistant text), and a supervisor parsing it line-by-line would
-            # choke on a chrome line. Same rule headless_print states for every
-            # other progress line.
-            print(control.endpoint_line, file=sys.stderr, flush=True)
-        # The surface must close BEFORE run_print_mode disposes the session, and
-        # that dispose is inside run_print_mode's own ``finally`` — so the
-        # ordering cannot be expressed from out here and is handed in as the
-        # ``before_dispose`` hook instead. A short run that finishes before the
-        # first 15 s heartbeat therefore still announces its stop and unpublishes
-        # its record; nothing is left for a scanner to reap.
-        return await run_print_mode(
-            session,
-            [command],
-            json_mode=args.json_mode,
-            before_dispose=(control.aclose if control is not None else None),
-        )
+        return await run_session(session, command, args, team)
 
     try:
         return asyncio.run(runner())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
     except Exception as exc:  # noqa: BLE001 — CL-19: raising prompt = exit 1
         print(f"exec failed: {exc}", file=sys.stderr)

@@ -185,6 +185,7 @@ class OwnedSessionHandle(SessionHandle):
         cwd: str,
         auto_approve: bool = False,
         approval_pinned: bool = False,
+        install_gates: bool = True,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -340,7 +341,14 @@ class OwnedSessionHandle(SessionHandle):
         # sessions in tests that never grew the attribute keep working.
         if hasattr(session, "on_turn_settled"):
             session.on_turn_settled = self._publish_busy_soon
-        self._install_gates()
+        # Discovery/attachment does not authorize replacing a headless deny
+        # gate with a parked interactive gate. Exec opts into that separately.
+        #: Why the most recent admitted turn failed, for a headless caller that
+        #: has no front end reading the projection. See the drain's handler.
+        self._last_prompt_failure = ""
+        self._gates_installed = install_gates
+        if install_gates:
+            self._install_gates()
 
     # -- gates -----------------------------------------------------------------
 
@@ -1178,11 +1186,64 @@ class OwnedSessionHandle(SessionHandle):
                     store.mutate(loop=state)
                 self._notify()
 
-            self._goal_loop = GoalLoop(prompt, judge, self._cancel_loop_turn, changed)
+            async def checkpoint() -> None:
+                # A headless session need not have a frontend subscriber. Its
+                # loop still owns durable progress, including the terminal
+                # boundary that occurs AFTER the last turn-end checkpoint.
+                store = getattr(self._session, "_frontend_state_store", None)
+                transcript = getattr(self._session, "_transcript", None)
+                if store is not None and transcript is not None:
+                    await store.checkpoint(transcript)
+
+            self._goal_loop = GoalLoop(prompt, judge, self._cancel_loop_turn, changed, checkpoint)
             store = getattr(self._session, "_frontend_state_store", None)
             if store is not None and store.state.loop:
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
+
+    async def run_headless_prompt(self, text: str) -> bool:
+        """Submit through the owner queue so live viewers cannot race exec.
+
+        Returns whether the turn completed, rather than raising on failure. A
+        provider error arrives as an EVENT, so the renderer already reports the
+        provider's own message and owns the exit code; raising on top of that
+        would replace a real diagnosis with a generic queue message. Returning
+        the outcome still lets the caller fail the run when the turn raised
+        without ever emitting an error event. The goal loop takes the raising
+        path (:meth:`prompt` directly) because it must stop iterating.
+        """
+        self._last_prompt_failure = ""
+        try:
+            await self.prompt(text, command_id=str(uuid.uuid4()), wait_complete=True)
+            return True
+        except RuntimeError:
+            logger.debug("headless turn did not complete", exc_info=True)
+            return False
+
+    @property
+    def last_prompt_failure(self) -> str:
+        """Why the last admitted turn failed, or "" — see the drain's handler."""
+        return self._last_prompt_failure
+
+    async def run_headless_loop(self, *, count: int | None, goal: str | None) -> bool:
+        """Await the same owner-local driver used by /loop, not another runner."""
+        driver = self._loop_driver()
+        driver.start(
+            str(count) if count is not None else "", self._session.goal, goal_override=goal
+        )
+        assert driver.task is not None
+        try:
+            await driver.task
+        finally:
+            if driver.running:
+                await driver.cancel()
+        if driver.state.get("status") == "cancelled":
+            raise asyncio.CancelledError
+        return driver.state.get("status") in {"completed", "achieved"}
+
+    async def cancel_headless_loop(self) -> None:
+        if self._goal_loop is not None:
+            await self._goal_loop.cancel()
 
     def _cancel_loop_turn(self) -> None:
         # Another frontend may have queued a manual turn before this iteration.
@@ -1311,6 +1372,19 @@ class OwnedSessionHandle(SessionHandle):
             command = self._prompt_queue[0]
             self._active_prompt_command_id = command.command_id
             succeeded = False
+            emitted_failure = False
+
+            def observe_end(event: AgentEvent) -> None:
+                nonlocal emitted_failure
+                from local_operator.harness.types import AgentEndEvent
+
+                if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
+                    emitted_failure = True
+
+            # Session.prompt reports provider errors as events, not exceptions.
+            # Queue completion must reflect that terminal result; otherwise a
+            # goal loop submits its next turn after the model already failed.
+            unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
@@ -1328,7 +1402,7 @@ class OwnedSessionHandle(SessionHandle):
                     if not command.admitted.done():
                         command.admitted.set_result(None)
                     await self._session.prompt(command.text, command.images)
-                succeeded = True
+                succeeded = not emitted_failure
             except asyncio.CancelledError:
                 if not command.admitted.done():
                     command.admitted.set_exception(
@@ -1356,6 +1430,10 @@ class OwnedSessionHandle(SessionHandle):
                 self._projection.streaming = self._session.is_streaming
                 self._fold.note_prompt_rejected(str(exc))
                 self._notify()
+                # Kept for a headless caller, which has no front end to read the
+                # projection: a turn that RAISES emits no error event, so this
+                # string is the only description of what went wrong.
+                self._last_prompt_failure = str(exc)
                 logger.exception("mobile prompt failed after admission")
             except BaseException:
                 # KeyboardInterrupt/SystemExit retain their process semantics;
@@ -1363,6 +1441,7 @@ class OwnedSessionHandle(SessionHandle):
                 logger.critical("mobile prompt drain terminated", exc_info=True)
                 raise
             finally:
+                unsubscribe_outcome()
                 if command.completed is not None and not command.completed.done():
                     command.completed.set_result(succeeded)
                 self._active_prompt_command_id = None
@@ -3225,6 +3304,19 @@ class OwnedSessionHandle(SessionHandle):
         sessions, not to a runtime that outlives it.
         """
         argument = (arg or "").strip().lower()
+        if not self._gates_installed:
+            # Publishing an exec owner did not replace its original gate, so
+            # mutating this handle's flag would lie about what tools consult.
+            # Gate routing is a launch decision, never a side effect of attach.
+            return SlashResult(
+                kind="notice",
+                text=(
+                    "exec uses its original headless approval gate"
+                    + (" (--yolo is active)" if self._auto_approve else " (non-TTY requests deny)")
+                    + "; launch with --control for supervisor approval controls"
+                ),
+                style="warning" if argument else "info",
+            )
         if argument == "default" or argument.startswith("default "):
             return SlashResult(
                 kind="notice",

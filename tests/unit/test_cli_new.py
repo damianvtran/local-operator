@@ -1447,6 +1447,16 @@ def test_golden_legacy_parser_surface() -> None:
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     current = _inventory(build_cli_parser())
 
+    # The ONE deliberate relaxation of the legacy surface, recorded here rather
+    # than edited into the golden data so the reason is visible to a reviewer.
+    # `exec` grew loop-only and piped-stdin forms (`--loop`, `--loop-goal`, `-`,
+    # omitted-with-a-pipe), and argparse cannot express "required unless one of
+    # those" — so the positional is `nargs="?"` and `run_exec` enforces the real
+    # rule, naming the ways to supply a prompt. Relaxing required->optional is
+    # backward compatible: every legacy invocation that passed a prompt still
+    # parses identically. Nothing else may change shape.
+    RELAXED_TO_OPTIONAL = {("exec", "POS:command"): {"required": False, "nargs": "?"}}
+
     problems: list[str] = []
     for command, options in golden.items():
         if command not in current:
@@ -1470,7 +1480,10 @@ def test_golden_legacy_parser_surface() -> None:
                 if removed:
                     problems.append(f"{command}: {key} lost choices: {sorted(removed)}")
                 continue
+            allowed = RELAXED_TO_OPTIONAL.get((command, key), {})
             for field in ("dest", "default", "required", "nargs"):
+                if field in allowed and now[field] == allowed[field]:
+                    continue
                 if now[field] != spec[field]:
                     problems.append(
                         f"{command}: {key} {field} changed: " f"{spec[field]!r} -> {now[field]!r}"
@@ -1535,12 +1548,17 @@ def test_resume_survives_in_front_of_the_subcommand() -> None:
 
     # And the bare form still means "the most recent". It has to come last: with
     # `nargs="?"` a following word IS the id, so `--resume hi` names a session
-    # called `hi` and leaves exec without a prompt. That exits 2 with a usage
-    # message rather than doing something surprising, which is the acceptable end
-    # of an ambiguity argparse cannot resolve for us.
+    # called `hi` and leaves exec without a prompt.
     assert parser.parse_args(["exec", "hi", "--resume"]).resume == cli.RESUME_LATEST
-    with pytest.raises(SystemExit):
-        parser.parse_args(["exec", "--resume", "hi"])
+
+    # That case USED to exit 2, because `command` was a required positional.
+    # `exec` now supports loop-only and piped-stdin runs, so the positional is
+    # optional and argparse can no longer reject it at parse time. The ambiguity
+    # is unchanged and still resolved the same way (`hi` is the session id, not
+    # the prompt); only the layer that reports it moved, to `run_exec`, which
+    # names how to supply a prompt instead of printing a bare usage block.
+    ambiguous = parser.parse_args(["exec", "--resume", "hi"])
+    assert ambiguous.resume == "hi" and ambiguous.command is None
 
 
 def test_a_background_job_carries_the_session_it_was_told_to_resume() -> None:

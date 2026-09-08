@@ -20,11 +20,13 @@ class GoalLoop:
         judge: Callable[[str], Awaitable[str]],
         abort: Callable[[], None],
         changed: Callable[[dict[str, Any]], None],
+        checkpoint: Callable[[], Awaitable[None]] | None = None,
     ):
         self.prompt = prompt
         self.judge = judge
         self.abort = abort
         self.changed = changed
+        self.checkpoint = checkpoint
         self.task: asyncio.Task[None] | None = None
         self.state: dict[str, Any] = {"status": "idle", "completed": 0}
 
@@ -43,7 +45,9 @@ class GoalLoop:
             self.abort()
             await asyncio.gather(self.task, return_exceptions=True)
 
-    def start(self, args: str, standing_goal: str) -> dict[str, Any]:
+    def start(
+        self, args: str, standing_goal: str, *, goal_override: str | None = None
+    ) -> dict[str, Any]:
         if self.running:
             raise ValueError("A loop is already running")
         goal = ""
@@ -59,6 +63,10 @@ class GoalLoop:
             # the desktop route's `max_length=200_000`, and an oversized frame
             # is a DROPPED LINE -- a session that simply cannot be attached to.
             goal, count = args[:LOOP_GOAL_CHARS], None
+        # The CLI has distinct count/text flags, so a literal goal such as
+        # '123' must not accidentally become a request for 123 iterations.
+        if goal_override is not None:
+            goal, count = goal_override[:LOOP_GOAL_CHARS], None
         if count is not None and not 1 <= count <= MAX_LOOP_ITERATIONS:
             raise ValueError(f"Iterations must be between 1 and {MAX_LOOP_ITERATIONS}")
         if not goal and not standing_goal:
@@ -72,10 +80,16 @@ class GoalLoop:
         failures = 0
         try:
             while count is None or self.state["completed"] < count:
+                # Persist the boundary BEFORE admitting another turn. A killed
+                # owner exposes its last progress but never replays it on resume.
+                if self.checkpoint is not None:
+                    await self.checkpoint()
                 await self.prompt(LOOP_GOAL_PROMPT.format(goal=goal) if goal else LOOP_PROMPT)
                 self.publish(completed=self.state["completed"] + 1)
                 if goal:
                     self.publish(status="judging")
+                    if self.checkpoint is not None:
+                        await self.checkpoint()
                     try:
                         verdict, reason = _parse_loop_verdict(
                             await self.judge(LOOP_JUDGE_PROMPT.format(goal=goal))
@@ -97,6 +111,11 @@ class GoalLoop:
         except Exception:
             # Provider exception strings may contain private upstream bodies.
             self.publish(status="failed", reason="The loop turn failed")
+        finally:
+            # There may be no next Session turn-end checkpoint (especially in
+            # headless mode), so terminal state must be durable before return.
+            if self.checkpoint is not None:
+                await self.checkpoint()
 
 
 #: Upper bound on the judge's free-text reason, which is the ONLY unbounded

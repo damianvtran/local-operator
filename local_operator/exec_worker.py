@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
-import os
 import signal
 import sys
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -79,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
         # session while reporting success.
         help="Resume a previous session by id (or '@latest')",
     )
+    from local_operator.exec_startup import add_startup_arguments
+
+    add_startup_arguments(parser)
     return parser
 
 
@@ -167,8 +169,13 @@ def run(
     ``session_factory`` is injectable for tests; the default wires the real
     engine through the shared composition root.
     """
-    from local_operator.headless_print import run_print_mode
+    from local_operator.exec_session import run_session
+    from local_operator.exec_startup import resolve_startup
 
+    # Worker preflight precedes even the injected session factory. The legacy
+    # selector is called agent_name by the launcher and agent on worker argv.
+    parsed.agent_name = parsed.agent
+    team = resolve_startup(parsed)
     factory = session_factory or (lambda: _default_session_factory(parsed))
 
     async def async_main() -> int:
@@ -177,55 +184,42 @@ def run(
         session_box: list[SessionProtocol] = []
         _install_sigterm_handler(loop, session_box, interrupted)
 
-        source = factory()
-        session: SessionProtocol = await source if inspect.isawaitable(source) else source
-        session_box.append(session)
+        async def execute() -> int:
+            source = factory()
+            session: SessionProtocol = await source if inspect.isawaitable(source) else source
+            session_box.append(session)
+            return await run_session(session, parsed.prompt, parsed, team)
 
-        # Function-local for the same reason as the engine imports above: a
-        # detached worker pays for the runtime stack only when asked for it.
-        from local_operator.session.runtime.exec_control import maybe_start_exec_control
-
-        control = await maybe_start_exec_control(
-            session,
-            enabled=bool(getattr(parsed, "control", False)),
-            cwd=os.getcwd(),
-            yolo=bool(getattr(parsed, "yolo", False)),
-        )
-        if control is not None:
-            # The spawner redirected this process's stderr to the job log, which
-            # is where a supervisor of a detached run looks for the endpoint —
-            # stdout still belongs to the NDJSON stream even here.
-            print(control.endpoint_line, file=sys.stderr, flush=True)
-
-        prompt_task = asyncio.ensure_future(
-            run_print_mode(
-                session,
-                [parsed.prompt],
-                json_mode=parsed.json_mode,
-                before_dispose=(control.aclose if control is not None else None),
-            )
-        )
+        # Race the WHOLE lifetime, not just the first prompt: a worker waiting
+        # on provider discovery must still honour termination and finalize.
+        prompt_task = asyncio.ensure_future(execute())
         interrupt_task = asyncio.ensure_future(interrupted.wait())
         await asyncio.wait({prompt_task, interrupt_task}, return_when=asyncio.FIRST_COMPLETED)
         if interrupted.is_set():
             # Give the turn a bounded window to settle (flush renderer output,
             # dispose the session) before reporting the interrupt.
+            prompt_task.cancel()
             try:
                 await asyncio.wait_for(prompt_task, timeout=5.0)
-            except Exception:  # noqa: BLE001 — interrupt wins regardless
+            except (Exception, asyncio.CancelledError):
+                # The explicit interrupt owns the outcome, including when the
+                # provider was initializing rather than streaming a turn.
                 pass
             return EXIT_INTERRUPTED
         interrupt_task.cancel()
-        return prompt_task.result()
+        try:
+            return prompt_task.result()
+        except asyncio.CancelledError:
+            # A supervisor `stop` cancels the whole lifetime rather than
+            # signalling the process, and ``CancelledError`` is a
+            # BaseException — unhandled it would skip main()'s terminal ledger
+            # write, leaving reconciliation to report a deliberate stop as an
+            # abrupt `interrupted`. Deliberate termination is `cancelled`.
+            return EXIT_INTERRUPTED
 
     try:
         return asyncio.run(async_main())
-    except KeyboardInterrupt:
-        return EXIT_INTERRUPTED
-    except RuntimeError:
-        # Belt (CL-03): loop-level failures (e.g. signal handling races that
-        # surface as RuntimeError) must still read as an interrupt, never as
-        # an uncaught crash in the job log.
+    except (KeyboardInterrupt, asyncio.CancelledError):
         return EXIT_INTERRUPTED
 
 

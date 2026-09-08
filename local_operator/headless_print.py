@@ -312,6 +312,21 @@ class PrintRenderer:
                 self.console.print("[red]aborted[/red]", highlight=False)
 
 
+async def _call_before_dispose(hook: Callable[..., Awaitable[None]], failed: bool) -> None:
+    """Call the teardown hook with the verdict when it wants it.
+
+    Inspected rather than always-passed so the existing zero-argument hooks
+    (and test doubles) are unaffected by a caller that needs the outcome.
+    """
+    import inspect
+
+    try:
+        takes_verdict = bool(inspect.signature(hook).parameters)
+    except (TypeError, ValueError):  # builtins/C callables report no signature
+        takes_verdict = False
+    await (hook(failed) if takes_verdict else hook())
+
+
 def _args_summary(args: dict[str, Any]) -> str:
     """One-line, privacy-minded summary of tool args: first scalar value.
 
@@ -330,7 +345,9 @@ async def run_print_mode(
     session: SessionProtocol,
     messages: list[str],
     json_mode: bool = False,
-    before_dispose: Callable[[], Awaitable[None]] | None = None,
+    before_dispose: Callable[..., Awaitable[None]] | None = None,
+    prompt_handler: Callable[[str], Awaitable[bool | None]] | None = None,
+    continuation: Callable[[], Awaitable[bool]] | None = None,
 ) -> int:
     """One-shot headless run mirroring the print-mode semantics.
 
@@ -339,6 +356,12 @@ async def run_print_mode(
     mode prints the last assistant text to stdout; json mode already emitted
     one line per event. Returns 0 on success, 1 when any turn errored or was
     aborted. Disposes the session before returning (one-shot by contract).
+
+    ``prompt_handler`` replaces the direct ``session.prompt`` call for hosts
+    that own a prompt queue (``exec`` submits through the runtime so a live
+    viewer cannot race it). Returning ``False`` from it marks the run failed;
+    ``None`` (what ``session.prompt`` returns) leaves the verdict to the
+    events, which is where a provider error already reports itself.
 
     ``before_dispose`` is awaited in the teardown, after the last event and
     BEFORE the session is disposed. It exists because the dispose is this
@@ -355,9 +378,19 @@ async def run_print_mode(
     unsubscribe = renderer.attach(session)
     try:
         for message in messages:
-            await session.prompt(message)
+            # A handler may REPORT a failed turn rather than raise, because the
+            # provider's own error arrives as an event the renderer prints. An
+            # explicit False still fails the run, so a turn that died without
+            # emitting an error event cannot be mistaken for success.
+            if await (prompt_handler or session.prompt)(message) is False:
+                renderer.failed = True
             if renderer.failed:
                 break
+        # Keep one subscription and one disposal across initial work and the
+        # owner-local loop: repeated one-shot runs would dispose between turns.
+        if not renderer.failed and continuation is not None:
+            if not await continuation():
+                renderer.failed = True
         if not json_mode and renderer.last_assistant_text:
             sys.stdout.write(renderer.last_assistant_text + "\n")
             sys.stdout.flush()
@@ -366,5 +399,9 @@ async def run_print_mode(
         if callable(unsubscribe):
             unsubscribe()
         if before_dispose is not None:
-            await before_dispose()
+            # Handed the run's own verdict so a teardown that must publish a
+            # terminal outcome (exec's browser scope) uses THIS value rather
+            # than deriving a second, possibly disagreeing, one. Optional-arg
+            # so existing zero-argument hooks keep working.
+            await _call_before_dispose(before_dispose, renderer.failed)
         await session.dispose()

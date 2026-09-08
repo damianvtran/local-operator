@@ -1,4 +1,4 @@
-"""The opt-in control surface for a headless ``lop exec`` run.
+"""Discovery and optional supervised gates for a headless ``lop exec`` run.
 
 ``exec`` is the harness's machine-driven entry point: a supervisor composes a
 prompt, runs one turn, and parses NDJSON off stdout. Until this module that run
@@ -17,23 +17,12 @@ here is a third ``SessionHandle`` implementation — the whole control vocabular
 ``lop attach`` already speak, so a supervisor written against either drives an
 exec run with no new client.
 
-**Why it is opt-in** (``exec --control``) rather than always on. Every reason
-below is a cost paid by runs that would never use the surface, which is the
-overwhelming majority of them:
-
-- ``lop sessions`` (``cli.sessions_command``) filters on nothing, so every
-  scripted exec and every CI loop would land in the operator's session list and
-  become a ``lop send`` target. A one-shot run is not a peer.
-- the mobile daemon adopts published records, so short-lived exec runs would
-  flicker in and out of the phone's session list.
-- :data:`~local_operator.session.runtime.types.HEARTBEAT_INTERVAL_S` is a 15 s
-  cadence sized for long-lived hosts; most exec runs are shorter than one
-  interval, so the record's whole liveness story would be its publish and its
-  unpublish.
-- the socket, the record and the owned handle pull the asyncio control stack
-  onto a path whose import weight ``tests/unit/test_import_graph.py`` pins,
-  which is why every import into this module is made from inside a function on
-  the CLI path and never at ``exec_mode`` scope.
+Exec now publishes every ordinary session so a background team is discoverable
+and attachable through the same TUI path as a terminal-owned conversation.
+Short-lived records are deliberately ephemeral; durable outcomes belong to the
+exec ledger, not discovery. Publication and gate installation are separate:
+``supervised=False`` leaves the original headless gate untouched. Imports remain
+function-local on the CLI path so parsing/help does not load the runtime stack.
 
 **What ``--control`` changes about the run itself.** The owned handle installs
 its own approval/ask gates (``OwnedSessionHandle._install_gates``), replacing
@@ -137,6 +126,7 @@ async def start_exec_control(
     *,
     cwd: str,
     yolo: bool = False,
+    supervised: bool = True,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
 
@@ -170,8 +160,16 @@ async def start_exec_control(
     from local_operator.session.runtime.server import RuntimeServer
 
     loop = asyncio.get_running_loop()
-    handle = OwnedSessionHandle(session, loop, cwd=cwd, auto_approve=yolo, approval_pinned=yolo)
-    attach_gate_config_watch(handle, config_dir())
+    handle = OwnedSessionHandle(
+        session,
+        loop,
+        cwd=cwd,
+        auto_approve=yolo,
+        approval_pinned=yolo,
+        install_gates=supervised,
+    )
+    if supervised:
+        attach_gate_config_watch(handle, config_dir())
     # The ``stop`` control op (and therefore `lop stop`, which can now see this
     # run because it publishes a record) reaches ``request_stop`` -> this hook.
     # Without one the handle falls back to disposing in place, UNDER the prompt
