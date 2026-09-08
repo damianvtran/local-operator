@@ -102,6 +102,7 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # roster and on a live edit (applied only if the user has not cycled it
     # this session). Unknown strings read as full.
     "display.dock": "full",
+    "display.time_format": "12h",
 }
 
 _cache: dict[str, Any] | None = None

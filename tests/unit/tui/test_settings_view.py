@@ -473,7 +473,23 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
 
         view.action_jump(1)
         await pilot.pause()
-        for _ in range(80):
+        # One press per selectable row, DERIVED rather than a hardcoded count.
+        # Travelling from the last row to the first needs len - 1 presses, so
+        # any fixed number is a bet on how long the page is. The old literal 80
+        # covered up to 81 rows and first fell short at 82, leaving the cursor
+        # one row below the top while the clamp itself was correct.
+        #
+        # CI shard 0 hit that: its page was longer than this machine's, and the
+        # reason for the extra rows was NOT established — a page carrying
+        # configured cascade chains is one shape that reaches 82, but it was
+        # not reproduced through the fixtures, so treat the length as an
+        # observation rather than a known cause. That is also why the count is
+        # derived instead of raised: the arrival contract was verified directly
+        # against production across 79-84 rows, so the test now passes at
+        # whatever length the runner produces and the reason stops mattering.
+        # The clamp makes surplus presses free, so one per row is always enough
+        # and never too many.
+        for _ in range(len(view._selectable())):
             view.action_move(-1)
         await pilot.pause()
         assert view._selected == view._selectable()[0]
@@ -485,6 +501,43 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
         view.action_jump(0)
         await pilot.pause()
         assert view._body.scroll_offset.y == 0
+
+
+@pytest.mark.asyncio
+async def test_arriving_at_the_top_holds_with_cascade_rows(tmp_path: Path) -> None:
+    """The same arrival contract on a config whose cascade ADDS rows.
+
+    The page's row count is not fixed: writing chains here lengthens it past
+    the shape the test above sees, and that shorter shape is the only one the
+    suite covered when a press budget sized for it fell short on CI. What the
+    extra rows on that runner actually were is not established, so this pins
+    the arrival at a LONGER page by construction rather than asserting why any
+    particular page is long.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_chains(
+        ConfigManager(tmp_path), {"alpha": ["anthropic/a"], "beta": ["openrouter/b"]}
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(view._selectable()) > 80, "the cascade rows did not lengthen the page"
+
+        view.action_jump(1)
+        await pilot.pause()
+        for _ in range(len(view._selectable())):
+            view.action_move(-1)
+        await pilot.pause()
+        assert view._selected == view._selectable()[0]
+        assert view._body.scroll_offset.y == 0, "the owning section header is scrolled off"
 
 
 @pytest.mark.asyncio

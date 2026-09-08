@@ -272,7 +272,13 @@ Work keeps moving after you walk away.
   execution. A session that was asleep past a due time fires the wake late
   and reports how many occurrences it skipped, rather than replaying six
   hourly checks at once. `lop wake status` and `lop wake list` show what is
-  installed and what fires next.
+  installed and what fires next. Human-readable wake times use the machine's
+  local timezone, labelled explicitly, with a 12-hour AM/PM clock by default.
+  Other dates include the month/day (and year when different). Choose **Wake
+  time format** in `/settings` → Appearance, or run
+  `lop config edit display.time_format 24h` for a 24-hour clock (`12h` restores
+  the default). This changes display only; stored timestamps and JSON output
+  remain epoch milliseconds, and existing transcript confirmations are not rewritten.
 - **Background jobs that report back on their own.** `task` always runs in
   the background and `bash` can (`background=true`); a long command
   interrupted by a steer detaches instead of dying; and every settled job

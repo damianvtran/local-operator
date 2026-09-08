@@ -68,6 +68,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.wakes.display import DEFAULT_TIME_FORMAT
     from local_operator.web_fetch.models import DEFAULT_WEB_FETCH_CONFIG
     from local_operator.web_search.models import DEFAULT_WEB_SEARCH_CONFIG
 
@@ -80,6 +81,7 @@ def _consumer_defaults() -> dict[str, object]:
         # registry said `""` while the app used `dark`, so the page reported a
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
+        "display.time_format": DEFAULT_TIME_FORMAT,
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "retry.enabled": retry.enabled,
