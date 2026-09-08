@@ -175,7 +175,8 @@ async def test_resume_latch_ignores_watch_firings_while_parked_in_zone() -> None
         before = len(app._resume_pending_head)
         assert before
 
-        # Arrive at the top through the real watch path: one page.
+        # Input earns demand; the watch only observes where it lands.
+        view.note_user_scroll()
         view.scroll_to(y=0, animate=False)
         for _ in range(20):
             await pilot.pause()
@@ -193,6 +194,7 @@ async def test_resume_latch_ignores_watch_firings_while_parked_in_zone() -> None
         app._resume_in_zone = True  # what a real gesture does via the hook
         view.scroll_to(y=40, animate=False)
         await pilot.pause()
+        view.note_user_scroll()
         view.scroll_to(y=0, animate=False)
         for _ in range(20):
             await pilot.pause()
