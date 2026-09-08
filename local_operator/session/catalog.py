@@ -40,7 +40,87 @@ class CatalogEntry:
         return self.row.id
 
     @property
-    def rank(self) -> tuple[int, float, str]:
+    def rank(self) -> tuple[int, int, float, str]:
+        """``(tier, wake_rank, -birth, id)`` — a wake orders the PREVIOUS group only.
+
+        ``wake_rank`` is scoped to cold rows (``not self.active``): inside
+        Previous an armed wake leads, then a dormant one, then everything else.
+        Every ACTIVE row gets the same constant, so the key cannot reorder
+        anything the user is currently working with.
+
+        **Why scoped rather than uniform.** The first cut applied the key in
+        every tier, on the reasoning that it "only breaks ties within one
+        category" and so was free. That premise is empirically false, and three
+        reviewers independently reproduced the consequences: rows inside a tier
+        are NOT interchangeable, because a tier mixes states that
+        :func:`~local_operator.tui.widgets.session_picker.row_state_mark`
+        deliberately ranks against each other.
+
+        * tier 5 mixes ``attached`` with ``idle``, so an idle session owning a
+          timer sorted above the user's own ATTACHED current session — order
+          contradicting the glyph ladder, where ``○`` means *a terminal is
+          watching this session* and answers "where am I?".
+        * tier 4 mixes ``busy`` with ``wedged``, so a WEDGED (broken) session
+          needing a person sank below a merely-busy neighbour with a wake.
+        * tier 0 mixes the approval and answer gates, so an armed pending row
+          displaced an OLDER pending one — and note this third case defeats a
+          guard written as "presence outranks a wake", because a pending row can
+          carry an empty ``live_state``.
+
+        Scoping to Previous removes all three at the root instead of enumerating
+        the states to dodge. That distinction is the real lesson: an enumerated
+        guard has to be updated every time the ``live_state`` vocabulary grows,
+        and the tier-0 case above is exactly what such a guard silently misses.
+
+        It is also what the operator actually asked for, which was scoped from
+        the start — "under Previous Sessions ... sorted to the top". Tiers 0/4/5
+        were never in scope, and reordering them is unrequested behaviour change.
+
+        **Glyph/order parity, stated precisely.** In Active, order defers
+        entirely to the existing precedence in ``row_state_mark``; this key
+        abstains. In Previous every row is cold, so ``row_state_mark`` paints
+        only the wake glyph or nothing at all — the wake is the sole
+        forward-looking fact a row can carry, so it leads.
+
+        **Dormant ranks below armed, not nowhere.** ``wakes_dormant`` means the
+        session was deliberately stopped and the schedule will never fire, so it
+        stays under every armed row: floating it would advertise a future that is
+        not coming. It still gets its own band so that every clock glyph in the
+        group is CONTIGUOUS. The dim-vs-muted separation between an armed ``◷``
+        and a dormant one measures 1.77:1 at the 8x17px cell this UI renders —
+        below any discrimination threshold — so a dormant row stranded among the
+        plain rows reads as a broken sort rather than as a distinct state.
+        Banding it directly under the armed rows puts the block boundary where
+        the glyph changes, and costs no row and no chrome.
+
+        The key lives HERE rather than in :func:`session_category` because that
+        function is shared with the mobile daemon, whose summaries carry no wake
+        data at all (durable rows come from ``recent_session_rows``, not
+        ``decorate_rows``, so ``wakes`` is always 0 there). Moving the key into
+        the shared categoriser would either be a no-op on mobile or force wake
+        plumbing into the daemon; keeping it in the catalog leaves both surfaces
+        agreeing on the tier, which is the partition they actually share.
+
+        Stability: a wake is as durable a fact as ``live_state`` and ``pending``,
+        and shares their best-effort read — ``decorate_rows`` zeroes ``wakes``
+        for a poll whose wake-index read raises, exactly as it empties the live
+        map when the registry scan raises, so a transient failure can bounce a
+        row for one poll and put it back on the next. That tolerance is
+        deliberate (a picker that cannot read either source still lists every
+        session), and this key inherits it rather than adding a new fragility.
+        What IS new is an asymmetry worth naming: a cold Previous row previously
+        had no poll-varying ordering input at all, and now has one. When a wake
+        genuinely fires the session becomes live and changes tier, which is a
+        real state change rather than churn.
+
+        One consequence reaches MEMBERSHIP, not just order: :func:`load_catalog`
+        ranks before applying ``[:limit]``, so at the ``CATALOG_SCAN_LIMIT``
+        boundary an ancient session with an armed wake can now enter the window
+        and displace a newer row that would otherwise have made it (measured at
+        251 sessions). That is arguably the point of the feature — a scheduled
+        session is usually an old one, and being unfindable is the report — but
+        it is a real behaviour change beyond reordering, so it is recorded here.
+        """
         tier = session_category(
             pending=bool(self.row.pending),
             busy=self.row.live_state in ("busy", "wedged"),
@@ -48,8 +128,14 @@ class CatalogEntry:
             kind=self.completion_kind,
             live=bool(self.row.live_state),
         )
+        # Cold rows only. An active row takes the constant, which is what makes
+        # the key structurally unable to reorder Active rather than merely
+        # declining to today.
+        armed = not self.active and bool(self.row.wakes) and not self.row.wakes_dormant
+        dormant = not self.active and bool(self.row.wakes) and self.row.wakes_dormant
+        wake_rank = 0 if armed else 1 if dormant else 2
         # Activity may update ages and badges, but must not move a click target.
-        return tier, -self.row.created_at, self.id
+        return tier, wake_rank, -self.row.created_at, self.id
 
     @property
     def active(self) -> bool:
