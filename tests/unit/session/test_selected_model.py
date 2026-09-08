@@ -10,10 +10,9 @@ The mechanism is a ``selected_model`` custom transcript entry, the sibling of
 requests, this one records where the USER did. Both are journalled on the edge
 and read back at construction.
 
-Each row carries the boot selector the session was constructed with, which is
-what lets the restore tell a switch that still applies from one stranded by a
-changed boot selection — a ``/model default`` write, an edited agent profile,
-or an explicit ``--hosting``/``--model`` flag on the resume itself.
+Versioned rows are conversation-owned, including the initial selection.
+Defaults and profile edits cannot invalidate them; only a deliberate resume
+flag overrides them. Legacy boot fields remain readable as historical evidence.
 """
 
 from __future__ import annotations
@@ -90,7 +89,7 @@ async def test_a_switch_is_journalled_with_the_boot_selector(tmp_path):
     await wait_for(lambda: bool(_selection_entries(session)))
 
     assert _selection_entries(session) == [
-        {"selector": "anthropic/claude-opus-5", "effort": None, "boot": "test/m"}
+        {"version": 2, "selector": "anthropic/claude-opus-5", "effort": None, "boot": "test/m"}
     ]
     await session.dispose()
 
@@ -174,13 +173,8 @@ async def test_switching_back_leaves_the_resume_on_the_boot_model(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_changed_boot_selection_outranks_the_journalled_switch(tmp_path):
-    """``/model default`` (or ``--model``) between runs wins over the journal.
-
-    The changed boot selection is the newer, more deliberate choice — and a
-    restore that overrode it would make the flag the user just typed silently
-    not work.
-    """
+async def test_an_explicit_resume_flag_outranks_the_journalled_switch(tmp_path):
+    """A deliberate resume flag wins; changing shared defaults never does."""
     stream = NotifyingStream()
     session = _session(tmp_path, stream)
     session.set_model(SWITCHED, explicit=True)
@@ -189,6 +183,7 @@ async def test_a_changed_boot_selection_outranks_the_journalled_switch(tmp_path)
     rebooted_stream = NotifyingStream()
     rebooted = Session(
         model=ModelSpec(provider="openai", model_id="gpt-6", context_window=400_000),
+        model_source="flag",
         stream_fn=rebooted_stream,
         tools=[],
         transcript=Transcript(tmp_path / "sess"),
@@ -353,7 +348,7 @@ async def test_an_unresolvable_selection_falls_back_to_the_boot_model(tmp_path):
         {"selector": ""},
         {"selector": "no-slash", "boot": "test/m"},
         {"selector": 17, "boot": "test/m"},
-        {"selector": "anthropic/claude-opus-5"},  # no boot recorded
+        {"selector": "missing-provider/model"},  # unavailable provider
     ],
 )
 async def test_a_malformed_row_is_tolerated(tmp_path, details):
