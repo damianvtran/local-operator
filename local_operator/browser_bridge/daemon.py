@@ -618,10 +618,15 @@ class BridgeService:
             else:
                 pending["attempts"] = attempts
                 _private_write(_pending_path(self.root), pending)
-                message = (
-                    "That code did not match. Codes expire after two minutes; "
-                    "check the app for a fresh one."
-                )
+                # Two lines at the popup's 300px width, not three. The popup
+                # reserves a fixed slot for this message so a failed attempt
+                # cannot resize the window (extension/src/popup/popup.css), and
+                # the reservation is sized to the LONGEST string that can land
+                # in it — so every word here costs vertical space on a card that
+                # is showing no error at all. Kept byte-identical to the
+                # extension's own PAIR_MISMATCH_MESSAGE fallback, which is the
+                # string a user sees when the daemon sends none.
+                message = "That code didn't match. Codes expire after two minutes — check the app."
             return PairResult(ok=False, message=message)
         token = secrets.token_urlsafe(32)
         _private_write(

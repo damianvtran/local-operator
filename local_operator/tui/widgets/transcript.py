@@ -58,6 +58,7 @@ from textual.selection import Selection
 from textual.widget import Widget
 from textual.widgets import Static
 
+from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.tui import theme as theme_mod
 
@@ -245,10 +246,15 @@ GAP_CLASS = "gap-above"
 
 #: Class the app puts on a transcript block that joins the centred boot
 #: composition (a system notice under the splash). The app writes the card's
-#: width onto the block (``OperatorApp._sync_boot_column_width``); the block
-#: centres its own content on that axis (``NoticeBlock._build``). Defined here,
-#: with the block that reads it, because app.py already imports this module and
-#: the reverse would be a cycle.
+#: width AND its offset onto the block (``OperatorApp._sync_boot_column_width``),
+#: which is the whole of the centring: the block is moved onto the card's column,
+#: while its TEXT keeps the same left edge it has on the spine. The class itself
+#: carries NO rule and no behaviour — it is the app's reconciliation marker for
+#: which blocks it has already moved. The re-wrap at the card's width comes from
+#: the block's ``on_resize``, which is how the assigned width arrives; see the
+#: tombstone on :class:`NoticeBlock` for why no ``set_class`` override does it.
+#: Defined here, beside the block the app marks, because app.py already imports
+#: this module and the reverse would be a cycle.
 BOOT_COLUMN_CLASS = "boot-column"
 
 
@@ -1252,38 +1258,28 @@ class NoticeBlock(TranscriptBlock):
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_around(self)
 
-    def set_class(self, add: bool, *class_names: str, update: bool = True) -> "NoticeBlock":
-        """Add/remove a class, re-centring when the boot column comes or goes.
-
-        ``_build`` reads ``BOOT_COLUMN_CLASS`` to decide between the spine and
-        the centred card axis, so a class flip is a content change, not only a
-        style one. Rebuilding here keeps the drawn text in step with the class
-        whatever the caller (the app's reconciliation pass, a test, a resize
-        crossing the card threshold), instead of trusting each to re-render.
-        """
-        had = self.has_class(BOOT_COLUMN_CLASS)
-        super().set_class(add, *class_names, update=update)
-        if self.has_class(BOOT_COLUMN_CLASS) != had:
-            self._rebuild()
-        return self
-
-    def _rebuild(self) -> None:
-        """Re-run :meth:`_build` through the finalize discipline.
-
-        The same three steps ``on_resize`` takes for a re-wrap — unfreeze,
-        rebuild, refreeze — factored out so a class change (``set_class``) can
-        share them. The gap is re-asked afterwards because a re-centre can move
-        the row count exactly as a re-wrap can.
-        """
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(self._build())
-        finally:
-            self._finalized = was_finalized
-        parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_around(self)
+    # NO ``set_class`` override here, deliberately — see below before adding one.
+    #
+    # There used to be one: it detected a ``boot-column`` flip and re-ran
+    # ``_build``, on the rationale that the class carries the card's WIDTH, so a
+    # flip changes the column the text folds at. That rationale died when
+    # ``_build`` stopped reading the class (the block is now offset onto the
+    # card as a whole, and every row keeps ONE left edge), and the mechanism was
+    # measurably doing nothing: ``_build`` reads ``self.size.width`` and nothing
+    # else, and the app sets the class one line BEFORE it assigns
+    # ``styles.width`` (``OperatorApp._sync_boot_column_width``), so the flip
+    # rebuild only ever saw the STALE pre-resize width. Instrumented across
+    # 100→80→100→160→86→120 with a wrapping notice: on a down-cross it rebuilt
+    # at 75 (the old card width) and Textual's own ``on_resize`` then rebuilt at
+    # 96 and 76; on an up-cross it rebuilt at 76 (stale) and ``on_resize`` at
+    # 75. ``on_resize`` is what actually re-wraps, in both directions and across
+    # the card threshold, because the width lands as a resize.
+    #
+    # So the flip rebuild was a redundant build at a width nothing draws at,
+    # explained by a mechanism that does not happen. It is removed rather than
+    # re-documented: a rebuild kept "just in case" is one no test can lose, and
+    # the resize path it duplicated is the one with the guards on it
+    # (``test_boot_layout.py``'s parametrized column tests).
 
     #: The kind field: the spine indent plus the glyph and its space. Every row
     #: reserves exactly this — :meth:`_build` writes ``indent + glyph + " "`` on
@@ -1406,24 +1402,27 @@ class NoticeBlock(TranscriptBlock):
         one statement instead of as several.
 
         A ``boot-column`` notice (one under the boot splash, an MCP server that
-        failed to connect) is CENTRED instead: it belongs to the same composition
-        as the centred card below it, whose width the app writes onto the block,
-        and the wordmark and the card's caret are centred masses, not left edges —
-        so the row is centred on that axis the same way the splash centres its own
-        lines. Left at the spine it drew flush against the terminal's left edge
-        beside a centred card. The centre is computed HERE, in the build, rather
-        than left to ``text-align``: this block pins its own height and a
-        stylesheet re-wrap would also reflow the hanging indent it cannot see.
-        Every wrapped row is centred on its own width, so a notice that folds to
-        two or three lines still reads as one centred block rather than a centred
-        first line with ragged continuations — and a row is a row whether the
-        break was the wrap's or the author's, so :meth:`_rows` feeds this loop
-        the same list either way.
+        failed to connect) wraps exactly the same way. It joins the centred boot
+        composition as a BLOCK — the app gives it the card's width and offsets it
+        onto the card's column (``OperatorApp._sync_boot_column_width``) — but its
+        text keeps this one left edge, so the sentence starts on the composer's
+        text column directly below it.
+
+        It used to centre each row on its own width, and that is the one thing
+        this method must not do again. The left edge of the ink then became a
+        function of the sentence's LENGTH: a stack of three notices at 100 columns
+        drew four different left edges (``[16, 17, 24, 31]``), a visible zigzag,
+        and a wrapped continuation at 160 columns floated 34 cells right of its
+        own first row as a centred orphan. ``welcome.py::_center_blocks`` rejected
+        precisely this for the splash above it — "centring each line on its own
+        width produced a diamond of four ragged edges" — and block-centres on ONE
+        shared left edge instead. A notice is prose, not a centred mass like the
+        wordmark or the card's caret, so it gets the same treatment: one column,
+        found by the block's offset rather than by each row's own width.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
-        width = max((self.size.width or 80) - 2, 12)
         body = self.body_budget(self.size.width or 80)
         rows = self._rows(body)
         # PINNED to the authored row count, for the reason ``UserBlock._build``
@@ -1446,20 +1445,16 @@ class NoticeBlock(TranscriptBlock):
         # ``test_a_timer_delivered_notice_keeps_the_wordmark_in_frame`` pins
         # the timer path so a future un-pin is caught there too.
         self._set_authored_height(len(rows))
-        centred = self.has_class(BOOT_COLUMN_CLASS)
         line = Text(no_wrap=True, overflow="ellipsis")
         for index, row in enumerate(rows):
-            # First row reserves the glyph column; continuations the hanging one.
-            # Centring takes the pad out of the SLACK beside the text, so each
-            # row lands on the block's axis give or take the odd cell.
-            prefix = SPINE_INDENT + 2 if index == 0 else cell_len(hanging)
-            pad = max(0, (width - prefix - cell_len(row)) // 2) if centred else 0
+            # First row reserves the glyph column; continuations the hanging one,
+            # which is the same width blank — that is what puts every row of one
+            # notice on a single text column.
             if index:
                 line.append("\n")
-                line.append((" " * (prefix + pad)) if centred else hanging, style=style)
+                line.append(hanging, style=style)
             else:
-                lead = indent if not centred else " " * (prefix - 2 + pad)
-                line.append(lead, style=style)
+                line.append(indent, style=style)
                 line.append(f"{self._glyph} ", style=style)
             line.append(row, style=style)
         return line
@@ -1732,6 +1727,18 @@ class WakeBlock(ExpandableActionBlock):
 #: own the viewport.
 _SENDER_FIELD_MAX_CHARS = 120
 
+#: How much of a peer's message body is fed to the collapsed row's preview.
+#:
+#: NOT a display cap — the row truncates itself to the width it is given, and a
+#: second truncation rule beside that one would be a defect. This bounds the
+#: WORK: both the sanitize and `truncate_cells` walk the string handed to them,
+#: and a peer body is capped on the wire at `PEER_MESSAGE_MAX_BYTES` (256 KiB),
+#: which is four orders of magnitude more text than a single row can show.
+#: Chosen far above any reachable row (the widest terminal times the widest
+#: name column is still a few hundred cells) so it can never be the thing that
+#: decides what a reader sees, while keeping the per-repaint cost flat.
+_SNIPPET_SOURCE_MAX_CHARS = 4096
+
 
 def _sanitize_sender_field(value: object) -> str:
     """One line of bounded, plain text from an advisory sender field.
@@ -1755,82 +1762,157 @@ def _sanitize_sender_field(value: object) -> str:
     Offending characters are dropped rather than escaped because the header is
     an identity label, not a place to display what an odd name contained.
     """
-    text = str(value or "")
     # Whitespace runs (newlines and tabs included) collapse to single spaces so
-    # the header stays exactly one paragraph.
-    text = " ".join(text.split())
-    # C0/C1 controls AND Unicode format characters. `unicodedata.category` is
-    # what makes the Cf class exhaustive — an explicit codepoint list would
-    # miss the next bidi control someone finds.
-    text = "".join(
+    # the header stays exactly one paragraph. AFTER the strip, because
+    # stripping can expose a newline that sat inside a sequence's payload.
+    return " ".join(_sanitize_line(value).split())[:_SENDER_FIELD_MAX_CHARS]
+
+
+def _sanitize_line(value: object) -> str:
+    """Drop control sequences and Cf from ``value``; keep every printable char.
+
+    The shared half of the two sanitizers on this spine, so the sender fields
+    and the message snippet cannot drift apart in what they consider unsafe —
+    which is how the block ended up stripping a hostile conversation name and
+    painting a hostile message body on the same row.
+
+    Control-sequence removal is :func:`local_operator.ansi.
+    strip_control_sequences`, the helper the tool ledger already uses
+    (``tool_card.py`` aliases the same function). It removes the WHOLE
+    sequence rather than only its ``ESC``, so an injected ``\\x1b[31m`` leaves
+    nothing rather than a literal ``[31m`` for the reader to puzzle over.
+
+    Cf is dropped on top of that, because a format character is not a control
+    sequence and survives the strip: ``U+202E`` and friends reorder the glyphs
+    AROUND them, which is how a bidi override visibly scrambled a pid — the
+    one field a reader uses to address the peer back.
+    ``unicodedata.category`` is what makes the class exhaustive; an explicit
+    codepoint list would miss the next bidi control someone finds.
+
+    Newlines and tabs deliberately SURVIVE here (``strip_control_sequences``
+    keeps them for multi-line tool output) — this function is not what makes a
+    string single-line. Every caller on this spine renders ONE row and collapses
+    whitespace itself immediately after, so no newline reaches a row; a future
+    caller that skips the collapse would need its own.
+    """
+    return "".join(
         char
-        for char in text
-        if ord(char) >= 32 and not 0x7F <= ord(char) <= 0x9F and unicodedata.category(char) != "Cf"
+        for char in strip_control_sequences(str(value or ""))
+        if unicodedata.category(char) != "Cf"
     )
-    return text[:_SENDER_FIELD_MAX_CHARS]
 
 
-class PeerMessageBlock(TranscriptBlock):
-    """An inbound message from ANOTHER local lop session (`lop send`).
+class PeerMessageBlock(ExpandableActionBlock):
+    """An inbound message from ANOTHER local lop session (`lop send`), as a card.
 
-    This is deliberately NOT a :class:`UserBlock` and NOT a :class:`WakeBlock`.
-    It must read as *inbound cross-session* — a note the user did not type and
-    the schedule did not fire, but that another running session handed over —
-    so it carries its own affordances:
+    This is deliberately NOT a :class:`UserBlock`: it must read as *inbound
+    cross-session* — a note the user did not type and the schedule did not
+    fire, but that another running session handed over. It IS drawn as a
+    ledger card, the same shape :class:`WakeBlock` uses, and that is the fix
+    this class exists in its present form for.
 
-    - A ``↔`` glyph in the gutter rule marks the block as a two-way
-      cross-session hand-off, distinct from the user prompt's plain ``▌`` bar.
-      Using the same full-height rule discipline as :class:`UserBlock` keeps a
-      multi-paragraph peer message reading as ONE block rather than several.
-    - A muted header line names the sending session (conversation / pid /
-      model) so the reader can see WHO reached in, which is the whole point of
-      a cross-session indicator — the parent/wake paths have no slot for it.
+    **Why the card replaced the rule-and-header block.** The receipt used to
+    paint a full-height ``↔`` gutter rule, a wrapped sender header, and then
+    the WHOLE body at body weight. That is right for one message and wrong for
+    the traffic this harness actually carries: a single release-window
+    announcement from a peer measured **15 rows at 100 columns**, and two of
+    them pushed the conversation the user was reading off the top of the
+    screen. An inbound note is a RECEIPT — something arrived, from whom, about
+    what — and a receipt earns one line until the reader asks for more. So the
+    collapsed row names the sender and previews the message, and Enter / click
+    / Space reveals the full sender identity and the whole body, exactly the
+    contract every other action row in the ledger offers.
 
-    The header is app chrome (the app naming the sender), so it is excluded
-    from a copy the same way :class:`UserBlock`'s attachment receipt is; the
-    body copies verbatim.
+    It is a ledger row on purpose, for the reasons :class:`WakeBlock`'s
+    docstring gives: sharing :attr:`SPACING_KIND` with the tool card plus
+    :attr:`SPACING_AIRY` is what puts a blank row above and below it, and
+    ``LEDGER_ROW`` keeps its name column aligned with the tool rows a peer
+    message habitually lands between. A receipt sitting in a run of actions
+    with its own private layout is a second spine.
+
+    **The name leads the snippet.** ``_send_summary`` in ``tool_card.py``
+    learned this the expensive way: the row builder truncates the composed
+    summary from the right as ONE string, so whatever sits rightmost dies
+    first. WHO reached in is what the reader acts on — it is the address they
+    would answer at — and free text is the thing that can be shed without the
+    row becoming unidentifiable, so the sender leads and the snippet trails.
+
+    The summary row is app chrome (the app naming the sender), so it is
+    excluded from a copy the same way :class:`UserBlock`'s attachment receipt
+    is; :meth:`text` and the expanded body stay the peer's verbatim message.
     """
 
-    #: A cross-session message arrives unbidden — always give it air so it does
-    #: not fuse with whatever row preceded it.
-    SPACING_KIND = "peer"
-    SPACING_LEAD = True
+    EXPANDED_CLASS = "peer-expanded"
 
-    #: ``↔`` (LEFT RIGHT ARROW): a two-way link between sessions. One cell of
-    #: glyph plus a trailing space fills the same gutter width the user rule
-    #: uses, so the body lands in the shared text column and no other block
-    #: moves.
-    RULE = "↔"
-    RULE_COLS = SPINE_INDENT
-    #: The rule and header wear the accent-free ``muted`` ink: loud enough to
-    #: register as "something reached in", quiet enough not to compete with the
-    #: live-turn accent. The body is full ``fg`` so the message itself reads at
-    #: body weight.
-    RULE_TOKEN = "muted"
-    HEADER_TOKEN = "muted"
-    TEXT_TOKEN = "fg"
+    #: The name column says ``peer``. Not "receive" (which implies the agent
+    #: acted) and not "inbox" (a place, not an event): the row reports that a
+    #: peer session reached in. The icon carries the direction.
+    tool_name = "peer"
+
+    #: Floor for the width the expansion reasons about, in cells. Two uses,
+    #: which must agree or the card contradicts itself: :meth:`_header`'s
+    #: model-fit test (does the model label still leave the identity on one
+    #: row?) and :meth:`_build_content`'s wrap width. Without the second, a
+    #: pane a few cells wide wrapped a short body to 40 rows while the
+    #: collapsed row stayed correctly clamped at 1 — a floor on the fit test
+    #: alone is a floor on half the arithmetic.
     MIN_BODY = 8
-    #: The model label is attached only when the WHOLE header still fits on one
-    #: row with it (see ``_header``). A fixed column threshold cannot express
-    #: that: it was calibrated against a 14-cell name, and at 22-26 cells — the
-    #: ordinary length here — crossing it re-attached a ~23-cell label that
-    #: cost more than the columns just gained, so widening a pane from 70 to 80
-    #: made the card TALLER. The rule is now about fit rather than width, which
-    #: is what makes wrapping monotonic: more columns never yields more rows.
 
     def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
         super().__init__()
         self.add_class("peer-message-block")
         self._text = body
         self._sender = sender or {}
-        #: How many rendered rows the header occupies. The header is ONE
-        #: paragraph but wraps to several rows at narrow widths and with a long
-        #: sender name, so a single index cannot describe it: set by ``_build``
-        #: at the width it actually wrapped at, so ``copy_row_is_chrome`` never
-        #: re-derives it and cannot disagree with the frame (the discipline
-        #: ``UserBlock._receipt_row`` already follows).
-        self._header_rows: int = 0
-        self.set_content(self._build())
+        self._expanded = False
+        self._hovered = False
+        self._focused = False
+        #: How many rendered rows are the card's OWN furniture — the summary
+        #: plus, when open, the sender identity and the rule beneath it. Set by
+        #: the build at the width it actually wrapped at, so
+        #: :meth:`copy_row_is_chrome` never re-derives it and cannot disagree
+        #: with the frame (the discipline the old header row count followed,
+        #: and ``UserBlock._receipt_row`` before it).
+        self._chrome_rows: int = 1
+        #: The collapsed row's preview of the body, sanitized and flattened
+        #: ONCE here rather than on every repaint.
+        #:
+        #: `_refresh_row` runs on hover, focus, expand/collapse, `retheme`,
+        #: `on_resize` AND `_invalidate_name_col` — and that last one repaints
+        #: every ledger block when the shared name column moves, so one peer
+        #: card's cost is paid by the whole ledger. The strip is a regex plus a
+        #: per-character `unicodedata.category` scan, and it runs over the
+        #: WHOLE body while all but one row of the result is discarded. The
+        #: body is not small by contract: `PEER_MESSAGE_MAX_BYTES` is 256 KiB,
+        #: which measured 23.9 ms of loop-thread CPU per repaint — real CPU on
+        #: the event loop, not scheduling noise (`time.thread_time`, the
+        #: measure AGENTS.md's timing section calls the honest one here).
+        #:
+        #: This mirrors `ToolCard`, which strips once at construction rather
+        #: than per paint — the precedent the snippet strip was modelled on,
+        #: and the half of it this class had not copied. Safe to cache because
+        #: `_text` is assigned once and never mutated; a block whose body
+        #: changed would need a new block, as every other transcript receipt
+        #: does.
+        #:
+        #: Order matters: strip FIRST, then collapse whitespace. Stripping can
+        #: expose a newline that was inside an escape's payload, and collapsing
+        #: first would leave it to be measured into a word's width and printed
+        #: literally mid-row.
+        #:
+        #: Sliced before sanitizing, and the slice is deliberately far larger
+        #: than any row: `truncate_cells` walks the string it is given, so a
+        #: 256 KiB snippet cost 0.89 ms per repaint even once the strip was
+        #: cached. `_SNIPPET_SOURCE_MAX_CHARS` cells cannot be reached by a row
+        #: (`TOOL_NAME_COL_MAX` plus a terminal's width is orders of magnitude
+        #: below it), so this bounds the work without being a second truncation
+        #: rule that could disagree with the row's own. Only the PREVIEW is
+        #: bounded \u2014 `text()` and the expansion read `_text` directly, so
+        #: `/copy` and the opened card stay byte-verbatim.
+        self._snippet = " ".join(_sanitize_line(body[:_SNIPPET_SOURCE_MAX_CHARS]).split())
+        self._row_count = 1
+        self._applied_rows = -1
+        self._built_width = -1
+        self._refresh_row()
         self.finalize()
 
     def text(self) -> str:
@@ -1838,51 +1920,114 @@ class PeerMessageBlock(TranscriptBlock):
         their own row (parallel to :meth:`UserBlock.text`)."""
         return self._text
 
-    def _header(self) -> str:
-        """The sender label: 'peer message from "<name>" (pid N, <model>)'.
+    def can_expand(self) -> bool:
+        """Always: the collapsed line is a preview of a message behind it.
 
-        Every field is advisory — a leaner sender omits some — so the label is
-        assembled from whatever is present and never assumes a key exists.
+        Unconditional even for a one-word note, because the expansion also
+        carries the sender's pid and model — the fields a reader needs in
+        order to address the peer back, which no snippet can hold.
+        """
+        return True
 
-        When the conversation name is genuinely absent even after the receive
-        side's registry enrichment, the label falls back to the sender's cwd
-        basename and then to a short session id rather than showing a bare pid.
-        A row reading `peer message from (pid 1)` names nothing a reader can act
-        on — the whole point of the indicator is to say WHICH session reached
-        in, and a working directory or an id prefix answers that where a pid
-        assigned by the kernel does not."""
+    def _sender_name(self) -> tuple[str, bool]:
+        """``(name, quoted)`` for the sending session, or ``("", False)``.
+
+        The ladder — conversation name, then cwd basename, then a short session
+        id — is why a peer receipt never degrades to a bare pid: a row naming
+        `pid 1` names nothing a reader can act on, and the whole point of the
+        indicator is to say WHICH session reached in.
+
+        ``quoted`` is False for the two fallbacks. A name the peer CHOSE is
+        quoted; a directory basename and an id prefix are the app guessing, and
+        rendering them identically told the reader nothing about which they
+        were looking at — two sessions in sibling checkouts would both read as
+        "user-dashboard".
+        """
         name = _sanitize_sender_field(self._sender.get("conversation_name"))
+        if name:
+            return name, True
+        cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
+        if cwd:
+            return os.path.basename(cwd) + "/", False  # trailing slash: a directory
+        session_id = _sanitize_sender_field(self._sender.get("session_id"))
+        if session_id:
+            # A short prefix: a full ULID is 26 cells of entropy that pushes the
+            # message preview off the row without helping the eye.
+            return session_id[:8], False
+        return "", False
+
+    def _sender_pid(self) -> str:
+        """The sending session's pid as bounded, single-line text, or ``""``.
+
+        ``pid`` reads like the one field that could not be hostile — it is a
+        number — but nothing on the wire ever makes it one. It arrives as
+        ``dict[str, Any]`` (``harness/types.py``), the inbox validates the
+        sender's dict SHAPE and not its values
+        (``session/runtime/inbox.py``), and ``resolve_sender_identity``
+        returns early on a non-int pid rather than repairing it, so a peer's
+        ``{"pid": "42\\nROW-A\\nROW-B"}`` reaches this widget verbatim.
+
+        That made it the only advisory field skipping
+        :func:`_sanitize_sender_field`, on BOTH render paths — and it is the
+        field the pre-existing hostile-input test happened to pass a clean
+        value for, which is exactly why it survived. Newlines in it produced
+        a card whose ``_row_count``/:meth:`settled_rows` reported 3 against a
+        CSS-pinned 1-row widget, and pushed two rows of the app's own label
+        past :meth:`copy_row_is_chrome` into the clipboard.
+
+        Sanitized like every sibling rather than coerced to ``int``: a
+        rejected pid would silently erase an address the reader could
+        otherwise still act on, and this widget's job is to render what
+        arrived, safely. Falsy result means "no usable pid", which is why the
+        callers test truthiness rather than ``is not None`` — an empty string
+        is what a pid of pure control characters sanitizes down to.
+        """
         pid = self._sender.get("pid")
+        return "" if pid is None else _sanitize_sender_field(pid)
+
+    def _header(self, width: int | None = None) -> str:
+        """The expansion's identity line: '"<name>" · pid N · <model>'.
+
+        This is the information the collapsed row cannot hold and the operator
+        asked to see on expand. Every field is advisory (a leaner sender omits
+        some), so the label is assembled from whatever is present and never
+        assumes a key exists.
+
+        **No ``peer message from`` prose.** The line used to open with it, and
+        at the seam that made three consecutive lines all restate the same
+        thing — the summary row says the name, the identity line repeated the
+        name inside a sentence, and the body below repeated the summary's
+        opening words. What the expansion actually ADDS is the pid and the
+        model, and those were the two facts buried mid-sentence. The icon, the
+        ``peer`` name column and the card the reader just opened all already
+        say this is an inbound peer message; spending the line's first 18
+        cells saying it a fourth time pushed the new information right.
+
+        The separator is `·`, the same structural glyph the summary row and
+        the neighbouring ``send`` row use, so one card does not carry two
+        punctuation vocabularies.
+
+        ``width`` is the body width the caller will wrap this at; it defaults
+        to the block's own, which is what the degradation tests pass.
+        """
+        name, quoted = self._sender_name()
+        pid = self._sender_pid()
         model = _sanitize_sender_field(self._sender.get("model_label"))
-        # Quoted only for a name the peer CHOSE. A directory basename and an id
-        # prefix are the app guessing, and rendering them identically to a real
-        # title told the reader nothing about which they were looking at — two
-        # sessions in sibling checkouts would both read as "user-dashboard".
-        quoted = True
-        if not name:
-            cwd = _sanitize_sender_field(self._sender.get("cwd")).rstrip("/")
-            if cwd:
-                name = os.path.basename(cwd) + "/"  # trailing slash: a directory
-                quoted = False
-        if not name:
-            session_id = _sanitize_sender_field(self._sender.get("session_id"))
-            if session_id:
-                # A short prefix: a full ULID is 26 cells of entropy that pushes
-                # the pid and model out of the header without helping the eye.
-                name = session_id[:8]
-                quoted = False
         bits: list[str] = []
-        if pid is not None:
+        if pid:
             bits.append(f"pid {pid}")
 
         def _compose(parts: list[str]) -> str:
-            detail = f" ({', '.join(parts)})" if parts else ""
             if name:
                 label = f'"{name}"' if quoted else name
-                return f"peer message from {label}{detail}"
+                return " · ".join([label, *parts])
             if parts:
-                return f"peer message from{detail}"
-            return "peer message from another session"
+                return " · ".join(parts)
+            # Nothing identifying at all. The one case that still needs prose,
+            # because a bare `·`-joined empty list says nothing — and it shares
+            # the wording `_summary` falls back to, and `harness/comms.py`
+            # before it, so the three do not drift.
+            return "another session"
 
         header = _compose(bits)
         if not model:
@@ -1892,49 +2037,233 @@ class PeerMessageBlock(TranscriptBlock):
         # "which session reached in, so I can go and talk to it", so it is the
         # first thing to give way (the information order name -> pid -> model is
         # also the shed order). It is attached only when the result still fits
-        # on ONE row, measured against the same body width ``_build`` wraps at.
+        # on ONE row, measured against the width it will be wrapped at.
         # Testing the terminal width instead made the behaviour non-monotonic:
         # a wider pane could re-attach a label that cost more than the extra
-        # columns and push the header onto a second row.
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        # columns and push the identity line onto a second row.
+        body = width if width is not None else (self.size.width or 80)
+        body = max(body, self.MIN_BODY)
         with_model = _compose(bits + [model])
         return with_model if cell_len(with_model) <= body else header
 
+    def _summary(self) -> tuple[str, str]:
+        """``(identity, snippet)`` for the collapsed row — identity FIRST.
+
+        The identity is the sender's name alone, not the whole
+        ``peer message from …`` sentence: the ``peer`` name column and the
+        inbound icon already say what kind of row this is, and repeating it in
+        the summary is the caption-not-card problem :class:`WakeBlock` names
+        one column along. When even the fallback ladder finds nothing, the pid
+        is the last thing that identifies the sender at all, and it is better
+        on the row than an anonymous line.
+
+        The snippet carries NO cap of its own. The row's ``truncate_cells``
+        already sheds it to the available budget, and a second arbitrary bound
+        only left the line empty at wide widths while protecting nothing — the
+        identity survives either way because it leads.
+        """
+        name, quoted = self._sender_name()
+        if name:
+            identity = f'"{name}"' if quoted else name
+        else:
+            pid = self._sender_pid()
+            # "another session" is the same fallback vocabulary
+            # `harness/comms.py` uses when it cannot name a peer either; keep
+            # the two spellings identical so a reader meeting one in a
+            # transcript and one in a tool result does not think they are
+            # different states.
+            identity = f"pid {pid}" if pid else "another session"
+        # The SNIPPET is stripped of control sequences and Cf; the body is not.
+        #
+        # `text()` and the expansion must stay byte-verbatim or `/copy` stops
+        # returning what the peer actually wrote, which is the whole point of
+        # the block. But the snippet is a summary the app composes onto a
+        # `height: 1` pinned row on the shared ledger spine, and that is a
+        # different contract: `ESC[2K` + `ESC[1A` (erase-line, cursor-up) is
+        # how a row escapes its pinned box and repaints the receipts above it
+        # — `ansi.py` names that pair the highest-value forgery target the app
+        # has. Rich also mis-measures an escape (`cell_len` reported 16 for a
+        # 17-character string), so the arithmetic the one-row guarantee rests
+        # on is computed against a wrong count.
+        #
+        # `ToolCard` already strips exactly this on exactly this row, for the
+        # reason its own comment gives: a name rendered on every row can clear
+        # the terminal without the tool having run. Two summaries on one spine
+        # treating one trust boundary two opposite ways is the drift; this is
+        # the shared helper, not a second implementation.
+        #
+        # Computed ONCE in `__init__` (see :attr:`_snippet`), not here: this
+        # method runs on every repaint, and the strip is ~20x the cost of the
+        # whitespace collapse it replaced.
+        return identity, self._snippet
+
+    def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Re-fit the card at the new width (same guard as the tool card)."""
+        size = getattr(event, "size", None)
+        if size is not None and size.width == self._built_width:
+            return
+        self._refresh_row()
+
     def copy_gutter(self, index: int) -> int:
-        """The rule occupies the gutter on every row (same as UserBlock)."""
-        return self.RULE_COLS
+        """The icon field on the summary row; the expansion's indent below it."""
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+
+        return 2 if index == 0 else OUTPUT_INDENT
 
     def copy_row_is_chrome(self, index: int) -> bool:
-        """The sender header is the app talking, not the peer's message body.
+        """The summary and the sender identity are the app talking.
 
-        Every row the header wrapped to, not merely the first — the count comes
-        from the same build that produced the frame, so a resize cannot make
-        the two disagree.
+        Not the message: the peer's body copies verbatim, which is what makes a
+        drag over an expanded receipt paste the note rather than the app's own
+        label above it. The count comes from the same build that produced the
+        frame, so a resize cannot make the two disagree.
         """
-        return index < self._header_rows
+        return index < self._chrome_rows
 
-    def on_resize(self, event: object) -> None:
-        """Re-wrap at the new width and re-ask the spacing gap, matching the
-        UserBlock discipline: this block wraps itself, so a width change is a
-        content change and also a height change adaptive spacing depends on."""
+    def refresh_row(self) -> None:
+        """Repaint at the current width — the ledger's shared column moved."""
+        self._refresh_row()
+
+    def _refresh_row(self) -> None:
+        """Rebuild the card at its OWN width, matching :class:`WakeBlock`.
+
+        Finalization is bypassed deliberately: a resize, a hover, or an expand
+        must be able to re-fit a settled card, and the content it produces is a
+        pure function of the card's state, never new history.
+        """
+        from local_operator.tui.widgets.tool_card import FALLBACK_WIDTH
+
+        # Same ladder as `WakeBlock._refresh_row`, for the same reason: a row
+        # built before its first layout pass must fold at the width it is about
+        # to be given, not at the terminal's or at 80.
+        width = self.fold_width(0)
+        detached = False
+        if width <= 0:
+            try:
+                width = self.app.console.width
+            except Exception:
+                width = FALLBACK_WIDTH
+                detached = True
+        content = self._build_content(width)
+        self._row_count = max(1, len(content.plain.splitlines()))
+        if detached:
+            return
+        self._built_width = width
+        moved = self._row_count != self._applied_rows
+        self._applied_rows = self._row_count
         was_finalized = self._finalized
         self._finalized = False
         try:
-            self.set_content(self._build())
+            self.set_content(content, layout=moved)
         finally:
             self._finalized = was_finalized
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells.
+
+        Read from the transcript rather than fixed here, because the column is
+        a spine: a peer receipt sitting between tool rows has to agree with
+        them or the ledger stops being a column.
+        """
+        from local_operator.tui.widgets.tool_card import NAME_COL, NAME_GROWTH_MIN_ROW
+
         parent = self.parent
-        if isinstance(parent, TranscriptView):
-            parent.refresh_gap_around(self)
+        if isinstance(parent, TranscriptView) and width >= NAME_GROWTH_MIN_ROW:
+            return parent.tool_name_col
+        return NAME_COL
 
-    def retheme(self) -> None:
-        """Re-ink rule, header and body from the current ramp."""
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(self._build(), layout=False)
-        finally:
-            self._finalized = was_finalized
+    def _build_row(self, width: int) -> Text:
+        """The single summary row — the ONE-ROW guarantee lives here."""
+        from local_operator.tui.glyphs import display_name, tool_icon
+        from local_operator.tui.widgets.tool_card import (
+            _SUMMARY_FLOOR,
+            COLLAPSE_HINT,
+            EXPAND_HINT,
+            truncate_cells,
+        )
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+
+        icon = tool_icon(self.tool_name)
+        label = display_name(self.tool_name)
+        name_budget = width - 4  # icon, its space, name's trailing space, 1 cell of summary
+        identity, snippet = self._summary()
+        if name_budget < 2:
+            # UNREACHABLE as the arithmetic stands, and kept deliberately.
+            # `width` is clamped to >= 10 two lines above, so `name_budget` is
+            # floored at 6 and this branch cannot be entered from any pane
+            # size — verified by sweeping `_build_row` from 1 to 8 cells, every
+            # one of which renders the normal degraded row (`<icon> peer …`)
+            # rather than this one.
+            #
+            # It is a structural guard on the arithmetic BELOW it, not a width
+            # case: `truncate_cells(label, name_col)` and the `prefix_cells`
+            # sum assume a name column of at least a cell or two, and a future
+            # change to the clamp or to the padding rule would reach them with
+            # a negative budget. `WakeBlock` carries the identical guard for
+            # the identical reason; removing it here alone would make the two
+            # rows disagree about their own floor.
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append(icon + " ", style=dim)
+            return row
+
+        name_col = min(self._name_col(width), name_budget)
+        name = truncate_cells(label, name_col)
+        name = name + " " * max(0, name_col - cell_len(name))
+        prefix_cells = 2 + name_col + 1
+
+        slot = ""
+        remaining = max(0, width - prefix_cells)
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
+                slot = offer
+        slot_cells = cell_len(slot) + 1 if slot else 0
+        budget = max(0, remaining - slot_cells)
+        # Identity first, snippet after the seam — one string, truncated from
+        # the right, so the free text is what sheds. See the class docstring.
+        #
+        # The seam is `·`, NOT an em-dash, and that is about the content this
+        # row actually carries. Agent-to-agent prose in this project is full
+        # of em-dashes (every peer broadcast in the capture frames contains
+        # one), so an em-dash seam put the same glyph in a structural role and
+        # a prose role on one line with nothing to tell the eye which was
+        # which: `"lo-usage-panel" — my PR #744 merged — Release: patch`.
+        # `·` is the separator the neighbouring `send` row already reserves
+        # for structure (`_send_summary`'s `" · ".join`), and prose does not
+        # contain it — measured at 1921 em-dashes against 89 interpuncts
+        # (21.6:1) across this tree's markdown — so the two halves of one
+        # cross-session conversation gain a shared punctuation vocabulary to go
+        # with their mirrored icons, and the seam survives its own content.
+        #
+        # Two known residual collisions, both looked at in a rendered frame and
+        # both judged safe, recorded so the next reader does not re-derive them:
+        #
+        # - A peer QUOTING a ledger row relays `·`-joined text, so a structural
+        #   and a quoted separator can share a line. This is the em-dash problem
+        #   at 21.6x lower frequency, and the quoted name still delimits the
+        #   seam; it is not worth a third glyph.
+        # - `·` is also `NOTICE_GLYPHS["info"]`, and `_SPINNER`'s docstring in
+        #   this file records a real defect from that collision — a `"· "` head
+        #   painted in the same dim ink at the same column as an info notice.
+        #   This use does not repeat it: the notice's glyph LEADS its row in the
+        #   icon column, while this one sits mid-row inside a card band the
+        #   notice does not have, so the two never align.
+        composed = f"{identity} · {snippet}" if snippet else identity
+        summary = truncate_cells(composed, budget)
+
+        row = Text(no_wrap=True, overflow="ellipsis")
+        row.append(icon + " ", style=dim)
+        row.append(name + " ", style=muted)
+        row.append(summary, style=dim)
+        if slot:
+            used = cell_len(row.plain)
+            pad = max(1, width - used - cell_len(slot))
+            row.append(" " * pad, style=dim)
+            row.append(slot, style=dim)
+        return row
 
     def _body_rows(self, body: int) -> list[str]:
         """The message body wrapped to ``body`` cells, paragraphs preserved.
@@ -1954,39 +2283,99 @@ class PeerMessageBlock(TranscriptBlock):
             rows.pop()
         return rows
 
-    def _build(self) -> RenderableType:
-        """The sender header then the body, every row behind the ``↔`` gutter.
+    def _build_content(self, width: int) -> Text:
+        """The card: one summary row, plus sender identity and body when open.
 
-        Height is pinned to the row count for the same reason UserBlock pins
-        its own (an ``auto`` measurement caches the fallback-width build and
-        leaves a hole); this block authors its rows so it knows its height."""
-        rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
-        header_style = Style(color=theme_mod.semantic_color(self.HEADER_TOKEN))
-        text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
-        gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
+        The expansion answers the two questions the collapsed row cannot: WHO
+        exactly (name, pid, model — the fields the old always-on header
+        carried) and WHAT they said in full. The identity leads the body
+        because it is the shorter, fixed-shape fact; a blank row separates
+        them so a long message does not read as a continuation of the label.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
 
-        # The header is one wrapped paragraph; the body rows follow. EVERY
-        # header row is chrome, not just the first: an ordinary sender name
-        # wraps the header at 60-70 columns, and marking only row 0 meant
-        # dragging over a peer message copied app chrome above it ("…claude-
-        # opus-4)\ngates are green").
-        header_rows = wrap_cells(self._header(), body) or [""]
-        body_rows = self._body_rows(body)
-        self._header_rows = len(header_rows)
+        row = self._build_row(width)
+        if not self._expanded:
+            self._chrome_rows = 1
+            return row
 
-        rows: list[tuple[str, bool]] = [(row, True) for row in header_rows]
-        rows.extend((row, False) for row in body_rows)
-        self._set_authored_height(len(rows))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        # The identity line is a HEADER, so it takes the middle step of the
+        # ramp: summary `dim` -> identity `muted` -> body `fg`. Rendered at
+        # `dim` it was the same ink as the summary row above it, so it read as
+        # a dimmer continuation of the headline rather than as the header of
+        # the block below, leaving the blank row to do all the structural work
+        # on its own.
+        header_style = Style(color=theme_mod.semantic_color("muted"))
+        text_style = Style(color=theme_mod.semantic_color("fg"))
+        # Floored at MIN_BODY so the wrap width and `_header`'s fit test
+        # reason about the same minimum: unfloored this reached 1 cell and
+        # turned a two-line note into 40 rows of one-character columns.
+        line_width = max(width - 2 - OUTPUT_INDENT, self.MIN_BODY)
+        indent = " " * OUTPUT_INDENT
 
-        line = Text(no_wrap=True, overflow="ellipsis")
-        for index, (row, is_header) in enumerate(rows):
-            if index:
-                line.append("\n")
-            line.append(gutter, style=rule_style)
-            if row:
-                line.append(row, style=header_style if is_header else text_style)
-        return line
+        # Wrapped, not truncated: the identity is one paragraph, and at narrow
+        # widths a truncated pid is worse than a second row — it is the field a
+        # reader uses to address the peer back.
+        chrome = 1
+        for wrapped in wrap_cells(self._header(line_width), line_width) or [""]:
+            row.append("\n" + indent, style=header_style)
+            row.append(truncate_cells(wrapped, line_width), style=header_style)
+            chrome += 1
+
+        # A peer that sent nothing (or only whitespace) has no body worth
+        # painting: `_body_rows` always returns at least one entry, so an empty
+        # message rendered as a blank indented line under the blank separator —
+        # an expand affordance that promised detail and delivered two rows of
+        # whitespace. The identity line still justifies the expansion, since
+        # the pid and model are exactly what the collapsed row cannot carry.
+        #
+        # Only TRAILING blanks are dropped, never interior ones: a blank row
+        # between two paragraphs is the break the peer typed, and filtering
+        # every empty row would silently reflow their message into one block.
+        body_rows = self._body_rows(line_width)
+        while body_rows and not body_rows[-1].strip():
+            body_rows.pop()
+
+        # The separator is appended ONLY once a body is known to follow, and
+        # that ordering is the whole finding. Appending it first left an empty
+        # card ending on a dangling "\n": Rich paints a row for it and
+        # `str.splitlines()` does not count one, so the card painted 3 rows
+        # while `_row_count`/`settled_rows()` reported 2 and `_chrome_rows`
+        # (3) exceeded the row count it is supposed to index into. That is the
+        # same self-contradiction about its own height that this class's
+        # hostile-pid fix closed one commit earlier — a separator with nothing
+        # under it is furniture for a body that does not exist.
+        if body_rows:
+            row.append("\n", style=dim)
+            chrome += 1
+        #: Everything above the body is the app's own furniture; the body is
+        #: the peer's words. `copy_row_is_chrome` reads this, so a drag over an
+        #: open receipt pastes the message and nothing else.
+        self._chrome_rows = chrome
+
+        for wrapped in body_rows:
+            row.append("\n" + indent, style=text_style)
+            row.append(truncate_cells(wrapped, line_width), style=text_style)
+        return row
+
+    def settled_rows(self) -> int:
+        """Rows settled now: one collapsed, the whole card when expanded.
+
+        The ``_finalized`` gate is defensive and cannot be observed False:
+        ``__init__`` calls :meth:`finalize` unconditionally, so the block is
+        finalized before any caller can hold a reference to it. Mutating the
+        gate away therefore leaves the suite green — that is an EQUIVALENT
+        mutant rather than a missing guard, so do not go hunting for a test to
+        write for it. The gate stays because it is :class:`WakeBlock`'s
+        contract for this method and the two ledger cards are read side by
+        side; the count itself IS guarded, and a constant return goes red.
+        """
+        return self._row_count if self._finalized else 0
+
+    def spans_multiple_rows(self) -> bool:
+        """Exact: the card already tracks its own height, collapsed or not."""
+        return self._row_count > 1
 
 
 class RichBlock(TranscriptBlock):

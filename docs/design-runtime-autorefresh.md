@@ -291,6 +291,14 @@ for the settle check. Editable checkouts have no `.lop-source` and a
 constant version: they never trip this, by design (matches
 `design-build-skew.md` §6.5).
 
+> **Amended after the stale-marker fix.** The settle check takes the **most
+> recent** of the marker and dist-info mtimes rather than preferring the
+> marker and falling back to dist-info. "Marker first" assumed the marker is
+> rewritten whenever the payload is; it was not, so a marker older than the
+> payload reported a minutes-old install as ~19000 s old and disarmed this
+> guard exactly when it was needed. Taking the newest can only shrink the
+> reported age, and a smaller age makes the guard wait longer.
+
 **Policy.** Not a fourth term inside `_should_exit` — that predicate answers
 "may I exit *quietly*", and a refresh must *announce*. Add beside it:
 

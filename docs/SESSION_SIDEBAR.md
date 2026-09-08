@@ -16,7 +16,16 @@ that ends above the input dock and closes after any valid selection.
 `SessionInteraction` owns each source's turns, loop, shell, compaction, draft,
 approval policy, gate input and accounting. A prepared/retained view owns widgets,
 not work. Switching does not answer a gate, cancel a turn, or redirect its eventual
-result. Preparation never acknowledges completion attention. The current binding
+result.
+
+That guarantee belongs to this navigation, **not** to `/resume`, which ends the
+turn it leaves and so denies its queued approvals. Anything that switches on the
+user's behalf therefore goes through `_select_sidebar_session` — the one entry
+point both the keystroke and a notification click use — rather than issuing a
+`/resume` that merely resembles it. A click routed the second way answered a
+parked approval "no" in the session being left, with no receipt.
+
+Preparation never acknowledges completion attention. The current binding
 changes only after canonical attachment and prepared replay; navigation stays
 pending until a real displayed frame also has the correct scroll/gate surface.
 

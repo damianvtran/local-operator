@@ -6,6 +6,7 @@ manifest.json
 options/options.css
 options/options.html
 options/options.js
+popup/first-paint.js
 popup/popup.css
 popup/popup.html
 popup/popup.js

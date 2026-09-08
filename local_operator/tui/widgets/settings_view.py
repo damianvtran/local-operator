@@ -47,7 +47,10 @@ from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.geometry import Region
 from textual.message import Message
+from textual.strip import Strip
+from textual.visual import Visual, visualize
 from textual.widgets import Static
 
 from local_operator import keymap as keymap_mod
@@ -146,6 +149,48 @@ class _Capture(NamedTuple):
     key: str = ""
     #: Why the last press was refused, or ``""``.
     refused: str = ""
+
+
+class _RowStyles(NamedTuple):
+    """The five inks every row is painted from, resolved ONCE per paint.
+
+    WHY THIS EXISTS
+    ===============
+
+    ``_row_text`` used to build these five ``Style`` objects at the top of its
+    body, before it examined the row's kind — so a header row paid for the
+    ``accent`` and ``faint`` styles it never uses, and the page paid 5×N of them
+    on every keypress. Profiled at 96 rows that was 480 of the 553
+    ``semantic_color`` calls a single arrow press made, and 13.2% of the
+    widget's own time.
+
+    The measured subtlety is that MEMOISING ``semantic_color`` does not fix it:
+    that variant saved 1.3%, because the lookup is already a dict hit. The cost
+    is CONSTRUCTING the ``Style`` objects, so the fix has to build fewer of
+    them rather than resolve colours faster.
+
+    A per-paint lifetime is what makes invalidation free: a theme switch
+    repaints the page, and the next paint resolves the new ramp because these
+    are rebuilt from scratch every time. Nothing caches them across paints, so
+    there is no epoch to track.
+    """
+
+    dim: Style
+    muted: Style
+    fg: Style
+    accent: Style
+    faint: Style
+
+    @classmethod
+    def resolve(cls) -> "_RowStyles":
+        """Build the bundle from the ACTIVE theme."""
+        return cls(
+            dim=Style(color=theme_mod.semantic_color("dim")),
+            muted=Style(color=theme_mod.semantic_color("muted")),
+            fg=Style(color=theme_mod.semantic_color("fg")),
+            accent=Style(color=theme_mod.semantic_color("accent")),
+            faint=Style(color=theme_mod.semantic_color("faint")),
+        )
 
 
 class _Suggestion(NamedTuple):
@@ -300,6 +345,296 @@ class _ChromeStatic(Static):
     """
 
     ALLOW_SELECT = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: The (content, theme epoch) last handed to `update_if_changed`, or
+        #: None before the first one. See that method for why the epoch is
+        #: half of the key.
+        self._painted: tuple[Text, int] | None = None
+
+    def update_if_changed(self, content: Text, *, layout: bool = True) -> bool:
+        """``update`` unless this surface already holds ``content``. True if painted.
+
+        WHY THIS EXISTS
+        ===============
+
+        ``Static.update`` invalidates the widget's whole render cache, and
+        ``Widget._render_content`` then rasterises ``self.size`` — every line of
+        it — on the next paint. On ``/settings`` that is the dominant cost of an
+        arrow press. Measured over 59 consecutive real cursor transitions, the
+        title, the rule and the side pane produced BYTE-IDENTICAL ``Text`` on
+        59/59 of them, so all of that work was thrown away and repainted
+        identically (``docs/settings-keypress-profile.md`` §5.2). Eliding those
+        no-op updates measured 12-16% of a press at 96 rows.
+
+        THE COMPARISON KEY IS THE WHOLE CORRECTNESS ARGUMENT, and it is why the
+        theme epoch is in it. Rich ``Text`` equality covers the plain string and
+        the spans, which is what rasterises — but a THEME SWITCH can change what
+        this widget paints without changing the ``Text`` at all, because the
+        surface's own ``$lo-*`` styling comes from the stylesheet rather than
+        from the content. Comparing content alone would leave a stale frame on
+        screen across a theme change. ``theme_mod.get_theme_epoch()`` exists for
+        exactly this and is bumped by every ``set_theme``.
+
+        Structural equality, never identity: the painters build a fresh ``Text``
+        every time, so an ``id()`` key would never match and this would elide
+        nothing. Kept here rather than in each painter so all five surfaces
+        answer the question the same way.
+        """
+        epoch = theme_mod.get_theme_epoch()
+        if self._painted is not None:
+            last_content, last_epoch = self._painted
+            if last_epoch == epoch and last_content == content:
+                return False
+        # The Text is stored as handed over. The painters treat a composed row
+        # as immutable once painted (none of them mutates a `Text` it has
+        # already given to a widget), so holding the reference is safe and
+        # copying it on every paint would pay back part of what this saves.
+        self._painted = (content, epoch)
+        self.update(content, layout=layout)
+        return True
+
+    def forget_painted(self) -> None:
+        """Drop the elision key, so the next update always paints.
+
+        For the cases where the CONTENT is unchanged but the rasterisation is
+        not — a resize, or anything that invalidates Textual's own caches
+        underneath this widget.
+        """
+        self._painted = None
+
+
+class _ListStatic(_ChromeStatic):
+    """The settings list, rasterised ONE ROW AT A TIME and cached per line.
+
+    WHY THIS EXISTS — the dominant cost of an arrow press
+    ====================================================
+
+    This widget is pinned to ``height = len(rows)`` so the scroll container has
+    something to scroll (see ``SettingsView._paint_list``). Textual's default
+    content path rasterises ``self.size`` — i.e. ALL N lines — inside
+    ``Widget._render_content``, caches them wholesale, and ``Static.update``
+    invalidates that cache in full. So repainting a 14-line viewport in which
+    TWO lines changed re-rasterised all 96 of them, every keypress. Measured by
+    intercepting ``Visual.to_strips``: exactly 96.0 lines/press at 96 rows and
+    218.0 at 218 (``docs/settings-keypress-profile.md`` \u00a75.1). The same 14-line
+    draw cost 179x more after an ``update()`` (0.020 -> 3.535 ms), 337x at 218
+    rows, and the whole operation was 48-51% of a press.
+
+    The cost was therefore LINEAR IN ROW COUNT, ~30 µs per row per keypress,
+    which is what made it block the Hotkeys section: another ~60 rows would
+    have added ~1.8 ms of widget time to every arrow press on a page the
+    operator already called laggy.
+
+    HOW
+    ---
+
+    ``render_line`` is overridden outright, so ``_render_content`` — the
+    full-height path — is never reached. Each row is rasterised on demand and
+    kept in a per-line cache, and :meth:`set_rows` invalidates only the lines
+    whose composed ``Text`` actually changed. A cursor move dirties two lines
+    (the row the cursor left and the one it arrived on) and Textual asks for
+    the viewport's worth of lines, so a press rasterises 2 rather than N. The
+    profile measured 97.9% of line strips reusable at 96 rows and 99.1% at 218,
+    which is the reuse this banks.
+
+    Rasterising a row alone is byte-identical to rasterising it as part of the
+    block: the rows are composed with ``no_wrap`` and each is truncated to the
+    list width before it gets here, so no row's rendering depends on its
+    neighbours. That is asserted in ``test_settings_repaint_cost`` against the
+    whole-render output rather than assumed.
+
+    WHAT INVALIDATES THE CACHE
+    --------------------------
+
+    * a row's composed ``Text`` differing from the one cached for that line
+      (covers selection, hover, an edit, a config write, an expansion —
+      everything that changes ink or text, because all of it arrives here as a
+      different ``Text``);
+    * a change of WIDTH, which changes what a strip is;
+    * a THEME switch (``theme_mod.get_theme_epoch()``), because the widget's own
+      base style feeds ``to_strips`` without passing through the row ``Text``;
+    * a change in the number of rows, which reshapes the widget.
+
+    The one-row-per-line contract is preserved exactly — ``_index_at`` maps a
+    click's y to ``_rows[y]`` and the cursor indexes the same list, so this
+    changes only WHEN a line is rasterised, never which line is where.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        #: Composes line ``y``. Set by the page; see :meth:`set_source`.
+        #: NOT named `_compose`: `Widget._compose` is Textual's own child-
+        #: mounting coroutine, and shadowing it breaks mounting with a
+        #: TypeError raised from inside the framework (AGENTS.md, "Do not
+        #: shadow Textual's API").
+        self._row_source: Callable[[int], Text] | None = None
+        self._row_count = 0
+        self._row_cache: dict[int, Text] = {}
+        self._line_cache: dict[int, Strip] = {}
+        #: ``(width, theme epoch, base style)`` the cached strips were
+        #: rasterised at. The base style is in here rather than only the epoch
+        #: because this widget discards Textual's own invalidation signal —
+        #: see :meth:`render_line`. ``None`` is the "nothing cached yet" style,
+        #: which no resolved style equals.
+        self._line_key: tuple[int, int, Style | None] = (-1, -1, None)
+
+    def set_source(
+        self, compose: Callable[[int], Text], count: int, dirty: Sequence[int | None]
+    ) -> None:
+        """Point the widget at the page's row composer for this paint.
+
+        ``compose(y)`` returns the ``Text`` for line ``y`` and is called ONLY
+        for the lines Textual actually asks to paint, which is what keeps
+        ``_row_text`` off the 82 rows that are not on screen. ``dirty`` names
+        the lines whose CONTENT may have changed since the last paint (the row
+        the cursor left, the one it arrived on, a hover); every other line keeps
+        its cached ``Text`` and its cached strip.
+
+        Deliberately NOT ``Static.update``: that invalidates every line, which
+        is the cost this class exists to avoid.
+        """
+        self._row_source = compose
+        width = self.size.width
+
+        if count != self._row_count:
+            # The widget's shape changed (an expansion opened, a chain was
+            # deleted). Every line below the change has moved, so nothing is
+            # reusable by line number and the height itself has to be relaid.
+            self._row_count = count
+            self._row_cache.clear()
+            self._line_cache.clear()
+            self.refresh(layout=True)
+            return
+
+        # `None` is a real member of `dirty`: `_hovered` is None when the
+        # pointer is off the list, and -1 is "nothing painted yet".
+        changed = [index for index in dirty if index is not None and 0 <= index < count]
+        if not changed:
+            return
+        for index in changed:
+            self._row_cache.pop(index, None)
+            self._line_cache.pop(index, None)
+        # `layout=False`: the row count and therefore the widget's height are
+        # unchanged here by construction, so a layout pass would re-measure the
+        # whole page to paint two lines.
+        self.refresh(*(Region(0, index, width, 1) for index in changed), layout=False)
+
+    def invalidate_lines(self) -> None:
+        """Drop every cached row and strip: for a resize or a theme change."""
+        self._row_cache.clear()
+        self._line_cache.clear()
+
+    def _row(self, y: int) -> Text:
+        """The composed ``Text`` for line ``y``, composing it if need be."""
+        cached = self._row_cache.get(y)
+        if cached is not None:
+            return cached
+        row = Text() if self._row_source is None else self._row_source(y)
+        self._row_cache[y] = row
+        return row
+
+    def render_line(self, y: int) -> Strip:
+        """One rasterised row, from the cache when it is still valid.
+
+        Overriding this is what keeps ``Widget._render_content`` — which
+        rasterises the widget's FULL height — off the keypress path entirely.
+        """
+        width = self.size.width
+        # THE RESOLVED BASE STYLE IS PART OF THE KEY, not just the theme epoch.
+        #
+        # This override throws away `_dirty_regions` below, which is Textual's
+        # own "your styles changed, re-render" signal (`Widget._set_dirty`
+        # populates it on ANY style invalidation: a class add/remove, a
+        # pseudo-class like `:focus` or `:hover`, an inline `styles.*`
+        # assignment, a stylesheet reparse). A key of (width, epoch) covers only
+        # two of those causes, so every other one was silently swallowed and the
+        # stale strip returned.
+        #
+        # Keying on `visual_style.rich_style` — the style the strips are
+        # actually measured against — closes that gap at the point it matters:
+        # whatever the CAUSE of the invalidation, if it changed what a strip
+        # would look like, the key moves. That keeps this widget honest about
+        # the framework's invalidation protocol rather than opting out of it,
+        # which is what makes it safe for the next person to add a `:focus`
+        # rule to `.settings-view-list` and simply have it work.
+        #
+        # `rich_style` is hashable and Textual memoises it against
+        # `styles._cache_key`, so this is a cache-key comparison and not a
+        # restyle per line; measured at zero cost (61.0/2.0/2.0/0.0 per press,
+        # byte-identical to the narrower key).
+        key = (width, theme_mod.get_theme_epoch(), self.visual_style.rich_style)
+        if key != self._line_key:
+            # Width, theme or base style moved under the cache, so BOTH caches
+            # are dropped — a strip is only meaningful at the width it was
+            # measured for, and a composed row carries the theme's inks, so
+            # re-rasterising a kept `Text` would put the old colours in a new
+            # frame. Clearing only `_line_cache` (as this did) left that half
+            # inert: it re-rasterised from exactly the `Text` it already had.
+            #
+            # WHAT THIS BRANCH DOES AND DOES NOT DO, since the distinction is
+            # easy to misread: dropping the row cache lets the rows be RE-COMPOSED,
+            # but the recomposition runs the `compose` closure `_paint_list`
+            # last installed, which captured its `_RowStyles` bundle. So an
+            # epoch bump on its own does not re-ink — measured. The re-inking
+            # comes from the repaint the theme change triggers, which builds a
+            # fresh bundle. This branch's job is narrower and still necessary:
+            # to guarantee no strip measured under the OLD style survives into
+            # the new frame. `invalidate_lines` clears the same pair for the
+            # same reason.
+            self._row_cache.clear()
+            self._line_cache.clear()
+            self._line_key = key
+        # Textual's base implementation renders content when this is set; the
+        # per-line cache above has already answered that question, so clearing
+        # it keeps the set from growing one region per refresh forever. Safe
+        # only because the key above now tracks the style those regions signal.
+        self._dirty_regions.clear()
+
+        cached = self._line_cache.get(y)
+        if cached is not None:
+            return cached
+
+        if y >= self._row_count or width <= 0:
+            # Past the last row: the pinned height can exceed the rows during
+            # the frame between a shrink and its layout.
+            return Strip.blank(width, self.visual_style.rich_style)
+
+        strips = Visual.to_strips(
+            self,
+            visualize(self, self._row(y), markup=self._render_markup),
+            width,
+            1,
+            self.visual_style,
+        )
+        strip = strips[0] if strips else Strip.blank(width, self.visual_style.rich_style)
+        # `apply_offsets(0, y)` is what makes a row rasterised ALONE identical to
+        # the same row rasterised as line `y` of the whole block. Textual stamps
+        # every segment with a `meta={"offset": (x, y)}` giving its position in
+        # the content, and the compositor reads it back in `get_widget_at` to
+        # answer "what is under the pointer" — a per-row render would otherwise
+        # stamp every row with y=0 and report the wrong content offset. Verified
+        # segment-for-segment against the full-height render over all 96 rows,
+        # not assumed; the equality is asserted in `test_settings_repaint_cost`.
+        strip = strip.apply_offsets(0, y)
+        self._line_cache[y] = strip
+        return strip
+
+    def rendered_text(self) -> Text:
+        """The whole list as one ``Text`` — for tests and `render_lines_for_test`.
+
+        The widget holds its content as one ``Text`` PER ROW, which is what
+        makes per-line caching possible; the page's assertable view of itself
+        is still the joined block, so it is reassembled here rather than kept
+        as a second copy that could drift.
+        """
+        joined = Text(no_wrap=True, overflow="ellipsis")
+        for index in range(self._row_count):
+            if index:
+                joined.append("\n")
+            joined.append_text(self._row(index))
+        return joined
 
 
 class SettingsCapture(Message):
@@ -538,7 +873,7 @@ class SettingsView(Vertical):
         self._detail = _ChromeStatic(classes="settings-view-detail")
         self._title = _ChromeStatic(classes="settings-view-title")
         self._rule = _ChromeStatic(classes="settings-view-rule")
-        self._list = _ChromeStatic(classes="settings-view-list")
+        self._list = _ListStatic(classes="settings-view-list")
         self._body = ScrollableContainer(self._list, classes="settings-view-body")
         # NOT focusable. With it in the focus chain, one `tab` moved focus from
         # the page to this container, which owns the scroll keys — so the arrows
@@ -573,7 +908,6 @@ class SettingsView(Vertical):
         self._hints = Horizontal(classes="settings-view-hints")
         self._title_text = Text()
         self._rule_text = Text()
-        self._list_text = Text()
         self._detail_text = Text()
         self._pane_text = Text()
         #: Live height-ladder flags, so `_pane_height` and `_paint_detail`
@@ -583,6 +917,17 @@ class SettingsView(Vertical):
         self._chrome_pad = True
         self._chrome_columns = True
         self._too_short = False
+        #: ``(key, rows)`` from the last `_build_rows`, or None. Keyed on the
+        #: inputs rather than invalidated by callers — see `_rows_key`.
+        self._rows_cache: tuple[tuple[Any, ...], list["_Row"]] | None = None
+        #: Cursor and hover as of the last `_paint_list`, so it can name the
+        #: lines whose ink may have changed. -1 is "nothing painted yet", which
+        #: is out of range and therefore ignored by `set_source`.
+        self._painted_selected = -1
+        self._painted_hovered = -1
+        #: `_paint_token` as of the last `_paint_list`. None forces the first
+        #: paint to compose every row.
+        self._painted_token: tuple[Any, ...] | None = None
 
     # -- composition --------------------------------------------------------
     def compose(self):  # type: ignore[override]
@@ -617,6 +962,13 @@ class SettingsView(Vertical):
             pass
 
     def on_resize(self) -> None:
+        # Drop every elision key BEFORE the repaint. `update_if_changed` and
+        # the row cache both key on CONTENT, and a resize can leave content
+        # identical while the rasterisation is not: the pane and the detail
+        # line are budgeted against a width, and a Static that skipped its
+        # update would keep strips measured for the old one. Cheap and total,
+        # rather than reasoning per surface about which widths matter.
+        self._invalidate_paint_caches()
         # The rule spans the page and the hints shed against a width only the
         # layout knows, so both are repainted on resize. Parking a 1-row
         # body on the selected setting has to wait until AFTER this
@@ -666,6 +1018,90 @@ class SettingsView(Vertical):
         self._repaint()
 
     # -- rows ---------------------------------------------------------------
+    def _rows_key(self) -> tuple[Any, ...] | None:
+        """Everything :meth:`_build_rows` reads, as one comparable value.
+
+        WHY A KEY RATHER THAN CACHE-INVALIDATION CALLS
+        ==============================================
+
+        The row list was structurally IDENTICAL on 59/59 consecutive cursor
+        moves (``docs/settings-keypress-profile.md`` §5.2) — a cursor move
+        cannot change the structure of the list, only which row is inked as
+        selected — so rebuilding it on every press is pure waste. But the
+        obvious cache, dropped by hand from each of the ~60 ``_repaint`` call
+        sites, is exactly where a stale-row-list bug would live: one mutator
+        that forgets to invalidate paints a list that no longer matches the
+        config, and the cursor then writes to the wrong setting.
+
+        So this derives a key from the INPUTS instead. If every input is equal,
+        the output is equal, and no caller has to remember anything — a new
+        mutator (or the queued Hotkeys section) is covered without touching this
+        file. The rule for maintaining it is simply: anything ``_build_rows``
+        reads must appear here.
+
+        Returns ``None`` to mean "do not cache", which is how the suggestion
+        dropdown is handled: its rows depend on the edit buffer, the highlight
+        and a fuzzy ranking, and ``_suggest_rows`` also CLAMPS ``_suggest_index``
+        as a side effect that the page depends on. Typing is not the path the
+        operator reported as laggy, so that state simply rebuilds every paint
+        rather than being modelled here and risked.
+        """
+        if self._suggest_key() is not None:
+            return None
+        chains = settings_io.read_chains(self._manager)
+        # The cascade's structure is its chains, plus which one is open, plus
+        # whether the stored value is malformed (that decides the empty-state
+        # row's text).
+        cascade = tuple(
+            (setting.key, self._cascade_is_malformed(setting))
+            for setting in settings_io.SETTINGS
+            if setting.kind is Kind.CASCADE
+        )
+        # The EXPANDED setting's choices, because a registry-sourced enum
+        # (`tui.theme`) resolves its members dynamically through
+        # `choices_source` — the count is what decides how many rows it adds.
+        expanded_choices = 0
+        if self._expanded is not None:
+            setting = settings_io.resolve_key(self._expanded)
+            if setting is not None:
+                expanded_choices = len(_choices_for(setting))
+        return (
+            # The registry itself: the queued Hotkeys section adds rows to it,
+            # and the profiling harnesses inflate it.
+            len(settings_io.SETTINGS),
+            len(settings_io.SECTIONS),
+            self._editing,
+            self._expanded,
+            expanded_choices,
+            self._chain,
+            tuple(sorted((name, tuple(hops)) for name, hops in chains.items())),
+            cascade,
+        )
+
+    def _rows_for_paint(self) -> list["_Row"]:
+        """The row list for this paint, rebuilt only when an input changed.
+
+        Wraps :meth:`_build_rows` rather than memoising inside it, so the
+        builder keeps its single responsibility and "was the list rebuilt?"
+        stays a question about calls to it — which is exactly what the G4
+        regression guard counts.
+
+        The rows are treated as IMMUTABLE once built (nothing in this module
+        mutates a ``_Row`` in place; ``_Row`` carries ``__slots__`` and is only
+        ever constructed), which is what makes handing the same list back on a
+        hit safe rather than a shared-mutable-state bug.
+        """
+        key = self._rows_key()
+        if key is None:
+            # Un-cacheable state (an open suggestion dropdown); see `_rows_key`.
+            self._rows_cache = None
+            return self._build_rows()
+        if self._rows_cache is not None and self._rows_cache[0] == key:
+            return self._rows_cache[1]
+        rows = self._build_rows()
+        self._rows_cache = (key, rows)
+        return rows
+
     def _build_rows(self) -> list["_Row"]:
         """The flat row list the cursor travels, rebuilt from the registry.
 
@@ -674,6 +1110,9 @@ class SettingsView(Vertical):
         one list with a ``selectable`` flag needs one. Headers are rows so
         PgUp/PgDn has something to land on and so a section's scope tag has a
         row to live on.
+
+        Call :meth:`_rows_for_paint` from a paint: this is the REBUILD, and on a
+        pure cursor move there is nothing to rebuild.
         """
         rows: list[_Row] = []
         for section in settings_io.SECTIONS:
@@ -1935,7 +2374,7 @@ class SettingsView(Vertical):
         # the cursor 35 rows past where the arrow pointed.
         if row is None:
             return
-        self._rows = self._build_rows()
+        self._rows = self._rows_for_paint()
         settled = next(
             (
                 index
@@ -2832,7 +3271,7 @@ class SettingsView(Vertical):
         # on the chrome widgets, which is what the layout reads, and the
         # paints (detail text, pane budget) have to see the same decision.
         self._apply_height_ladder()
-        self._rows = self._build_rows()
+        self._rows = self._rows_for_paint()
         indices = self._selectable()
         if indices and self._selected not in indices:
             # A rebuild can drop the row the cursor was on (an expansion
@@ -2847,43 +3286,183 @@ class SettingsView(Vertical):
 
     def _paint_list(self) -> None:
         width = self._list_width()
-        text = Text(no_wrap=True, overflow="ellipsis")
-        for index, row in enumerate(self._rows):
-            if index:
-                text.append("\n")
-            line = self._row_text(row, index, width)
+        # ONE ink bundle for the whole list. Resolved here rather than inside
+        # `_row_text` because the five `Style` constructions were 5xN per paint
+        # and N is the row count — see `_RowStyles`.
+        styles = _RowStyles.resolve()
+
+        def compose(index: int) -> Text:
+            line = self._row_text(self._rows[index], index, width, styles)
             # Clipped rather than allowed to wrap. A wrapped row breaks the
             # one-row-per-setting contract the cursor and the click handler
             # both depend on: `_index_at` maps a click's y to a row index, so a
             # row occupying two lines would make every click below it land on
             # the wrong setting.
             line.truncate(width, overflow="ellipsis")
-            text.append_text(line)
-        self._list_text = text
-        self._list.update(text)
+            return line
+
+        # WHICH LINES MAY HAVE CHANGED.
+        #
+        # The cursor and the hover are the two positions the page inks
+        # differently, so a pure cursor move dirties at most four lines: the
+        # old and new selection, the old and new hover. Hotkey capture also
+        # changes only the selected row: listening, replacement, refusal and
+        # cancellation are covered by this same dirty set. Do not put the
+        # capture key in the whole-list token; that would flush every cached
+        # strip on each captured press. The rendered capture-transition test
+        # checks this with the integrated per-line renderer.
+        #
+        # But a row's TEXT can change with the row list and the cursor both
+        # unmoved. `r` on a malformed cascade rewrites the config, and the
+        # empty-state row goes from `malformed cascade — press r to clear it`
+        # to `no cascade configured` at the same index, in a list of the same
+        # length. Deriving the dirty set from the cursor alone left that line
+        # stale on the frame while the model held the new text — caught by
+        # `test_r_clears_a_malformed_cascade_and_the_frame_does_not_contradict
+        # _itself`, which asserts on the COMPOSITOR output rather than on a
+        # model string, which is precisely why it caught it.
+        #
+        # So anything a row reads BESIDES its own identity and the cursor is
+        # folded into one token, and a token change dirties every line. That is
+        # a whole-list recompose on a config write (rare, and already the
+        # expensive path) and nothing at all on a keypress. The alternative —
+        # enumerating which rows a given write can affect — is the stale-frame
+        # bug waiting to be reintroduced by the next setting that renders
+        # something derived.
+        token = self._paint_token()
+        if token != self._painted_token:
+            self._painted_token = token
+            dirty: Sequence[int | None] = range(len(self._rows))
+        else:
+            dirty = (self._painted_selected, self._selected, self._painted_hovered, self._hovered)
+        self._painted_selected = self._selected
+        self._painted_hovered = self._hovered
         # Pin the Static to the row count so the container's virtual size
         # equals the list and Textual scrolls the difference. `auto` collapses
-        # it to the handed content with no room to scroll.
+        # it to the handed content with no room to scroll — and it does so
+        # HARDER now that the widget renders per line: with `height: auto` the
+        # widget measured its content as ONE row and painted a single line of a
+        # 96-row list. Set BEFORE `set_source`, whose row-count branch relays
+        # out and must measure against the new height.
         self._list.styles.height = max(len(self._rows), 1)
+        # The rows are COMPOSED ON DEMAND rather than up front, which is what
+        # keeps a keypress off the 82 rows that are not on screen; the widget
+        # asks for the lines it is about to paint (see `_ListStatic`).
+        self._list.set_source(compose, len(self._rows), dirty)
 
-    def _row_text(self, row: "_Row", index: int, width: int) -> Text:
+    def _paint_token(self) -> tuple[Any, ...]:
+        """Everything a row's TEXT depends on except its identity and the cursor.
+
+        Compared as a whole rather than per row: a mismatch repaints the list,
+        which is what a config write should cost. See `_paint_list` for why the
+        cursor-only dirty set was not enough.
+
+        HOW TO KEEP THIS TRUE, because the docstring above is a promise the next
+        author will build on rather than re-derive. Anything ``_row_text`` reads
+        TRANSITIVELY must appear here, and "transitively" is the whole trap: the
+        catalogues below are not touched by ``_row_text`` itself, they are four
+        calls down (``_row_text`` -> ``_editor_text`` -> ``_suggest_ghost`` ->
+        ``_highlighted_suggestion`` -> ``_suggestions``). They were missing, and
+        a same-length catalogue swap through ``load()`` painted a stale
+        suggestion dropdown while the model held the new one — the failure is
+        silent by construction, because a paint cache that returns the wrong
+        answer looks exactly like one that returns the right answer.
+
+        Derive this list by walking that call graph, not from memory. An AST
+        walk from ``_row_text`` over this class's own methods, differenced
+        against the attributes named here, takes a minute and is what found the
+        omission; the only reads it turns up that are deliberately absent are
+        ``_selected`` and ``_hovered`` (the cursor and hover, which the dirty
+        set in `_paint_list` handles per line precisely so a cursor move does
+        NOT invalidate the list) and ``_TWO_COLUMN_MIN_WIDTH`` (a class
+        constant, and the width it feeds is already covered by
+        ``_list_width()``).
+
+        The config VALUES are in here because most rows render a stored value
+        and its changed-vs-default ink; ``repr`` of the values mapping measures
+        4.3 µs, against a press this saves milliseconds on. The editor state is
+        here because an open editor paints a buffer and a caret into its row.
+        """
+        return (
+            repr(self._manager.get_config().values),
+            self._editing,
+            self._buffer,
+            self._caret,
+            self._expanded,
+            self._chain,
+            self._confirm_delete,
+            self._suggest_index,
+            self._suggest_dismissed,
+            theme_mod.get_theme_epoch(),
+            self._list_width(),
+            # The two suggestion catalogues, by CONTENT rather than by length.
+            # `load()` replaces both lists wholesale, and a same-length swap
+            # (two providers exchanged for two others) leaves every other
+            # member of this token unchanged — which is precisely the case that
+            # painted a stale dropdown, because `_suggest_index` normally moves
+            # and masks the omission.
+            #
+            # The whole `ModelRow` rather than its selector: a suggestion row
+            # renders the model id, the selector AND `_suggestion_detail`'s
+            # provider/price note, so keying on the selector alone would miss a
+            # re-priced catalogue. `ModelRow` is a frozen dataclass and hashable,
+            # so it is a valid tuple member and compares by value.
+            tuple(self._provider_catalogue),
+            tuple(self._model_catalogue),
+        )
+
+    @property
+    def _list_text(self) -> Text:
+        """The composed list as one ``Text``.
+
+        Kept as a PROPERTY over the widget's per-row content rather than as a
+        second stored copy: the rows moved into `_ListStatic` for the per-line
+        cache, and a duplicate joined block would be a second source of truth
+        that could disagree with the frame. Read by `render_lines_for_test` and
+        by the page's own tests.
+        """
+        return self._list.rendered_text()
+
+    def _invalidate_paint_caches(self) -> None:
+        """Force the next paint to rasterise from scratch.
+
+        For the changes that leave the CONTENT identical while invalidating the
+        strips measured from it — a resize (a strip is only meaningful at the
+        width it was measured for) being the reachable one. Theme changes are
+        keyed on the epoch inside the caches themselves and need no call here.
+        """
+        self._list.invalidate_lines()
+        for surface in (self._title, self._rule, self._detail, self._pane_view):
+            surface.forget_painted()
+
+    def _row_text(
+        self, row: "_Row", index: int, width: int, styles: "_RowStyles | None" = None
+    ) -> Text:
+        """Compose one painted line.
+
+        ``styles`` is the per-paint ink bundle (:class:`_RowStyles`). It is
+        OPTIONAL so the many call sites that paint a single row — and any
+        caller outside this module — keep working unchanged; passing it is what
+        lets ``_paint_list`` resolve the five theme colours once for the whole
+        list instead of once per row (see :class:`_RowStyles`).
+        """
         selected = index == self._selected
         hovered = index == self._hovered
         line = Text(no_wrap=True, overflow="ellipsis")
-        dim = Style(color=theme_mod.semantic_color("dim"))
-        muted = Style(color=theme_mod.semantic_color("muted"))
-        fg = Style(color=theme_mod.semantic_color("fg"))
-        accent = Style(color=theme_mod.semantic_color("accent"))
-        faint = Style(color=theme_mod.semantic_color("faint"))
+        if styles is None:
+            styles = _RowStyles.resolve()
+        dim = styles.dim
+        muted = styles.muted
+        fg = styles.fg
+        accent = styles.accent
+        faint = styles.faint
 
         if row.kind == "header" and row.section is not None:
             # The scope tag rides the SECTION header, right-aligned and dim: it
             # answers "when does this take effect" once per group rather than
             # fifty times down the page. See the module docstring.
             head = Text(no_wrap=True)
-            head.append(
-                row.section.title, style=Style(color=theme_mod.semantic_color("fg"), bold=True)
-            )
+            head.append(row.section.title, style=fg + Style(bold=True))
             # The tag sheds its PREFIX before it sheds the scope itself: on a
             # narrow body "takes effect: new sessions" does not fit beside the
             # title, and the half that carries the meaning is the scope. Dropped
@@ -3708,7 +4287,11 @@ class SettingsView(Vertical):
                     text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
                     break
         self._detail_text = text
-        self._detail.update(text)
+        # The one surface that legitimately changes on every move (it describes
+        # the cursor row), so this elides nothing in the common case — it is
+        # routed through the same helper so all five surfaces behave alike and
+        # a future state that DOES repeat a detail line is covered for free.
+        self._detail.update_if_changed(text)
 
     @staticmethod
     def _join_detail(parts: list[tuple[str, Style, bool]]) -> Text:
@@ -4019,7 +4602,10 @@ class SettingsView(Vertical):
             dim,
             roster_foldable=foldable,
         )
-        self._pane_view.update(self._pane_text)
+        # The pane is resolved once at open (providers, teams, agents) and was
+        # byte-identical on 59/59 consecutive cursor moves, so this repaints on
+        # a pane SWITCH and on nothing else.
+        self._pane_view.update_if_changed(self._pane_text)
 
     def _fit_pane(
         self,
@@ -4422,11 +5008,15 @@ class SettingsView(Vertical):
         path = self._config_path()
         title.append(truncate_cells(path, max(self._title_room(), 12)), style=dim)
         self._title_text = title
-        self._title.update(title)
+        # The title is the config path: identical on every cursor move, and
+        # changed only by a resize (the truncation budget) or a config-path
+        # change.
+        self._title.update_if_changed(title)
 
         width = max(self.size.width - 2, 1)
         self._rule_text = Text("─" * width, style=dim)
-        self._rule.update(self._rule_text)
+        # `"─" * width` — changed only by a resize.
+        self._rule.update_if_changed(self._rule_text)
         self._paint_hints()
 
     def _current_is_readonly(self) -> bool:

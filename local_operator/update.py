@@ -30,6 +30,7 @@ still rewrite the cache so the next splash is free.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -48,6 +49,8 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from local_operator.interpreter import python_argv
+
+logger = logging.getLogger(__name__)
 
 #: Same cache root the model catalogue uses, so there is one place to clear.
 _CACHE_DIR = Path("~/.local-operator/cache")
@@ -620,29 +623,82 @@ def install_kind(
     return InstallKind.UNKNOWN
 
 
-def is_git_snapshot(prefix: str | Path | None = None) -> bool:
-    """``.lop-source`` marks a ``lop-update`` uv-tool snapshot, not a PyPI wheel.
+#: First token written into ``.lop-source`` for an install that came from a
+#: PyPI wheel rather than from a git snapshot. A sentinel rather than a fake
+#: commit: a PyPI upgrade genuinely HAS no git ref, and copying the previous
+#: install's sha forward is exactly the lie this module exists to stop.
+#:
+#: Expect one cosmetic artefact in the upgrade window that introduces this
+#: token: a runtime still on PRE-SENTINEL code reads the whole first token as
+#: a ref and renders ``/info`` as ``source git snapshot @ pypi``. It is
+#: self-clearing rather than sticky — the marker's mtime still CHANGES, so
+#: those runtimes see a new build and retire on their own (measured at ~1.5 s,
+#: QA round 1, Q2) — and it is unavoidable for a format change that must keep
+#: the marker a single file shared with ``lop-update``.
+PYPI_SOURCE_TOKEN = "pypi"
 
-    Default is still PyPI: the caller prints one line and upgrades. We do
-    not invoke ``lop-update`` — developers who want git ``main`` keep using
-    that script.
+
+def _looks_like_git_sha(token: str) -> bool:
+    """Is this ``.lop-source`` token a commit, as opposed to a sentinel?
+
+    The marker's first token is either an abbreviated-or-full git sha (what
+    ``lop-update`` writes) or :data:`PYPI_SOURCE_TOKEN`. Discriminating on
+    SHAPE rather than on an allow-list keeps the two writers — this module and
+    the out-of-tree ``lop-update`` shell script — from having to agree on
+    anything but the format, and means an unrecognised future sentinel degrades
+    to "no ref" instead of being rendered as a bogus commit.
+
+    A PyPI version can never collide: it carries dots, which are not hex.
+
+    The shape test is deliberately loose: it admits any 7-40 hex token, so a
+    hex-looking BRANCH name (``deadbeef``) in the second writer's ref position
+    would read as a commit. It cannot fire today — ``lop-update`` only ever
+    writes ``git rev-parse --verify`` output into the first token — but it is
+    the constraint on anyone adding a sentinel later: A FUTURE SENTINEL MUST
+    NOT BE HEX, or it will render as a bogus commit instead of degrading to
+    "no ref" (review round 1, R1-3).
     """
-    root = Path(prefix) if prefix is not None else Path(sys.prefix)
-    return (root / ".lop-source").is_file()
+    if not (7 <= len(token) <= 40):
+        return False
+    return all(char in "0123456789abcdefABCDEF" for char in token)
+
+
+def is_git_snapshot(prefix: str | Path | None = None) -> bool:
+    """Was this install built from a git ref, as opposed to a PyPI wheel?
+
+    Presence of ``.lop-source`` used to be the whole test, which was true only
+    while ``lop-update`` was the sole writer. It is not any more: a PyPI
+    ``/update`` now records ``pypi <version>`` at the same path (see
+    :func:`write_source_marker`), so the marker survives the transition from a
+    git snapshot to a wheel and the FIRST TOKEN — not the file's existence —
+    is what says which one is installed.
+
+    Reading existence alone here is what made ``lop update`` keep printing
+    "this runtime was built from git" on a host whose git snapshot had already
+    been replaced by a wheel, and made ``/info`` label that wheel a snapshot.
+
+    Default is still PyPI: the caller prints one line and upgrades. We do not
+    invoke ``lop-update`` — developers who want git ``main`` keep using that
+    script.
+    """
+    return bool(source_ref(prefix))
 
 
 def source_ref(prefix: str | Path | None = None) -> str:
-    """The git ref ``lop-update`` recorded for this install, or ``""``.
+    """The git commit this install was built from, or ``""``.
 
-    ``lop-update`` writes ``<git-sha> <tag>`` into ``.lop-source`` at the same
-    root :func:`is_git_snapshot` probes, so the FIRST whitespace-separated
-    token is the commit the install was built from. Only that token is kept:
-    the tag half is a label that repeats across rebuilds of one release and
-    therefore cannot distinguish two builds, which is the whole job here.
+    ``.lop-source`` holds two whitespace-separated tokens at the root
+    :func:`is_git_snapshot` probes, in one of two shapes:
 
-    Absent (a PyPI wheel, a pipx install, an editable checkout) is ``""``
-    rather than an error — those installs have no second token and fall back
-    to the distribution version alone.
+    * ``<git-sha> <ref>`` — a ``lop-update`` snapshot. The sha is the commit;
+      the ref half is a label that repeats across rebuilds of one release and
+      therefore cannot distinguish two builds, which is the whole job here.
+    * ``pypi <version>`` — a PyPI wheel installed by :func:`perform_upgrade`.
+      There is no commit, so this returns ``""`` and the caller falls back to
+      the distribution version alone.
+
+    Absent (never upgraded through either writer, an editable checkout) is
+    ``""`` too, for the same reason.
     """
     root = Path(prefix) if prefix is not None else Path(sys.prefix)
     try:
@@ -658,7 +714,91 @@ def source_ref(prefix: str | Path | None = None) -> str:
         # diagnostic path (review round 1, R1-2).
         return ""
     parts = raw.split()
-    return parts[0] if parts else ""
+    if not parts:
+        return ""
+    return parts[0] if _looks_like_git_sha(parts[0]) else ""
+
+
+def write_source_marker(
+    root: str | Path,
+    *,
+    version: str,
+    commit: str = "",
+    ref: str = "",
+) -> bool:
+    """Record what is installed at ``root`` in ``.lop-source``. Never raises.
+
+    WHY THIS EXISTS
+    ---------------
+    ``perform_upgrade`` replaced the payload under ``root`` and nothing wrote
+    the marker back, so the file kept describing the build it had DISPLACED.
+    On the reporting host that left ``.lop-source`` naming the 0.51.7 bump
+    commit while site-packages carried 0.51.9 — every ``version@ref`` label,
+    every :class:`BuildStamp` comparison and the settle clock below all read
+    from a file about a build that was no longer there.
+
+    THE FORMAT IS A CONTRACT WITH A SECOND WRITER
+    ---------------------------------------------
+    ``~/.local/bin/lop-update`` (a shell script, out of this tree) writes
+    ``printf '%s %s\\n' "$COMMIT" "$REF"``. That shape is preserved exactly, so
+    the two writers stay interchangeable and neither has to know about the
+    other; :func:`source_ref` discriminates on token shape, not on which writer
+    produced the line. A PyPI upgrade has no commit, so it writes
+    ``pypi <version>`` — honest about having no ref rather than carrying the
+    previous install's sha forward.
+
+    ORDERING IS LOAD-BEARING
+    ------------------------
+    Callers must write this only AFTER the installer has exited successfully.
+    :func:`build_marker_age_s` uses this file's mtime as the moment the install
+    became whole, and a runtime that acted on a marker written mid-install
+    could spawn a successor that imports a torn tree.
+
+    ATOMIC, AND BEST-EFFORT
+    -----------------------
+    Temp-and-rename within the destination directory, mirroring
+    :func:`_write_cache`: a torn or interrupted write cannot leave a partial
+    marker behind, which matters because ``RuntimeServer.__init__`` reads this
+    file and a corrupt one would otherwise reach every runtime on the host
+    (review round 1, R1-2). A failure to write returns ``False`` rather than
+    raising — a missing marker degrades to "compare on version alone", while a
+    failed upgrade report would be a worse outcome than an unrecorded one.
+    """
+    first = commit if commit else PYPI_SOURCE_TOKEN
+    second = ref if commit else version
+    line = f"{first} {second}\n"
+
+    path = Path(root) / ".lop-source"
+    fd: int | None = None
+    tmp: Path | None = None
+    try:
+        handle, name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+        fd, tmp = handle, Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None
+            stream.write(line)
+            # fsync before the rename: the marker's whole value is that it is
+            # true about the tree beside it, and an unflushed write that
+            # survives as an empty file after a crash reads as "no ref".
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o644 & ~_umask())
+        tmp.replace(path)
+        tmp = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def installed_build(prefix: str | Path | None = None) -> BuildStamp:
@@ -679,33 +819,73 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     """Seconds since the install on disk was last written, or ``None``.
 
     The settle input for a runtime's self-refresh (``process._build_changed``):
-    ``lop-update`` runs ``uv tool install --force`` — which rewrites
-    site-packages over several seconds — and only THEN writes ``.lop-source``,
-    so the marker's mtime is the moment the install became whole. A runtime
-    that acted on a marker younger than ``BUILD_SETTLE_S`` could spawn a
-    successor that imports a torn tree. When there is no marker (a PyPI or
-    pipx install) the ``dist-info`` directory's mtime plays the same role; it
-    is written last by every installer. ``None`` when neither can be read —
-    an editable checkout has no dist-info of its own and no marker, and the
-    caller treats "unknown" as "not settled", which is the safe side.
+    an installer rewrites site-packages over several seconds, and a runtime
+    that acted inside that window could spawn a successor importing a torn
+    tree. Two files record when the install was last touched: ``.lop-source``,
+    written last by both writers (``lop-update`` and
+    :func:`write_source_marker`) precisely so it marks the moment the install
+    became whole, and the ``dist-info`` directory, written last by the
+    installer itself.
+
+    WHY THE NEWEST OF THE TWO, NOT THE MARKER FIRST
+    -----------------------------------------------
+    Reading the marker first and the dist-info only as a fallback assumed the
+    marker is rewritten whenever the payload is — which was not true before
+    :func:`write_source_marker` existed, and still is not for an install
+    upgraded by some path that writes neither (a hand-run ``uv tool install
+    --force``). A marker older than the payload then reported a minutes-old
+    install as hours old: on the reporting host, ~19000 s for a tree written
+    minutes earlier, which is the settle guard reading the wrong clock and
+    disarming itself exactly when it was needed.
+
+    Taking the MOST RECENT of the two mtimes cannot have that failure: any
+    write to either file only makes the reported age smaller, and a smaller
+    age means the guard waits longer. Erring toward "not settled yet" is the
+    safe direction — the cost is one more refresh check, against the cost of
+    spawning from a half-written tree.
+
+    ``None`` when neither can be read — an editable checkout has no dist-info
+    of its own and no marker, and the caller treats "unknown" as "not
+    settled", which is the same safe side.
+
+    THE TWO TERMS ARE NOT SCOPED THE SAME WAY, ON PURPOSE
+    -----------------------------------------------------
+    The marker is read from ``prefix``; the dist-info is always the RUNNING
+    INTERPRETER's, because :func:`distribution` resolves through ``sys.path``
+    and takes no prefix. In production the two are the same tree — a
+    runtime's ``prefix`` IS its own install — so the distinction is invisible.
+    It shows only through the ``LOP_BUILD_PREFIX`` test seam, where a caller
+    passing a foreign prefix gets an age mixing that prefix's marker with this
+    interpreter's dist-info (review round 1, R1-2).
+
+    That is deliberate rather than merely tolerated. Scoping the dist-info to
+    ``prefix`` means globbing ``<prefix>/lib/*/site-packages/*.dist-info``,
+    and a layout that glob does not match degrades this back to reading the
+    MARKER ALONE — which is precisely the stale-marker failure the max-of-two
+    was introduced to fix, reintroduced on the production path to sharpen a
+    seam only the e2e stage uses. The mixed answer is also safe in the one
+    direction that matters: an extra mtime can only make the age SMALLER, so
+    the settle guard waits longer, never less.
     """
     root = Path(prefix) if prefix is not None else Path(sys.prefix)
-    marker = root / ".lop-source"
+    mtimes: list[float] = []
+
     try:
-        mtime = marker.stat().st_mtime
+        mtimes.append((root / ".lop-source").stat().st_mtime)
     except OSError:
-        try:
-            dist = distribution("local-operator")
-        except PackageNotFoundError:
-            return None
+        pass
+
+    try:
+        dist = distribution("local-operator")
         located = getattr(dist, "_path", None)
-        if located is None:
-            return None
-        try:
-            mtime = Path(located).stat().st_mtime
-        except OSError:
-            return None
-    return max(0.0, time.time() - mtime)
+        if located is not None:
+            mtimes.append(Path(located).stat().st_mtime)
+    except (PackageNotFoundError, OSError):
+        pass
+
+    if not mtimes:
+        return None
+    return max(0.0, time.time() - max(mtimes))
 
 
 def installer_argv(
@@ -806,6 +986,19 @@ def perform_upgrade(
 
     The new wheel is not imported into this interpreter; callers print
     ``target`` rather than asking :func:`installed_version` again.
+
+    On success the ``.lop-source`` marker is rewritten to describe what was
+    just installed — see :func:`write_source_marker`. Without that step the
+    marker kept naming the DISPLACED build: it is written only by the
+    ``lop-update`` shell script, so an upgrade driven from here (``lop
+    update`` and the TUI's ``/update``, which share this function) moved
+    site-packages and left the marker behind, and every ``version@ref`` label
+    and settle-clock reading on the host went on describing a build that was
+    no longer installed.
+
+    Ordering is deliberate and load-bearing: the marker is written only after
+    the installer has exited 0, because its mtime is the signal a runtime uses
+    to decide the install has settled.
     """
     detected = kind if kind is not None else install_kind(prefix=prefix, executable=executable)
     if detected is InstallKind.EDITABLE:
@@ -819,6 +1012,29 @@ def perform_upgrade(
     code = runner(argv)
     if code != 0:
         raise UpdateError(f"installer exited {code}")
+
+    # Only the uv-tool layout has a ``.lop-source`` root to record into, and
+    # it is the layout ``lop-update`` shares. pipx and pip installs never had
+    # a marker and gain nothing from one: they compare on version alone.
+    if detected is InstallKind.UV_TOOL:
+        root = Path(prefix) if prefix is not None else Path(sys.prefix)
+        # ``target`` is the PyPI version just installed, and this path is
+        # always a PyPI wheel: ``installer_argv`` runs `uv tool install
+        # --force local-operator` with no --from, so no git ref exists to
+        # record. Passing no commit is what makes the marker say so.
+        if not write_source_marker(root, version=target):
+            # Deliberately not fatal: the upgrade itself SUCCEEDED, and a
+            # failed marker only costs accuracy in the labels. But without a
+            # line here the host silently reverts to the pre-fix behaviour —
+            # a marker naming the displaced build — with nothing to find
+            # afterwards, so log it rather than discarding the result
+            # (review round 1, R1-4).
+            logger.warning(
+                "Upgraded to %s but could not record it in %s/.lop-source; "
+                "version labels will keep naming the previous build.",
+                target,
+                root,
+            )
     return target
 
 

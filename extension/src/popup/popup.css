@@ -413,6 +413,64 @@ input:disabled {
   color: var(--danger);
 }
 
+/* The pre-render placeholder holds the height of the state it will become, so
+ * the popup window does not jump as render() settles.
+ *
+ * A Chrome action popup auto-sizes to its content, so every difference in card
+ * height between the first painted frame and the settled one is a visible
+ * window resize. #pending is the only section shipping visible, so it paints on
+ * EVERY open — the resize it causes is unconditional, and only its duration
+ * depends on how slow /health is.
+ *
+ * The pin is therefore chosen per user, from a synchronous localStorage hint:
+ * 219px for a browser that has never paired (it becomes the 340px pairing form)
+ * and 86px for one that has (it becomes the 207px connected card). A single pin
+ * cannot serve both — pinning to the form costs the already-paired user, who
+ * opens this popup for the rest of the product's life, a 133px settle; pinning
+ * to the tallest state would leave a permanent band of empty card under
+ * `connected` for everyone.
+ *
+ * That choice is applied by first-paint.js, a CLASSIC script in <head>, NOT by
+ * popup.ts. popup.js is a deferred module, so an inline style it sets arrives
+ * after the compositor may already have painted: with only the module doing the
+ * work the already-paired user still saw the tall pin on 4 of 12 opens. The
+ * rule below is therefore the value for a browser whose hint cannot be read at
+ * all, and the pre-paint script overrides it for everyone else.
+ *
+ * All four numbers are measured at 300x600 and move together — the card's
+ * height depends on the pairing form, which depends on the reserved error slot
+ * below. Re-measure BOTH pins if any of them changes; a stale pin is a resize,
+ * which is the defect this whole block exists to prevent. */
+#pending {
+  min-height: 219px;
+}
+
+/* The pairing error RESERVES its space instead of reflowing the card.
+ *
+ * A Chrome action popup auto-sizes to its content, so un-hiding this line grew
+ * the card by 66px (measured 292px -> 358px) and the popup WINDOW resized under
+ * the user's cursor at the exact moment they were re-reading a rejected code.
+ * The line is made invisible rather than display:none, which keeps
+ * `role="alert"` announcing the message when it appears (D7).
+ *
+ * 36px is TWO lines at this font size (12px / 1.5), which is what the longest
+ * message the daemon can send occupies at 300px. Every pairing failure string
+ * (mismatch, expired, too many attempts, no live code, and the popup's own
+ * unreachable fallback) fits in two lines — deliberately, since the slot is
+ * permanent and each extra line is height every pairing card pays whether or
+ * not anything went wrong. A message that wraps to three lines would resize the
+ * card again, which is why the tests below pin the wrap, not just the pixels.
+ *
+ * Scoped to the pairing form's error only. `.error.hidden` elsewhere keeps the
+ * shared `display: none`, so no other state pays for blank reserved space. */
+#pair-error {
+  min-height: 36px;
+}
+#pair-error.hidden {
+  display: block !important;
+  visibility: hidden;
+}
+
 /* Footer link in the muted-dim register, above a hairline. */
 .foot {
   padding: 10px 16px;

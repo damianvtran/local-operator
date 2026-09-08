@@ -110,7 +110,9 @@ def _stub_engage(monkeypatch: pytest.MonkeyPatch, server: RuntimeServer) -> list
     """Stand in for the runtime spawn: publish a live record for the session."""
     engagements: list[int] = []
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         engagements.append(1)
         # The measured engage takes 1.1–2.8 s. The race IS the test: at 0.2 s
         # the mount engage (#622) usually won against the paste+Enter, and
@@ -394,3 +396,133 @@ async def test_an_agent_attached_receipt_syncs_the_agent_segment(tmp_path, monke
         )
         assert app._status._agent_profile == "reviewer", "the agent segment was not synced"
         assert app._status._team == "", "the team segment must not have been what was synced"
+
+
+# --------------------------------------------------------------------------
+# What the surface SAYS when the bind does not land
+#
+# The whole user-visible half of the liveness change was unasserted, which is
+# how a reassurance ("it is running in the background") shipped over three
+# failures where the runtime demonstrably was not running — a deliberate
+# `/stop` among them (review round 1, MAJOR-1/MINOR-1). These drive the REAL
+# `_bind_then_dispatch` handler and read the row a user would.
+# --------------------------------------------------------------------------
+
+
+async def _notice_after_failed_bind(
+    app: OperatorApp, pilot: Any, error: BaseException
+) -> tuple[str, str]:
+    """Run the real handler against a facade whose bind raises, return the row.
+
+    Returns ``(text, kind)`` of the notice the handler appended, so a test
+    asserts on what is painted rather than on which branch was taken.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = app._session
+    assert session is not None
+
+    async def failing_ensure(*args: Any, **kwargs: Any) -> None:
+        raise error
+
+    session._ensure_bound = failing_ensure  # type: ignore[method-assign]
+    before = {id(b) for b in app.query(NoticeBlock)}
+    app._bind_then_dispatch("/credential DEMO_TOKEN")
+    for _ in range(400):
+        await pilot.pause()
+        fresh = [b for b in app.query(NoticeBlock) if id(b) not in before]
+        if fresh:
+            block = fresh[-1]
+            return block.text(), block._token
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"no notice appeared; transcript:\n{_transcript_text(app)}")
+
+
+@pytest.mark.asyncio
+async def test_a_busy_runtime_is_reported_as_reachable_later_not_as_a_boot_failure(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync-envelope expiry gets the reassurance, in the past tense.
+
+    The copy is PAST for the attempt and PRESENT for the runtime, because by
+    the time this paints the retries are spent and the `finally` has cleared
+    the band — a present participle would promise progress the code is not
+    making, and a user who believes it waits (design round 1, D1). `note` and
+    not `info`: this row is the only receipt for a command that was dropped,
+    which is NoticeBlock's own definition of the middle tier (D2).
+    """
+    from local_operator.session.remote import (
+        _SYNC_UNRESPONSIVE_REASON,
+        RuntimeUnresponsiveError,
+    )
+
+    app, _handle, server, _engagements = _rig(isolated, monkeypatch)
+    server.start()
+    try:
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _boot(app, pilot)
+            text, kind = await _notice_after_failed_bind(
+                app, pilot, RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON)
+            )
+    finally:
+        server.close()
+
+    assert text == (
+        "could not reach this session's runtime in time — it is still running; "
+        "try that again in a moment"
+    ), text
+    assert kind == "muted", f"{kind!r}: the dropped-command receipt is `note`, not `info`"
+    assert "still connecting" not in text, "no present participle: nothing is connecting"
+    assert "in the background" not in text, "the implementation's word, not the user's"
+    assert "could not start a runtime" not in text, "a runtime DID start"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_keeps_its_own_reason_instead_of_the_reassurance(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MAJOR-1: a deliberate `/stop` must not be told its runtime is running.
+
+    `this session was stopped` is a plain ``ConnectionError`` — non-actionable,
+    and TRUE. Branching on ``not actionable`` replaced it with "it is running
+    in the background; try again in a moment", which points the user at a wait
+    that never ends. The reassurance rides ``RuntimeUnresponsiveError`` only,
+    so everything else relays what it was given.
+    """
+    app, _handle, server, _engagements = _rig(isolated, monkeypatch)
+    server.start()
+    try:
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _boot(app, pilot)
+            text, kind = await _notice_after_failed_bind(
+                app, pilot, ConnectionError("this session was stopped")
+            )
+    finally:
+        server.close()
+
+    assert "this session was stopped" in text, text
+    assert "running" not in text, f"{text!r}: the runtime is NOT running; the user stopped it"
+    assert "try that again" not in text and "try again" not in text, text
+    assert kind == "warning", kind
+
+
+@pytest.mark.asyncio
+async def test_a_vetted_configuration_error_keeps_its_own_sentence(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An actionable error is text the user must act on, and stays a warning."""
+    from local_operator.session.runtime.launch import ActionableConnectionError
+
+    app, _handle, server, _engagements = _rig(isolated, monkeypatch)
+    server.start()
+    try:
+        async with app.run_test(size=(110, 30)) as pilot:
+            await _boot(app, pilot)
+            text, kind = await _notice_after_failed_bind(
+                app, pilot, ActionableConnectionError("no API key is configured for test")
+            )
+    finally:
+        server.close()
+
+    assert text == "no API key is configured for test", text
+    assert kind == "warning", f"{kind!r}: a configuration fault the user must act on"

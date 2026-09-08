@@ -61,6 +61,7 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     GAP_CLASS,
+    SPINE_INDENT,
     NoticeBlock,
     TranscriptView,
     UserBlock,
@@ -604,41 +605,115 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
         assert welcome.region.height > 0
 
 
-@pytest.mark.asyncio
-async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine() -> None:
-    """A boot notice is part of the centred composition, not the full-width spine.
+#: Widths the boot-notice column is asserted at. The parametrization is the
+#: POINT of these two tests, not thoroughness for its own sake: the offset
+#: defect they guard CANCELLED at exactly the width the older single-width test
+#: ran at (120). `_sync_boot_column_width` centred the block in `box - gutter`
+#: while the stylesheet centres the card in `box`, so the two agreed only where
+#: `box - card` happened to be EVEN — and a real invariant was pinned at one of
+#: the widths that hides its own violation.
+#:
+#: Measured on the unfixed tree: one cell of drift at 86/90/100/110 (`box - card`
+#: odd), zero at 120/160 (even). Both parities are therefore represented and
+#: must stay — dropping the odd ones disarms the guard, dropping the even ones
+#: stops it proving the fix did not simply move the error.
+#:
+#: 86 is the lowest carded width at which the defect APPEARS, which is why the
+#: list starts there. The first carded width is 85 (`box=83`, `card=75`,
+#: `d=8 == BOOT_CARD_MIN_INSET`; 84 with `d=7` is the last uncarded one), but
+#: 85's `box - card` is even, so it sits on the parity that hides the bug.
+#: Below the threshold the app deliberately leaves the notice on the full-width
+#: spine, where there is no card column to share; a narrower terminal is
+#: covered by the spine tests instead, not by these.
+BOOT_NOTICE_WIDTHS = (86, 90, 100, 110, 120, 160)
 
-    The splash above it and the card below it are both centred, so a notice left
-    at `1fr` drew flush against the terminal's left edge — one line visibly out
-    of column on the first frame a user with a broken MCP server sees. The fix
-    gives it the card's width and centres its TEXT within that width: the
-    wordmark and the card's caret are centred masses, not left edges, so
-    edge-aligning the row still read as "off to the left". Asserted off the
-    notice's own geometry: its block is the card's width and its text is centred
-    in it (equal slack on both sides, give or take the odd cell).
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_width", BOOT_NOTICE_WIDTHS)
+async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
+    terminal_width: int,
+) -> None:
+    """A boot notice shares the card's COLUMN, and keeps one left edge in it.
+
+    Two separate claims, both of which were once wrong at some width.
+
+    The BLOCK joins the centred composition: left at `1fr` it drew flush against
+    the terminal's left edge while the splash and the card sat centred. So it
+    takes the card's width and the card's exact `x` — asserted here at six
+    widths rather than one, because the offset that places it used to be
+    computed against a different box than the card's own and drifted a cell at
+    four of them.
+
+    The TEXT inside it is left-aligned on the hanging indent, NOT centred. Rows
+    centred on their own widths made the ink's left edge a function of sentence
+    length — a stack of three notices drew four ragged edges, the same "diamond"
+    `welcome.py::_center_blocks` rejected for the splash above it. One column,
+    landing on the composer's own text column below.
     """
     app = _make_app()
-    async with app.run_test(size=(120, 36)) as pilot:
+    async with app.run_test(size=(terminal_width, 36)) as pilot:
         await pilot.pause()
         await _settle(pilot)
         app._system_notice("MCP cloudflare failed: needs authorization", "error")
         await _settle(pilot)
         card = app.query_one("#input-shell").region
         notice = app.query_one(NoticeBlock).region
-        assert card.width == _expected_card_width(120) < 120 - 2
+        assert card.width == _expected_card_width(terminal_width)
         assert notice.width == card.width, (notice.width, card.width)
-        # The BLOCK shares the card's column, not only its width: an offset the
-        # test below cannot see (it measures slack within the block) would leave
-        # the block left of the card with its text centred in the wrong place.
-        assert notice.x == card.x, (notice.x, card.x)
-        # The text is centred in the card-wide block: the slack left and right of
-        # the row's ink, measured WITHIN the block's own span, differs by at most
-        # the odd cell a centred row leaves.
+        # The BLOCK shares the card's column, not only its width.
+        assert notice.x == card.x, (terminal_width, notice.x, card.x)
+        # And its text starts on ONE column: the glyph field's width in from the
+        # block's own left edge, exactly as a spine notice does.
         line = _rows(app)[notice.y]
         span = line[notice.x : notice.x + notice.width]
         left = len(span) - len(span.lstrip())
-        right = len(span) - len(span.rstrip())
-        assert abs(left - right) <= 1, (left, right, span)
+        assert left == SPINE_INDENT, (terminal_width, left, span)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_width", BOOT_NOTICE_WIDTHS)
+async def test_a_boot_notice_starts_on_the_composers_own_text_column(
+    terminal_width: int,
+) -> None:
+    """The notice's sentence begins where the user's typing begins.
+
+    This is the invariant that makes the notice read as part of the composition
+    rather than as a stray fragment above it, and nothing pinned it before: the
+    block's placement and the composer's placement are computed in different
+    places (`_sync_boot_column_width` against the card, the composer by the
+    stylesheet), so they can drift apart without either looking wrong alone.
+
+    Measured against the editor's CONTENT box rather than `chevron.x + 2`: the
+    editor carries its own one-cell left padding, so the chevron-relative form
+    is off by one and would pin the wrong column.
+    """
+    app = _make_app()
+    async with app.run_test(size=(terminal_width, 36)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._system_notice(
+            "this session is running 0.51.0@ad6db35 \u2192 0.51.5@ad6db35 \u2014 it will "
+            "switch to the new version when it is next idle.",
+            "note",
+        )
+        await _settle(pilot)
+        notice = app.query_one(NoticeBlock).region
+        sentence_x = notice.x + NoticeBlock.GLYPH_COLS
+        composer_text_x = app.query_one(Editor).content_region.x
+        assert sentence_x == composer_text_x, (
+            terminal_width,
+            sentence_x,
+            composer_text_x,
+        )
+        # Every wrapped continuation lands on that same column — the property a
+        # per-row centre destroyed, where a 4-word orphan floated 34 cells right
+        # of its own first row at 160 columns.
+        rows = _rows(app)
+        for row_index in range(notice.y + 1, notice.y + notice.height):
+            span = rows[row_index][notice.x : notice.x + notice.width]
+            if not span.strip():
+                continue
+            assert notice.x + (len(span) - len(span.lstrip())) == sentence_x, span
 
 
 @pytest.mark.asyncio

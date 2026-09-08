@@ -101,6 +101,14 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "task": "\uf0c0",  # nf-fa-users — work handed to another agent
     "agent": "\uf0c0",
     "send": "\uf1d8",  # nf-fa-paper_plane — a note handed to a peer session
+    # nf-fa-inbox. Not a tool at all: the `peer` row is the RECEIPT for a note
+    # another session handed to US, and it is in this table because the ledger
+    # resolves every card's icon through `tool_icon`, so a receipt that wants
+    # the ledger's spine has to be a key here like any other row. An inbox is
+    # the noun for "something arrived and is waiting to be read", which is what
+    # the collapsed row says; the paper plane above is the same event seen from
+    # the sending side.
+    "peer": "\uf01c",
 }
 
 #: Nerd Font glyph for any ``mcp__*`` tool: a plug, because what the row is
@@ -133,6 +141,11 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "task": "»",  # work passed onward
     "agent": "»",
     "send": "\u2192",  # a rightward arrow: a message handed across to a peer
+    # The INBOUND counterpart to `send`'s `→`, and deliberately the same glyph
+    # mirrored rather than a second metaphor: the two rows are one
+    # conversation seen from its two ends, so a reader scanning a ledger full
+    # of cross-session traffic reads direction off the arrow alone.
+    "peer": "\u2190",
 }
 
 #: Plain fallback for ``mcp__*`` — a discrete module docked onto the harness.

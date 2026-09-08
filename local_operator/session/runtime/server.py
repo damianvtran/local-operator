@@ -124,6 +124,36 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     return len(json.dumps(probe).encode()) + 1 - 2
 
 
+def _compose_reuses_key(retained: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Whether ``incoming`` is a DIFFERENT call that reused a compose key.
+
+    ``argument_bytes`` is the running size of the arguments dictated so far, so
+    within one call it only ever grows. A decrease therefore cannot happen on
+    the call that is already holding the slot — it proves the key was recycled
+    by a new call, and folding the two together would splice one call's
+    progress onto another's row.
+
+    This is the second half of the step-boundary defence, and it is deliberately
+    independent of the first: the boundary reset needs a ``turn_start`` to be
+    present in the SAME compaction batch, which holds for a viewer stalled
+    across a step but not for one whose queue happens to contain only compose
+    frames from either side of it. Monotonicity needs no boundary frame at all.
+    Both are cheap, and the failure they guard — a snapshot folded backwards
+    past an execution start — is the exact stranded row this fold exists to
+    remove.
+
+    Missing or non-integer counts are treated as NOT a reuse: the fold is the
+    safe default here (an equal or absent count is what an un-throttled repeat
+    of the same call looks like), and refusing on every malformed frame would
+    reopen the overflow this method exists to close.
+    """
+    previous = (retained.get("data") or {}).get("argument_bytes")
+    current = (incoming.get("data") or {}).get("argument_bytes")
+    if not isinstance(previous, int) or not isinstance(current, int):
+        return False
+    return current < previous
+
+
 def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
     """Return ``frame``, or a small stand-in when it cannot be read.
 
@@ -2365,13 +2395,62 @@ class RuntimeServer:
             self._enqueue_client_frame(conn, frame)
 
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
-        """Merge runs of same-message ``message_update`` frames in place.
+        """Fold the two compactible frame families in place.
 
-        Lossless by construction: the later event's ``message`` already
-        contains the earlier one's text, and concatenating ``delta`` preserves
-        the append contract UIs rely on. Returns whether any room was freed.
-        Runs synchronously on the runtime loop, so the drain task cannot
+        Merges runs of same-message ``message_update`` frames, and keeps only
+        the NEWEST ``tool_call_compose`` per ``tool_call_id``.
+
+        Both are lossless by construction. For ``message_update`` the later
+        event's ``message`` already contains the earlier one's text, and
+        concatenating ``delta`` preserves the append contract UIs rely on. For
+        ``tool_call_compose`` the argument is the one ``_fold_live_event``
+        (``frontend_state.py``) already relies on for the reconnect seed: a
+        compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
+        CUMULATIVE ``argument_bytes``, ``intent``), never a delta, so an older
+        frame carries nothing the newer one lacks. Returns whether any room was
+        freed. Runs synchronously on the runtime loop, so the drain task cannot
         observe a half-compacted queue.
+
+        WHY THE COMPOSE FOLD EXISTS. Without it these frames are
+        incompressible — each carries a distinct ``tool_call_id`` and a growing
+        ``argument_bytes`` — so a viewer stalled during a tool-argument
+        dictation fills its whole FIFO with frames compaction cannot touch,
+        frees nothing, and is dropped with ``event queue overflow``. That is
+        not hypothetical: at three concurrent calls the measured compose rate
+        is 16.0 frames/s, which overflows ``_EVENT_QUEUE_MAX`` in ~4.0 s —
+        BEFORE ``_TUI_SEND_TIMEOUT_S`` (5.0 s) can be reached, so the timeout
+        raised from 1.0 s specifically to stop dropping stalled TUI viewers was
+        bypassed for exactly the multi-call case it was meant to protect. The
+        dropped viewer re-attaches, its seed re-mounts the composing rows, and
+        nothing ever adopts or retires them: the user sees several tool cards
+        frozen at one identical elapsed time on calls that in fact ran fine.
+        Folding bounds the queue at ONE entry per in-flight call regardless of
+        how long the dictation runs, which closes the class; raising
+        ``_EVENT_QUEUE_MAX`` would only buy a linear factor against an
+        unbounded dictation and re-open the memory question the bound exists
+        for.
+
+        THE COMPOSE FOLD REPLACES IN PLACE AND NEVER APPENDS. The newer frame
+        takes the retained slot's FIFO position, and the fold is abandoned for
+        a call as soon as any OTHER frame for that same ``tool_call_id`` goes
+        by (``tool_execution_start``/``_update``/``_end``). Both halves are
+        load-bearing: appending would let a compose frame arrive after the
+        start that ends composition, and folding across an intervening start
+        would move a compose frame BACK past it. Either way the viewer adopts
+        out of order and can re-mount a composing row for a call that is
+        already executing — the stranded row this fold exists to prevent.
+
+        A COMPOSE KEY IS ONLY UNIQUE WITHIN ONE MODEL STEP, so two further
+        guards keep a recycled key from folding across one. The id may be a
+        placeholder (``compose:{index}``) derived from ``tool_states``, which
+        ``harness/loop.py`` scopes to a single ``_model_turn`` — one STEP of a
+        turn, not the whole run — so ``compose:0`` recurs on every tool-calling
+        step. A step boundary (``turn_start``/``turn_end``) clears every slot,
+        and independently a fold is refused when ``argument_bytes`` goes
+        BACKWARDS, which cannot happen within a call and so proves the key was
+        reused. Only clearing on ``agent_start``/``agent_end`` guarded the run
+        boundary while leaving the step boundary — the common one — open
+        (review R1).
 
         A MERGE THAT WOULD NOT FIT IS REFUSED, and that check cannot be
         skipped on the grounds that everything in this queue already passed
@@ -2403,7 +2482,61 @@ class RuntimeServer:
         # Tracked incrementally so a merge never re-measures the deltas already
         # folded in; see the size check below for why this is exact.
         merged_delta_bytes: list[int] = []
+        # ``tool_call_id`` -> index in ``compacted`` of the compose frame
+        # retained for that call. An INDEX, not a list position to append at:
+        # the newest snapshot overwrites the slot so the row's FIFO mount point
+        # is the call's FIRST compose frame, unchanged. Only the snapshot's
+        # contents refresh early, and they refresh an already-mounted row.
+        #
+        # INDEX-PARALLEL WITH ``merged_delta_bytes``, and a replacement here
+        # deliberately does NOT touch that list. Safe only because a compose
+        # frame carries no ``delta``: the outgoing and incoming frames both
+        # contribute 0, so the two lists stay aligned AND correctly valued. A
+        # future fold over any frame family that does carry a delta must update
+        # ``merged_delta_bytes[slot]`` too, or the ``message_update`` size
+        # accounting below silently under-counts and re-opens the oversize bug
+        # that accounting exists to prevent.
+        compose_slot: dict[str, int] = {}
         for frame in frames:
+            if frame.get("op") == "event":
+                event_data = frame.get("data") or {}
+                event_type = event_data.get("type")
+                call_id = str(event_data.get("tool_call_id") or "")
+                if event_type == "tool_call_compose" and call_id:
+                    slot = compose_slot.get(call_id)
+                    if slot is not None and not _compose_reuses_key(compacted[slot], frame):
+                        # REPLACE IN PLACE. The frame already passed
+                        # ``relay_frame_or_degraded`` individually at enqueue,
+                        # and a replacement is not a concatenation, so unlike
+                        # the ``message_update`` merge below this cannot
+                        # assemble an oversized frame and needs no size check.
+                        compacted[slot] = frame
+                        continue
+                    compose_slot[call_id] = len(compacted)
+                elif call_id:
+                    # Any OTHER frame for this call ends its composition. Stop
+                    # folding it, so a later compose frame appends after this
+                    # one instead of moving back in front of it.
+                    compose_slot.pop(call_id, None)
+                elif event_type in {"turn_start", "turn_end", "agent_start", "agent_end"}:
+                    # STEP boundary, not merely a turn boundary. Placeholder
+                    # compose keys are index-derived (``compose:{index}``,
+                    # ``harness/loop.py``) off ``tool_states``, which is local
+                    # to ``_model_turn`` — and ``_model_turn`` runs once PER
+                    # STEP, inside ``run()``'s ``while has_more_tool_calls``
+                    # loop. So ``compose:0`` recurs on every tool-calling step,
+                    # while ``agent_start``/``agent_end`` bracket the whole run.
+                    # Resetting only on those left the COMMON boundary open:
+                    # step 2's snapshot folded backwards past step 1's start
+                    # and end (review R1). ``turn_start`` is the exact frame
+                    # ``_model_turn`` emits after creating ``tool_states``, so
+                    # it is the boundary the key's lifetime is defined by.
+                    #
+                    # The ``elif call_id`` branch above does NOT cover this:
+                    # under the placeholder regime the compose frame is keyed
+                    # ``compose:0`` while start/end carry the provider's real
+                    # id, so the pop misses and the slot stays live.
+                    compose_slot.clear()
             previous = compacted[-1] if compacted else None
             if (
                 previous is not None

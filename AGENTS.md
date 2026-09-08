@@ -1202,6 +1202,15 @@ extension's popup and options page are the other user-visible surface here, and
 they are captured out of a real Chrome rather than out of a pilot. **Any Chrome
 an agent launches for testing, capture, or CDP work runs `--headless=new`.**
 
+**This section is for people and agents developing the extension itself**, where
+the artifact under test is `extension/dist` and it has to be loaded into a
+browser that does not have it yet. It is not how anyone *uses* the browser tool:
+a user — or an agent doing ordinary browser work in any repository — drives the
+browser that is already paired, per `guide://browser`, and never starts a second
+one. Keep the two apart in both directions. Do not send contributors to the user
+guide for harness flags, and do not let this recipe leak into the guide and read
+as advice to spin up Chrome for everyday browsing.
+
 This is not a preference. On 2026-09-07 agent test harnesses driving the
 extension launched *headful* Chrome, and the windows took focus from the
 operator repeatedly while he was working in another application. The whole
@@ -1210,7 +1219,9 @@ creates its tab with `active: false`, every cmux command passes `--focus false`,
 and `guide://browser` carries a "Focus safety — never steal the user's focus"
 section. A harness that pops a window on screen violates the same principle the
 product spends real effort upholding, and "it is only a quick check" is exactly
-the reasoning that produced the incident.
+the reasoning that produced the incident. **Never stealing focus is the general
+rule for every browser this project starts, in any context**; headless is simply
+how a harness satisfies it, and `open -g` is how a real-browser launch does.
 
 New headless is not the old one: it is the same browser binary with no window,
 so extensions, DevTools/CDP, screenshots and synthetic input all work. Measured
@@ -1218,6 +1229,53 @@ on this host (Chrome 152.0.7977.76, `--headless=new`), the built
 `extension/dist` loaded, its popup rendered at an explicit 300x600 viewport, and
 `Page.captureScreenshot` returned a 34 KB PNG showing the real pairing form;
 `Input.dispatchMouseEvent` dispatched. Nothing appeared on screen.
+
+The launch itself, with the flags this section requires:
+
+```sh
+# Throwaway profile, headless, no keychain prompts, and a port Chrome picks.
+profile=$(mktemp -d /tmp/lo-harness.XXXXXX)
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --headless=new --user-data-dir="$profile" \
+  --remote-debugging-port=0 \
+  --use-mock-keychain --password-store=basic \
+  --no-first-run --no-default-browser-check about:blank &
+chrome_pid=$!
+
+# Chrome writes DevToolsActivePort asynchronously, so WAIT for it rather than
+# reading it straight after launch: an immediate read gets a missing or empty
+# file and the connect fails intermittently, which reads like a flaky harness.
+until [ -s "$profile/DevToolsActivePort" ]; do sleep 0.2; done
+port=$(head -1 "$profile/DevToolsActivePort")
+```
+
+Drive it over CDP on `$port` per the steps below, then tear it down — by PID,
+because this snippet's Chrome is in your own process group:
+
+```sh
+# SIGTERM to the browser PID alone is NOT enough, and what it misses varies run
+# to run -- measured on Chrome 152 across 11 runs it left anywhere from 0 to 5
+# helpers behind, with no stable pattern by timing. That is exactly why a quick
+# test "passes": some runs really do come back clean. Never conclude from one.
+# Sweep your OWN profile afterwards, and assert the count rather than trusting
+# it. The unique mktemp pattern is what scopes the sweep to your Chrome and
+# never the operator's.
+kill "$chrome_pid" 2>/dev/null
+sleep 2
+pkill -f "$profile" 2>/dev/null
+pgrep -f "$profile" | wc -l   # assert 0, every run
+rm -rf "$profile"
+```
+
+**The process-group teardown below applies to a harness that owns its own
+group, not to this shell snippet.** A backgrounded `&` puts Chrome in the
+*caller's* process group, so signalling that group signals whatever is running
+the script — verified here: the child inherited the caller's pgid and
+`kill -TERM -$pgid` terminated the calling shell with `-15`. Kill the captured
+PID from a shell; use the pgid form only from a harness that started Chrome
+with `start_new_session=True` (Python) or an equivalent, which is what puts it
+in a group of its own. `setsid` is not the escape hatch on macOS — it does not
+exist there.
 
 **Load the extension over CDP, not `--load-extension`.** Branded Chrome removed
 that switch in 137 (`PSA: Removing --load-extension flag in Chrome branded
@@ -1292,6 +1350,12 @@ already background-launched by `-g`. It is correct as written; do not
 "headless" it. The distinction is the profile: the operator's logged-in browser
 is woken in the background and never given debug flags, while a harness browser
 is a throwaway profile that is headless, debug-ported and torn down.
+
+And it does not cover verifying a change *through* the extension once it is
+loaded — a rendered page, a flow, a screenshot for a PR. That is ordinary
+browser work: use the `browser` tool against the paired browser like any other
+session. Reach for a harness only when you need a browser that does not yet
+have the build you are testing.
 
 ### 7. Evidence goes on the PR, never into the repository
 

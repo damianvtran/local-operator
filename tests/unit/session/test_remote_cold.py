@@ -163,7 +163,9 @@ async def test_the_first_prompt_binds_the_viewer_to_a_runtime(tmp_path: Path, mo
     server = RuntimeServer(handle, kind="tui")
     engagements = 0
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         nonlocal engagements
         engagements += 1
         server.start()
@@ -215,7 +217,9 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
     server = RuntimeServer(handle, kind="tui")
     engagements = 0
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         nonlocal engagements
         engagements += 1
         # A real engage takes time; without that delay the lock is never
@@ -283,7 +287,9 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
     engaged = asyncio.Event()
     settled = asyncio.Event()
 
-    async def fake_engage(session_id, cwd, work, *, config_dir, deadline_s=30.0):  # noqa: ANN001
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
         engaged.set()
         raise ConnectionError("no runtime in this test")
 

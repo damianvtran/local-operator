@@ -319,7 +319,20 @@ async function connect(): Promise<void> {
     // disconnect (finding D2). 4003 is an unpair/revoke.
     if (event?.code === 4001) void chrome.storage.session.set({ connState: "incompatible" });
     else if (event?.code === 4003) void chrome.storage.session.set({ connState: "pairing" });
-    else void chrome.storage.session.set({ connState: "disconnected" });
+    // 4000 is the daemon's later-connection-wins eviction (daemon.py), which the
+    // POPUP's own pairing socket triggers on every pair attempt. It is not a
+    // loss of connectivity, so publishing "disconnected" here drove the popup's
+    // render BACKWARDS mid-pair: the storage write re-enters render() through
+    // chrome.storage.onChanged, and the card painted an extra transition
+    // (pairing -> connected -> paired -> connected) as the user submitted.
+    //
+    // Only the STORAGE WRITE is suppressed. The socket really is gone, so the
+    // local connected/connecting/paired resets above and the scheduleReconnect()
+    // below must still run — the worker has to re-dial with the new token.
+    // Drive authority is enforced daemon-side by link.paired (a second socket
+    // arrives paired:false and its RPCs are refused not_paired), never by this
+    // storage key, so suppressing the write grants nothing.
+    else if (event?.code !== 4000) void chrome.storage.session.set({ connState: "disconnected" });
     scheduleReconnect();
   };
   wire.onclose = (event) => teardown(event);

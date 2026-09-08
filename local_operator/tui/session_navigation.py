@@ -141,6 +141,32 @@ class SessionNavigation(Generic[Prepared]):
         self.intent_id = ""
         self._pending("")
 
+    def abandon(self, task: "asyncio.Task[None]") -> bool:
+        """Stop ONE navigation the caller started, if it is still in flight.
+
+        :meth:`cancel` stops whatever is current, which is right for a user who
+        just changed their mind and wrong for a caller giving up on its own
+        request: a notification click that overruns its bound must not cancel a
+        switch the user began in the meantime. Returns whether this call is the
+        one that stopped ``task``, so a caller can tell "I stopped it" from "it
+        was already finished or already superseded" — both of which mean the
+        caller must read the outcome rather than assume one.
+
+        THE GENERATION BUMP IS THE FENCE, and it is why this is not merely a
+        polite ``task.cancel()``. Cancellation is delivered when the task next
+        yields, which is unbounded; the bump is immediate and
+        :meth:`_prepare_and_commit` re-reads it directly before ``_commit``
+        with no await in between. So a navigation that outruns a caller's bound
+        either commits before the bump — the caller reads a completed switch —
+        or is fenced out of committing at all. It cannot commit *after* the
+        caller has been told it failed, which is the state that gave a click
+        both a session switch and a duplicate window.
+        """
+        if self._task is not task or task.done():
+            return False
+        self.cancel()
+        return True
+
     async def close(self) -> None:
         self._closed = True
         self.generation += 1
