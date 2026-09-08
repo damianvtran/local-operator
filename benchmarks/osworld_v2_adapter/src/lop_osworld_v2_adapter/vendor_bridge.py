@@ -73,16 +73,25 @@ SECRET_ENV_NAMES = frozenset({JUDGE_KEY_ENV, USER_SIM_KEY_ENV})
 # import succeeds. ``ENABLE_TTL=false`` is set for the same reason: OSWorld's
 # own TTL path is a warning-on-failure one we never rely on, and leaving it
 # enabled would race our own schedule with a second, unnamed one.
-# Names upstream reads at MODULE IMPORT time, so injecting them later than the
-# first ``desktop_env`` import has no effect. PROXY_CONFIG_FILE belongs here and
-# not in ``_ENV_INJECTABLE`` for a reason that cost a paid episode to find:
+# Names upstream reads at MODULE IMPORT time rather than at call time.
+#
+# Both this tuple and ``_ENV_INJECTABLE`` feed the SAME condition below, so
+# membership in either injects the value identically -- the split is
+# documentation of WHEN upstream reads a name, not a mechanism that changes
+# behaviour. It earns its place because the two sets have different failure
+# modes when the adapter is refactored: injecting an import-time name after the
+# first ``desktop_env`` import is a silent no-op, not an error, so a future
+# change that moves injection later breaks these names and nothing else.
+#
+# PROXY_CONFIG_FILE is the case that cost a paid episode:
 # ``desktop_env/controllers/setup.py`` calls ``init_proxy_pool(PROXY_CONFIG_FILE)``
 # at import (module level), reading the name through ``os.getenv`` with a default
 # of the CWD-RELATIVE ``evaluation_examples/settings/proxy/dataimpulse.json``.
 # The adapter worker is spawned with ``-I`` from an arbitrary CWD, so that
-# relative default never resolves, the pool loads zero proxies, and every
-# proxy-declaring task dies at ``reset_start`` with "No proxy available from
-# proxy pool" AFTER the VM is already allocated and paid for.
+# relative default never resolves, ``load_proxies_from_file`` swallows the error
+# into a log line, the pool loads zero proxies, and every proxy-declaring task
+# dies at ``reset_start`` with "No proxy available from proxy pool" AFTER the VM
+# is already allocated and paid for.
 _OSWORLD_IMPORT_ENV = (
     "AWS_REGION",
     "AWS_SUBNET_ID",

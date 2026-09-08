@@ -417,16 +417,15 @@ class OSWorldV2Adapter:
         # a pure plan (when the task is already known), mints the deterministic
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
-        enable_proxy = provisioning.resolve_proxy_policy(
-            params.infra_values,
-            task_proxy=bool(self._task.proxy) if self._task is not None else False,
-        )
-        # Validate the proxy-pool config HERE, at the no-cost boundary. Upstream
-        # loads it at import and swallows every failure into a log line, so an
-        # unusable path becomes an empty pool and a crash at reset_start with a
-        # VM already allocated and billed. Failing in prepare converts that paid
-        # crash into a free, self-describing refusal.
-        provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=enable_proxy)
+        provisioning.resolve_proxy_policy(params.infra_values)
+        # A SUPPLIED proxy config is validated here, at the earliest point that
+        # exists. This deliberately does NOT cover the absent-but-needed case:
+        # PrepareParams carries no task_id, so ``self._task`` is still None and
+        # the task's own proxy hint is unknowable at this boundary. Passing
+        # enable_proxy=False states that plainly instead of reading a hint that
+        # is always False and calling it a check. Requiredness is enforced in
+        # reset_start, after the task loads and still before allocation.
+        provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=False)
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)
@@ -484,6 +483,21 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+        # The proxy pool, checked HERE rather than in prepare because prepare
+        # has no task: PrepareParams carries no task_id and self._task is first
+        # populated a few lines above, so a prepare-time check reads
+        # task_proxy=False for every task and cannot fire for the very tasks
+        # that need it. This is the same shape as the judge refusal directly
+        # above -- fail AFTER the task is known and BEFORE anything is
+        # allocated, so the refusal is free. Upstream would instead load an
+        # empty pool at import and crash mid-episode with the VM already
+        # billed.
+        provisioning.validate_proxy_config_file(
+            self._infra_values,
+            enable_proxy=provisioning.resolve_proxy_policy(
+                self._infra_values, task_proxy=bool(self._task.proxy)
+            ),
+        )
         if self._provider_factory is None and self._read_provider_config().get("provider") in (
             None,
             "aws",
