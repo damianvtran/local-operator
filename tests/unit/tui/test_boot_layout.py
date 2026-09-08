@@ -629,9 +629,11 @@ BOOT_NOTICE_WIDTHS = (86, 90, 100, 110, 120, 160)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_width", BOOT_NOTICE_WIDTHS)
+@pytest.mark.parametrize("terminal_width", (*BOOT_NOTICE_WIDTHS, 190, 240))
+@pytest.mark.parametrize("sidebar_open", (False, True))
 async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
     terminal_width: int,
+    sidebar_open: bool,
 ) -> None:
     """A boot notice shares the card's COLUMN, and keeps one left edge in it.
 
@@ -654,14 +656,20 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
     async with app.run_test(size=(terminal_width, 36)) as pilot:
         await pilot.pause()
         await _settle(pilot)
+        app._set_sidebar_open(sidebar_open)
         app._system_notice("MCP cloudflare failed: needs authorization", "error")
         await _settle(pilot)
         card = app.query_one("#input-shell").region
         notice = app.query_one(NoticeBlock).region
-        assert card.width == _expected_card_width(terminal_width)
+        if not sidebar_open:
+            assert card.width == _expected_card_width(terminal_width)
         assert notice.width == card.width, (notice.width, card.width)
         # The BLOCK shares the card's column, not only its width.
         assert notice.x == card.x, (terminal_width, notice.x, card.x)
+        # The narrow drawer intentionally covers the transcript, not the dock.
+        # Assert its geometry above, but do not mistake occlusion for alignment.
+        if app.query_one("#session-workspace").has_class("sidebar-overlay"):
+            return
         # And its text starts on ONE column: the glyph field's width in from the
         # block's own left edge, exactly as a spine notice does.
         line = _rows(app)[notice.y]
@@ -671,9 +679,11 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_width", BOOT_NOTICE_WIDTHS)
+@pytest.mark.parametrize("terminal_width", (*BOOT_NOTICE_WIDTHS, 190, 240))
+@pytest.mark.parametrize("sidebar_open", (False, True))
 async def test_a_boot_notice_starts_on_the_composers_own_text_column(
     terminal_width: int,
+    sidebar_open: bool,
 ) -> None:
     """The notice's sentence begins where the user's typing begins.
 
@@ -691,6 +701,7 @@ async def test_a_boot_notice_starts_on_the_composers_own_text_column(
     async with app.run_test(size=(terminal_width, 36)) as pilot:
         await pilot.pause()
         await _settle(pilot)
+        app._set_sidebar_open(sidebar_open)
         app._system_notice(
             "this session is running 0.51.0@ad6db35 \u2192 0.51.5@ad6db35 \u2014 it will "
             "switch to the new version when it is next idle.",
@@ -705,6 +716,8 @@ async def test_a_boot_notice_starts_on_the_composers_own_text_column(
             sentence_x,
             composer_text_x,
         )
+        if app.query_one("#session-workspace").has_class("sidebar-overlay"):
+            return
         # Every wrapped continuation lands on that same column — the property a
         # per-row centre destroyed, where a 4-word orphan floated 34 cells right
         # of its own first row at 160 columns.
@@ -714,6 +727,54 @@ async def test_a_boot_notice_starts_on_the_composers_own_text_column(
             if not span.strip():
                 continue
             assert notice.x + (len(span) - len(span.lstrip())) == sentence_x, span
+
+
+@pytest.mark.asyncio
+async def test_boot_notice_tracks_sidebar_toggles_and_resizes(
+    monkeypatch,
+) -> None:
+    """Sidebar toggles do not paint a stale column; resizing keeps the same lane.
+
+    Sample every compositor frame on drawer toggles, rather than accepting a
+    fix that only converges after paint. Resize checks cover the settled layout
+    across the overlay boundary and the existing composer's width floor.
+    """
+    app = _make_app()
+    async with app.run_test(size=(190, 36)) as pilot:
+        await _settle(pilot)
+        app._system_notice("this session is running an older version", "note")
+        await _settle(pilot)
+        block = app.query_one(NoticeBlock)
+        frames: list[tuple[int, int, int, int]] = []
+        painted = Screen._compositor_refresh
+
+        def record(screen: "Screen[object]") -> None:
+            painted(screen)
+            notice = block.region
+            card = app.query_one("#input-shell").region
+            frames.append((notice.x, notice.width, card.x, card.width))
+
+        monkeypatch.setattr(Screen, "_compositor_refresh", record)
+        previous_width = 190
+        for width, sidebar_open in (
+            (190, True),
+            (190, False),
+            (190, True),
+            (240, True),
+            (100, True),
+            (90, True),
+            (120, True),
+            (120, False),
+            (190, False),
+        ):
+            frames.clear()
+            app._set_sidebar_open(sidebar_open)
+            await pilot.resize_terminal(width, 36)
+            await _settle(pilot)
+            assert frames, "premise: the changed layout painted"
+            checked = frames if width == previous_width else frames[-2:]
+            assert all(nx == cx and nw == cw for nx, nw, cx, cw in checked), frames
+            previous_width = width
 
 
 @pytest.mark.asyncio
