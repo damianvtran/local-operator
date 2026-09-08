@@ -13,6 +13,7 @@ from rich.style import Style
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
+    EXCLUDED_FAULTS,
     SessionReport,
     SessionRequest,
     TimingSummary,
@@ -1281,16 +1282,58 @@ def test_the_validity_qualifier_survives_a_narrow_frame():
 
     ``kv``'s ``notes`` ladder exists because a qualifier cropped mid-word or
     dropped wholesale leaves a correct figure looking like a wrong one.
+
+    **This asserts the rung's MEANING at every supported width, not a sampled
+    suffix.** The predecessor sampled four widths and asserted only that the
+    word ``emitted`` was present, which the defect it was standing next to
+    satisfied: the middle rung ``"4 of 31 emitted"`` contains ``emitted``, sits
+    between two sampled widths (60 and 72), and drops the word that carries the
+    count's DIRECTION. Beside ``87.1%`` a bare ``4 of 31`` reads as "4 valid of
+    31" — the inverse of the truth — and nothing but doing the division
+    distinguishes the two readings (design round 2, D8). An assertion a broken
+    string satisfies is a decoration, which is the lesson D6 already paid for
+    one row below.
+
+    So the two properties asserted here are the two a shorter rung may not
+    trade away, and they are checked at EVERY width the row is drawn at:
+
+    * **the direction** — any rung showing the invalid count says ``invalid``,
+      so the number can never be read as its own complement;
+    * **the denominator** — a percentage is never drawn without the population
+      it is over, the same rule
+      ``test_the_execution_scope_survives_at_every_supported_width`` pins.
+
+    Refinements above those (the verb ``emitted``, the word ``of``) stay free to
+    shed as the frame narrows; that is what a ladder is for.
     """
     stats = ToolCallStats(total=412, ok=389, faults={"invalid_arguments": 12}, faults_by_tool={})
-    for width in (60, 72, 88, 100):
+    # Recomputed rather than restated, so a fixture change cannot leave the
+    # guard asserting a stale denominator.
+    invalid, emitted = stats.model_faults, stats.emitted
+    assert (invalid, emitted) == (12, 412)
+    drawn = 0
+    for width in range(_MIN_CARD_WIDTH, 121):
         section = _section(
             build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
         )
         row = next(r for r in section if "Call validity" in r)
         assert len(row) <= width
-        # Some spelling of the scope always survives, and it is never cut mid-word.
-        assert "emitted" in row, f"scope lost at {width}: {row!r}"
+        tail = row.rstrip()
+        # `12` alone would also match the percentage's own digits, so the
+        # qualifier is detected by the count sitting at the start of a rung.
+        if str(invalid) in tail.split("%", 1)[-1]:
+            drawn += 1
+            assert "invalid" in tail, (
+                f"at {width} the invalid count is drawn without the word that "
+                f"gives it its direction, so it reads as its own complement: {row!r}"
+            )
+            assert str(emitted) in tail, (
+                f"at {width} the rate is drawn without its denominator, "
+                f"so it states a proportion of nothing: {row!r}"
+            )
+    # The ladder is actually exercised: the loop is not vacuously passing on
+    # widths where every rung is shed.
+    assert drawn > 0
 
 
 def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
@@ -1323,7 +1366,7 @@ def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
         " └ nested (eval)": "not the model's",
         # Attribution-NEUTRAL at every rung: `gate_failed` and `skipped` are in
         # this row too, and neither is the operator's decision (review N1).
-        " └ denied or aborted": "outside both rates",
+        " └ never completed": "outside both rates",
     }
     for label, floor in expected.items():
         row = next((r for r in section if label in r), None)
@@ -1430,7 +1473,7 @@ def test_the_block_reconciles_its_own_counts_on_screen():
     # removed, so the reader reaches `emitted` by reading downward.
     nested_row = next(r for r in section if "nested (eval)" in r)
     assert "5" in nested_row and "not the model's" in nested_row
-    excluded_row = next(r for r in section if "denied or aborted" in r)
+    excluded_row = next(r for r in section if "never completed" in r)
     assert "1" in excluded_row and "outside both rates" in excluded_row
     # Every denominator the rates use is printed rather than implied.
     assert "34 emitted" in joined, "the validity denominator is unstated"
@@ -1486,7 +1529,7 @@ def test_the_headline_never_calls_an_operator_denial_a_failure():
         "9 failed" not in headline
     ), f"the operator's 7 denials are counted as failures: {headline!r}"
     # The seven are not lost — they are accounted for by their own row.
-    assert any("denied or aborted" in r and "7" in r for r in section)
+    assert any("never completed" in r and "7" in r for r in section)
 
     # Nothing dispatched: every recorded call was excluded, so there is no
     # `failed` clause to draw. A `0 ok · 4 failed` here is the founding bug
@@ -1545,7 +1588,7 @@ def test_the_excluded_row_does_not_blame_the_operator_for_a_harness_fault():
         section = _section(
             build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
         )
-        row = next(r for r in section if "denied or aborted" in r)
+        row = next(r for r in section if "never completed" in r)
         # "you"/"your" is the whole finding: the row must not address the reader
         # as the cause of a fault the harness produced.
         assert (
@@ -1556,6 +1599,59 @@ def test_the_excluded_row_does_not_blame_the_operator_for_a_harness_fault():
     # The neutral wording is actually reached, so the loop is not vacuously
     # passing on widths where every note is shed.
     assert drawn > 0
+
+
+def test_the_excluded_label_covers_every_fault_the_row_counts():
+    """D9: the label named two of the four classes the row's number counts.
+
+    ``└ denied or aborted`` is a disjunction over ``{denied, aborted}``, but the
+    count beside it sums all of ``EXCLUDED_FAULTS`` — ``skipped`` (steering
+    redirected) and ``gate_failed`` (our approval plumbing raised) land under a
+    heading that describes neither. That is the N1 defect one cell to the left:
+    the note was made attribution-neutral while the label above it kept naming
+    the operator's two decisions as though they were the whole set.
+
+    **The label is checked against ``EXCLUDED_FAULTS`` itself, not against a
+    restated list**, so a fifth member added later fails here rather than
+    quietly widening the gap between what the row says and what it counts.
+
+    Design suggested ``never dispatched`` / ``not run``. Both are FALSE for this
+    set and the falsity is measured, not argued: driving the real ``AgentLoop``
+    with a blocking tool and aborting mid-execution records ``aborted`` for a
+    call whose body had already run (``interruptible_runner`` cancels a task in
+    flight and parks a synthetic result). ``denied`` and ``gate_failed`` never
+    dispatch; ``aborted`` and ``skipped`` may. What is true of all four is that
+    no real tool outcome came back — which is precisely why they are in neither
+    denominator — so the label says ``never completed``.
+    """
+    # Every member of the set, one at a time: each must render under a label
+    # that is true of it, at every width the row is drawn.
+    for fault in sorted(EXCLUDED_FAULTS):
+        stats = ToolCallStats(total=5, ok=3, faults={fault: 2}, faults_by_tool={})
+        assert stats.excluded == 2, f"{fault} is not being excluded at all"
+        for width in (_MIN_CARD_WIDTH, _NOTE_MIN, 74, 100):
+            section = _section(
+                build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+            )
+            row = next((r for r in section if "2" in r and "└" in r), None)
+            assert row is not None, f"the excluded row vanished for {fault} at {width}"
+            assert len(row) <= width
+            lowered = row.lower()
+            # The label must not name a proper SUBSET of what it counts: a
+            # `gate_failed` call is not the operator denying anything.
+            for decision in ("denied", "aborted"):
+                if decision in lowered:
+                    assert fault in {"denied", "aborted"}, (
+                        f"a {fault!r} call is labelled {decision!r} at {width}, "
+                        f"which names a class it is not in: {row!r}"
+                    )
+            # Nor may it claim the call never started: `aborted` and `skipped`
+            # can be cut short after dispatch (measured against the real loop).
+            for started in ("never dispatched", "not dispatched", "never run", "not run"):
+                assert started not in lowered, (
+                    f"a {fault!r} call is claimed never to have started at {width}, "
+                    f"which the loop contradicts for aborted/skipped: {row!r}"
+                )
 
 
 def test_fault_sub_rows_are_ordered_deterministically_on_a_tie():

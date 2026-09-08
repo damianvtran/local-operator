@@ -1128,7 +1128,7 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
     #
     #   Tool calls          35   <- recorded, both origins
     #    └ nested (eval)     3   <- not the model emitting a call
-    #    └ denied/aborted    1   <- never allowed to prove anything
+    #    └ never completed   1   <- returned no result to judge
     #   Call validity          4 invalid of 31 emitted   (35 - 3 - 1)
     #
     # This is why the headline is `recorded` and not `total`: under the ` └ `
@@ -1201,12 +1201,32 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # the wording was. "outside both rates" is the one thing true of all
         # four, and it states the fact the row exists to state: these calls are
         # in neither denominator below.
+        #
+        # THE LABEL MUST COVER THE WHOLE SET, and "denied or aborted" named two
+        # of the four members of ``EXCLUDED_FAULTS`` while the row counted all
+        # four (design round 2, D9). A `skipped` or `gate_failed` call landed
+        # under a heading that described neither, which is the N1 defect one
+        # cell to the left: the note was made neutral and the label above it
+        # kept blaming.
+        #
+        # "never dispatched" — design's suggested wording, and the note rung
+        # this replaces — is FALSE, and measurably so. Driving the real
+        # ``AgentLoop`` with a tool that blocks and aborting mid-execution
+        # records `aborted` for a call whose body HAD run: `interruptible_runner`
+        # cancels a tool task that is already in flight and parks a synthetic
+        # result for it. `denied` and `gate_failed` never dispatch; `aborted`
+        # and `skipped` may dispatch and be cut short. So the cover for the set
+        # is not "never started" but "never FINISHED": what all four share is
+        # that no real tool outcome came back, which is exactly why they are in
+        # neither denominator. "never" rather than "not" because this screen
+        # reports a settled session — "not completed" invites the reading that
+        # the call is still running.
         body.kv(
-            " └ denied or aborted",
+            " └ never completed",
             str(stats.excluded),
             notes=(
-                "stopped or never dispatched · outside both rates",
-                "never dispatched · outside both rates",
+                "refused, stopped or interrupted · outside both rates",
+                "no result to judge · outside both rates",
                 "outside both rates",
             ),
         )
@@ -1223,13 +1243,35 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # percentage (which calls it is over), and a scope cropped mid-word or
         # shed wholesale leaves a correct figure looking like a wrong one — the
         # defect ``kv``'s ``notes`` parameter exists to fix.
+        #
+        # EVERY RUNG KEEPS THE WORD `invalid`, because the count's DIRECTION is
+        # not a refinement — it is the whole meaning of the number. The middle
+        # rung was `"{invalid} of {emitted} emitted"`, which at body widths
+        # 52-59 painted a bare `4 of 34 emitted` beside `88.2%` (design round 2,
+        # D8). With `invalid` dropped, `4 of 34` reads far more naturally as "4
+        # VALID of 34" — the exact inverse of the truth — and the only thing
+        # available to disambiguate it is dividing 4 by 34 in your head and
+        # noticing it is not 88.2%. That is the same defect class as D6 one row
+        # below: a shorter rung that is not a shorter spelling of the same
+        # qualifier but a different and false claim. `of` is what makes the
+        # inversion readable, so the compact rung uses `/`, which cannot be
+        # parsed as a partitive.
+        #
+        # AND EVERY RUNG KEEPS THE DENOMINATOR, matching the rule `Tool-side
+        # errors` was fixed to obey: a percentage drawn without the population
+        # it is a percentage OF states a proportion of nothing. The old floor
+        # rung `"emitted calls"` did exactly that at body 50-51 — scope word,
+        # no numbers — so it is replaced by `{invalid} invalid/{emitted}`, which
+        # is both shorter (12 against 13) and strictly more informative. The two
+        # rate rows now obey one rule between them rather than each having its
+        # own.
         body.kv(
             "Call validity",
             f"{validity * 100:.1f}%",
             notes=(
                 f"{invalid} invalid of {stats.emitted} emitted",
-                f"{invalid} of {stats.emitted} emitted",
-                "emitted calls",
+                f"{invalid} invalid of {stats.emitted}",
+                f"{invalid} invalid/{stats.emitted}",
             ),
         )
         # Name the faults rather than only counting them: "which one" is the
