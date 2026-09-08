@@ -186,6 +186,11 @@ failing model's id.
 A target is either a legacy `provider/model` string or a mapping with
 `provider`, `model`, and optional `effort`. The mapping form is what lets a
 chain re-list the *current* model at a different effort as a real route.
+An entry without an effort that names the primary is skipped, so a shared
+`default` chain can safely contain models you also select as primary. When the
+primary effort is known, quota preflight and the stream also skip an explicitly
+identical effort; a genuinely different effort stays a separate route. Account
+rotation still happens within each route before descending the chain.
 
 `enabled: false` or `modelFallback: false` switches the cascade off entirely —
 `/failovers` names whichever of the two did it.
