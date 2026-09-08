@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -223,13 +223,16 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     Marked,
     ModelQueryOpened,
+    PastedCredential,
     RecallState,
     RefreshArgumentChoices,
     ShellModeChanged,
     SkillQueryOpened,
     StopRequested,
+    credential_payloads,
     expand_pastes,
     resolve_markers,
+    substitute_credentials,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -11978,6 +11981,18 @@ class OperatorApp(App[None]):
         # screenshot pasted with no words still submits, carrying its marker.
         if not text and not message.shell:
             return
+        # INLINE CREDENTIALS, before every exit below. This is the one seam
+        # where the secret leaves the composer's map for the session store, and
+        # it has to run ahead of the aside/shell/slash branches because each of
+        # them returns: a credential captured into a draft that was then sent
+        # to `/btw` would otherwise be silently dropped, and the marker naming
+        # it would reach the model as a promise of a key nothing stored.
+        #
+        # It rewrites `text` in place, so from here down NOTHING carries a
+        # credential citation any further than the name — the transcript row,
+        # the history entry, the journal and the model all read the substituted
+        # form, and the value exists only in the store.
+        text = self._capture_inline_credentials(text, message.attachments)
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
         # (`esc close · enter ask again`) and its placeholder says so, and a
@@ -26489,6 +26504,108 @@ class OperatorApp(App[None]):
             f"{verb} {stored_key}. Injected into every bash command "
             "as an environment variable; the agent cannot read the value."
         )
+
+    def _capture_inline_credentials(self, text: str, attachments: Mapping[int, Marked]) -> str:
+        """Store every credential ``text`` cites; return the text to send on.
+
+        The submit-side half of the inline ``/credential`` gesture. The
+        composer took the secret OUT of the buffer at paste time and left a
+        ``[Credential #N, <len> chars]`` receipt; this is where the value goes
+        into the session store under its generated name and the receipt is
+        rewritten to NAME that credential for the model.
+
+        Returns ``text`` unchanged when nothing was captured, which is the
+        overwhelmingly common case and costs one dict scan.
+
+        WHY THE SUBSTITUTION HAPPENS EVEN WHEN THE STORE REFUSES: a marker left
+        in the outgoing text would tell the model a credential exists that
+        nothing holds. Every failure path below therefore rewrites the citation
+        too — to an explicit "not stored" phrase — so the model is never handed
+        a name it cannot use, which is the silent failure the viewer split in
+        ``_FRONTEND_LOCAL_SLASHES`` exists to prevent.
+        """
+        payloads = credential_payloads(text, attachments)
+        if not payloads:
+            return text
+        session = self._session
+        store = getattr(session, "variables", None)
+        if store is None or not hasattr(store, "store_credential"):
+            # A VIEWER (or a session still starting). The store that matters is
+            # the OWNER's — `credential_env()` is read by the `bash` tool in
+            # the owner's process — and this path is synchronous, on the submit
+            # seam, with no place to await the remote op. Rather than store
+            # locally (a key no tool could read: the exact leak
+            # `_FRONTEND_LOCAL_SLASHES` documents) the capture DEGRADES
+            # LOUDLY: the secret is dropped here, the operator is told, and the
+            # model is told nothing was stored. `/credential <KEY>` still
+            # routes to the owner over the dedicated op and remains the
+            # supported way to hand a secret over from a viewer.
+            self._system_notice(
+                "inline /credential needs the session that runs the tools; "
+                "use /credential <KEY> here and the secret is stored on the owner",
+                "warning",
+            )
+            return self._mark_credentials_unstored(text, attachments)
+        stored: list[str] = []
+        for payload in payloads:
+            result = store.store_credential(payload.key, payload.value, "command")
+            if not result.ok or result.credential is None:
+                continue
+            stored.append(result.credential.key)
+            # Journalled exactly as the masked-paste flow journals, so a
+            # credential handed over inline is visible to the next turn and to
+            # a resume. The record names the KEY only; `journal_credential_
+            # change` never sees the value.
+            self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
+        if not stored:
+            return self._mark_credentials_unstored(text, attachments)
+        substituted = substitute_credentials(text, attachments)
+        # SCRUB THE MAP once the store owns the value. The same attachments map
+        # rides on past this point into `SessionDraft` (the accepted-draft and
+        # `/reload` hand-back), the compaction hold and the aside stash — all
+        # in-memory, none of which needs the bytes now that
+        # `VariableStore._credentials` holds them. Emptying the payload here
+        # means those seams are safe BY CONSTRUCTION rather than by an argument
+        # about which of them re-expands, and it bounds how long a secret sits
+        # in a widget's memory to the one turn it was pasted in.
+        #
+        # The key and marker stay so a restored draft still paints its receipt.
+        # A restore that re-submits finds an empty value, which
+        # `store_credential` refuses, and the operator is told it was not
+        # stored rather than the model being promised a key twice.
+        if isinstance(attachments, MutableMapping):
+            for index, payload in list(attachments.items()):
+                if isinstance(payload, PastedCredential):
+                    attachments[index] = PastedCredential("", payload.key, payload.marker)
+        # The receipt names what the agent can now use. Plural-safe because two
+        # pastes while armed capture two credentials (see `_capture_credential`).
+        self._notice(
+            f"Stored {', '.join(stored)}. Injected into every bash command "
+            "as an environment variable; the agent cannot read the value."
+        )
+        return substituted
+
+    def _mark_credentials_unstored(self, text: str, attachments: Mapping[int, Marked]) -> str:
+        """Rewrite credential citations to say the value did NOT land.
+
+        The honest form of the degraded path. Stripping the citation instead
+        would send the operator's description of a secret with no mention that
+        the secret is missing, and the agent would go looking for an env var
+        nobody set.
+        """
+        from local_operator.tui.widgets.editor import cite
+
+        spans = [
+            (span, payload)
+            for index, payload in attachments.items()
+            if isinstance(payload, PastedCredential)
+            and (span := cite(text, index, payload)) is not None
+        ]
+        for (start, end), _payload in sorted(spans, reverse=True):
+            text = (
+                text[:start] + "[credential NOT stored — no session store available]" + text[end:]
+            )
+        return text
 
     async def _credential_store_flow(self, store: object, key: str) -> None:
         """Masked paste for ``/credential <KEY>``, then store what arrived."""

@@ -109,6 +109,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import secrets
 import shlex
 import time
 from bisect import bisect_right
@@ -262,7 +263,17 @@ MIN_PASTE_ROWS = COMPOSER_ROWS // 2
 #: alternation would have silently made it mean "the kind" at all of them - a
 #: rewrite with no type error and no failing test until an index came back as
 #: ``'Image'``. Naming the groups makes the conversion mechanical instead.
-ATTACHMENT_MARKER = re.compile(r"\[(?P<kind>Image|Paste) #(?P<index>[1-9]\d*)(?:,[^\]\n\[]*)?\]")
+#: ``Credential`` joins the alternation rather than getting a grammar of its
+#: own: the number space is SHARED (see :func:`_marker_indices`), so a parser
+#: that could not see ``[Credential #1, 64 chars]`` would hand out ``#1`` again
+#: to the next image and bind two payloads to one citation. Everything that
+#: keys on the NUMBER — the chip, the atomic-token gate, the release rule — is
+#: payload-agnostic and therefore correct for a credential for free; the places
+#: that must differ discriminate on the PAYLOAD TYPE
+#: (:class:`PastedCredential`), never on this ``kind`` group.
+ATTACHMENT_MARKER = re.compile(
+    r"\[(?P<kind>Image|Paste|Credential) #(?P<index>[1-9]\d*)(?:,[^\]\n\[]*)?\]"
+)
 
 
 #: The IMAGE half of the grammar, for the one consumer that must keep counting
@@ -509,6 +520,112 @@ def _paste_label(payload: str) -> str:
     return f"{len(payload)} chars"
 
 
+#: The arming token, matched case-insensitively at a word boundary anywhere in
+#: the line. The ALIAS is included because ``/cred`` completes to ``credential``
+#: in the picker but a user who typed the alias and pasted without completing
+#: never went through the picker at all — and the gesture must not depend on
+#: having accepted a completion.
+#: Lookbehind rather than a consuming ``\s`` so the match STARTS at the ``/``:
+#: the span is spliced out of the buffer, and eating the separating space with
+#: it would glue the marker onto the previous word.
+CREDENTIAL_ARM = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)[ \t]*$", re.IGNORECASE)
+
+#: Random-name alphabet: Crockford-ish base32 WITHOUT the letters that read as
+#: digits. The name is quoted back to the operator in a notice and may be typed
+#: into a shell by hand, so ``0/O`` and ``1/I/L`` confusions are worth the two
+#: bits of entropy they cost. 8 chars over this 32-symbol alphabet is 40 bits.
+_KEY_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
+
+#: Prefix from ``docs/design/secret-store.md`` §11. Env-var-shaped so the name
+#: drops straight into ``credential_env()`` injection and round-trips through
+#: ``normalize_credential_key`` unchanged — verified by test, because a name the
+#: store renormalises would advertise one key to the model and hold another.
+CREDENTIAL_KEY_PREFIX = "LOP_SECRET_"
+
+
+def generate_credential_key(taken: Iterable[str] = ()) -> str:
+    """A fresh ``LOP_SECRET_XXXXXXXX`` name, avoiding ``taken``.
+
+    The operator does not invent a name for an inline capture — that is the
+    point of the gesture — so the store does. 40 bits makes a collision
+    negligible, but ``taken`` is still consulted rather than trusted to
+    probability: a collision would SILENTLY REPLACE a live credential
+    (``store_credential`` overwrites), and a secret the operator handed over
+    ten minutes ago disappearing is not a failure mode worth a birthday-paradox
+    argument. Bounded retries, then a widened name, so this can never spin.
+
+    ``secrets`` rather than ``random``: this names a credential, and a
+    predictable name lets anything that can read the model's context guess the
+    env var to look for.
+    """
+    used = set(taken)
+    for _ in range(16):
+        candidate = CREDENTIAL_KEY_PREFIX + "".join(secrets.choice(_KEY_ALPHABET) for _ in range(8))
+        if candidate not in used:
+            return candidate
+    # Unreachable in practice (it needs 16 collisions against a set the
+    # operator would have had to fill by hand); widening rather than raising
+    # keeps a capture that has already taken the secret out of the composer
+    # from failing at the naming step.
+    return CREDENTIAL_KEY_PREFIX + "".join(secrets.choice(_KEY_ALPHABET) for _ in range(16))
+
+
+def credential_payloads(text: str, attachments: Mapping[int, Marked]) -> list[PastedCredential]:
+    """The credentials ``text`` still cites, in citation order.
+
+    The submit-side counterpart of :func:`resolve_markers`: one walk, keyed on
+    the payload type and on :func:`cite`, so "what is chipped is what is
+    stored" is the same predicate the composer paints. A marker the user
+    backspaced away is not cited, so its secret is never stored — which is the
+    same rule that drops an uncited image.
+    """
+    cited = [
+        (span[0], payload)
+        for index, payload in attachments.items()
+        if isinstance(payload, PastedCredential)
+        and (span := cite(text, index, payload)) is not None
+    ]
+    return [payload for _, payload in sorted(cited, key=lambda item: item[0])]
+
+
+def substitute_credentials(text: str, attachments: Mapping[int, Marked]) -> str:
+    """``text`` with each credential citation rewritten to NAME the credential.
+
+    The one transformation a credential marker gets on its way to the model,
+    and it is a substitution rather than an expansion: the VALUE is replaced by
+    the store key, never by the secret. ``[Credential #1, 64 chars]`` becomes
+    ``[credential LOP_SECRET_K3RQ7WZM (64 chars) — available to bash and eval as
+    $LOP_SECRET_K3RQ7WZM; its value cannot be read]``.
+
+    Why the marker is rewritten at all, when §11 of the design doc has the
+    marker text pass through unchanged: ``#1`` is a COMPOSER-local label that
+    resets every submit, so a model told only ``[Credential #1]`` learns that a
+    secret exists and has no way to USE it — it cannot name the env var, which
+    is the entire point of the session credential store. Substituting the key
+    turns the marker into the three facts the agent needs (it exists, what it
+    is called, how to reach it) while keeping the operator's own description,
+    typed around the marker, exactly where they typed it.
+
+    Spliced by :func:`cite`'s span and DESCENDING, for the same two reasons
+    :func:`expand_pastes` documents: only the app's OWN citation is rewritten
+    (a hand-typed lookalike is prose), and an ascending walk would invalidate
+    every later offset.
+    """
+    spans = [
+        (span, payload)
+        for index, payload in attachments.items()
+        if isinstance(payload, PastedCredential)
+        and (span := cite(text, index, payload)) is not None
+    ]
+    for (start, end), payload in sorted(spans, reverse=True):
+        named = (
+            f"[credential {payload.key} ({_paste_label(payload.value)}) — available to "
+            f"bash and eval as ${payload.key}; its value cannot be read]"
+        )
+        text = text[:start] + named + text[end:]
+    return text
+
+
 def strip_paste_citations(text: str, attachments: Mapping[int, Marked]) -> str:
     """``text`` with the app's own citations of collapsed pastes REMOVED.
 
@@ -525,11 +642,26 @@ def strip_paste_citations(text: str, attachments: Mapping[int, Marked]) -> str:
     Takes the trailing space the marker was issued with, so
     ``[Paste #1, 240 lines] why does this fail?`` records as
     ``why does this fail?`` rather than with a leading gap.
+
+    A CREDENTIAL citation is stripped by the same walk, and for a stronger
+    reason than the paste it shares the rule with. A recalled
+    ``[Credential #1, 64 chars]`` resolves to nothing (the map is cleared on
+    submit), so Up-arrow-Enter would send a chip-shaped string claiming a
+    secret that is not attached — the operator believes they re-sent the
+    credential and the agent is told nothing exists. Removing the citation at
+    the record seam means the recalled line reads as the description alone,
+    which is true, visible BEFORE Enter, and re-armable by typing
+    ``/credential`` and pasting again. This is the deliberate answer to the
+    "marker recalled from history" edge case: strip rather than refuse, because
+    a refusal at submit could not tell the app's own recalled marker from the
+    operator writing ABOUT one (at that seam the map is empty and the two are
+    byte-identical), and would silently eat the sentence.
     """
     spans = [
         span
         for index, pasted in attachments.items()
-        if isinstance(pasted, PastedText) and (span := cite(text, index, pasted)) is not None
+        if isinstance(pasted, (PastedText, PastedCredential))
+        and (span := cite(text, index, pasted)) is not None
     ]
     for start, end in sorted(spans, reverse=True):
         if text[end : end + 1] == " ":
@@ -605,10 +737,42 @@ class PastedText:
     marker: str
 
 
-#: One map, two payload shapes. Everything that keys on the marker NUMBER - the
-#: counter, the chip, the atomic-token gate, the release rule, the aside stash,
-#: the compaction hold, ``EditorSubmitted``, ``/reload`` - is unchanged and
-#: payload-agnostic.
+@dataclass(frozen=True)
+class PastedCredential:
+    """A SECRET captured out of the composer, and the marker citing it.
+
+    The third variant of :data:`Marked`, and deliberately a sibling of
+    :class:`PastedText` rather than a flag on it. The two differ in the one
+    property that matters most here: a ``PastedText`` payload is spliced BACK
+    into the outgoing prompt at submit, and a ``PastedCredential`` payload must
+    never be. Making that a boolean field on one dataclass would put "expand
+    me" and "never expand me" in the same type, so every seam would need a
+    predicate that reads a flag instead of a type — and a seam that forgot the
+    flag would leak the secret rather than merely mislabel a paste. As distinct
+    types the existing ``isinstance(..., PastedText)`` filters at every
+    expansion seam exclude a credential BY CONSTRUCTION.
+
+    ``key`` is the randomly generated env-var-shaped name the value is stored
+    under (see :func:`generate_credential_key`). It is not a secret — it is
+    exactly what the model is told, so it rides in the message like any other
+    marker metadata. ``value`` is the secret and must reach only
+    ``VariableStore.store_credential``.
+    """
+
+    #: The secret, verbatim. NEVER put this in a transcript row, a history
+    #: entry, a journal record, a notice, or anything the model receives.
+    value: str
+    #: The generated store key, e.g. ``LOP_SECRET_K3RQ7WZM``. Model-visible.
+    key: str
+    #: Exactly the text issued at :meth:`Editor._capture_credential`, e.g.
+    #: ``[Credential #1, 64 chars]``.
+    marker: str
+
+
+#: One map, three payload shapes. Everything that keys on the marker NUMBER -
+#: the counter, the chip, the atomic-token gate, the release rule, the aside
+#: stash, the compaction hold, ``EditorSubmitted``, ``/reload`` - is unchanged
+#: and payload-agnostic.
 #:
 #: A SECOND MAP (``_pastes: dict[int, str]``) is the trap this feature has
 #: fallen into three times over (see :class:`Attachment`, and rounds 18/19):
@@ -616,7 +780,9 @@ class PastedText:
 #: ``adopt_attachments``, the aside stash, the compaction hold and
 #: ``EditorSubmitted.attachments`` would each need a second parameter threaded
 #: through, and every one of those is a round trip an earlier round broke.
-Marked = Attachment | PastedText
+#: :class:`PastedCredential` was added HERE for the same reason, and it buys
+#: the release rule (backspacing the marker forgets the secret) at no cost.
+Marked = Attachment | PastedText | PastedCredential
 
 
 def cite(text: str, index: int, attachment: Marked) -> tuple[int, int] | None:
@@ -4393,7 +4559,47 @@ class Editor(TextArea):
         base handler cannot start while this one is suspended. The same
         sequencing is why two fast pastes cannot interleave: the pump dispatches
         one message at a time, so marker issuance stays in paste order.
+
+        THE CREDENTIAL GATE COMES FIRST, ahead of every branch below including
+        the whitespace one. It is a MODE question ("did the operator just type
+        ``/credential`` here?"), not a question about the payload, and the size
+        thresholds the other branches ask cannot answer it: a one-line API key
+        is nowhere near ``COLLAPSE_ROWS``/``MIN_PASTE_ROWS``, so asking the
+        size question first would insert the secret into the buffer verbatim
+        and the redaction would never happen at all.
+
+        No :class:`EditorPasteAttached` or :class:`EditorPasteEmpty` is posted
+        on this route. Those toasts describe IMAGE attachment ("attached" /
+        "nothing on the clipboard to attach"), and a credential capture is
+        neither; the receipt the operator needs is the marker itself, which is
+        already in the buffer where they are looking.
         """
+        arm = self._credential_arm_span()
+        if arm is not None:
+            captured = self._capture_credential(event.text)
+            if captured is not None:
+                event.prevent_default()
+                event.stop()
+                # The arming token is selected and REPLACED by the marker, so
+                # one edit does both halves of the gesture: the command word
+                # disappears and the receipt takes its place, leaving the caret
+                # past the trailing space ready for the description. Going
+                # through `replace` (not `_replace_selection`) keeps this a
+                # single undoable edit rather than a delete the operator could
+                # undo into a buffer holding the secret — which the buffer never
+                # held in the first place.
+                start, end = arm
+                self.replace(
+                    captured,
+                    self._offset_to_location(start),
+                    self._offset_to_location(end),
+                    maintain_selection_offset=False,
+                )
+                self.move_cursor(self._offset_to_location(start + len(captured)))
+                return
+            # Empty/whitespace-only while armed: fall through, so the operator
+            # gets the characters they actually copied rather than a
+            # zero-length credential. See :meth:`_capture_credential`.
         if not event.text.strip():
             # A payload with no text in it is the clipboard-image signal. The
             # clipboard is consulted, but the event is consumed ONLY if that
@@ -4803,6 +5009,13 @@ class Editor(TextArea):
         if not isinstance(pasted, PastedText):
             # An image marker, or a number that resolves to nothing. There is
             # no text to put back, and expanding an image is not a thing.
+            #
+            # A CREDENTIAL is refused by this same predicate, and that is a
+            # SECURITY property rather than a missing feature: this key is the
+            # one gesture that puts a stashed payload back into the visible
+            # buffer, and the whole point of the capture is that the secret is
+            # out of the buffer. The escape hatch for a credential pasted by
+            # mistake is backspace, which forgets it (`_release_uncited`).
             raise SkipAction()
         # Dropped BEFORE the edit. `edit()` runs `_release_uncited` over the
         # attachments this removal touches, and the entry is gone by then
@@ -4847,6 +5060,97 @@ class Editor(TextArea):
         result = self._replace_via_keyboard(pasted, *self.selection)
         if result is not None:
             self.move_cursor(result.end_location)
+
+    def _credential_arm_span(self) -> tuple[int, int] | None:
+        """Buffer offsets of the ``/credential`` token arming the next paste.
+
+        The MODE GATE for the next paste. Anchored at the caret and at the end
+        of the token, so it answers "is the operator pasting a secret RIGHT
+        HERE" rather than "does this draft mention the command anywhere" — a
+        draft that says ``fix the /credential command`` and then pastes a log
+        four words later must collapse that log as an ordinary paste.
+
+        Deliberately NOT routed through ``slash_command_for`` /
+        ``consumes_prompt``. ``consumes_prompt=True`` (``/team``, ``/agent``)
+        HOISTS the draft to the front of the line, which is the exact opposite
+        of "keep typing in place" that this gesture is specified as; and
+        ``ArgumentMode`` handles a LEADING slash command, while this token is
+        inline by construction. Per ``docs/design/secret-store.md`` §11 the
+        inline form is an editor-level concern, and the existing leading
+        ``/credential KEYNAME`` masked-paste command is untouched by it.
+
+        Trailing spaces and tabs are allowed but a newline is not: the token
+        must be on the caret's own line, otherwise a ``/credential`` used three
+        lines up would arm a paste the operator is making somewhere else
+        entirely.
+
+        A SPAN rather than a boolean because the token is CONSUMED by the
+        capture, exactly as the pasted secret is. Two reasons, and the second is
+        a correctness bug rather than a preference:
+
+        - It is an arming GESTURE, not prose. Leaving it behind would send
+          ``deploy with /credential [credential LOP_SECRET_…]`` to the model,
+          where an image paste — the style this marker is specified to match —
+          leaves no command word behind.
+        - A capture armed at the START of the line would otherwise leave the
+          submitted text beginning with ``/credential``, which
+          ``_dispatchable_slash`` routes to the masked-paste command with the
+          marker as its KEY argument. Consuming the token means the leading and
+          the mid-line gestures behave identically, and bare
+          ``/credential <KEY>`` (no paste, so no capture) still dispatches
+          exactly as it always has.
+        """
+        offset = self._caret_offset()
+        before = self.text[:offset]
+        line_start = len(before) - len(before.rpartition("\n")[2])
+        match = CREDENTIAL_ARM.search(before[line_start:])
+        if match is None:
+            return None
+        return line_start + match.start(), offset
+
+    def _capture_credential(self, pasted: str) -> str | None:
+        """Stash ``pasted`` as a secret; return the marker to put in its place.
+
+        ``None`` when there is nothing to capture, which the caller treats as
+        "not a credential paste" and lets fall through to the ordinary
+        branches. That is the answer for an EMPTY OR WHITESPACE-ONLY paste
+        while armed: ``store_credential`` refuses a blank value anyway (a blank
+        env var is how a tool silently falls back to another credential), so
+        minting a zero-length ``[Credential #1, 0 chars]`` would advertise a key
+        to the model that can never hold anything. Falling through inserts the
+        whitespace the operator actually had on their clipboard, exactly as an
+        unarmed paste would.
+
+        A SECOND paste while still armed captures a SECOND credential, with its
+        own number and its own key. It is not a replacement: the first marker is
+        still in the buffer and still cited, so replacing its payload would make
+        a visible receipt point at bytes the operator never put behind it. Two
+        markers is also the honest reading of two pastes — the operator handing
+        over a key and a secret is an ordinary thing to do, and both reach the
+        agent named and described.
+        """
+        value = pasted.strip()
+        if not value:
+            return None
+        self._sync_next_marker()
+        index = self._next_marker
+        self._next_marker += 1
+        # `_paste_label` unchanged, so a one-line secret reads `64 chars` in the
+        # same vocabulary an image reads `1568x200` and a paste reads `240
+        # lines`. The LENGTH is the whole receipt: it is what lets the operator
+        # see the paste landed intact without seeing the value.
+        marker = f"[Credential #{index}, {_paste_label(value)}]"
+        key = generate_credential_key(
+            payload.key
+            for payload in self._attachments.values()
+            if isinstance(payload, PastedCredential)
+        )
+        self._attachments[index] = PastedCredential(value, key, marker)
+        # The trailing space is load-bearing exactly as it is for the other two
+        # marker kinds (`_delete_marker_past_spaces`, `action_expand_paste`),
+        # and here it is also what leaves the caret ready for the description
+        # the operator keeps typing inline.
+        return marker + " "
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
