@@ -4159,10 +4159,21 @@ def main() -> int:
         # run shell commands whose PATH must match a login terminal's, but
         # `config list`, `credential`, `login`, `agents` and the like never
         # spawn a tool — yet every one of them used to pay a full login-shell
-        # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper keeps
-        # a per-process cache, so a session that later needs it still primes at
-        # most once. ``None`` is the bare interactive launch.
-        _SUBPROCESS_SUBCOMMANDS = frozenset({"exec", "serve", "mobile", "browser", "tunnel"})
+        # round-trip (`$SHELL -l -c 'echo $PATH'`) on startup. The helper is
+        # NOT cached, so this membership test is the only thing keeping that
+        # round-trip off the cheap subcommands — adding a name here costs
+        # every invocation of it one login shell. ``None`` is the bare
+        # interactive launch.
+        #
+        # `wake` is here for `lop wake serve`, the documented foreground form
+        # of the LaunchAgent for anyone running the supervisor under their own
+        # supervisor. It reaches the same `serve()` and therefore spawns
+        # runtimes through `session/runtime/launch.py`, which propagates
+        # `dict(os.environ)` — so without the bootstrap it hands every
+        # wake-driven turn whatever PATH its own supervisor happened to have.
+        _SUBPROCESS_SUBCOMMANDS = frozenset(
+            {"exec", "serve", "mobile", "browser", "tunnel", "wake"}
+        )
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
 
