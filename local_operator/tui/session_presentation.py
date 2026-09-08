@@ -833,20 +833,37 @@ def replay_tool_call(
     # ``0.0s`` that says the tool returned instantly.
     duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
     if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
-        # A user-stopped bang command persists as an error result (the
-        # model-facing shape), but the LIVE frame it came from was the dim
-        # shut `interrupted ⊘` row. Replaying it through the error branch
-        # would reopen the user's own Esc as a red failure (design round
-        # 1, D1). The aborted prefix is execute_bash's stable contract.
+        # An aborted call persists as an error result (the model-facing
+        # shape), but the LIVE frame it came from was the dim shut
+        # `interrupted ⊘` row. Replaying it through the error branch would
+        # reopen the user's own Esc as a red failure (design round 1, D1).
         #
-        # The duration still comes back. Unlike the `result is None` arm
-        # above, this row HAS a recorded result and it carries the interval:
-        # `harness/loop.py` parks the synthetic aborted result with
-        # `duration_s=time.monotonic() - started_at`, and the live card's
-        # `mark_interrupted()` stamped the same elapsed time on screen. "How
-        # long did it run before I killed it" is the question this row exists
-        # to answer, and one Esc marks EVERY tool in flight — so blanking it
-        # opens the hole across a whole run of rows.
+        # The parenthesised prefix identifies ONE producer, and it is not the
+        # agent loop: `execute_bash` builds this text itself via `_error(...)`
+        # (`tools/builtin.py:1478`, `:1990`), as does `tools/eval.py:882`.
+        # `harness/loop.py`'s synthetic abort is `ABORTED_RESULT_TEXT =
+        # "aborted"` with NO parenthesis, so every result the loop parks a
+        # duration onto fails this guard and takes the plain error arm below.
+        #
+        # So `duration_s` is passed for faithfulness, not for a population we
+        # can point at today. `_error(...)` sets no `duration_s`, and only
+        # `loop.py::_append_results` writes the `provider_payload` this reads
+        # — review round 2 swept 37 real aborted runs (model-issued bash,
+        # parallel-batch races, eval kernel aborts) and produced the
+        # `aborted (` + `duration_s` conjunction zero times. The arm is
+        # therefore inert but correct: `park()` stamps any NORMALLY returned
+        # result, so the moment a producer returns this text with a measured
+        # interval the row shows it instead of silently dropping it.
+        # `tools/eval.py:1004` (`aborted (…): kernel killed mid-run`) is the
+        # plausible future one — it returns normally rather than by
+        # cancellation — but neither reviewer could drive a turn into that
+        # branch or prove it unreachable, so its status is unsettled.
+        #
+        # Not covered here: a bang-mode `! cmd` the user stopped. That row
+        # persists through `session/shell_record.py` →
+        # `Message.tool_result`, which copies content/ids/`is_error` and
+        # never writes `provider_payload` at all — so it replays blank, as a
+        # successful `! echo hi` also does. Pre-existing and out of scope.
         card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):

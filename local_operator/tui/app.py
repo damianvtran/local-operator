@@ -7467,11 +7467,14 @@ class OperatorApp(App[None]):
         # crashing the formatter or inventing a `0.0s`.
         duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
         if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
-            # The duration IS known here: a bang command the user stopped
-            # parks a synthetic aborted result carrying the measured interval,
-            # and the live card `mark_interrupted()` painted showed it. The
-            # dim `interrupted ⊘` presentation stays (design round 1, D1) —
-            # only the number it was dropping comes back.
+            # Symmetric with `replay_tool_call`'s aborted arm, including its
+            # limits — see the long note there for the provenance. In short:
+            # the parenthesised text is `execute_bash`/`eval`'s own, built by
+            # `_error(...)`, which stamps no `duration_s`; the loop's
+            # `ABORTED_RESULT_TEXT` has no paren and takes the error arm. So
+            # this restore is inert on every producer known today and exists
+            # so the row stays faithful if one ever carries the interval.
+            # The dim `interrupted ⊘` presentation stays (design round 1, D1).
             card.restore(state="interrupted", duration_s=duration_s)
             return
         if getattr(result, "is_error", False):
