@@ -554,17 +554,29 @@ The pieces, and what each guarantees:
     `libpython3.12.dylib` through `@rpath` relative to the venv, so it dies at
     startup with `dyld: Library not loaded: @rpath/libpython3.12.dylib`.
     Copy `<toolchain>/lib/libpython3.12.dylib` into `<venv>/lib/` after
-    creating the venv. A venv whose interpreter cannot start is indisting-
-    uishable, from the batch log, from a harness bug.
+    creating the venv. A venv whose interpreter cannot start is
+    indistinguishable, from the batch log, from a harness bug.
 
-  **Both packages must be installed as wheels, never `-e`.** An editable
-  install writes no `RECORD`, so `distribution_digest` cannot verify the
-  entry module and load fails with `adapter entry module is not uniquely
-  RECORD-covered`. An editable `local-operator` is worse than a hard failure:
-  it *works*, and stamps the version from the checkout's `pyproject.toml`
-  into evidence — observed reporting `0.51.0` for a tree at `0.51.19`, which
-  is the self-consistent-and-wrong failure §4 warns about. Build both with
-  `uv build --wheel` and install the artifacts.
+  **The adapter must be installed as a wheel, never `-e`.** An editable
+  install *does* write a `RECORD` — and `distribution_digest` hashes it
+  happily — but that RECORD covers only the `.pth` shim and the metadata
+  directory: it has **no rows under the package source**. So
+  `_resolve_module_artifact` finds no artifact for the entry module and
+  `discovery.py` raises `adapter entry module is not uniquely
+  RECORD-covered`. The error names RECORD coverage, not the editable install,
+  so read it as "the entry module's source is not listed", which is also what
+  it means in the rarer case of a genuinely malformed wheel. Build with
+  `uv build --wheel` and install the artifact.
+
+  `local-operator` itself may be editable without breaking discovery — only
+  the adapter distribution is resolved this way — but installing it as a
+  wheel too keeps one interpreter's provenance uniform, and a wheel is what
+  the committed lock describes. Note that the harness version in evidence is
+  *not* affected either way: `_harness_version` (`scripts/run_episode.py`)
+  deliberately prefers the checkout's `pyproject.toml` over
+  `importlib.metadata` precisely because install metadata goes stale on a
+  development checkout, and it reports the running tree's version under both
+  install modes.
 - **Exact-distribution discovery.** Before launch, `worker_argv` re-resolves
   both spawn boundaries symlink-free, verifies the release manifest, and
   re-hashes the workspace. At load, `distribution_digest` hashes every RECORD
