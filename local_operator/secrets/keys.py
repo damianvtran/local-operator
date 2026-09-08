@@ -109,10 +109,85 @@ def key_mode(base: Path | None = None) -> str:
     can act on and re-wraps the live key. :func:`key_of_record_inconsistency`
     names the state so ``status`` can point at it rather than leaving the
     operator to notice a mode line that silently changed.
+
+    **This is the DISPLAY and REPAIR answer, and it must never be used to
+    decide an authorization (PR-2 review R4-1).** It answers on what is ABSENT
+    from disk, which is the right rule for honesty and the wrong one for
+    authority: absence — and presence — are attacker-controlled, since any
+    process running as this uid can create ``master.key``. Answering the
+    hardened tier's ancestry gate from this function turned "write 32 random
+    bytes to a path" into a full authentication bypass, measured 3/3 against an
+    unlocked store. Authorization asks a different question and must derive it
+    from something unforgeable; :func:`key_of_record_is_plaintext` is that
+    question, and the store's own fingerprint is that something.
     """
     if wrapped_key_path(base).exists() and not key_path(base).exists():
         return "passphrase"
     return "keyfile"
+
+
+def key_of_record_is_plaintext(base: Path | None = None) -> bool:
+    """Is the key this store is SEALED UNDER sitting on disk unwrapped?
+
+    The authorization counterpart to :func:`key_mode`, and the two are
+    deliberately separate functions rather than one predicate with two callers
+    (PR-2 review R4-1). ``key_mode`` reports the tier honestly for the operator;
+    this one decides whether the hardened tier's ancestry gate may stand down,
+    which is a security decision and therefore may not rest on anything an
+    attacker can write.
+
+    **Validated, not observed.** The gate this feeds
+    (:meth:`~local_operator.secrets.broker.SecretBroker._is_keyfile_tier`)
+    admits a registrant on the registration ticket alone in the keyfile tier,
+    and §8 concedes that is sound *there* precisely because a caller able to
+    read the 0600 ticket could read ``master.key`` beside it and decrypt the
+    store with no broker at all. That argument holds only while the plaintext
+    file really is the key of record. A same-uid attacker who merely CREATES
+    that path has proved nothing — it did not decrypt anything — so presence is
+    not evidence and the answer comes from the fingerprint the database records
+    for itself instead. That row is public (it is readable without a key, which
+    is why it exists) and cannot be forged without the key it identifies.
+
+    Fails closed — ``False``, meaning "treat the store as hardened and require
+    lineage" — on every case where the question cannot be answered: an
+    unreadable key file, a wrong-sized one, or a fingerprint row that says the
+    installed key does not open this database. A denial is the safe direction
+    because it is not fatal in the tier it can be wrong in: ``access.py``
+    documents the keyfile tier's fallback to reading the key file, so a caller
+    wrongly refused here is still served from disk, while a caller wrongly
+    ADMITTED in the hardened tier is handed the unwrapped key out of broker
+    memory.
+
+    The one case with no fingerprint to check — no database yet, or a store
+    predating the fingerprint row — falls back to the absence rule, because
+    there is nothing else to consult. It is not exploitable: without a store
+    there are no secrets to serve, and a store carrying a wrapped key still
+    fails closed.
+    """
+    from local_operator.secrets.crypto import key_fingerprint
+    from local_operator.secrets.store import recorded_key_fingerprint
+
+    path = key_path(base)
+    try:
+        if not path.exists():
+            # Nothing plaintext on disk: hardened, or no store at all. Either
+            # way the ticket-only path has no key-file argument behind it.
+            return False
+        installed = path.read_bytes()
+    except OSError:  # pragma: no cover - unreadable dir/file fails closed
+        return False
+    if len(installed) != KEY_BYTES:
+        # Not a key at all. A truncated file is damage and a padded one is a
+        # plant; neither is the key of record.
+        return False
+
+    try:
+        expected = recorded_key_fingerprint(base)
+    except OSError:  # pragma: no cover - unreadable store fails closed
+        return False
+    if expected is None:
+        return not wrapped_key_path(base).exists()
+    return key_fingerprint(installed) == expected
 
 
 def key_of_record_inconsistency(base: Path | None = None) -> str | None:
@@ -676,7 +751,9 @@ def discard_staged_wrapped_key(base: Path | None, staged: Path) -> None:
         pass
 
 
-def assert_key_of_record_invariant(base: Path | None, mode: str) -> None:
+def assert_key_of_record_invariant(
+    base: Path | None, mode: str, *, stale_wrapped_ok: bool = False
+) -> None:
     """Fail loudly if the on-disk key files contradict the tier just written.
 
     The one invariant this feature cannot afford to get wrong, stated once and
@@ -692,9 +769,24 @@ def assert_key_of_record_invariant(base: Path | None, mode: str) -> None:
     than being discovered later by an audit. It is a post-condition on the
     writer, not a validation of operator input: reaching it means this code
     installed the wrong file, which is a bug in the caller.
+
+    **``stale_wrapped_ok`` is for the one caller that INHERITED the violation
+    rather than caused it (review R4-2).** A keyfile-tier ``rotate`` run on a
+    Q10-damaged store — plaintext key beside a stale wrapped one — installs the
+    right file for its tier and completes correctly, but the stale wrapped file
+    it never wrote is still there, so this post-condition fired and ``rotate``
+    exited 2 with "Internal error" after fully succeeding. Measured over three
+    consecutive runs: each incremented the key generation while reporting
+    failure, so an operator would retry indefinitely against a store that was
+    working. The wrapped-file clause is therefore skippable by the caller that
+    can tell the difference, and only that one; the two clauses describing THIS
+    write (a plaintext key left behind in the hardened tier, no key installed in
+    the keyfile tier) are never skippable, because those really would be this
+    code's own bug. The damage itself is not swallowed — ``rotate`` reports it
+    and points at ``harden``, which is the verb that repairs it.
     """
     plain = key_path(base).exists()
-    wrapped = wrapped_key_path(base).exists()
+    wrapped = wrapped_key_path(base).exists() and not stale_wrapped_ok
     if mode == "passphrase" and plain:
         raise SecretStoreError(
             f"Internal error: a plaintext master key was left at {key_path(base)} on a "

@@ -19,6 +19,7 @@ from local_operator.secrets.keys import (
     install_staged_wrapped_key,
     key_mode,
     key_of_record_inconsistency,
+    key_of_record_is_plaintext,
     key_path,
     load_master_key,
     stage_wrapped_master_key,
@@ -138,6 +139,59 @@ def test_a_plaintext_key_beside_a_wrapped_one_is_not_reported_as_hardened(
     assert "plaintext master key" in (key_of_record_inconsistency(config_root) or "")
 
 
+def test_the_authorization_predicate_is_not_fooled_by_a_planted_key(
+    config_root: Path,
+) -> None:
+    """R4-1: the display answer and the authorization answer must differ here.
+
+    `key_mode` answers on ABSENCE, which is honest and attacker-controlled. The
+    broker's ancestry gate cannot consume that: a same-uid process writes any
+    bytes it likes to `master.key`, and if presence alone decided the tier it
+    would switch the hardened tier's lineage requirement off — the full bypass
+    R4-1 measured. So the two are separate functions, and this pins the exact
+    case where they must disagree.
+
+    The plant is junk (the attacker has no real key, which is the whole point),
+    so the fingerprint the DATABASE records is what tells them apart.
+    """
+    original = load_master_key(config_root, create=True)
+    SecretStore(original, base=config_root).initialize()
+    wrap_master_key(config_root, original, PASSPHRASE)
+    assert not key_of_record_is_plaintext(config_root)
+
+    key_path(config_root).write_bytes(generate_master_key())  # the attacker's plant
+    # Honest for the operator: a plaintext key IS on disk, so `status` warns and
+    # `harden` can repair it.
+    assert key_mode(config_root) == "keyfile"
+    assert "plaintext master key" in (key_of_record_inconsistency(config_root) or "")
+    # Unforgeable for the gate: that key does not open this store, so the store
+    # is still hardened and lineage is still required.
+    assert not key_of_record_is_plaintext(config_root)
+
+
+def test_the_authorization_predicate_accepts_a_genuine_keyfile_store(
+    config_root: Path,
+) -> None:
+    """The other half: failing closed must not break the tier that ships.
+
+    A predicate that answered "hardened" everywhere would be safe and useless —
+    the keyfile tier's ticket-only registration is the default path, and §8 is
+    explicit that it is sound there. So the real key of record, and a store with
+    no fingerprint row to check against yet, both answer true.
+    """
+    original = load_master_key(config_root, create=True)
+    assert key_of_record_is_plaintext(config_root), "a store with no database yet"
+
+    SecretStore(original, base=config_root).initialize()
+    assert key_of_record_is_plaintext(config_root), "the real key of record"
+
+    # Q10 damage: the plaintext file really is the live key, beside a stale
+    # wrapped one. The gate follows the key, not the wrapper.
+    wrap_master_key(config_root, original, PASSPHRASE)
+    key_path(config_root).write_bytes(original)
+    assert key_of_record_is_plaintext(config_root)
+
+
 def test_a_healthy_store_reports_no_inconsistency(config_root: Path) -> None:
     """The warning must not cry wolf on either tier in its normal state."""
     original = load_master_key(config_root, create=True)
@@ -161,6 +215,30 @@ def test_the_invariant_refuses_a_plaintext_key_in_the_hardened_tier(
     key_path(config_root).write_bytes(original)
     with pytest.raises(SecretStoreError, match="plaintext master key"):
         assert_key_of_record_invariant(config_root, "passphrase")
+
+
+def test_the_invariant_can_excuse_damage_the_caller_inherited(config_root: Path) -> None:
+    """R4-2: a keyfile writer must not be blamed for a stale wrapped file.
+
+    `rotate` on a Q10-damaged store installs the right file for its tier and
+    succeeds, but the wrapped file it never wrote is still there — so the
+    post-condition fired and the command exited 2 with "Internal error" after
+    completing. `stale_wrapped_ok` is scoped to exactly that clause: the two
+    that describe THIS write stay unconditional, because those really would be
+    a bug in the caller.
+    """
+    original = load_master_key(config_root, create=True)
+    wrap_master_key(config_root, original, PASSPHRASE)
+    key_path(config_root).write_bytes(original)
+
+    with pytest.raises(SecretStoreError, match="still claims this store is hardened"):
+        assert_key_of_record_invariant(config_root, "keyfile")
+    assert_key_of_record_invariant(config_root, "keyfile", stale_wrapped_ok=True)
+
+    # The clause about this write is NOT excusable by the same flag.
+    key_path(config_root).unlink()
+    with pytest.raises(SecretStoreError, match="no master key was installed"):
+        assert_key_of_record_invariant(config_root, "keyfile", stale_wrapped_ok=True)
 
 
 def test_rewrapping_replaces_the_key_of_record_without_a_plaintext_window(

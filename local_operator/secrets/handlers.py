@@ -435,12 +435,24 @@ def _rotate(args: argparse.Namespace) -> int:
     from local_operator.secrets.keys import (
         assert_key_of_record_invariant,
         discard_staged_master_key,
+        key_of_record_inconsistency,
         stage_master_key,
     )
     from local_operator.secrets.store import install_master_key_if_current
 
     if key_mode() == "passphrase":
         return _rotate_hardened()
+
+    # **Sampled BEFORE the rotation, because the answer afterwards is the same
+    # and the meaning is not (review R4-2).** A store carrying both key files is
+    # Q10 damage that predates this command. Rotating it is correct — the
+    # plaintext key IS the live one, so the keyfile path is the right path — but
+    # the stale wrapped file survives the rotation, and the post-condition below
+    # then reported this command as having failed after it had fully succeeded.
+    # Recording the state up front is what lets the exit status distinguish "I
+    # installed the wrong file" from "I finished on a store that was already
+    # damaged".
+    inherited_damage = key_of_record_inconsistency() is not None
 
     store = open_store()
     new_key = generate_master_key()
@@ -469,8 +481,20 @@ def _rotate(args: argparse.Namespace) -> int:
             "still want a fresh key."
         )
         return 2
-    assert_key_of_record_invariant(None, "keyfile")
+    assert_key_of_record_invariant(None, "keyfile", stale_wrapped_ok=inherited_damage)
     _err(f"rotated {moved} secret(s) to key generation {store.key_generation()}")
+    if inherited_damage:
+        # Said plainly and separately from the success line: the rotation did
+        # work, and the store still carries damage this verb cannot repair —
+        # only `harden` holds the passphrase needed to re-wrap the live key.
+        # Exit 0 regardless, because retrying `rotate` never fixes it and a
+        # non-zero status here is what sent the operator into that loop.
+        _err(
+            "This store still has a plaintext master key beside a stale wrapped one, so it "
+            "is NOT protected at rest the way passphrase mode claims. The rotation above "
+            "succeeded; run `lop secret harden` to re-wrap the live key and remove the "
+            "plaintext copy."
+        )
     return 0
 
 

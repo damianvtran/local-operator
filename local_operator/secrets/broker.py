@@ -863,7 +863,7 @@ class SecretBroker:
         return hmac.compare_digest(candidate, expected)
 
     def _is_keyfile_tier(self) -> bool:
-        """Is the master key on disk unwrapped (``keyfile``), or only wrapped?
+        """May a registrant be admitted on the ticket alone, with no lineage?
 
         The tier decides how much a ticket is worth. In ``keyfile`` mode the
         ticket sits beside ``master.key``, so a caller able to read one could
@@ -872,13 +872,29 @@ class SecretBroker:
         only unwrapped copy is in this process's memory, so a file secret
         proves nothing and lineage from the passphrase is required instead.
 
-        Fails closed (treats the store as hardened) if the mode cannot be read,
-        because the hardened path is the one with the stricter check.
+        **Asks :func:`~local_operator.secrets.keys.key_of_record_is_plaintext`,
+        NOT :func:`~local_operator.secrets.keys.key_mode` (review R4-1).** This
+        is an authorization decision, and `key_mode` answers on the mere
+        presence of `master.key` — a path any process running as this uid can
+        create. Consuming the display predicate here meant an attacker could
+        write 32 random bytes to it, flip this gate to the ticket-only path,
+        register, and be served the unwrapped master key out of this process's
+        memory; measured 3/3 from a detached `setsid` process at ppid=1 against
+        a genuinely hardened, unlocked store. The planted key was junk, so it
+        was never key theft — it was a lie told to a predicate that only
+        observed. The validating predicate checks the installed key against the
+        fingerprint the database records, which an attacker cannot forge
+        without the key it names.
+
+        Fails closed (treats the store as hardened) if the answer cannot be
+        established, because the hardened path is the one with the stricter
+        check and a wrong denial in the keyfile tier is absorbed by
+        `access.py`'s documented key-file fallback.
         """
-        from local_operator.secrets.keys import key_mode
+        from local_operator.secrets.keys import key_of_record_is_plaintext
 
         try:
-            return key_mode(self._base) == "keyfile"
+            return key_of_record_is_plaintext(self._base)
         except OSError:  # pragma: no cover - unreadable dir fails closed
             return False
 
@@ -1175,6 +1191,19 @@ def run_broker(base: Path | None = None, *, idle_shutdown_s: float = IDLE_SHUTDO
     """
     from local_operator.secrets.keys import key_mode, load_master_key
 
+    # **`key_mode` and not `key_of_record_is_plaintext`, checked deliberately
+    # during the R4-1 caller audit.** This is a startup/availability question —
+    # "is there a key I can load eagerly, or must I start locked and wait for
+    # `unlock`" — not an authorization one, and it is answered in the daemon's
+    # own process about its own store. A planted `master.key` does make a
+    # hardened broker start with a provider holding junk, but nothing is
+    # disclosed by it: the registration gate below validates against the store's
+    # fingerprint and still demands lineage, so the junk is never served, while
+    # legitimate callers get the honest "sealed under a key that is not on disk"
+    # and `status` names the planted file outright. Validating here instead
+    # would ALSO make a keyfile store caught mid-rotation start locked and tell
+    # its operator to run `unlock` on a store that has no passphrase, which is a
+    # worse answer than the one the fingerprint would be buying.
     provider: Callable[[], bytes] | None = None
     if key_mode(base) == "keyfile":
         provider = lambda: load_master_key(base)  # noqa: E731 - a def here shadows the annotation

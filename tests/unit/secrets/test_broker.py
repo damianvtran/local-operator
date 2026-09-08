@@ -29,6 +29,7 @@ import pytest
 from local_operator.secrets import client
 from local_operator.secrets.broker import BrokerError, SecretBroker
 from local_operator.secrets.errors import BrokerUnavailable
+from local_operator.secrets.keys import key_path, write_private_file
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -48,9 +49,27 @@ SECRET_VALUE = b"s3cr3t-token-value"
 
 @pytest.fixture
 def broker_store(config_root: Path, master_key: bytes) -> SecretStore:
+    """An initialised keyfile-tier store, with its key ON DISK as the tier means.
+
+    **The key file is written deliberately, and leaving it out was a fixture
+    defect (review R4-1).** These fixtures handed the broker its key through
+    `key_provider` and never created `master.key`, which models a store that
+    production cannot produce: `load_master_key` writes that file on first use,
+    and its presence as the key of record is the entire definition of the
+    keyfile tier — the reason §8 accepts ticket-only registration there is that
+    a caller who can read the ticket can read the key beside it.
+
+    While the tier was decided by the mere ABSENCE of a plaintext key, a store
+    with neither file still answered `keyfile` and the gap was invisible. Now
+    that the gate validates the key of record against the store's fingerprint,
+    a fixture with no key on disk is correctly treated as hardened and denies —
+    so the fixture has to model the tier it claims. The `hardened_broker`
+    fixture below already carried the mirror-image warning for the same reason.
+    """
     store = SecretStore(master_key, base=config_root)
     store.initialize()
     store.set("DEMO_TOKEN", SECRET_VALUE, description="broker test")
+    write_private_file(key_path(config_root), master_key)
     return store
 
 
@@ -766,6 +785,58 @@ def test_the_operator_terminal_works_after_unlock_but_a_detached_script_does_not
     text = output.read_text()
     assert "ppid=1" in text, text
     assert "register_ok=False" in text, f"self-registration was allowed post-unlock: {text}"
+    assert "LEAKED" not in text, text
+    assert SECRET_VALUE.decode() not in text, text
+
+
+def test_a_planted_plaintext_key_cannot_switch_off_the_ancestry_gate(
+    hardened_broker: SecretBroker, config_root: Path, tmp_path: Path
+) -> None:
+    """R4-1: the authorization tier must not be decided by a file an attacker writes.
+
+    The gate `_is_keyfile_tier` guards is the whole hardened tier: in `keyfile`
+    mode `register` accepts the ticket alone, because §8 concedes a caller that
+    can read the ticket can read `master.key` beside it. So anything that lets
+    an attacker MAKE the broker believe it is in `keyfile` mode is a complete
+    authentication bypass — it does not need the real key, only the answer.
+
+    The predicate briefly answered on the mere EXISTENCE of `master.key`, which
+    is exactly the wrong input: a same-uid process creates that path at will.
+    Planting 32 random bytes there flipped the tier, the ticket-only path
+    opened, and the detached attacker registered and was served the UNWRAPPED
+    master key from broker memory — measured 3/3, with the plant then unlinked
+    so `status` reported `passphrase` again and nothing recorded the visit.
+
+    The store's fingerprint is the input that cannot be forged, so the
+    authorization answer derives from it: a planted key whose fingerprint does
+    not open the database proves the plaintext key of record is NOT on disk,
+    the store is still hardened, and lineage is still required. This test is
+    the mutation guard for that — reverting the predicate to the existence
+    check turns it red.
+    """
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.keys import key_path
+
+    # The plant an attacker can actually make: right path, right mode, right
+    # length, junk contents. It cannot be a REAL key — the attacker does not
+    # have one, which is the entire point of the tier.
+    key_path(config_root).write_bytes(generate_master_key())
+    os.chmod(key_path(config_root), 0o600)
+
+    output = tmp_path / "planted.out"
+    script = tmp_path / "planted.py"
+    script.write_text(_self_register_exploit(config_root, hardened_broker.path, output))
+    subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not output.exists():
+        time.sleep(0.1)
+    assert output.exists(), "the detached attacker never reported back"
+    text = output.read_text()
+
+    assert "ppid=1" in text, f"the attacker was not actually detached: {text}"
+    assert (
+        "register_ok=False" in text
+    ), f"planting a junk master.key switched off the hardened tier's ancestry gate: {text}"
     assert "LEAKED" not in text, text
     assert SECRET_VALUE.decode() not in text, text
 

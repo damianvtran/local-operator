@@ -666,6 +666,31 @@ Measured against today's plaintext `~/.minerva/credentials/.env` (58 keys).
 > contribution in that tier is the audit trail and the §6 redaction notice,
 > **not access control**. `lop secret harden` is the only tier where the
 > ancestry boundary is load-bearing.
+>
+> **Corrected again in PR-2 review round 4, and this is the more general
+> lesson.** Because the hardened tier is the only one where the gate is real,
+> *deciding which tier is in force is itself a security decision* — and it was
+> being made by the same predicate `status` uses to print the mode line. That
+> predicate answers on what is ABSENT from disk, which is right for honesty and
+> wrong for authorization: absence, and presence, are attacker-controlled. Any
+> same-uid process could write 32 random bytes to `master.key`, and the broker
+> would conclude it was in the keyfile tier and stop requiring lineage —
+> measured 3/3 from a detached `setsid` process at ppid=1 against a genuinely
+> hardened, unlocked store, which then registered and was served the unwrapped
+> master key out of broker memory and decrypted every record. The planted key
+> was junk, so this was never key theft; it was a **lie told to a predicate that
+> only observed**.
+>
+> The rule that replaces it: **a display answer may observe, an authorization
+> answer must validate.** The two are now separate functions — `key_mode()`
+> reports the tier honestly (a store carrying both files says `keyfile`, so
+> `status` warns and `harden` repairs it), while `key_of_record_is_plaintext()`
+> decides the gate by checking the installed key against the fingerprint the
+> database records for itself. That fingerprint is public by design and cannot
+> be forged without the key it names, so a plant fails it and the store is
+> correctly still treated as hardened. Both behaviours are pinned by tests, and
+> the authorization one is mutation-tested: restoring the existence check turns
+> it red.
 
 | Attacker behaviour | Today | Encrypted DB + key file (default) | Broker + passphrase (opt-in) |
 |---|---|---|---|
@@ -674,7 +699,7 @@ Measured against today's plaintext `~/.minerva/credentials/.env` (58 keys).
 | Script camping on the socket | n/a | **Not stopped** — 0600 excludes other *uids* (spike 7), but a same-uid denial falls back to the key file | **Stopped** — denial is enforced; no key on disk to fall back to |
 | Detached script (`setsid`, reparented to launchd) | Loses everything | **Not stopped** — denied at the socket, then served from the key file (measured: `rc=0`, value on stdout) | **Stopped** — denied at the socket and there is no fallback (measured) |
 | Script dumping the broker's memory | n/a | Needs `task_for_pid` → **denied, rc=5**; `lldb` → **SecurityAgent prompt** (spikes 3, 5) | Same |
-| Script that self-registers as a session over the socket | n/a | **Not stopped** — but irrelevant, it can read the key file anyway | **Stopped** — `register` needs the 0700 ticket *and*, in this tier, lineage from an unlocked terminal or a live session (PR-2 review R1) |
+| Script that self-registers as a session over the socket | n/a | **Not stopped** — but irrelevant, it can read the key file anyway | **Stopped** — `register` needs the 0700 ticket *and*, in this tier, lineage from an unlocked terminal or a live session (PR-2 review R1), and *which tier applies* is decided by validating the installed key against the store's fingerprint rather than by observing that a file exists (R4-1) |
 | Script that runs `lop secret get` itself | n/a | **Not stopped** (§9) | **Not stopped** while unlocked (§9.1, §9.4) |
 | Script that rewrites the lop code it can write (`~/.local/bin/lop` is 0755 **writable**, spike 10) | n/a | **Not stopped** | **Not stopped** |
 | Attacker with a backup copy of the store only | n/a | Stopped if the key file was not in the backup | **Stopped** |
