@@ -9,6 +9,8 @@ not even a read-only ``describe_images`` is issued.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from lop_osworld_v2_adapter import provisioning, taskfile
 from lop_osworld_v2_adapter.provisioning import ProvisioningError
@@ -346,13 +348,29 @@ def test_a_relative_proxy_config_path_is_refused(tmp_path) -> None:
         )
 
 
-def test_an_unreadable_proxy_config_is_refused_without_echoing_the_path(tmp_path) -> None:
+def test_an_absent_proxy_config_is_refused_without_echoing_the_path(tmp_path) -> None:
+    # An absent path fails the regular-file check before the open, so it
+    # reports the type rather than the read. Either way it is refused before
+    # allocation and, critically, without repeating the operator's input.
     missing = str(tmp_path / "nope.json")
-    with pytest.raises(ProvisioningError) as excinfo:
+    with pytest.raises(ProvisioningError, match="regular file") as excinfo:
         provisioning.validate_proxy_config_file(_proxy_infra(missing), enable_proxy=True)
-    assert "not readable" in str(excinfo.value)
     # An operator can mistype a credentialed URL into this field; never echo it.
     assert missing not in str(excinfo.value)
+
+
+def test_a_present_but_unreadable_proxy_config_is_refused(tmp_path) -> None:
+    """A regular file we cannot open reaches the read branch and is refused."""
+    path = tmp_path / "locked.json"
+    path.write_text('[{"host": "h.example", "port": 8080}]', encoding="utf-8")
+    path.chmod(0o000)
+    try:
+        with pytest.raises(ProvisioningError) as excinfo:
+            provisioning.validate_proxy_config_file(_proxy_infra(str(path)), enable_proxy=True)
+        assert "not readable" in str(excinfo.value)
+        assert str(path) not in str(excinfo.value)
+    finally:
+        path.chmod(0o600)
 
 
 @pytest.mark.parametrize(
@@ -397,3 +415,33 @@ def test_an_oversized_proxy_config_is_refused_rather_than_parsed(tmp_path) -> No
     path = _proxy_file(tmp_path, "[" + ("0," * 600_000) + "0]")
     with pytest.raises(ProvisioningError, match="ceiling"):
         provisioning.validate_proxy_config_file(_proxy_infra(path), enable_proxy=True)
+
+
+def test_a_proxy_config_naming_a_non_regular_file_is_refused(tmp_path) -> None:
+    """A FIFO must refuse, not hang.
+
+    ``open`` follows symlinks and ignores the file type, so a path naming a
+    FIFO blocks until a writer appears -- with no timeout, at prepare, before
+    anything else runs. A hang is a worse failure than a refusal and much
+    harder to attribute, so the type is checked before the open.
+    """
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(ProvisioningError, match="regular file"):
+        provisioning.validate_proxy_config_file(_proxy_infra(str(fifo)), enable_proxy=True)
+
+
+def test_a_proxy_config_symlinked_to_a_regular_file_is_accepted(tmp_path) -> None:
+    """The type check must not break the ordinary symlinked-config case."""
+    real = tmp_path / "real.json"
+    real.write_text('[{"host": "h.example", "port": 8080}]', encoding="utf-8")
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert provisioning.validate_proxy_config_file(
+        _proxy_infra(str(link)), enable_proxy=True
+    ) == str(link)
+
+
+def test_a_proxy_config_naming_a_directory_is_refused(tmp_path) -> None:
+    with pytest.raises(ProvisioningError, match="regular file"):
+        provisioning.validate_proxy_config_file(_proxy_infra(str(tmp_path)), enable_proxy=True)

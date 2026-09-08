@@ -103,7 +103,11 @@ _OSWORLD_IMPORT_ENV = (
 def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None:
     """Write non-secret infra values into the worker's own process env.
 
-    Called at the START of ``reset_start``, before any ``desktop_env`` import.
+    Called from ``prepare``, which is earlier than the old docstring claimed
+    and still strictly before any ``desktop_env`` import -- the only ordering
+    that matters, since several of these names are read by upstream at import
+    time and a later write would be a silent no-op.
+
     A value not on the closed injectable list is refused, so a secret named
     like an env var cannot leak into the process environment where a child
     process or a crash report would inherit it.

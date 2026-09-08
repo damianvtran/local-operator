@@ -69,8 +69,11 @@ _DEFAULT_REGION = DEFAULT_REGION
 _SCREEN = (1920, 1080)
 
 # A proxy-pool config is a short JSON list of endpoints; anything larger is a
-# mistyped path (a log, a dataset) and is refused rather than parsed, so a
-# pathological file cannot be read into the worker at prepare time.
+# mistyped path (a log, a dataset) and is refused before it is parsed. This
+# bounds the READ, not the parse: a file just under the ceiling is still handed
+# to json.loads, and deeply nested JSON inside that budget still costs CPU. The
+# path is operator-supplied and parsed on the operator's own machine before any
+# cloud call, so the residual is self-inflicted rather than a exposure.
 _PROXY_CONFIG_MAX_BYTES = 1 << 20
 
 
@@ -204,10 +207,19 @@ def validate_proxy_config_file(
     CWD-RELATIVE default and loads it at module import, swallowing every
     failure into a log line: a missing or malformed file yields an EMPTY pool
     and the episode dies at ``reset_start`` with "No proxy available from proxy
-    pool" -- after the VM is allocated and billed. So this validates at
-    ``prepare``, where a failure costs nothing, and requires an ABSOLUTE path:
+    pool" -- after the VM is allocated and billed. So this validates before
+    allocation, where a failure costs nothing, and requires an ABSOLUTE path:
     a relative one would be resolved against whatever CWD the ``-I`` worker
     happens to inherit, which is exactly the bug being fixed.
+
+    NOT a guarantee about the bytes upstream will load. This checks a PATH, and
+    upstream re-reads that path later, so the file can be replaced, truncated,
+    or chmod-ed in between; upstream also loads a MIXED file partially, leaving
+    a silently degraded pool rather than an empty one. Closing that window
+    would mean passing contents rather than a path, which upstream's
+    import-time ``os.getenv`` read gives us no way to do. What this does buy is
+    that the ordinary failures -- wrong path, unreadable file, wrong shape --
+    stop being discovered after the VM is billed.
 
     Returns the validated path, or None when the input is absent. Absence is
     only an error when the episode actually needs a proxy; that check belongs
@@ -232,6 +244,13 @@ def validate_proxy_config_file(
     if not os.path.isabs(path):
         # Never echo the value: an operator can mistype a credentialed URL here.
         raise ProvisioningError("PROXY_CONFIG_FILE must be an absolute path")
+    # Require a regular file BEFORE opening. ``open`` follows symlinks and does
+    # not care about the type, so a path naming a FIFO blocks prepare forever
+    # waiting for a writer -- a hang is a worse failure than a refusal, and
+    # harder to attribute. ``isfile`` resolves symlinks, so a symlink TO a
+    # regular file is still accepted.
+    if not os.path.isfile(path):
+        raise ProvisioningError("PROXY_CONFIG_FILE must name a regular file")
     try:
         with open(path, "rb") as handle:
             raw = handle.read(_PROXY_CONFIG_MAX_BYTES + 1)
