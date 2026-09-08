@@ -53,8 +53,8 @@ class CatalogEntry:
 
     @property
     def active(self) -> bool:
-        """The terminal's Active/Previous partition, independent of glyph precedence."""
-        return self.rank[0] <= 2
+        """Section membership is independent of the number of ordering categories."""
+        return bool(self.row.pending or self.unseen or self.row.live_state)
 
     @property
     def status_code(self) -> str:
@@ -411,7 +411,18 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
 
     candidates = _recent_sessions_with_origin(directory)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
-    rows = [SessionRow(session_id, mtime, "") for session_id, mtime, _ in candidates]
+    # Creation time is the immutable ordering key (#800), so every construction
+    # site must stamp it. Rows left at the 0.0 default all tie and fall through
+    # to the session-id tie-break, which silently reverses newest-first order.
+    rows = [
+        SessionRow(
+            session_id,
+            mtime,
+            "",
+            created_at=session_created_at(directory / "sessions" / session_id),
+        )
+        for session_id, mtime, _ in candidates
+    ]
     for marker in (directory / "sessions").glob("*/desktop.json"):
         if marker.parent.name in source or not session_directory_name(marker.parent.name):
             continue
@@ -420,7 +431,14 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
         if (marker.parent / TRANSCRIPT_FILENAME).exists():
             continue
         try:
-            rows.append(SessionRow(marker.parent.name, marker.stat().st_mtime, ""))
+            rows.append(
+                SessionRow(
+                    marker.parent.name,
+                    marker.stat().st_mtime,
+                    "",
+                    created_at=session_created_at(marker.parent),
+                )
+            )
         except OSError:
             continue
     rows = decorate_rows(directory, rows, include_live=True)

@@ -77,8 +77,49 @@ async def test_corrupt_installed_profile_cannot_fall_back_during_read_or_start(a
     assert resumed.active_agent == "" and resumed._unresolved_agent == "reviewer"
     assert "No packaged profile was substituted" in resumed.attachment_restore_notice
     path.write_text(original)
-    resumed.agent_registry.require_complete_metadata()
     assert resumed.attach_agent_profile("reviewer") == "reviewer"
+    await resumed.dispose()
+
+
+async def test_repair_resolves_edited_definition_and_keeps_the_durable_goal(api):
+    """The prescribed recovery must not stamp packaged text nor erase the goal.
+
+    Both halves are one user story: corruption is repaired on disk, the user runs
+    ``/agent``, and the very next turn must carry THEIR instructions while the
+    goal they authored survives the round trip.
+    """
+    from local_operator.agent_profiles import install_seed
+    from local_operator.resume import read_session_attachment, write_session_attachment
+    from tests.unit.session.test_attachment_persistence import _session
+
+    client, root = api
+    registry = AgentRegistry(root)
+    installed = install_seed("reviewer", registry=registry)
+    assert installed is not None and installed[0].agent_id is not None
+    # Edited through the real PATCH route, so the fixture cannot diverge from
+    # how an operator actually customises an installed role.
+    edited = await client.patch(
+        "/v1/desktop/profiles/reviewer", json=mutation(instructions="EDITED_ONLY_MARKER")
+    )
+    assert edited.status_code == 200
+    path = root / "agents" / installed[0].agent_id / "agent.yml"
+    original = path.read_text()
+    write_session_attachment(root / "sess", agent="reviewer", team="", goal="Keep this goal")
+    path.write_text("invalid: [")
+
+    resumed = _session(root, (AgentRegistry(root), TeamRegistry(root)))
+    # R4: the goal is independent of the profile slot, so a rejected profile
+    # restore must not discard it (the repair below would then journal "").
+    assert resumed.goal == "Keep this goal"
+    assert resumed.active_agent == ""
+
+    path.write_text(original)
+    assert resumed.attach_agent_profile("reviewer") == "reviewer"
+    # R1: resolution after repair must use the INSTALLED definition, never the
+    # same-named packaged seed reached through a stale tolerant snapshot.
+    assert "EDITED_ONLY_MARKER" in resumed._goal_state.agent_brief
+    durable = read_session_attachment(root / "sess")
+    assert durable is not None and durable.goal == "Keep this goal"
     await resumed.dispose()
 
 
@@ -345,5 +386,9 @@ async def test_shared_status_precedence(live, pending, unseen, kind, expected):
         "anchor",
     )
     assert entry.status_code == expected
-    assert entry.active == (entry.rank[0] <= 2)
+    # Section membership is deliberately INDEPENDENT of the ordering category
+    # (#800): a busy row with an unread outcome ranks below unviewed completions
+    # while still belonging to Active, so tying this to a rank threshold would
+    # re-couple what that change separated.
+    assert entry.active == bool(live or pending or unseen)
     assert CatalogEntry(SessionRow("123456789abc", 1, "unknown")).status_code == "recent"
