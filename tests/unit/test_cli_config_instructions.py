@@ -194,6 +194,80 @@ def test_an_unreadable_file_is_named_as_unreadable_not_as_absent(home: Path, cap
     assert "unreadable; skipped" in out
 
 
+def test_an_existing_but_empty_file_is_reported_as_empty_not_as_absent(home: Path, capsys) -> None:
+    """A zero-byte ``~/.agents/AGENTS.md`` EXISTS.
+
+    Reporting "no imported file exists at those paths" about a path that has a
+    file on it is a statement about the filesystem that is simply false, and it
+    is the mirror image of the distinction ``InstructionSource.unreadable``
+    exists to draw: an operator who truncated their shared file while debugging
+    must be sent to the empty file they have, not to a missing one.
+    """
+    _write_agents_md(home, "")
+    _write_system_prompt(home, "- lop only.\n")
+
+    assert config_instructions_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "no imported file exists at those paths" not in out
+    # The stronger claim for an imported row: the loader lists only paths that
+    # resolve to a real file, so "might not exist" would understate what is known.
+    assert "Empty: the file is there but holds no instructions" in out
+    assert "(empty)" in out
+    assert str(home / ".agents" / "AGENTS.md") in out
+
+
+def test_a_whitespace_only_file_is_reported_as_empty_not_as_absent(home: Path, capsys) -> None:
+    """Same rule as the zero-byte case: the bytes are there, the rules are not."""
+    _write_agents_md(home, "\n\n   \t\n")
+    _write_system_prompt(home, "- lop only.\n")
+
+    assert config_instructions_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "no imported file exists at those paths" not in out
+    assert "Empty: the file is there but holds no instructions" in out
+
+
+def test_a_superset_native_file_names_the_overlap_it_pays_for(home: Path, capsys) -> None:
+    """The one arrangement the digest collapse cannot catch.
+
+    Without this row the frame is byte-identical to two genuinely distinct
+    files, so the guide's "check with ``config instructions``" pointed at a
+    diagnosis the output could not give — the gap #822 reported, one level down.
+    The overlapping TEXT must never appear: the count is the answer.
+    """
+    _write_agents_md(home, "- SHARED-OVERLAP-MARKER rule.\n")
+    _write_system_prompt(home, "- SHARED-OVERLAP-MARKER rule.\n\n- lop only.\n")
+
+    assert config_instructions_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert 'Overlaps: contains all 29 chars of "imported" verbatim' in out
+    assert "both copies are sent" in out
+    assert "SHARED-OVERLAP-MARKER" not in out
+
+
+def test_the_overlap_row_stays_silent_on_the_collapsed_and_distinct_cases(
+    home: Path, capsys
+) -> None:
+    """``Overlaps:`` is a cost the operator can remove, so it must not fire on
+    the two arrangements where nothing is being paid twice: identical files are
+    already collapsed and reported as such, and two distinct files are healthy.
+    A warning on a healthy install is a warning operators learn to ignore."""
+    _write_agents_md(home, "- Same.\n")
+    _write_system_prompt(home, "- Same.\n")
+    assert config_instructions_command(_args()) == 0
+    collapsed = capsys.readouterr().out
+    assert "Collapsed:" in collapsed
+    assert "Overlaps:" not in collapsed
+
+    _write_agents_md(home, "- Shared rule.\n")
+    _write_system_prompt(home, "- Entirely different.\n")
+    assert config_instructions_command(_args()) == 0
+    assert "Overlaps:" not in capsys.readouterr().out
+
+
 def test_the_report_never_prints_the_contents(home: Path, capsys) -> None:
     """Paths and sizes, never the rules themselves."""
     _write_agents_md(home, "- SHARED-SECRET-MARKER rule.\n")
@@ -221,6 +295,28 @@ def test_the_command_writes_nothing(home: Path, capsys) -> None:
     assert {path: path.stat().st_mtime_ns for path in (imported, native)} == before
     # And no file was created anywhere under the two roots it can see.
     assert sorted(p.name for p in (home / ".agents").iterdir()) == ["AGENTS.md"]
+
+
+def test_the_command_writes_nothing_under_agent(tmp_path: Path, monkeypatch, capsys) -> None:
+    """``--agent`` is the ONE branch that can write, and the writes-nothing test
+    above cannot see it: it passes no agent, so it never reaches the registry,
+    and it scans only ``~/.agents`` — never the config dir, which is where
+    ``AgentRegistry.__init__``'s ``mkdir`` lands. On a machine with no config
+    root, asking a read-only provenance command about an agent materialised
+    ``<config_dir>/`` and ``<config_dir>/agents/``.
+
+    Deliberately NOT using the ``home`` fixture, which pre-creates the config
+    dir: the defect only shows on a home that has none.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+
+    assert config_instructions_command(_args(agent_name="ghost")) == 1
+
+    err = capsys.readouterr().err
+    assert "No agent found with name: ghost" in err
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 def test_an_unknown_agent_name_is_refused_without_creating_it(home: Path, capsys) -> None:

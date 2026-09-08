@@ -2489,6 +2489,137 @@ def test_the_resolver_reports_a_truncated_import(
     assert sources[0].included <= session_factory.MAX_USER_INSTRUCTIONS_CHARS
 
 
+def test_the_resolver_attributes_a_multi_file_cut_to_the_files_that_lost_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget cuts the JOINED imported block from the tail, so a cut larger
+    than the last file also eats the tail of the one before it.
+
+    Charging the whole cut to the last contributor credited earlier files with
+    text that never reached the prompt: rows summing to 107,998 "included"
+    characters inside a 64,000-character total, and the file that actually lost
+    44k carrying no truncation flag. The sum invariant below is the property
+    that makes the report checkable at all — a report whose own rows do not add
+    up to its own total is the defect this surface exists to close.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system_prompt.md").write_text("N" * 60_000, encoding="utf-8")
+    first = tmp_path / "a.md"
+    first.write_text("A" * 60_000, encoding="utf-8")
+    second = tmp_path / "b.md"
+    second.write_text("B" * 10_000, encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS", f"{first}:{second}")
+
+    assembled, sources = session_factory.resolve_user_instructions()
+
+    imported = [source for source in sources if source.label == "imported"]
+    assert [source.path for source in imported] == [first, second]
+    # Measured against the prompt itself, not against a model of it. ``included``
+    # is the span this file occupies in the assembled text, so it covers the
+    # truncation marker that replaced its own tail — which is what keeps the sum
+    # invariant below exactly true rather than off by the marker.
+    first_span = assembled[: imported[0].included]
+    assert first_span.count("A") == assembled.count("A") < imported[0].included
+    assert "custom instructions truncated at" in first_span
+    # The second file reached the prompt not at all: the budget was already
+    # spent by the first, which the old accounting credited as whole.
+    assert imported[1].included == assembled.count("B") == 0
+    # Both imported files lost text, so both must say so — the earlier file is
+    # the one the old accounting reported as whole.
+    assert imported[0].truncated is True
+    assert imported[1].truncated is True
+
+    separators = 2 * max(0, sum(1 for source in sources if source.included) - 1)
+    assert sum(source.included for source in sources) + separators == len(assembled)
+
+
+def test_the_resolver_reports_an_existing_but_empty_import_rather_than_omitting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent and present-but-empty are different states with different fixes.
+
+    Omitting the record made the report state that no file exists at a path
+    that has one — the mirror image of the distinction
+    ``InstructionSource.unreadable`` is documented to preserve.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _write_ecosystem_file(tmp_path, "")
+
+    _, sources = session_factory.resolve_user_instructions()
+
+    imported = [source for source in sources if source.label == "imported"]
+    assert [source.path for source in imported] == [path]
+    assert imported[0].chars == 0
+    assert imported[0].included == 0
+    # Empty is not degraded and not a duplicate: the other two states must stay
+    # off, or the operator is sent to fix something that is not wrong.
+    assert imported[0].unreadable is False
+    assert imported[0].collapsed is False
+
+
+def test_the_resolver_names_a_superset_but_not_a_collapsed_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The superset is the arrangement the digest collapse cannot catch, and
+    the only one where the operator pays for the same rules twice on every
+    cached request. The collapsed case already reports itself and costs
+    nothing, so flagging it too would train the operator to ignore the row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Shared rule."
+    _write_ecosystem_file(tmp_path, shared)
+
+    (tmp_path / "config" / "system_prompt.md").write_text(
+        f"{shared}\n\n- lop only.", encoding="utf-8"
+    )
+    assembled, sources = session_factory.resolve_user_instructions()
+    native = next(source for source in sources if source.label == "system_prompt.md")
+    assert native.overlaps == "imported"
+    assert native.overlap_chars == len(shared)
+    # The cost the row is claiming is real: both copies are in the prompt.
+    assert assembled.count(shared) == 2
+
+    # Byte-identical: collapsed, sent once, and NOT flagged as an overlap.
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+    assembled, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps for source in sources] == [None, None]
+    assert next(source for source in sources if source.label == "imported").collapsed is True
+    assert assembled.count(shared) == 1
+
+    # Two distinct files: healthy, and must stay unflagged.
+    (tmp_path / "config" / "system_prompt.md").write_text("- Entirely other.", encoding="utf-8")
+    _, sources = session_factory.resolve_user_instructions()
+    assert [source.overlaps for source in sources] == [None, None]
+
+
+def test_the_resolver_flags_a_profile_that_repeats_an_earlier_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dedup collapses IMPORTED files only, so an agent profile whose prompt
+    repeats ``system_prompt.md`` genuinely ships both copies in every request of
+    every session using that agent. Equality is therefore a real overlap here,
+    unlike the imported case where it is collapsed upstream and reported as
+    such — the row must fire on what the prompt actually carries.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config").mkdir()
+    shared = "- Rule the profile repeats."
+    (tmp_path / "config" / "system_prompt.md").write_text(shared, encoding="utf-8")
+
+    assembled, sources = session_factory.resolve_user_instructions(shared)
+
+    profile = next(source for source in sources if source.label == "agent profile")
+    assert profile.overlaps == "system_prompt.md"
+    assert profile.overlap_chars == len(shared)
+    assert assembled.count(shared) == 2
+
+
 def test_the_resolver_can_stay_silent_for_the_provenance_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:

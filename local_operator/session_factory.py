@@ -33,7 +33,7 @@ import logging
 import os
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -776,6 +776,22 @@ class InstructionSource:
     #: the ordinary state of an install that simply has no such file, and
     #: reporting both as "empty" sends the operator to the wrong one.
     unreadable: bool = False
+    #: Label of an EARLIER source whose text this one contains verbatim, and how
+    #: many characters that is. The superset arrangement — shared rules plus a
+    #: lop-only overlay in ``system_prompt.md`` — is the case the digest
+    #: collapse cannot catch, so both copies ride the cached prefix of every
+    #: request. Without this the frame is identical to two genuinely distinct
+    #: files, and "two rows with non-zero Included" is true of every healthy
+    #: multi-source install, so it cannot be the diagnosis.
+    #:
+    #: Containment rather than equality, and it does not double-report the
+    #: collapse: an imported file byte-identical to ``system_prompt.md`` is
+    #: dropped upstream and arrives with empty ``text``, so it is excluded from
+    #: the test. An agent PROFILE equal to an earlier source is a different
+    #: matter — profiles are never collapsed — and is flagged, correctly: both
+    #: copies really are in the prompt.
+    overlaps: str | None = None
+    overlap_chars: int = 0
 
 
 def resolve_user_instructions(
@@ -867,32 +883,57 @@ def resolve_user_instructions(
 
     # The whole-source cap is reported per imported FILE rather than against
     # the joined block: with several override paths the operator needs to know
-    # which file lost text, and the join is what the budget acts on. Attributing
-    # the cut to the last file read is the only accurate answer, since the
-    # earlier ones are what consumed the budget.
-    ecosystem_cut = len(ecosystem_raw) - len(ecosystem_text)
+    # which file lost text, and the join is what the budget acts on. The budget
+    # truncates that joined block from the TAIL, so a cut larger than the last
+    # file also eats the tail of the file before it. Charging the whole cut to
+    # the last contributor therefore credited earlier files with text that never
+    # reached the prompt — rows summing to 107,998 "included" characters inside a
+    # 64,000-character total, with the file that actually lost 44k carrying no
+    # truncation flag. Walking the SURVIVING length forward instead reproduces
+    # how the block was actually cut, so each file is credited only what its own
+    # span contributed.
+    #
+    # ``remaining`` is measured against the ASSEMBLED block rather than the raw
+    # one, which means the truncation marker rides with the file whose tail it
+    # replaced. That is deliberate: it keeps ``sum(included) + separators ==
+    # len(assembled)`` exactly true, and a report whose own rows do not add up to
+    # its own total is the defect class this whole surface exists to close.
+    remaining = len(ecosystem_text)
+    emitted = False
     sources: list[InstructionSource] = []
-    for index, record in enumerate(ecosystem_records):
-        is_last_contributor = index == max(
-            (i for i, r in enumerate(ecosystem_records) if r.text), default=-1
-        )
+    # What each source actually held, positionally parallel to ``sources``, for
+    # the containment test below. Empty for a source that contributed nothing.
+    raw_texts: list[str] = []
+    for record in ecosystem_records:
+        if record.text:
+            if emitted:
+                # The "\n\n" join before this file, charged to neither side.
+                remaining = max(0, remaining - 2)
+            included = min(record.chars, remaining)
+            remaining -= included
+            emitted = emitted or included > 0
+        else:
+            # Collapsed, empty or unreadable: contributed nothing, and consumed
+            # no separator either.
+            included = 0
+        raw_texts.append(record.text)
         sources.append(
             InstructionSource(
                 label="imported",
                 path=record.path,
                 chars=record.chars,
-                included=(
-                    max(0, record.chars - ecosystem_cut)
-                    if is_last_contributor
-                    else (record.chars if record.text else 0)
-                ),
+                included=included,
                 collapsed=record.collapsed,
                 # Truncated by the per-FILE 64 KiB read cap, or by the shared
-                # instructions budget landing on this file.
-                truncated=record.truncated or (is_last_contributor and ecosystem_cut > 0),
+                # instructions budget landing on this file. Guarded on
+                # ``record.text`` so a collapsed file — which also has
+                # ``included`` 0 against a non-zero ``chars`` — is not reported
+                # as truncated on top of being reported as collapsed.
+                truncated=record.truncated or (bool(record.text) and included < record.chars),
                 unreadable=record.unreadable,
             )
         )
+    raw_texts.append(global_raw)
     sources.append(
         InstructionSource(
             label="system_prompt.md",
@@ -904,6 +945,7 @@ def resolve_user_instructions(
         )
     )
     if agent_raw:
+        raw_texts.append(agent_raw)
         sources.append(
             InstructionSource(
                 label="agent profile",
@@ -914,6 +956,34 @@ def resolve_user_instructions(
                 truncated=len(agent_text) < len(agent_raw),
             )
         )
+
+    # Duplicate content the collapse cannot catch. The digest collapse is keyed
+    # on the WHOLE file, so a native file that is a superset of the shared one
+    # ships both copies in every cached request — the expensive arrangement, and
+    # the one the frame could not previously distinguish from two healthy
+    # distinct files. A plain containment test on text already in hand: no new
+    # read, no new arithmetic, and CPython's substring search over a handful of
+    # sources bounded at 64,000 characters is not work worth avoiding.
+    #
+    # Restricted to sources that survived WHOLE (``included == chars``) so the
+    # row can say both copies are sent without qualification: a source the
+    # budget already cut carries a ``Truncated:`` row, and claiming a verbatim
+    # duplicate of text that was itself partly dropped would be the report
+    # asserting something the prompt does not do.
+    whole = [
+        (index, raw)
+        for index, (source, raw) in enumerate(zip(sources, raw_texts))
+        if raw and source.included == source.chars
+    ]
+    for position, (index, raw) in enumerate(whole):
+        for earlier_index, earlier_raw in whole[:position]:
+            if earlier_raw in raw:
+                sources[index] = replace(
+                    sources[index],
+                    overlaps=sources[earlier_index].label,
+                    overlap_chars=len(earlier_raw),
+                )
+                break
 
     # Imported first, native second, profile last: later text is read as the
     # more specific instruction, so lop's own file outranks the shared one and

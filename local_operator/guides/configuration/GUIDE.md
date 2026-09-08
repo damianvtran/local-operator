@@ -72,7 +72,9 @@ Keep the file free of secrets and of absolute home paths (prefer `~/`) when it m
 
 ### Imported instructions (`~/.agents/AGENTS.md`)
 
-Local Operator also reads `~/.agents/AGENTS.md`, the tool-neutral user-scope file Claude Code, Codex, opencode and droid have converged on, so one set of standing preferences serves every harness without a second copy under a lop-specific name. That directory and no other by default because Local Operator already scans `~/.agents/skills`; `~/.local-operator/AGENTS.md` is deliberately **not** read, since with both it and `system_prompt.md` present there would be no single answer to what `GET /v1/config/system-prompt` returns or where `PATCH` writes.
+Local Operator also reads `~/.agents/AGENTS.md`, so one set of standing preferences can serve several harnesses without a second copy under a lop-specific name. There is no standard for *user-scope* agent instructions — the agents.md spec covers repository files only — but the **filename** has converged, and `~/.agents/` is a tool-neutral directory with more than one independent implementation (Cline, Factory droid). Local Operator chose it because it already scans `~/.agents/skills`, so this needs no new relationship with a path it does not already know. `~/.local-operator/AGENTS.md` is deliberately **not** read, since with both it and `system_prompt.md` present there would be no single answer to what `GET /v1/config/system-prompt` returns or where `PATCH` writes.
+
+Other harnesses keep their user-scope instructions elsewhere — Claude Code in `~/.claude/CLAUDE.md`, Codex in `~/.codex/AGENTS.md` — and Local Operator does **not** read those paths. Point it at one with the redirect below if that is where your rules already live.
 
 - **Read-only.** `system_prompt.md` remains the sole write target of Settings → **Instructions** and `GET`/`PATCH /v1/config/system-prompt`. Local Operator never writes an imported file.
 - **Order and precedence**: imported file first, then `system_prompt.md`, then the selected agent profile's prompt. Later text reads as the more specific instruction, so your own `system_prompt.md` wins over the shared file and the profile outranks both.
@@ -83,7 +85,7 @@ export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=~/.config/AGENTS.md:~/team/AGENTS.m
 export LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS=   # off
 ```
 
-Each imported file is capped at 64 KiB at read; the assembled result is then bounded on the same 64,000-character budget described above, where the imported text is a third source with its own 16,000-character floor, so it can neither crowd out nor be crowded out by the other two.
+Each imported file is capped at 64 KiB at read; the assembled result is then bounded on the same 64,000-character budget described above. The imported text and the agent profile each hold a **16,000-character floor**; `system_prompt.md` has none and takes whatever remains. So a large imported file — written by another tool, and one you may not know is there — **can** truncate your own `system_prompt.md`, silently dropping its last rules: with a 40,000-character `~/.agents/AGENTS.md`, a 62,000-character `system_prompt.md` is cut to 47,998. `local-operator config instructions` marks the file that lost text with `Truncated:`, and truncation is logged as a warning.
 
 **Watch the duplicate collapse.** Content byte-identical to `system_prompt.md` (whitespace-stripped) is loaded once instead of twice. The collapse is keyed on a digest of the **whole file**, so a `system_prompt.md` that is a *superset* of the shared file — shared rules plus a lop-only overlay, the natural arrangement when maintaining one rule set across harnesses — does **not** collapse, and you pay for both copies in the cached prefix of every request, in every session and every subagent. Check with:
 
@@ -91,7 +93,16 @@ Each imported file is capped at 64 KiB at read; the assembled result is then bou
 local-operator config instructions
 ```
 
-It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. Two rows both reporting non-zero "Included" for the same rules means no collapse: either keep the shared file and the lop-only file **disjoint**, or make them byte-identical.
+It prints each source, its resolved path, characters read versus included, and whether it was collapsed or truncated — never the contents. A superset is named explicitly, so you do not have to infer it from the counts:
+
+```
+│ 2. system_prompt.md
+│    Path: ~/.local-operator/system_prompt.md
+│    Read: 1,124 chars   Included: 1,124 chars
+│    Overlaps: contains all 1,079 chars of "imported" verbatim; both copies are sent
+```
+
+An `Overlaps:` row means you are paying twice for those characters on every request. Fix it by keeping the shared file and the lop-only file **disjoint** — move the overlapping rules out of `system_prompt.md` — or by making them byte-identical, which collapses instead. Two rows with no `Overlaps:` line are two genuinely distinct sources and are nothing to fix.
 
 ## Set the default provider and model
 

@@ -278,6 +278,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "instructions",
         help="Show which custom-instruction files a session assembles, in order "
         "(paths and sizes only, never their contents)",
+        # ``description=`` as well as ``help=``: the latter renders only on the
+        # PARENT ``config --help`` page, so without this the command's own
+        # ``--help`` is blank above the options list.
+        description="Show which custom-instruction files a session assembles, in "
+        "order, with the size each contributed and whether it was collapsed as a "
+        "duplicate, truncated, or overlaps an earlier source. Paths and sizes "
+        "only, never the contents.",
         parents=[parent_parser],
     )
 
@@ -1397,7 +1404,19 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     if agent_name:
         from local_operator.agents import AgentRegistry
 
-        registry = AgentRegistry(config_dir())
+        # Guarded because ``AgentRegistry.__init__`` mkdirs both ``config_dir``
+        # and ``config_dir/agents`` — so on a machine with no config root at
+        # all, asking this read-only command about an agent materialised one.
+        # Read-only was a stated deliverable, and there is nothing to report
+        # anyway: a config dir that does not exist holds no agents.
+        root = config_dir()
+        if not root.exists():
+            print(
+                paint(f"Error: No agent found with name: {agent_name}", ERROR, stream=sys.stderr),
+                file=sys.stderr,
+            )
+            return 1
+        registry = AgentRegistry(root)
         agent = registry.get_agent_by_name(agent_name)
         if agent is None:
             print(
@@ -1411,6 +1430,16 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     assembled, sources = resolve_user_instructions(agent_prompt, log_provenance=False)
 
     override = os.environ.get(ECOSYSTEM_INSTRUCTIONS_ENV)
+    # Both counts right-aligned in one field so the ``Included`` column does not
+    # move between rows: comparing ``Read`` against ``Included``, and rows
+    # against each other, is the whole reason both numbers are printed, and a
+    # column that shifts with the digit count defeats scanning down it. Sized
+    # from the data rather than a constant so the common small-number case
+    # stays tight.
+    count_width = max(
+        (len(f"{value:,}") for source in sources for value in (source.chars, source.included)),
+        default=1,
+    )
     print(paint("\n╭─ Custom instructions, in assembly order ──────", SUCCESS))
     for index, source in enumerate(sources, start=1):
         label = source.label
@@ -1422,7 +1451,8 @@ def config_instructions_command(args: argparse.Namespace) -> int:
         # operator is trying to confirm, and a single figure cannot express it.
         print(
             paint(
-                f"│    Read: {source.chars:,} chars   Included: {source.included:,} chars",
+                f"│    Read: {source.chars:>{count_width},} chars"
+                f"   Included: {source.included:>{count_width},} chars",
                 SUCCESS,
             )
         )
@@ -1435,7 +1465,25 @@ def config_instructions_command(args: argparse.Namespace) -> int:
             # A path with no bytes behind it reads as a file that exists and is
             # being used. Saying so keeps the default install (no
             # system_prompt.md) from looking like a configured-but-broken one.
-            print(paint("│    Empty: no file at that path, or nothing in it", SUCCESS))
+            #
+            # Imported rows state the stronger fact: the loader only lists paths
+            # that resolve to a real file, so an imported row with zero
+            # characters is a file that EXISTS and is blank — not a path that
+            # might be empty. Reporting the disjunction there would repeat, one
+            # level down, the "no imported file exists" claim about a path that
+            # has one.
+            #
+            # CYAN, not SUCCESS: every other line in the box — chrome, headers,
+            # counts — is green, so a green annotation carries no signal at all,
+            # and this is the row the DEFAULT install shows. The ladder is green
+            # = normal contribution, cyan = present but contributed nothing,
+            # yellow = degraded.
+            empty_note = (
+                "Empty: the file is there but holds no instructions"
+                if source.label == "imported"
+                else "Empty: no file at that path, or nothing in it"
+            )
+            print(paint(f"│    {empty_note}", CYAN))
         if source.collapsed:
             print(
                 paint(
@@ -1445,11 +1493,34 @@ def config_instructions_command(args: argparse.Namespace) -> int:
             )
         if source.truncated:
             print(paint("│    Truncated: hit the size cap; the tail was dropped", WARNING))
+        if source.overlaps:
+            # The superset arrangement, which the digest collapse cannot catch
+            # and which two rows of non-zero "Included" cannot distinguish from
+            # two genuinely distinct files. WARNING, matching ``Truncated:``:
+            # this is a cost the operator is paying on every cached request and
+            # can remove. The overlapping TEXT is never printed — the count and
+            # the other source's label are the whole answer.
+            print(
+                paint(
+                    f"│    Overlaps: contains all {source.overlap_chars:,} chars of "
+                    f'"{source.overlaps}" verbatim; both copies are sent',
+                    WARNING,
+                )
+            )
     if not sources:
         print(paint("│ (none — no instruction sources resolved)", SUCCESS))
+    # The recurrence, not just the headroom: without it the counts read as file
+    # sizes rather than as a cost paid again on every request, which is the
+    # framing the guide uses and the reason the numbers are worth showing.
     print(
         paint(
             f"│ Total assembled: {len(assembled):,} of {MAX_USER_INSTRUCTIONS_CHARS:,} chars",
+            SUCCESS,
+        )
+    )
+    print(
+        paint(
+            "│ Re-sent with every request, in every session and subagent",
             SUCCESS,
         )
     )
@@ -1484,14 +1555,25 @@ def config_instructions_command(args: argparse.Namespace) -> int:
         )
         print(paint(f"│ Files read: none — {reason}", SUCCESS))
     else:
+        # "Files read" is plural and reads as a heading, so repeating it per row
+        # made a two-file install read as two separate answers to one question.
+        # Printed once with the entries indented beneath, matching the
+        # four-space continuation the first box already uses — but only in the
+        # multi-row case, since a lone "Files read: <path>" is correct as one
+        # line and splitting it would cost a row for nothing.
+        if len(imported) > 1:
+            print(paint("│ Files read:", SUCCESS))
         for source in imported:
             if source.unreadable:
                 state = "unreadable; skipped"
             elif source.collapsed:
                 state = "collapsed"
+            elif source.chars == 0:
+                state = "empty"
             else:
                 state = f"{source.included:,} chars"
-            print(paint(f"│ Files read: {source.path} ({state})", SUCCESS))
+            prefix = "│    " if len(imported) > 1 else "│ Files read: "
+            print(paint(f"{prefix}{source.path} ({state})", SUCCESS))
     print(
         paint(
             "│ Read-only: system_prompt.md stays the only file lop writes",

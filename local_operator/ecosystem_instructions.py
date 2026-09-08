@@ -231,6 +231,24 @@ def read_ecosystem_instructions(
             continue
         stripped = text.strip()
         if not stripped:
+            # A record, not a ``continue``: the file EXISTS. Dropping it here made
+            # the report say "no imported file exists at those paths" about a
+            # path that has a file on it, which is the mirror image of the
+            # mistake ``InstructionSource.unreadable`` exists to prevent — an
+            # operator who truncated their shared file while debugging would be
+            # sent looking for a missing file instead of at the empty one they
+            # have. Its digest is deliberately NOT added to ``seen``: nothing
+            # was contributed, so it cannot collapse a later file.
+            records.append(
+                EcosystemFile(
+                    path=path,
+                    text="",
+                    chars=0,
+                    collapsed=False,
+                    truncated=truncated,
+                    unreadable=False,
+                )
+            )
             continue
         digest = content_digest(stripped)
         collapsed = digest in seen
