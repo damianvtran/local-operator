@@ -610,7 +610,15 @@ class _Body:
     def blank(self) -> None:
         self.lines.append(Text())
 
-    def kv(self, name: str, value: str, note: str = "", *, notes: Sequence[str] = ()) -> None:
+    def kv(
+        self,
+        name: str,
+        value: str,
+        note: str = "",
+        *,
+        notes: Sequence[str] = (),
+        dim_value: bool = False,
+    ) -> None:
         """A Totals-style scalar row, matching ``build_report``'s ``kv`` exactly.
 
         ``notes`` is a ladder of progressively shorter spellings of the SAME
@@ -623,12 +631,38 @@ class _Body:
         that looks like a wrong one, which is the defect this screen exists to
         fix. Cropping a qualifier is fine; cropping the scope is not.
 
+        **A LADDER RUNG IS STILL SHEDDABLE, SO NOTHING LOAD-BEARING MAY LIVE
+        ONLY HERE.** The ladder narrows the range of widths at which a qualifier
+        disappears; it cannot remove it, because below the shortest rung's budget
+        there is nothing left to draw and cropping mid-word is the other failure
+        this screen forbids. The first version of ``Execution errors`` put the
+        whole load-bearing distinction — that the number is NOT a model-accuracy
+        figure — in these notes, so at 68 columns the row rendered as a bare
+        integer named "errors" sitting under an accuracy percentage: worse than
+        the ``note`` path it replaced, which at least shed at a documented
+        :data:`_NOTE_MIN` (design round 1, D1).
+
+        The rule that followed: **a distinction the reader must not lose belongs
+        in the LABEL, which is never shed; the notes carry only the refinement.**
+        That is why the row is now ``Tool-side errors`` rather than ``Execution
+        errors`` — the scope survives every width by construction, and the ladder
+        is free to shed the rate and its denominator as the frame narrows.
+        ``test_the_execution_scope_survives_at_every_supported_width`` pins it.
+
+        ``dim_value`` renders the value cell in ``dim`` rather than ``fg``, for
+        the literal ``unknown``: an absent measurement should not carry the same
+        ink as a measured number, which is the treatment ``_timing_rows``
+        already established with ``unknown (0 samples)`` (design round 1, D5).
+
         Callers with a purely decorative qualifier keep passing ``note`` and keep
         the old shed-below-``_NOTE_MIN`` behaviour.
         """
         row = Text()
         row.append(f"  {name:<22}", style=semantic_style("dim"))
-        row.append(f"{value:<{_VALUE_CELL}}", style=semantic_style("fg"))
+        row.append(
+            f"{value:<{_VALUE_CELL}}",
+            style=semantic_style("dim" if dim_value else "fg"),
+        )
         if notes:
             # Budget measured from the row as actually built, not from a
             # restated literal: a change to _VALUE_CELL or the label column
@@ -638,6 +672,12 @@ class _Body:
                 if len(candidate) <= budget:
                     row.append(f"  {candidate}", style=semantic_style("dim"))
                     break
+            # No `else`: when no rung fits the qualifier sheds rather than being
+            # cropped mid-word. That is safe ONLY because no caller keeps a
+            # load-bearing distinction here — see the docstring's label rule.
+            # Drawing the last rung unconditionally was tried and rejected: it
+            # reintroduces the mid-word crop the ladder exists to avoid, at
+            # exactly the widths where it would fire.
         elif note and self.width >= _NOTE_MIN:
             # Below _NOTE_MIN the qualifier is shed and the fact kept: at 50
             # columns the note wraps onto its own unindented line and reads as a
@@ -1071,21 +1111,73 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
     is in that state, and a fabricated zero on a diagnostics screen is worse
     than a withheld fact: the reader cannot tell it from a measurement.
     """
-    if stats is None or stats.total <= 0:
-        body.kv("Tool calls", "unknown", "not recorded for this session")
+    if stats is None or stats.recorded <= 0:
+        # ``recorded``, not ``total``: a session whose only tool calls came from
+        # eval's bridge DID make calls, and reading it as "unknown" would be the
+        # mirror of the fabricated zero this rule forbids.
+        body.kv("Tool calls", "unknown", "not recorded for this session", dim_value=True)
         # The two rates are OMITTED rather than shown as unknown: three unknown
         # rows is noise, and the one row above already says why.
         return
-    failed = stats.total - stats.ok
-    detail = f"{stats.ok} ok" + (f" · {failed} failed" if failed else "")
-    body.kv("Tool calls", str(stats.total), detail)
+
+    # THE BLOCK IS A SUBTRACTION CHAIN, and every step of it is on screen
+    # (design round 1, D2). The headline is EVERY call recorded; each ` └ ` row
+    # below removes a class from it, in the order the rates remove them, so the
+    # validity denominator is reached by reading downward rather than by
+    # trusting an unexplained shift:
+    #
+    #   Tool calls          35   <- recorded, both origins
+    #    └ nested (eval)     3   <- not the model emitting a call
+    #    └ denied/aborted    1   <- never allowed to prove anything
+    #   Call validity          4 invalid of 31 emitted   (35 - 3 - 1)
+    #
+    # This is why the headline is `recorded` and not `total`: under the ` └ `
+    # idiom a sub-row is PART of the row above it, so a model-origin headline
+    # with a nested sub-row under it would be arithmetically false. The previous
+    # version printed 35 and then a 34-call denominator one line later with
+    # nothing accounting for the difference, which reads as the screen
+    # miscounting — the exact misreading this feature exists to remove.
+    ok = stats.ok + stats.nested_ok
+    failed = stats.recorded - ok
+    detail = f"{ok} ok" + (f" · {failed} failed" if failed else "")
+    body.kv("Tool calls", str(stats.recorded), detail)
+
+    if stats.nested_total:
+        # Nested calls are real work the session did, so they are shown — but
+        # apart, and labelled, because no rate here is computed over them (see
+        # the origin partition on ``ToolCallStats``). Without this row a reader
+        # watching 20 eval-dispatched calls happen sees a rate over 3 and
+        # concludes the counter is broken.
+        body.kv(
+            " └ nested (eval)",
+            str(stats.nested_total),
+            notes=(
+                f"{stats.nested_ok} ok · eval's calls, not the model's",
+                f"{stats.nested_ok} ok · not the model's",
+                "not the model's",
+            ),
+        )
+    if stats.excluded:
+        # The denied/aborted calls: correctly outside both denominators, and
+        # previously invisible, which left the headline `N failed` short of the
+        # sub-rows by exactly this number. With the approval gate on, denials
+        # are the DEFAULT posture, so this was the modal unaccountable count.
+        body.kv(
+            " └ denied or aborted",
+            str(stats.excluded),
+            notes=(
+                f"you stopped {'these' if stats.excluded > 1 else 'this'}, not the model",
+                "your decision, not the model's",
+                "your decision",
+            ),
+        )
 
     validity = stats.validity
     if validity is None:
         # Rows exist but nothing counted toward the denominator (every call was
         # denied or aborted). Mirrors ``_timing_rows``' "unknown (0 samples)"
         # wording on purpose, so the two read as the same kind of statement.
-        body.kv("Call validity", "unknown", "0 emitted")
+        body.kv("Call validity", "unknown", "0 emitted", dim_value=True)
     else:
         invalid = stats.model_faults
         # A ladder, not a plain note: this qualifier carries the SCOPE of the
@@ -1103,8 +1195,11 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         )
         # Name the faults rather than only counting them: "which one" is the
         # actionable half, and it is what makes the figure a benchmark rather
-        # than a score. Biggest first, and only faults that actually occurred.
-        for name in sorted(MODEL_FAULTS, key=lambda f: -stats.faults.get(f, 0)):
+        # than a score. Biggest first; the NAME breaks ties, because the sort
+        # runs over a frozenset and set order for strings varies with
+        # PYTHONHASHSEED — tied rows swapping between two renders of the same
+        # data reads as the data changing (design round 1, D3).
+        for name in sorted(MODEL_FAULTS, key=lambda f: (-stats.faults.get(f, 0), f)):
             count = stats.faults.get(name, 0)
             if count:
                 # Leading space matches ``_tool_rows``' " └ " exactly: the two
@@ -1113,18 +1208,34 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
                 body.kv(f" └ {name.replace('_', ' ')}", str(count))
 
     execution = stats.execution_error_rate
-    if execution is not None and stats.execution_faults:
-        # Explicitly labelled as NOT a model metric, every time it is drawn. It
-        # counts the web being down and an MCP server refusing credentials; a
-        # reader who takes it for an accuracy figure will blame the model for
-        # the network.
+    if execution is not None:
+        # Drawn whenever calls were DISPATCHED, including at zero. Suppressing
+        # the zero made "no execution errors" and "not measured" identical on
+        # screen, which is the converse of this screen's standing invariant and
+        # is inconsistent with `Call validity` one line above, which shows its
+        # own zero (design round 1, D4). The modal healthy session is exactly
+        # the case that was being hidden.
+        #
+        # THE LABEL CARRIES THE SCOPE, not the note. "Tool-side" says whose
+        # fault these are in the one cell that is never shed, so the distinction
+        # survives a 50-column pane; the note then refines it with the rate and
+        # the denominator and may shed freely. Named "Execution errors" first,
+        # which put the entire distinction in the shed-able half and rendered as
+        # a bare integer under an accuracy percentage at 68 columns (D1). It
+        # counts the web being down and an MCP server refusing credentials — a
+        # reader who takes it for a model metric blames the model for the
+        # network — and it covers model-emitted calls only, like every count in
+        # this block.
+        dispatched = stats.emitted - stats.model_faults
         body.kv(
-            "Execution errors",
+            "Tool-side errors",
             str(stats.execution_faults),
             notes=(
-                f"{execution * 100:.1f}% · not a model-accuracy figure",
-                f"{execution * 100:.1f}% · not model accuracy",
-                "not model accuracy",
+                f"{execution * 100:.1f}% of {dispatched} dispatched · "
+                "not a model-accuracy figure",
+                f"{execution * 100:.1f}% of {dispatched} dispatched · not model accuracy",
+                f"{execution * 100:.1f}% of {dispatched} dispatched",
+                f"{execution * 100:.1f}% dispatched",
             ),
         )
 

@@ -1565,10 +1565,17 @@ class LoopConfig(BaseModel):
     #: clean call, else the classification made where the reason is known \u2014 see
     #: ``_FAULT_*`` in ``loop.py``.
     #:
-    #: The loop invokes this on the EVENT LOOP inside a live turn, so an
-    #: implementation must be non-blocking and must not raise; the loop guards
-    #: it anyway, because a host that breaks its contract must still not be able
-    #: to kill a turn with a bad analytics hook.
+    #: The loop invokes this SYNCHRONOUSLY on the EVENT LOOP inside a live turn,
+    #: once per finished tool call, so an implementation must be non-blocking and
+    #: must not raise. The loop guards against the raising half — a host that
+    #: breaks its contract must still not be able to kill a turn with a bad
+    #: analytics hook — but it CANNOT guard against the blocking half: there is
+    #: no timeout around the call, so whatever time this hook spends is added
+    #: directly to the turn. Measured: a hook that sleeps 0.75 s turns a 0.002 s
+    #: turn into a 0.754 s one. The shipped implementation is a single bounded
+    #: ``put_nowait`` at ~0.0018 ms/call, which is the budget an implementer
+    #: should hold to; anything that touches disk, a lock or a socket belongs on
+    #: the far side of a queue, not here.
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )

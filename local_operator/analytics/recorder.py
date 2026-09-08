@@ -315,13 +315,21 @@ class AnalyticsRecorder:
         """Best-effort: record one tool call's outcome off the hot path.
 
         Called from ``AgentLoop.park``, which runs ON THE EVENT LOOP inside a
-        live turn. So this does the least possible work — one bounded
-        ``put_nowait`` — and, like :meth:`record`, never raises and never
-        blocks: analytics that can add latency to a turn or abort one is a
+        live turn, and invoked SYNCHRONOUSLY there — the loop puts no timeout
+        and no thread between itself and this call, because at the measured
+        0.0018 ms/call scheduling would cost more than the work. So the
+        non-blocking half of the contract is load-bearing rather than advisory:
+        whatever time this spends is added straight to the turn (measured
+        0.002 s → 0.754 s against a hook that sleeps 0.75 s). One bounded
+        ``put_nowait``, never raising, never touching disk or a lock on this
+        side — analytics that can add latency to a turn or abort one is a
         defect, not a measurement.
 
         ``fault`` is ``""`` for a call that ran cleanly, else the classification
         set at the source (see ``store``'s ``tool_calls`` schema comment).
+        ``origin`` decides which population the call is counted in and must be
+        one of ``analytics.model.ORIGIN_MODEL`` / ``ORIGIN_NESTED``; only the
+        former reaches a rate (see the origin partition on ``ToolCallStats``).
         """
         if self._closed or not session_id:
             return

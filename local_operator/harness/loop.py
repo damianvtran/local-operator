@@ -2578,6 +2578,14 @@ class AgentLoop:
         contract is that a measurement can never break the thing it measures,
         and that has to hold even against a host hook that throws.
 
+        The callback is invoked SYNCHRONOUSLY and is deliberately NOT wrapped in
+        a timeout or handed to a thread: at ~0.0018 ms for the shipped hook,
+        scheduling would cost more than the work and would reorder samples. The
+        consequence is that the non-blocking half of the contract is the host's
+        to keep and cannot be enforced here — a hook that blocks adds its full
+        duration to the turn (measured 0.002 s → 0.754 s against a 0.75 s
+        sleep). ``LoopConfig.record_tool_call`` states the budget.
+
         The tool name is taken from the resolved tool when there is one and from
         the CALL otherwise — a hallucinated name has no tool, and that name is
         exactly what a "which tool does this model get wrong" view needs.

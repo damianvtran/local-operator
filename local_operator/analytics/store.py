@@ -38,6 +38,7 @@ from typing import Any, Iterable, Sequence
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
+    ORIGIN_MODEL,
     CallSnapshot,
     SessionReport,
     SessionRequest,
@@ -1644,12 +1645,20 @@ class AnalyticsStore:
         and therefore also reads ``unknown``. That is the safe error in both
         directions — a wrong ``unknown`` withholds a fact, a wrong ``0%`` states
         one — and it self-corrects the moment the session makes a tool call.
+
+        **``origin`` is in the GROUP BY because the read side must honour the
+        partition the schema records.** ``ToolCallStats``' counts are
+        model-origin only; nested (``eval``-bridge) rows are tallied apart and
+        never reach a rate. Dropping ``origin`` from this projection is not a
+        cosmetic simplification — it silently re-pools the two populations and
+        lets one scripted loop set the headline accuracy figure. See the origin
+        partition on ``ToolCallStats`` and the schema comment on ``tool_calls``.
         """
         try:
             rows = list(
                 conn.execute(
-                    "SELECT fault, tool_name, COUNT(*) FROM tool_calls "
-                    "WHERE session_id = ? GROUP BY fault, tool_name",
+                    "SELECT origin, fault, tool_name, COUNT(*) FROM tool_calls "
+                    "WHERE session_id = ? GROUP BY origin, fault, tool_name",
                     (session_id,),
                 )
             )
@@ -1664,8 +1673,20 @@ class AnalyticsStore:
         ok = 0
         faults: dict[str, int] = {}
         faults_by_tool: dict[str, int] = {}
-        for fault, tool_name, count in rows:
+        nested_total = 0
+        nested_ok = 0
+        for origin, fault, tool_name, count in rows:
             count = int(count)
+            if str(origin) != ORIGIN_MODEL:
+                # Anything that is not model-emitted is nested by definition, and
+                # an UNRECOGNISED origin lands here too rather than in the rates:
+                # if a future writer adds a third origin, the safe default is to
+                # keep it out of the benchmarking number until someone decides
+                # where it belongs.
+                nested_total += count
+                if not fault:
+                    nested_ok += count
+                continue
             total += count
             if not fault:
                 ok += count
@@ -1673,7 +1694,14 @@ class AnalyticsStore:
             faults[str(fault)] = faults.get(str(fault), 0) + count
             name = str(tool_name)
             faults_by_tool[name] = faults_by_tool.get(name, 0) + count
-        return ToolCallStats(total=total, ok=ok, faults=faults, faults_by_tool=faults_by_tool)
+        return ToolCallStats(
+            total=total,
+            ok=ok,
+            faults=faults,
+            faults_by_tool=faults_by_tool,
+            nested_total=nested_total,
+            nested_ok=nested_ok,
+        )
 
     def _descendant_usage(
         self,

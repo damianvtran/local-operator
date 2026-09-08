@@ -649,6 +649,23 @@ class TimingSummary:
     max_ms: float | None = None
 
 
+#: ``tool_calls.origin`` for a call the MODEL emitted as a tool_use block. The
+#: only origin any rate on :class:`ToolCallStats` is computed over.
+ORIGIN_MODEL = "model"
+
+#: ``tool_calls.origin`` for a call made by ``eval``'s ``dispatch_tool`` bridge:
+#: the model's CODE calling a tool. Recorded so the calls are visible and can be
+#: accounted for, and kept out of every rate — see the origin partition on
+#: :class:`ToolCallStats`.
+#:
+#: These are named here rather than being bare literals in the reader because a
+#: misspelling silently moves rows into the wrong population instead of failing.
+#: The WRITER (``harness/loop.py``) still passes the strings literally: that
+#: package deliberately carries no analytics dependency (see
+#: ``LoopConfig.record_tool_call``), so the two sides are pinned together by a
+#: test that asserts the loop's emitted origins are exactly these values.
+ORIGIN_NESTED = "nested"
+
 #: Faults the MODEL is responsible for: the harness could not dispatch the call
 #: at all because what the model emitted was not a usable call. These and only
 #: these are the numerator of tool-call validity.
@@ -671,22 +688,61 @@ class ToolCallStats:
     when the session predates tool-call recording. An instance of this class
     always describes real measured rows.
 
+    **THE ORIGIN PARTITION — the invariant this type exists to enforce.** Every
+    count and every rate on this type EXCEPT :attr:`nested_total` /
+    :attr:`nested_ok` / :attr:`recorded` describes calls whose stored ``origin``
+    is ``'model'``: a tool_use block the model actually emitted. Calls
+    dispatched by ``eval``'s ``dispatch_tool`` bridge are the model's CODE
+    calling a tool, not the model emitting a call, and they arrive in scripted
+    loops — pooling them lets one twenty-iteration retry loop drag the headline
+    accuracy figure wherever it likes (measured: two model calls, one faulted,
+    plus a 20-call ``eval`` loop reports 95.5% where the true model-emission
+    figure is 50%, and the distortion grows with exactly the composition-heavy
+    runs the figure is most wanted for). Nested calls are counted separately and
+    NEVER folded into a rate.
+
+    A future edit that adds a rate here must derive it from the model-origin
+    fields only. If a nested rate is ever wanted, give it a ``nested_`` name and
+    its own row rather than widening one of these: the two populations are not
+    comparable, and a shared name is how they get re-pooled.
+
     The two rates are deliberately SEPARATE and separately named because they
     answer different questions and share no denominator — which is also why the
     renderer must not draw them as bars beside one another.
     """
 
-    #: Every recorded tool call for the session, whatever its fault.
+    #: MODEL-EMITTED calls, whatever their fault. NOT every call the session
+    #: made — see the origin partition above; :attr:`recorded` is that figure.
     total: int = 0
-    #: Calls with no fault at all: dispatched, ran, returned without error.
+    #: Model-emitted calls with no fault at all: dispatched, ran, returned
+    #: without error.
     ok: int = 0
-    #: ``fault`` -> count, for every nonempty fault. Carries the breakdown the
-    #: rates summarise, so the screen can name WHICH invalidity dominated.
+    #: ``fault`` -> count over MODEL-EMITTED calls, for every nonempty fault.
+    #: Carries the breakdown the rates summarise, so the screen can name WHICH
+    #: invalidity dominated.
     faults: dict[str, int] = field(default_factory=dict)
-    #: ``tool_name`` -> count of faulted calls. Recorded from day one so a
-    #: "which tool does this model get wrong" view is a rendering change later
-    #: rather than a schema change.
+    #: ``tool_name`` -> count of faulted MODEL-EMITTED calls. Recorded from day
+    #: one so a "which tool does this model get wrong" view is a rendering
+    #: change later rather than a schema change.
     faults_by_tool: dict[str, int] = field(default_factory=dict)
+    #: Calls dispatched by ``eval``'s bridge — every row whose ``origin`` is not
+    #: ``'model'``. Counted so the screen can ACCOUNT for them (a reader who
+    #: sees 30 calls happen and a rate over 10 needs to know where 20 went)
+    #: while no rate is computed over them.
+    nested_total: int = 0
+    #: Nested calls that ran cleanly, so the nested row can read ``N · M ok``.
+    #: No rate is derived from it, deliberately.
+    nested_ok: int = 0
+
+    @property
+    def recorded(self) -> int:
+        """Every tool call recorded for the session, BOTH origins.
+
+        Named apart from :attr:`total` rather than being what ``total`` means,
+        so that reaching across the origin partition is always explicit at the
+        call site. This is the only count on the type that spans it.
+        """
+        return self.total + self.nested_total
 
     @property
     def emitted(self) -> int:
@@ -705,8 +761,27 @@ class ToolCallStats:
         return sum(self.faults.get(name, 0) for name in MODEL_FAULTS)
 
     @property
+    def excluded(self) -> int:
+        """Calls removed from both denominators: denied, aborted, skipped, gate.
+
+        Exposed rather than left implicit inside :attr:`emitted` because the
+        renderer must be able to NAME this number. It is the entire difference
+        between :attr:`total` and :attr:`emitted`, and an unexplained gap
+        between two counts printed one line apart reads as the screen
+        miscounting — the exact misreading this feature exists to remove.
+        """
+        return sum(self.faults.get(name, 0) for name in EXCLUDED_FAULTS)
+
+    @property
     def execution_faults(self) -> int:
-        """Calls that were dispatched and then failed inside the tool."""
+        """MODEL-EMITTED calls that were dispatched and then failed inside the tool.
+
+        Model-origin only, like every other count here (see the origin partition
+        on the class). A nested call that failed inside its tool is in
+        ``nested_total - nested_ok``, not here — which is why the rendered row
+        states its scope: an "errors" count whose scope is unstated is read as
+        the model's.
+        """
         return self.faults.get("execution", 0)
 
     @property

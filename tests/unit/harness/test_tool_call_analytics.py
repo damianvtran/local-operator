@@ -310,3 +310,35 @@ async def test_a_session_less_context_records_nothing():
     async for _ in AgentLoop().run([], context, config):
         pass
     assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_the_origins_the_loop_emits_are_exactly_the_ones_the_reader_partitions_on():
+    """Pins the writer to the reader across a deliberate layering gap.
+
+    ``harness`` carries no analytics dependency by design (see
+    ``LoopConfig.record_tool_call``), so the loop passes these strings as
+    literals while ``analytics.model`` names them as constants. Nothing but this
+    test stops the two sides drifting on a spelling — and a drift would not
+    fail, it would silently move every model-emitted call into the nested
+    bucket, emptying the benchmarking figure's denominator instead of raising.
+    """
+    from local_operator.analytics.model import ORIGIN_MODEL, ORIGIN_NESTED
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        await context.dispatch_tool("read", {"path": "a"})
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="eval", content=[TextContent(text="done")]
+        )
+
+    eval_tool = AgentTool(
+        name="eval",
+        parameters={"type": "object", "properties": {"code": {"type": "string"}}},
+        execute=execute,
+    )
+    recorded = await _run(
+        _calls((0, "c1", "eval", '{"code":"x"}')) + [StreamEndEvent(stop_reason="toolUse")],
+        [_ok_tool(), eval_tool],
+    )
+    emitted_origins = {origin for _n, origin, _f, _ms in recorded}
+    assert emitted_origins == {ORIGIN_MODEL, ORIGIN_NESTED}
