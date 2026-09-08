@@ -292,25 +292,37 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
-**`lop browser install` is not isolated by `HOME` at all — never run it from a
-test.** Same shape as the two hazards above: an isolated run reaching outside
-its sandbox, but here `HOME` does not even slow it down. `browser_bridge/
-install.py` hardcodes `LABEL = "com.local-operator.browser"` and derives only
+**`lop browser install` used not to be isolated by `HOME` at all, and the
+reason is worth keeping even though the hazard is now fixed.** `browser_bridge/
+install.py` hardcoded `LABEL = "com.local-operator.browser"` and derived only
 the plist *path* from `Path.home()`, while the launchd domain is `gui/<uid>`
-from `os.getuid()`. So a redirected `HOME` writes the plist somewhere harmless
-and then `bootstrap`s the *same global label* into the *same* domain — and the
-`bootout` that precedes it evicts whatever holds that label, which is the
-operator's live bridge daemon. It happened today: a sibling agent's test took
-the operator's daemon down on 4099 for ~90s, and the only symptom he saw was
-his browser tool going dead. Linux has the identical exposure through the fixed
-systemd unit name.
+from `os.getuid()`. A redirected `HOME` therefore wrote the plist somewhere
+harmless and then `bootstrap`ed the *same global label* into the *same*
+domain — and launchd resolves a plist to the `Label` INSIDE it, so the
+`bootout` that precedes it evicted whatever held that label: the operator's
+live bridge daemon. It happened: a sibling agent's test took the operator's
+daemon down on 4099 for ~90s, and the only symptom he saw was his browser tool
+going dead. Linux had the identical exposure through the fixed systemd unit
+name.
 
-So a bridge test runs the daemon as a **plain subprocess on a non-default
-port** (`python -m local_operator.browser_bridge.daemon --port <port>`, as
-`docs/design/browser-extension-evidence.md` does) and never calls `install`.
-Deriving the label per root would remove the hazard, but nothing has changed
-it yet: while `LABEL` is a module constant, `HOME` redirection is no protection
-here. Check that line rather than assuming a fix has landed.
+The supervisor name is now derived per config root — `label()` and
+`systemd_unit()` append a digest of the resolved root, so an isolated run
+registers its own daemon instead of evicting the default one. Two constraints
+that fix rests on, and that anything touching it must preserve: the DEFAULT
+root's names stay byte-identical (a rename orphans every installed daemon,
+leaving a live process the CLI can no longer stop), and "is this the default
+root?" is answered against the **uid's passwd home**, not `Path.home()` —
+`Path.home()` reads `$HOME`, so an isolated run would compare its root against
+its own redirected home, conclude it is the default, and reuse the real label.
+
+The advice below is therefore no longer load-bearing for safety, but it is
+still the cheaper way to test: run the daemon as a **plain subprocess on a
+non-default port** (`python -m local_operator.browser_bridge.daemon --port
+<port>`, as `docs/design/browser-extension-evidence.md` does) rather than
+calling `install` at all. If you do call `install` under a redirected `HOME`,
+confirm it reported a suffixed supervisor name (`lop browser status` prints
+`supervisor:` and `config root:` whenever it is not the default install)
+before trusting that it left the operator's daemon alone.
 
 ### Read the committed ref, not the working tree
 
