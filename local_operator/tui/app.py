@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import (
@@ -211,6 +211,7 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
+    CredentialArmChanged,
     Editor,
     EditorCopied,
     EditorCopyStale,
@@ -223,13 +224,16 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     Marked,
     ModelQueryOpened,
+    PastedCredential,
     RecallState,
     RefreshArgumentChoices,
     ShellModeChanged,
     SkillQueryOpened,
     StopRequested,
+    credential_payloads,
     expand_pastes,
     resolve_markers,
+    substitute_credentials,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -323,6 +327,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
         SessionDiagnostics,
         SessionScreen,
     )
+    from local_operator.variables import CredentialStoreFailure
 
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
@@ -1388,6 +1393,77 @@ PROMPT_CHEVRON = "❯"
 #: mode; using it as the marker would make the frame look like the bang
 #: was inserted into the buffer (it is consumed, not typed).
 SHELL_CHEVRON = "$"
+
+#: The composer's prompt marker while an inline credential capture is ARMED.
+#: One cell, so it fits the same 2-cell box and shifts nothing.
+#:
+#: The MASK CHARACTER, which this app already uses to stand in for one hidden
+#: character of a secret (``key_prompt.MASK_CHAR``). Reusing it is what makes
+#: the mark legible without a legend: the marker says "what you type or paste
+#: here is masked", which is exactly the state. A key glyph (``⚿``) was the
+#: first choice and was rejected on rendered evidence — it is tofu in the
+#: terminal font stack, and a mode marker that renders as a replacement box is
+#: worse than no marker at all.
+#:
+#: Shape AND colour, the same pairing bang-mode uses and for the same #385
+#: reason: hue alone is invisible under ``NO_COLOR``, on a monochrome terminal
+#: and to a colourblind reader. The bar is higher here than for bang-mode —
+#: this mode changes what a PASTE means, and a misread puts a plaintext secret
+#: in scrollback that no keystroke can recall (design round 1, D2).
+CREDENTIAL_CHEVRON = "•"
+
+#: Class the input dock carries while a capture is armed. Reads as the
+#: ``warning`` amber, one step off both the resting chevron and bang-mode's
+#: green, so three composer modes are three distinct marks.
+COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
+
+#: The composer's placeholder while armed, in the same voice and shape as
+#: :data:`~local_operator.tui.widgets.editor.SHELL_PLACEHOLDER`.
+#:
+#: IT DOES NOT RENDER, and cannot: ``Editor`` paints a placeholder only on an
+#: EMPTY buffer, while arming requires the ``/credential`` token to be IN the
+#: buffer — mutually exclusive conditions. Bang-mode's placeholder works
+#: because ``!`` is consumed out of the buffer; ``/credential`` is not, and
+#: every armed intermediate state (``/cred``, ``/credential``) is non-empty
+#: (design round 2, D8; QA round 2 measured the same).
+#:
+#: Kept, rather than deleted, because the armed STATE is what it belongs to and
+#: the swap is what keeps that state consistent with bang-mode's — including
+#: restoring whatever placeholder it replaced, which is load-bearing for the
+#: aside (see ``on_credential_arm_changed``). It would begin rendering the day
+#: an arming form leaves the buffer empty, and until then it is a state field,
+#: NOT a signalling channel.
+#:
+#: So the armed state has TWO channels an operator can actually see, not the
+#: three an earlier remediation claimed: the ``⚿`` chevron (colour-independent)
+#: and the amber ink on the token itself, plus the picker's own notice row
+#: while its list is open. Anything counting channels here must count what
+#: PAINTS — the attribute being set correctly is not the same claim.
+CREDENTIAL_PLACEHOLDER = "Paste the secret… — it is captured, not shown"
+
+#: Shown where ``/credential``'s argument rows would be while a capture is
+#: armed. The rows are suppressed there (see ``_credential_choices``), and a
+#: list that simply vanished would read as the gesture having been dropped —
+#: so the row says what the composer is waiting for instead.
+CREDENTIAL_ARMED_NOTICE = "armed — paste the secret; it is captured, never shown"
+
+#: Shown where those same rows would be once a capture has LANDED and the
+#: buffer still cites it (design round 3, D9). The armed notice cannot be
+#: reused: it says "paste the secret", and by this point the operator already
+#: did — a row promising the next paste is captured, next to a chip saying one
+#: already was, is the stale-hint defect D7 removed one state earlier.
+#:
+#: It names the reason the rows are gone rather than merely stating a fact, so
+#: the operator can act on it: the destructive verbs are still reachable in the
+#: same keystrokes they always were, by typing the flag.
+#:
+#: LENGTH IS A CONSTRAINT, not a preference. The picker's notice row ellipsizes
+#: at the panel width, and the measured budget at a 120-column terminal is ~82
+#: cells — a longer line drops its own TAIL, which is exactly the half that says
+#: how to reach the verbs, leaving a row that states a restriction and hides the
+#: way out of it. Kept comfortably inside that budget, and pinned by the test
+#: that asserts the whole string paints rather than a prefix of it.
+CREDENTIAL_HELD_NOTICE = "a credential is in this draft — type --forget-all to forget"
 
 #: How long after a terminal resize the floating overlay cards re-measure
 #: themselves. They are hosted in `width: auto` containers, so Textual sends
@@ -11066,6 +11142,21 @@ class OperatorApp(App[None]):
             # reasoning as the branch above, and it keeps the two causes the
             # branch can honestly name without asserting which one applies.
             text = "Couldn't attach that file. Too large, or not an image."
+        elif message.reason == "credential-blank":
+            # A paste while ARMED that carried no value. States the outcome and
+            # the one fact the operator cannot read off the screen: the arm
+            # SURVIVED, so the next paste is still captured. Without that, the
+            # frame is neither "captured" nor "failed" and the natural repair —
+            # re-typing the gesture — is a move they do not need (design round
+            # 1, D3).
+            text = "Nothing to capture — still armed for the next paste."
+        elif message.reason == "credential-sealed":
+            # ctrl+r on a credential chip. The refusal is the security property
+            # working, but a bare no-op reads as a missed keystroke because
+            # every other marker kind answers this key — so the sentence states
+            # the property and names the gesture that DOES work (design round
+            # 1, D6).
+            text = "A credential can't be expanded — backspace forgets it."
         elif message.reason == "too_large":
             # Names the payload, not the clipboard. The bound is deliberate -
             # truncating a paste is invisible damage - so the honest report is
@@ -12224,6 +12315,18 @@ class OperatorApp(App[None]):
         # screenshot pasted with no words still submits, carrying its marker.
         if not text and not message.shell:
             return
+        # INLINE CREDENTIALS, before every exit below. This is the one seam
+        # where the secret leaves the composer's map for the session store, and
+        # it has to run ahead of the aside/shell/slash branches because each of
+        # them returns: a credential captured into a draft that was then sent
+        # to `/btw` would otherwise be silently dropped, and the marker naming
+        # it would reach the model as a promise of a key nothing stored.
+        #
+        # It rewrites `text` in place, so from here down NOTHING carries a
+        # credential citation any further than the name — the transcript row,
+        # the history entry, the journal and the model all read the substituted
+        # form, and the value exists only in the store.
+        text = self._capture_inline_credentials(text, message.attachments)
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
         # (`esc close · enter ask again`) and its placeholder says so, and a
@@ -12704,7 +12807,139 @@ class OperatorApp(App[None]):
         except NoMatches:
             return
         dock.set_class(message.active, COMPOSER_SHELL_CLASS)
-        chevron.update(SHELL_CHEVRON if message.active else PROMPT_CHEVRON)
+        # Leaving bang-mode RESTORES the armed marker rather than the resting
+        # one when a capture is still armed. The two modes are independently
+        # reachable (`!` then `/credential`, or the reverse), and a state that
+        # silently lost its glyph on the way out of another mode is the exact
+        # invisibility D2 is about — the arm would still be live and nothing
+        # would say so.
+        armed = self._editor().credential_armed()
+        if message.active:
+            chevron.update(SHELL_CHEVRON)
+        else:
+            chevron.update(CREDENTIAL_CHEVRON if armed else PROMPT_CHEVRON)
+
+    def on_credential_arm_changed(self, message: CredentialArmChanged) -> None:
+        """Follow the composer's ARMED state onto the dock class, glyph and copy.
+
+        The same treatment bang-mode gets, for a state whose misread is worse:
+        the class is the colour cue, the glyph the colour-independent one, and
+        the picker's notice row says it in words while its list is open. They
+        flip on one message so they cannot drift.
+
+        The placeholder is written too, but it does NOT paint here — a
+        placeholder needs an empty buffer and arming needs the token in it (see
+        :data:`CREDENTIAL_PLACEHOLDER`, design round 2, D8). It is kept in sync
+        as state, and the restore branch below is load-bearing for the aside
+        regardless of whether anything is drawn.
+
+        Bang-mode's class is left to outrank this one in the stylesheet — the
+        two are mutually reachable (``!`` then ``/credential``) and Enter
+        running a command is the louder claim about the key the operator is
+        about to press.
+
+        A disarm the operator DID NOT ASK FOR gets a word. ``captured`` needs
+        none (the marker in the buffer is the receipt) and ``gone`` was them
+        deleting the token, but ``argument`` is the case where they kept typing
+        and the mode changed underneath: they typed a flag, which means they are
+        addressing the command rather than arming, and the next paste would land
+        in plaintext. That is the false negative D2 names as unrecoverable, so
+        it is the one that must never be silent.
+        """
+        try:
+            dock = self.query_one("#input-dock")
+            chevron = self.query_one("#prompt-chevron", Chrome)
+        except NoMatches:
+            return
+        editor = self._editor()
+        dock.set_class(message.active, COMPOSER_CREDENTIAL_CLASS)
+        if editor.shell_mode:
+            # Bang-mode owns the glyph while it is on; the class above still
+            # goes on so the state is not lost when the mode is left.
+            pass
+        elif message.active:
+            chevron.update(CREDENTIAL_CHEVRON)
+        else:
+            chevron.update(PROMPT_CHEVRON)
+        # The placeholder is a SHARED channel — bang-mode, the aside and the
+        # read-only subagent page each own it in their own mode — so this only
+        # writes it where the resting copy is what would otherwise be showing,
+        # and only restores what it replaced. Restoring `resting_placeholder`
+        # unconditionally would have overwritten "Ask the aside…" with
+        # "Message Local Operator…" for anyone who armed a capture inside the
+        # aside, silently relabelling a surface this change has no business
+        # touching.
+        if not editor.shell_mode:
+            if message.active and editor.placeholder == editor.resting_placeholder:
+                editor.placeholder = CREDENTIAL_PLACEHOLDER
+            elif not message.active and editor.placeholder == CREDENTIAL_PLACEHOLDER:
+                editor.placeholder = editor.resting_placeholder
+        # THE PICKER'S OWN ROW, when the list is open. `CREDENTIAL_ARMED_NOTICE`
+        # is written on `ArgumentQueryOpened`, which fires when the list OPENS —
+        # so a disarm that happens while it is already open never revised it,
+        # and the row went on promising "armed — paste the secret; it is
+        # captured, never shown" after the state had ended. The flag disarm is
+        # the reachable case: deleting the token closes the list and a capture
+        # replaces the buffer, but typing `-` leaves the list open, and it is
+        # exactly the disarm the operator is least likely to expect (design
+        # round 2, D7).
+        #
+        # Worse than a stale hint: it sat NEARER the caret than the transcript
+        # notice below, so the two channels contradicted each other and the row
+        # the operator was looking at was the false one — a promise that the
+        # next paste is never shown, immediately above the plaintext paste.
+        #
+        # The disarm branch falls back to the HELD notice rather than to blank
+        # (design round 3, D9): a capture disarms, and if the list is still open
+        # over a buffer that now cites the chip, the rows are suppressed for the
+        # citation instead. Blanking the row there would leave the list looking
+        # empty for no stated reason — the same "vanished, so the gesture must
+        # have been dropped" reading `CREDENTIAL_ARMED_NOTICE` exists to
+        # prevent. Rows are deliberately NOT refilled on this path: this handler
+        # only ever narrows what the list offers, so no disarm can hand back a
+        # destructive row the fill above withheld.
+        if editor.argument_command in ("credential", "cred"):
+            editor.picker.set_notice(
+                CREDENTIAL_ARMED_NOTICE
+                if message.active
+                else (CREDENTIAL_HELD_NOTICE if editor.credential_cited() else "")
+            )
+        if not message.active and message.reason == "argument":
+            self._notice(
+                "credential capture disarmed — that is an argument to "
+                "/credential, so the next paste is NOT captured",
+                "warning",
+            )
+
+    def session_credential_names(self) -> tuple[str, ...]:
+        """Names the session store already holds, for the composer's key guard.
+
+        The composer generates a name for an inline capture and must avoid one
+        already in use — a collision SILENTLY REPLACES a live credential, and
+        its own map resets on every submit, so it cannot see a credential the
+        operator handed over earlier in the session (review round 1, R3). This
+        is the read that closes that gap.
+
+        Names only, never values: a viewer or a store that cannot answer yields
+        an empty tuple, which degrades the guard to probability rather than
+        failing a capture whose secret is already out of the buffer.
+        """
+        store = getattr(self._session, "variables", None) if self._session is not None else None
+        names = getattr(store, "credential_names", None)
+        if not callable(names):
+            return ()
+        try:
+            # The store is reached duck-typed (a viewer has no `variables` at
+            # all), so the call's return is untyped here: narrowed rather than
+            # trusted, because a double returning something unexpected must
+            # degrade the guard, not raise on the submit seam.
+            reported = names()
+            if not isinstance(reported, (list, tuple, set, frozenset)):
+                return ()
+            return tuple(str(name) for name in reported)
+        except Exception:  # noqa: BLE001 — an unreadable store is an empty set
+            logger.debug("could not read stored credential names", exc_info=True)
+            return ()
 
     def on_interrupt_requested(self, message: InterruptRequested) -> None:
         """Ctrl+C from the composer — the NORMAL path, since it holds focus.
@@ -26125,8 +26360,17 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command in ("credential", "cred"):
-            picker.set_choices(self._credential_choices())
-            picker.set_notice("")
+            # Both suppression reasons are read here, and the notice follows
+            # whichever applies. ARMED wins the notice when both are true (a
+            # second gesture armed while an earlier chip is still in the
+            # draft): the operator is mid-gesture, so what the NEXT paste does
+            # is the more urgent of the two things to say.
+            armed = editor.credential_armed()
+            cited = editor.credential_cited()
+            picker.set_choices(self._credential_choices(armed=armed, cited=cited))
+            picker.set_notice(
+                CREDENTIAL_ARMED_NOTICE if armed else (CREDENTIAL_HELD_NOTICE if cited else "")
+            )
             return
         if message.command in ("team", "teams", "agent", "agents"):
             # Rows and the render-time name snapshot are one fill operation. The
@@ -26224,14 +26468,62 @@ class OperatorApp(App[None]):
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
 
-    def _credential_choices(self) -> list[ArgumentChoice]:
+    def _credential_choices(
+        self, *, armed: bool = False, cited: bool = False
+    ) -> list[ArgumentChoice]:
         """The verbs ``/credential`` offers, plus each stored key to forget.
 
         Verbs first so a user who opened the list to store something is not
         looking at a forget row. Stored keys are offered as ``--forget KEY``
         rather than the bare name: completing a stored key into the buffer
         would re-open the paste prompt for a key that is already held.
+
+        EMPTY WHILE A CAPTURE IS ARMED, which is the fix for the destructive
+        default row (design round 1, D1). The two intents are mutually
+        exclusive — "I am about to hand you a secret" and "forget the secrets I
+        already handed you" — and offering the second while the operator is
+        mid-way through the first parked them on a preselected, unconfirmed
+        ``--forget-all`` with a ghost under the caret. Two proven consequences
+        on the real app: Enter+Enter completed and ran the highlighted row and
+        wiped a live store with no confirm and no undo; Tab accepted the ghost,
+        which consumed the arming token, so the very next paste landed the
+        secret IN PLAINTEXT on screen.
+
+        EMPTY ALSO WHILE THE BUFFER CITES A CAPTURE (design round 3, D9), which
+        is the same defect one step later in the same gesture. ``armed`` covers
+        only the window BEFORE the secret arrives, and the capture itself ends
+        it — so a draft that mentions the command twice (``fix the /credential
+        command`` typed before the real gesture, which is an ordinary sentence)
+        keeps a second, now-UNARMED token in the buffer once the marker splices
+        at the first. Its argument slot is empty, so every row came back with
+        ``--forget-all`` preselected, and pure keystrokes out of the feature's
+        own post-capture output — ``end,enter,enter`` — wiped the whole store
+        INCLUDING the credential just captured, while its chip was still sitting
+        in the buffer citing it. That last part is the load-bearing half: the
+        frame then showed a chip promising a credential the store no longer
+        held, which is two rows of one screen contradicting each other.
+
+        Why the citation and not the leftover token: splicing the marker at the
+        caret's token instead cannot fix this, because with two mentions a
+        capture consumes exactly one and the other is stray either way — it only
+        changes WHICH one is left. Moving the ARM to the caret's token was the
+        other candidate and it is worse than a no-op: ``CREDENTIAL_ARM``
+        transiently matches an earlier ``/cred`` while that sentence is still
+        being typed, so re-latching per sync migrates the arm onto a token the
+        operator never armed — exactly the R6b/R6c leak this PR closed in round
+        2. The condition that actually tracks the hazard is "this composer is
+        holding a secret the operator can see", which is what a citation means.
+
+        Still NOT a redesign of ``--forget-all``'s own confirmation. That row
+        and this picker predate this PR and the same wipe reproduces on ``main``
+        without any of this — the defect owned here is that a new happy path
+        routes the operator through that state, so the fix stays scoped to the
+        states this feature creates, and the destructive verb is reached exactly
+        as before by typing it (``CREDENTIAL_ARGUMENT`` disarms on a leading
+        ``-``, and a typed flag is the explicit act the rows are not).
         """
+        if armed or cited:
+            return []
         choices = [
             ArgumentChoice(
                 "--forget-all",
@@ -26808,6 +27100,181 @@ class OperatorApp(App[None]):
             f"{verb} {stored_key}. Injected into every bash command "
             "as an environment variable; the agent cannot read the value."
         )
+
+    def _capture_inline_credentials(self, text: str, attachments: Mapping[int, Marked]) -> str:
+        """Store every credential ``text`` cites; return the text to send on.
+
+        The submit-side half of the inline ``/credential`` gesture. The
+        composer took the secret OUT of the buffer at paste time and left a
+        ``[Credential #N, <len> chars]`` receipt; this is where the value goes
+        into the session store under its generated name and the receipt is
+        rewritten to NAME that credential for the model.
+
+        Returns ``text`` unchanged when nothing was captured, which is the
+        overwhelmingly common case and costs one dict scan.
+
+        WHY THE SUBSTITUTION HAPPENS EVEN WHEN THE STORE REFUSES: a marker left
+        in the outgoing text would tell the model a credential exists that
+        nothing holds. Every failure path below therefore rewrites the citation
+        too — to an explicit "not stored" phrase — so the model is never handed
+        a name it cannot use, which is the silent failure the viewer split in
+        ``_FRONTEND_LOCAL_SLASHES`` exists to prevent.
+
+        PER CREDENTIAL, not per submit. That invariant is only true if each
+        citation reflects ITS OWN payload's outcome, and an aggregate guard
+        cannot deliver it: guarding on "did anything store" rewrote every
+        citation to the confident form whenever ONE payload landed, so a
+        message carrying a refused credential beside a stored one advertised
+        ``$LOP_SECRET_…`` for a key ``credential_env()`` does not contain
+        (review round 1 R1, QA round 1 Q1 — two independent derivations of the
+        same defect).
+
+        That mixed case is REACHABLE through shipped components: a draft spilled
+        to the sidebar's temp JSON comes back with ``value=""`` by design (the
+        encoder deliberately does not persist secrets), ``store_credential``
+        refuses a blank, and one restored credential beside one freshly pasted
+        one is exactly the shape. The docstring above asserted the invariant
+        twice while the code held it only in the all-or-nothing case.
+        """
+        payloads = credential_payloads(text, attachments)
+        if not payloads:
+            return text
+        session = self._session
+        store = getattr(session, "variables", None)
+        if store is None or not hasattr(store, "store_credential"):
+            # A VIEWER (or a session still starting). The store that matters is
+            # the OWNER's — `credential_env()` is read by the `bash` tool in
+            # the owner's process — and this path is synchronous, on the submit
+            # seam, with no place to await the remote op. Rather than store
+            # locally (a key no tool could read: the exact leak
+            # `_FRONTEND_LOCAL_SLASHES` documents) the capture DEGRADES
+            # LOUDLY: the secret is dropped here, the operator is told, and the
+            # model is told nothing was stored. `/credential <KEY>` still
+            # routes to the owner over the dedicated op and remains the
+            # supported way to hand a secret over from a viewer.
+            self._system_notice(
+                "inline /credential needs the session that runs the tools; "
+                "use /credential <KEY> here and the secret is stored on the owner",
+                "warning",
+            )
+            return self._mark_credentials_unstored(text, attachments)
+        stored: list[str] = []
+        # Keyed by the payload's OWN key, so the citation rewrite below can ask
+        # about each credential individually. A list of successes is not enough:
+        # the rewrite has to be able to say "this one did not land" for a
+        # specific marker, which is the whole of R1/Q1.
+        refused: dict[str, CredentialStoreFailure] = {}
+        for payload in payloads:
+            result = store.store_credential(payload.key, payload.value, "command")
+            if not result.ok or result.credential is None:
+                # `empty-value` is the reachable one (a restored spilled draft
+                # carries no bytes); `empty-key` cannot happen for a generated
+                # name, but the reason is carried through rather than assumed so
+                # the model is told what actually refused.
+                refused[payload.key] = result.reason or "empty-value"
+                continue
+            stored.append(result.credential.key)
+            # Journalled exactly as the masked-paste flow journals, so a
+            # credential handed over inline is visible to the next turn and to
+            # a resume. The record names the KEY only; `journal_credential_
+            # change` never sees the value.
+            self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
+        if refused:
+            # THE OPERATOR HEARS IT TOO, on every refusal and not only the
+            # all-failed one. The composer has already cleared and the marker is
+            # gone, so silence here left them believing they had handed over a
+            # credential that the store refused and the model was told was
+            # missing — the one belief this feature must never create (QA round
+            # 1, Q2). Warning rather than info: it reports a gesture that did
+            # not do what it looked like it did.
+            noun = "credential" if len(refused) == 1 else "credentials"
+            self._system_notice(
+                f"{len(refused)} {noun} could not be stored "
+                f"({', '.join(sorted(refused))}); the agent has been told so. "
+                "Paste the value again after /credential to retry.",
+                "warning",
+            )
+        if not stored:
+            return self._mark_credentials_unstored(text, attachments, refused)
+        substituted = substitute_credentials(text, attachments, refused)
+        # SCRUB THE MAP once the store owns the value. The same attachments map
+        # rides on past this point into `SessionDraft` (the accepted-draft and
+        # `/reload` hand-back), the compaction hold and the aside stash — all
+        # in-memory, none of which needs the bytes now that
+        # `VariableStore._credentials` holds them. Emptying the payload here
+        # means those seams are safe BY CONSTRUCTION rather than by an argument
+        # about which of them re-expands.
+        #
+        # WHAT THIS SCRUB DOES NOT REACH, stated exactly, because an earlier
+        # version of this comment claimed it bounded a secret's lifetime to the
+        # one turn it was pasted in and that is FALSE (review round 1, R2). It
+        # reaches every holder that shares this map OBJECT. It cannot reach a
+        # copy taken before it ran, and `Editor._navigate_history` takes one:
+        # pressing Up with an unsubmitted credential does
+        # `_draft_attachments = dict(self._attachments)`, and `PastedCredential`
+        # is frozen, so replacing the entry here cannot reach that copy. A
+        # parked session therefore holds the plaintext in
+        # `SessionDraft.history_stash_attachments` for as long as the draft is
+        # parked, across sidebar switches.
+        #
+        # That retention is DELIBERATE and it is not a leak — verified: the
+        # field is absent from `_encode_draft`'s list (`session_drafts.py`), so
+        # it never reaches disk, and nothing re-expands it into a prompt. It is
+        # the operator's own unsubmitted draft, and scrubbing it would hand them
+        # back a credential marker with no value behind it, which
+        # `store_credential` then refuses — destroying unsubmitted work to
+        # shorten the lifetime of a secret that never leaves memory. The
+        # narrower claim is the true one: this bounds what the SUBMITTED turn's
+        # downstream holders carry, not what a parked draft retains.
+        #
+        # The key and marker stay so a restored draft still paints its receipt.
+        # A restore that re-submits finds an empty value, which
+        # `store_credential` refuses, and the operator is told it was not
+        # stored rather than the model being promised a key twice.
+        if isinstance(attachments, MutableMapping):
+            for index, payload in list(attachments.items()):
+                if isinstance(payload, PastedCredential):
+                    attachments[index] = PastedCredential("", payload.key, payload.marker)
+        # The receipt names what the agent can now use. Plural-safe because two
+        # pastes while armed capture two credentials (see `_capture_credential`).
+        self._notice(
+            f"Stored {', '.join(stored)}. Injected into every bash command "
+            "as an environment variable; the agent cannot read the value."
+        )
+        return substituted
+
+    def _mark_credentials_unstored(
+        self,
+        text: str,
+        attachments: Mapping[int, Marked],
+        refused: Mapping[str, CredentialStoreFailure] | None = None,
+    ) -> str:
+        """Rewrite credential citations to say the value did NOT land.
+
+        The honest form of the degraded path. Stripping the citation instead
+        would send the operator's description of a secret with no mention that
+        the secret is missing, and the agent would go looking for an env var
+        nobody set.
+
+        ``refused`` names why each key was refused, when a store was present and
+        said no. Without it the phrase is the viewer case — there is no store on
+        this side at all. The distinction is the whole of QA finding Q3: the
+        sentence used to hard-code "no session store available" for both, so a
+        store that WAS present and refused an empty value told the model the
+        store was unavailable, pointing any diagnosis at the wrong subsystem.
+        """
+        from local_operator.tui.widgets.editor import cite, describe_unstored
+
+        spans = [
+            (span, payload)
+            for index, payload in attachments.items()
+            if isinstance(payload, PastedCredential)
+            and (span := cite(text, index, payload)) is not None
+        ]
+        for (start, end), payload in sorted(spans, reverse=True):
+            reason = (refused or {}).get(payload.key)
+            text = text[:start] + describe_unstored(reason) + text[end:]
+        return text
 
     async def _credential_store_flow(self, store: object, key: str) -> None:
         """Masked paste for ``/credential <KEY>``, then store what arrived."""
