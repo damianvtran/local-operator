@@ -36,8 +36,19 @@ def test_policy_plan_and_requirements_agree(hint: bool, value: str | None) -> No
     reqs = {r.name: r for r in requirements.derive_requirements(_task(hint), infra_values=infra)}
     assert reqs["OSWORLD_ENABLE_PROXY"].required is False
     assert reqs["OSWORLD_ENABLE_PROXY"].kind == "infra"
-    for name in ("OSWORLD_PROXY_CREDENTIALS", "OSWORLD_PROXY_ENDPOINT"):
-        assert (name in reqs) is (hint and expected)
+    # PROXY_CONFIG_FILE is the input upstream actually reads, so it appears --
+    # and appears REQUIRED -- exactly when the episode will really use a proxy.
+    needs_proxy = hint and expected
+    assert ("PROXY_CONFIG_FILE" in reqs) is needs_proxy
+    if needs_proxy:
+        assert reqs["PROXY_CONFIG_FILE"].required is True
+    # The legacy pair no longer gates a run: CREDENTIALS is gone entirely
+    # (nothing consumed it) and ENDPOINT survives as optional so an existing
+    # invocation that still supplies it is accepted unchanged.
+    assert "OSWORLD_PROXY_CREDENTIALS" not in reqs
+    assert ("OSWORLD_PROXY_ENDPOINT" in reqs) is needs_proxy
+    if needs_proxy:
+        assert reqs["OSWORLD_PROXY_ENDPOINT"].required is False
 
 
 @pytest.mark.asyncio

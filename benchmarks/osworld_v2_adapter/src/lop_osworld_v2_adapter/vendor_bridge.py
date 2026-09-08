@@ -73,7 +73,22 @@ SECRET_ENV_NAMES = frozenset({JUDGE_KEY_ENV, USER_SIM_KEY_ENV})
 # import succeeds. ``ENABLE_TTL=false`` is set for the same reason: OSWorld's
 # own TTL path is a warning-on-failure one we never rely on, and leaving it
 # enabled would race our own schedule with a second, unnamed one.
-_OSWORLD_IMPORT_ENV = ("AWS_REGION", "AWS_SUBNET_ID", "AWS_SECURITY_GROUP_ID")
+# Names upstream reads at MODULE IMPORT time, so injecting them later than the
+# first ``desktop_env`` import has no effect. PROXY_CONFIG_FILE belongs here and
+# not in ``_ENV_INJECTABLE`` for a reason that cost a paid episode to find:
+# ``desktop_env/controllers/setup.py`` calls ``init_proxy_pool(PROXY_CONFIG_FILE)``
+# at import (module level), reading the name through ``os.getenv`` with a default
+# of the CWD-RELATIVE ``evaluation_examples/settings/proxy/dataimpulse.json``.
+# The adapter worker is spawned with ``-I`` from an arbitrary CWD, so that
+# relative default never resolves, the pool loads zero proxies, and every
+# proxy-declaring task dies at ``reset_start`` with "No proxy available from
+# proxy pool" AFTER the VM is already allocated and paid for.
+_OSWORLD_IMPORT_ENV = (
+    "AWS_REGION",
+    "AWS_SUBNET_ID",
+    "AWS_SECURITY_GROUP_ID",
+    "PROXY_CONFIG_FILE",
+)
 
 
 def inject_infra_environment(infra_values: tuple[ScopedInfraValue, ...]) -> None:

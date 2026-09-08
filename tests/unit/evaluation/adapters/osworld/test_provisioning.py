@@ -13,7 +13,7 @@ import pytest
 from lop_osworld_v2_adapter import provisioning, taskfile
 from lop_osworld_v2_adapter.provisioning import ProvisioningError
 
-from local_operator.evaluation.adapters.api import ScopedInfraValue
+from local_operator.evaluation.adapters.api import InfraPurpose, ScopedInfraValue
 from tests.unit.evaluation.adapters.osworld import fixtures
 
 _INFRA = tuple(
@@ -296,3 +296,104 @@ def test_the_two_infra_overrides_apply_independently() -> None:
     plan = provisioning.resolve(descriptor, episode_id="ep-1", infra_values=infra)
     assert plan.instance_type == "m5.2xlarge"
     assert plan.volume_gb == 150
+
+
+# --- PROXY_CONFIG_FILE ------------------------------------------------------
+#
+# Upstream loads its proxy pool at MODULE IMPORT from a CWD-relative default,
+# and swallows every failure into a log line. An unusable path is therefore not
+# an error upstream -- it is an EMPTY pool, and the episode dies at reset_start
+# with "No proxy available from proxy pool" after the VM is allocated and
+# billed. These tests pin the refusal at prepare, where it is free.
+
+
+def _proxy_file(tmp_path, payload: str) -> str:
+    path = tmp_path / "proxies.json"
+    path.write_text(payload, encoding="utf-8")
+    return str(path)
+
+
+def _proxy_infra(
+    value: str, purpose: InfraPurpose = "benchmark_compute"
+) -> tuple[ScopedInfraValue, ...]:
+    return (ScopedInfraValue(name="PROXY_CONFIG_FILE", purpose=purpose, value=value),)
+
+
+def test_proxy_config_is_optional_when_no_proxy_is_needed() -> None:
+    assert provisioning.validate_proxy_config_file((), enable_proxy=False) is None
+
+
+def test_a_needed_proxy_config_that_is_absent_is_refused_before_allocation() -> None:
+    with pytest.raises(ProvisioningError) as excinfo:
+        provisioning.validate_proxy_config_file((), enable_proxy=True)
+    # The message must name the two ways out, because the operator hitting this
+    # has no other signal: upstream's own failure is a log line and an empty pool.
+    assert "PROXY_CONFIG_FILE" in str(excinfo.value)
+    assert "OSWORLD_ENABLE_PROXY=false" in str(excinfo.value)
+
+
+def test_a_valid_absolute_proxy_config_is_accepted(tmp_path) -> None:
+    path = _proxy_file(tmp_path, '[{"host": "h.example", "port": 8080}]')
+    assert provisioning.validate_proxy_config_file(_proxy_infra(path), enable_proxy=True) == path
+
+
+def test_a_relative_proxy_config_path_is_refused(tmp_path) -> None:
+    # The whole defect: upstream resolves a relative path against whatever CWD
+    # the -I worker inherited, which is never the repo root.
+    with pytest.raises(ProvisioningError, match="absolute path"):
+        provisioning.validate_proxy_config_file(
+            _proxy_infra("evaluation_examples/settings/proxy/x.json"), enable_proxy=True
+        )
+
+
+def test_an_unreadable_proxy_config_is_refused_without_echoing_the_path(tmp_path) -> None:
+    missing = str(tmp_path / "nope.json")
+    with pytest.raises(ProvisioningError) as excinfo:
+        provisioning.validate_proxy_config_file(_proxy_infra(missing), enable_proxy=True)
+    assert "not readable" in str(excinfo.value)
+    # An operator can mistype a credentialed URL into this field; never echo it.
+    assert missing not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not json at all",
+        "{}",  # an object, not a list
+        "[]",  # empty: upstream would load zero proxies and crash later
+        '[{"host": "h.example"}]',  # no port
+        '[{"port": 8080}]',  # no host
+        '["just-a-string"]',
+    ],
+)
+def test_a_proxy_config_upstream_would_silently_ignore_is_refused(tmp_path, payload: str) -> None:
+    # Each of these parses (or fails) upstream into an EMPTY pool with only a
+    # log line. Refusing them here is the difference between a free failure and
+    # a paid one.
+    path = _proxy_file(tmp_path, payload)
+    with pytest.raises(ProvisioningError):
+        provisioning.validate_proxy_config_file(_proxy_infra(path), enable_proxy=True)
+
+
+def test_a_proxy_config_in_the_wrong_scope_is_refused(tmp_path) -> None:
+    path = _proxy_file(tmp_path, '[{"host": "h.example", "port": 8080}]')
+    with pytest.raises(ProvisioningError, match="benchmark_compute"):
+        provisioning.validate_proxy_config_file(
+            _proxy_infra(path, "benchmark_user_simulator"), enable_proxy=True
+        )
+
+
+def test_conflicting_proxy_config_values_are_refused(tmp_path) -> None:
+    path = _proxy_file(tmp_path, '[{"host": "h.example", "port": 8080}]')
+    values = (
+        ScopedInfraValue(name="PROXY_CONFIG_FILE", purpose="benchmark_compute", value=path),
+        ScopedInfraValue(name="PROXY_CONFIG_FILE", purpose="benchmark_compute", value="/other"),
+    )
+    with pytest.raises(ProvisioningError, match="conflicting"):
+        provisioning.validate_proxy_config_file(values, enable_proxy=True)
+
+
+def test_an_oversized_proxy_config_is_refused_rather_than_parsed(tmp_path) -> None:
+    path = _proxy_file(tmp_path, "[" + ("0," * 600_000) + "0]")
+    with pytest.raises(ProvisioningError, match="ceiling"):
+        provisioning.validate_proxy_config_file(_proxy_infra(path), enable_proxy=True)

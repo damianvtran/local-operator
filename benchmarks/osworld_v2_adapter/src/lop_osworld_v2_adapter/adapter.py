@@ -417,7 +417,16 @@ class OSWorldV2Adapter:
         # a pure plan (when the task is already known), mints the deterministic
         # cleanup refs, and returns the plan the parent persists BEFORE any
         # side effect exists.
-        provisioning.resolve_proxy_policy(params.infra_values)
+        enable_proxy = provisioning.resolve_proxy_policy(
+            params.infra_values,
+            task_proxy=bool(self._task.proxy) if self._task is not None else False,
+        )
+        # Validate the proxy-pool config HERE, at the no-cost boundary. Upstream
+        # loads it at import and swallows every failure into a log line, so an
+        # unusable path becomes an empty pool and a crash at reset_start with a
+        # VM already allocated and billed. Failing in prepare converts that paid
+        # crash into a free, self-describing refusal.
+        provisioning.validate_proxy_config_file(params.infra_values, enable_proxy=enable_proxy)
         self._refs = cleanup_mod.CleanupRefs.mint(params.episode_id)
         self._infra_values = params.infra_values
         vendor_bridge.inject_infra_environment(params.infra_values)

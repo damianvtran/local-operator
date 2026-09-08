@@ -16,6 +16,8 @@ wrong AMI is a result nobody can reproduce.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 from dataclasses import dataclass
 
@@ -65,6 +67,11 @@ DEFAULT_REGION = "us-east-1"
 _DEFAULT_REGION = DEFAULT_REGION
 # The only screen geometry the V2 AMI map and the released IMAGE_ID_MAP carry.
 _SCREEN = (1920, 1080)
+
+# A proxy-pool config is a short JSON list of endpoints; anything larger is a
+# mistyped path (a log, a dataset) and is refused rather than parsed, so a
+# pathological file cannot be read into the worker at prepare time.
+_PROXY_CONFIG_MAX_BYTES = 1 << 20
 
 
 class ProvisioningError(ValueError):
@@ -186,6 +193,67 @@ def resolve_proxy_policy(
             "OSWORLD_ENABLE_PROXY requires benchmark_compute scope and exactly true or false"
         )
     return policies[0].value == "true"
+
+
+def validate_proxy_config_file(
+    infra_values: tuple[ScopedInfraValue, ...], *, enable_proxy: bool = False
+) -> str | None:
+    """Validate the upstream proxy-pool config path, or explain its absence.
+
+    Upstream resolves ``PROXY_CONFIG_FILE`` through ``os.getenv`` with a
+    CWD-RELATIVE default and loads it at module import, swallowing every
+    failure into a log line: a missing or malformed file yields an EMPTY pool
+    and the episode dies at ``reset_start`` with "No proxy available from proxy
+    pool" -- after the VM is allocated and billed. So this validates at
+    ``prepare``, where a failure costs nothing, and requires an ABSOLUTE path:
+    a relative one would be resolved against whatever CWD the ``-I`` worker
+    happens to inherit, which is exactly the bug being fixed.
+
+    Returns the validated path, or None when the input is absent. Absence is
+    only an error when the episode actually needs a proxy; that check belongs
+    to the caller, which knows the task's proxy hint and the policy override.
+    """
+
+    entries = [item for item in infra_values if item.name == "PROXY_CONFIG_FILE"]
+    if not entries:
+        if enable_proxy:
+            raise ProvisioningError(
+                "this task needs a system proxy but PROXY_CONFIG_FILE was not supplied; "
+                "pass an absolute path to an upstream proxy-pool JSON file, or set "
+                "OSWORLD_ENABLE_PROXY=false to select upstream's system-disabled mode"
+            )
+        return None
+    if len({item.value for item in entries}) != 1:
+        raise ProvisioningError("PROXY_CONFIG_FILE was supplied with conflicting values")
+    if any(item.purpose != "benchmark_compute" for item in entries):
+        raise ProvisioningError("PROXY_CONFIG_FILE requires benchmark_compute scope")
+
+    path = entries[0].value
+    if not os.path.isabs(path):
+        # Never echo the value: an operator can mistype a credentialed URL here.
+        raise ProvisioningError("PROXY_CONFIG_FILE must be an absolute path")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_PROXY_CONFIG_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ProvisioningError(
+            f"PROXY_CONFIG_FILE is not readable ({exc.__class__.__name__})"
+        ) from None
+    if len(raw) > _PROXY_CONFIG_MAX_BYTES:
+        raise ProvisioningError("PROXY_CONFIG_FILE is larger than the supported ceiling")
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProvisioningError("PROXY_CONFIG_FILE is not valid UTF-8 JSON") from None
+    # Mirror ProxyPool.load_proxies_from_file: a list of objects with host+port.
+    # Upstream would accept the file and silently load zero usable proxies; the
+    # whole point of validating here is to refuse what it would swallow.
+    if not isinstance(parsed, list) or not parsed:
+        raise ProvisioningError("PROXY_CONFIG_FILE must be a non-empty JSON list")
+    for entry in parsed:
+        if not isinstance(entry, dict) or "host" not in entry or "port" not in entry:
+            raise ProvisioningError("PROXY_CONFIG_FILE entries need 'host' and 'port'")
+    return path
 
 
 def _has(infra_values: tuple[ScopedInfraValue, ...], name: str) -> bool:
