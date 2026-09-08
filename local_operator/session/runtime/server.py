@@ -2680,12 +2680,21 @@ class RuntimeServer:
         Full-TUI attach clients are skipped (see ``_projection_recipients``).
         Phone daemon frames stay byte-identical.
         """
+        recipients = self._projection_recipients()
+        if not recipients:
+            # Detached owners and full-TUI-only viewers have nobody consuming
+            # repaints. Avoid building a large payload at every coalesced tick;
+            # welcome frames and all subscribed update cadences are unchanged.
+            #
+            # The warning latch still has to be released: no frame was emitted,
+            # so nothing degraded, and leaving it set would swallow the log line
+            # for the NEXT genuine degradation after a quiet period — exactly
+            # what the once-per-episode latch exists to preserve.
+            self._frame_cap_warned = False
+            return
         ordinary = self._projection_payload()
         await asyncio.gather(
-            *(
-                self._send_to(conn, self._projection_frame(conn, ordinary))
-                for conn in self._projection_recipients()
-            )
+            *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )
 
     def _projection_payload(self) -> dict[str, Any]:
