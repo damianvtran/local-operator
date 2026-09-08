@@ -1100,7 +1100,7 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
 
     Scalars via ``kv``, deliberately WITHOUT bars. A bar asserts a shared
     denominator — the rule stated on ``Totals`` and ``_group_rows`` — and these
-    two rates have different ones: validity is over calls the model EMITTED,
+    two rates have different ones: invocation errors are over calls the model EMITTED,
     the execution rate is over calls that actually RAN. Drawn side by side as
     tracks they would invite a comparison that is arithmetically meaningless.
 
@@ -1123,13 +1123,13 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
     # THE BLOCK IS A SUBTRACTION CHAIN, and every step of it is on screen
     # (design round 1, D2). The headline is EVERY call recorded; each ` └ ` row
     # below removes a class from it, in the order the rates remove them, so the
-    # validity denominator is reached by reading downward rather than by
+    # invocation-error denominator is reached by reading downward rather than by
     # trusting an unexplained shift:
     #
     #   Tool calls          35   <- recorded, both origins
     #    └ nested (eval)     3   <- not the model emitting a call
     #    └ never completed   1   <- returned no result to judge
-    #   Call validity          4 invalid of 31 emitted   (35 - 3 - 1)
+    #   Tool-call error rate          4 invalid of 31 emitted   (35 - 3 - 1)
     #
     # This is why the headline is `recorded` and not `total`: under the ` └ `
     # idiom a sub-row is PART of the row above it, so a model-origin headline
@@ -1162,10 +1162,11 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
     # `ok` already spans both origins, so a model-origin-only `failed` would
     # leave a failed eval-bridge call in neither term of a pair that reads as a
     # partition. The three terms are exhaustive by construction —
-    # `ok + failed + excluded == recorded` — and each one is on screen, the last
-    # as the ` └ denied or aborted` row.
+    # `ok + failed + all_excluded == recorded`. Nested exclusions are part of
+    # the nested sub-row, NOT the next subtraction: removing nested_total has
+    # already removed them from the model-origin denominator.
     ok = stats.ok + stats.nested_ok
-    failed = (stats.total - stats.ok - stats.excluded) + (stats.nested_total - stats.nested_ok)
+    failed = stats.recorded - ok - stats.all_excluded
     detail = f"{ok} ok" + (f" · {failed} failed" if failed else "")
     body.kv("Tool calls", str(stats.recorded), detail)
 
@@ -1184,6 +1185,14 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
                 "not the model's",
             ),
         )
+        if stats.nested_excluded:
+            # A child of the nested subtotal, not a second top-level subtraction.
+            # The count stays in the value column even when notes cannot fit.
+            body.kv(
+                "    └ excluded",
+                str(stats.nested_excluded),
+                notes=("already included in nested", "included above"),
+            )
     if stats.excluded:
         # The denied/aborted calls: correctly outside both denominators, and
         # previously invisible, which left the headline `N failed` short of the
@@ -1231,12 +1240,14 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
             ),
         )
 
-    validity = stats.validity
-    if validity is None:
+    error_rate = stats.tool_call_error_rate
+    if error_rate is None:
         # Rows exist but nothing counted toward the denominator (every call was
         # denied or aborted). Mirrors ``_timing_rows``' "unknown (0 samples)"
         # wording on purpose, so the two read as the same kind of statement.
-        body.kv("Call validity", "unknown", "0 emitted", dim_value=True)
+        body.kv("Tool-call error rate", "unknown", "0 emitted", dim_value=True)
+        if body.width < _NOTE_MIN:
+            body.note("0 eligible model-emitted calls")
     else:
         invalid = stats.model_faults
         # A ladder, not a plain note: this qualifier carries the SCOPE of the
@@ -1266,14 +1277,18 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # rate rows now obey one rule between them rather than each having its
         # own.
         body.kv(
-            "Call validity",
-            f"{validity * 100:.1f}%",
+            "Tool-call error rate",
+            f"{error_rate * 100:.1f}%",
             notes=(
                 f"{invalid} invalid of {stats.emitted} emitted",
                 f"{invalid} invalid of {stats.emitted}",
                 f"{invalid} invalid/{stats.emitted}",
             ),
         )
+        # Below the shortest rung, wrap the scope instead of leaving a bare
+        # benchmarking percentage whose population the reader cannot recover.
+        if len(f"{invalid} invalid/{stats.emitted}") > body.width - 24 - _VALUE_CELL - 2:
+            body.note(f"{invalid} invalid of {stats.emitted} emitted")
         # Name the faults rather than only counting them: "which one" is the
         # actionable half, and it is what makes the figure a benchmark rather
         # than a score. Biggest first; the NAME breaks ties, because the sort
@@ -1293,7 +1308,7 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
         # Drawn whenever calls were DISPATCHED, including at zero. Suppressing
         # the zero made "no execution errors" and "not measured" identical on
         # screen, which is the converse of this screen's standing invariant and
-        # is inconsistent with `Call validity` one line above, which shows its
+        # is inconsistent with `Tool-call error rate` one line above, which shows its
         # own zero (design round 1, D4). The modal healthy session is exactly
         # the case that was being hidden.
         #
@@ -1331,6 +1346,11 @@ def _draw_tool_call_rows(body: _Body, stats: ToolCallStats | None) -> None:
                 f"{execution * 100:.1f}% of {dispatched}",
             ),
         )
+    body.note(
+        "Both rates cover eligible model-emitted calls only. Tool-call errors count "
+        "rejected or invalid invocations, not semantic tool-selection correctness. "
+        "Execution errors are separate; not all errors are model-caused."
+    )
 
 
 def _draw_tool_surface(

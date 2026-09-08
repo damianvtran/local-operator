@@ -38,6 +38,7 @@ from typing import Any, Iterable, Sequence
 
 from local_operator.analytics.model import (
     COMPONENT_KEYS,
+    EXCLUDED_FAULTS,
     ORIGIN_MODEL,
     CallSnapshot,
     SessionReport,
@@ -1675,6 +1676,7 @@ class AnalyticsStore:
         faults_by_tool: dict[str, int] = {}
         nested_total = 0
         nested_ok = 0
+        nested_excluded = 0
         for origin, fault, tool_name, count in rows:
             count = int(count)
             if str(origin) != ORIGIN_MODEL:
@@ -1686,6 +1688,8 @@ class AnalyticsStore:
                 nested_total += count
                 if not fault:
                     nested_ok += count
+                elif fault in EXCLUDED_FAULTS:
+                    nested_excluded += count
                 continue
             total += count
             if not fault:
@@ -1701,6 +1705,7 @@ class AnalyticsStore:
             faults_by_tool=faults_by_tool,
             nested_total=nested_total,
             nested_ok=nested_ok,
+            nested_excluded=nested_excluded,
         )
 
     def _descendant_usage(

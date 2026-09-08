@@ -1221,18 +1221,58 @@ def test_no_tool_data_reads_unknown_and_never_a_measured_zero():
     section = _section(text, "Tool surface")
     assert any("Tool calls" in r and "unknown" in r for r in section)
     # The rates are omitted entirely rather than shown as unknown.
-    assert not any("Call validity" in r for r in section)
+    assert not any("Tool-call error rate" in r for r in section)
     assert not any("Tool-side errors" in r for r in section)
     assert "0%" not in "".join(section)
 
 
 def test_a_real_zero_fault_count_renders_as_a_measurement():
-    """A session that emitted 20 clean calls is 100% — that IS measured."""
+    """A session that emitted 20 clean calls has 0% errors — that IS measured."""
     stats = ToolCallStats(total=20, ok=20, faults={}, faults_by_tool={})
     text = build_session_report(_tool_report(stats), runtime(), 100).plain
     section = _section(text, "Tool surface")
-    assert any("Call validity" in r and "100.0%" in r for r in section)
+    assert any("Tool-call error rate" in r and "0.0%" in r for r in section)
     assert any("Tool calls" in r and "20" in r for r in section)
+
+
+@pytest.mark.parametrize("fault", sorted(EXCLUDED_FAULTS))
+def test_nested_exclusions_are_visible_but_never_subtracted_twice(fault):
+    stats = ToolCallStats(
+        total=5,
+        ok=3,
+        faults={"unknown_tool": 1, fault: 1},
+        faults_by_tool={},
+        nested_total=3,
+        nested_ok=1,
+        nested_excluded=1,
+    )
+    assert stats.recorded == 8
+    assert stats.all_excluded == 2
+    assert stats.emitted == 4
+    assert stats.tool_call_error_rate == 0.25
+    for width in range(_MIN_CARD_WIDTH, 121):
+        rows = _section(
+            build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
+        )
+        headline = next(row for row in rows if "Tool calls" in row)
+        if width >= _NOTE_MIN:
+            assert "4 ok" in headline and "2 failed" in headline
+        nested = next(row for row in rows if "└ excluded" in row)
+        assert nested.split("excluded", 1)[1].strip().startswith("1")
+        model_excluded = next(row for row in rows if "never completed" in row)
+        assert model_excluded.split("never completed", 1)[1].strip().startswith("1")
+        rate = next(row for row in rows if "Tool-call error rate" in row)
+        assert "25.0%" in rate
+        assert "4 emitted" in " ".join(rows) or "1 invalid/4" in rate or "1 invalid of 4" in rate
+        assert all(len(row) <= width for row in rows)
+
+
+def test_tool_call_error_rate_keeps_direct_ratio_precision():
+    stats = ToolCallStats(total=3000, ok=2999, faults={"unknown_tool": 1}, faults_by_tool={})
+    # A rounded validity complement would lose this measured nonzero entirely.
+    assert stats.tool_call_error_rate == 1 / 3000
+    zero = ToolCallStats(total=0, ok=0, faults={}, faults_by_tool={})
+    assert zero.tool_call_error_rate is None
 
 
 def test_validity_counts_only_model_faults_and_excludes_user_cancellations():
@@ -1258,7 +1298,7 @@ def test_validity_counts_only_model_faults_and_excludes_user_cancellations():
         build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
     )
     joined = "\n".join(section)
-    assert "75.0%" in joined
+    assert "25.0%" in joined
     assert "2 invalid of 8 emitted" in joined
     # The execution row is labelled as NOT an accuracy figure, every time. The
     # LABEL carries that scope (never shed) and the note refines it (D1).
@@ -1274,7 +1314,7 @@ def test_validity_is_unknown_when_nothing_countable_was_emitted():
     section = _section(
         build_session_report(_tool_report(stats), runtime(), 100).plain, "Tool surface"
     )
-    assert any("Call validity" in r and "unknown" in r for r in section)
+    assert any("Tool-call error rate" in r and "unknown" in r for r in section)
 
 
 def test_the_validity_qualifier_survives_a_narrow_frame():
@@ -1316,7 +1356,7 @@ def test_the_validity_qualifier_survives_a_narrow_frame():
         section = _section(
             build_session_report(_tool_report(stats), runtime(), width).plain, "Tool surface"
         )
-        row = next(r for r in section if "Call validity" in r)
+        row = next(r for r in section if "Tool-call error rate" in r)
         assert len(row) <= width
         tail = row.rstrip()
         # `12` alone would also match the percentage's own digits, so the
@@ -1361,7 +1401,7 @@ def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
     expected = {
         # Whichever rung wins, the SCOPE word survives; validity's own floor
         # rung is exercised by the width sweep in the test below.
-        "Call validity": "emitted",
+        "Tool-call error rate": "emitted",
         "Tool-side errors": "dispatched",
         " └ nested (eval)": "not the model's",
         # Attribution-NEUTRAL at every rung: `gate_failed` and `skipped` are in
@@ -1378,7 +1418,7 @@ def test_every_ladder_qualifier_is_present_and_uncropped_at_note_min():
 def test_the_execution_scope_survives_at_every_supported_width():
     """D1: at 68 columns this row used to read as a bare unqualified integer.
 
-    It carries no ``%`` in its value cell, so unlike ``Call validity`` it
+    It carries no ``%`` in its value cell, so unlike ``Tool-call error rate`` it
     self-describes not at all — an integer named "errors" sitting under a
     model-accuracy percentage is precisely the misreading the scope exists to
     prevent. The old ladder ``break``-ed with no fallback, so when nothing fit
@@ -1696,7 +1736,7 @@ def test_a_measured_zero_execution_error_count_is_drawn():
     The standing invariant is that an absent measurement is never drawn as a
     measured zero; the converse is the same principle. Suppressing this row at
     zero made a clean run — the MODAL shape for a healthy session — say nothing
-    where ``Call validity`` on the very next line happily shows its own zero.
+    where ``Tool-call error rate`` on the very next line happily shows its own zero.
     """
     stats = ToolCallStats(total=10, ok=10, faults={}, faults_by_tool={})
     section = _section(
@@ -1743,12 +1783,12 @@ def test_unknown_is_dimmed_like_the_other_absent_measurement_on_this_screen():
     stats = ToolCallStats(total=20, ok=20, faults={}, faults_by_tool={})
     text = build_session_report(_tool_report(stats), runtime(), 100)
     assert value_style(text, "Tool calls") == fg
-    assert value_style(text, "Call validity") == fg
+    assert value_style(text, "Tool-call error rate") == fg
 
     # And the other unknown on this block takes the same treatment.
     denied = ToolCallStats(total=3, ok=0, faults={"denied": 3}, faults_by_tool={"bash": 3})
     text = build_session_report(_tool_report(denied), runtime(), 100)
-    assert value_style(text, "Call validity") == dim
+    assert value_style(text, "Tool-call error rate") == dim
 
 
 def test_nested_calls_are_shown_but_named_as_outside_the_rates():
@@ -1774,7 +1814,7 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
     assert "20" in row and "not the model's" in row
     # The headline counts every call; the RATE stays model-origin.
     assert any("Tool calls" in r and "23" in r for r in section)
-    assert any("Call validity" in r and "66.7%" in r for r in section)
+    assert any("Tool-call error rate" in r and "33.3%" in r for r in section)
     # And the row is absent when there are none, so a clean session stays clean.
     plain = ToolCallStats(total=3, ok=3, faults={}, faults_by_tool={})
     section = _section(

@@ -668,7 +668,7 @@ ORIGIN_NESTED = "nested"
 
 #: Faults the MODEL is responsible for: the harness could not dispatch the call
 #: at all because what the model emitted was not a usable call. These and only
-#: these are the numerator of tool-call validity.
+#: these are the numerator of the tool-call error rate.
 MODEL_FAULTS: frozenset[str] = frozenset({"unknown_tool", "invalid_arguments", "duplicate_id"})
 
 #: Faults nobody's accuracy is measured by: the user cancelled the call, or the
@@ -690,7 +690,8 @@ class ToolCallStats:
 
     **THE ORIGIN PARTITION — the invariant this type exists to enforce.** Every
     count and every rate on this type EXCEPT :attr:`nested_total` /
-    :attr:`nested_ok` / :attr:`recorded` describes calls whose stored ``origin``
+    :attr:`nested_ok` / :attr:`nested_excluded` / :attr:`all_excluded` /
+    :attr:`recorded` describes calls whose stored ``origin``
     is ``'model'``: a tool_use block the model actually emitted. Calls
     dispatched by ``eval``'s ``dispatch_tool`` bridge are the model's CODE
     calling a tool, not the model emitting a call, and they arrive in scripted
@@ -733,6 +734,15 @@ class ToolCallStats:
     #: Nested calls that ran cleanly, so the nested row can read ``N · M ok``.
     #: No rate is derived from it, deliberately.
     nested_ok: int = 0
+    #: Nested user/harness exclusions must not become headline failures. Keep
+    #: them apart from ``excluded``: nested_total already removes these rows
+    #: from model-only denominators, so pooling would subtract them twice.
+    nested_excluded: int = 0
+
+    @property
+    def all_excluded(self) -> int:
+        """Both origins, for the recorded = ok + failed + excluded partition."""
+        return self.excluded + self.nested_excluded
 
     @property
     def recorded(self) -> int:
@@ -740,7 +750,7 @@ class ToolCallStats:
 
         Named apart from :attr:`total` rather than being what ``total`` means,
         so that reaching across the origin partition is always explicit at the
-        call site. This is the only count on the type that spans it.
+        call site, as it is for :attr:`all_excluded`.
         """
         return self.total + self.nested_total
 
@@ -783,6 +793,18 @@ class ToolCallStats:
         the model's.
         """
         return self.faults.get("execution", 0)
+
+    @property
+    def tool_call_error_rate(self) -> float | None:
+        """Rejected/invalid model invocations divided by eligible emitted calls.
+
+        Not semantic tool-selection correctness or proof that every tool error
+        is model-caused. Nested calls and user/harness exclusions never reach
+        this denominator. Compute the ratio directly, not from rounded validity,
+        so small error rates retain their measured precision.
+        """
+        emitted = self.emitted
+        return self.model_faults / emitted if emitted > 0 else None
 
     @property
     def validity(self) -> float | None:

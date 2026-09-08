@@ -1401,4 +1401,34 @@ def test_a_session_with_only_nested_calls_is_not_unknown(tmp_path):
     assert stats.recorded == 1 and stats.total == 0
     # No rate is claimed over a population no rate is defined for.
     assert stats.validity is None
+    assert stats.tool_call_error_rate is None
     store.close()
+
+
+@pytest.mark.parametrize("fault", ["denied", "aborted", "skipped", "gate_failed"])
+@pytest.mark.parametrize("origin", ["model", "nested"])
+def test_exclusions_partition_both_origins_without_changing_model_rates(tmp_path, fault, origin):
+    from local_operator.analytics.model import EXCLUDED_FAULTS
+
+    assert fault in EXCLUDED_FAULTS
+    store = AnalyticsStore(tmp_path / "excluded.db")
+    try:
+        store.record_tool_calls(
+            [(i, "s1", "read", "model", "", 1.0) for i in range(3)]
+            + [(4, "s1", "reed", "model", "unknown_tool", 1.0)]
+            + [(5, "s1", "write", origin, fault, 1.0)]
+            + [(6, "s1", "retry", "nested", "execution", 1.0)]
+        )
+        stats = store.session_report("s1").tool_calls
+        assert stats is not None
+        assert stats.excluded == (1 if origin == "model" else 0)
+        assert stats.nested_excluded == (1 if origin == "nested" else 0)
+        assert stats.all_excluded == 1
+        assert stats.emitted == 4
+        assert stats.model_faults == 1
+        assert stats.tool_call_error_rate == pytest.approx(0.25)
+        assert stats.validity == pytest.approx(0.75)
+        assert stats.execution_error_rate == 0
+        assert stats.recorded == 6
+    finally:
+        store.close()

@@ -342,3 +342,84 @@ async def test_the_origins_the_loop_emits_are_exactly_the_ones_the_reader_partit
     )
     emitted_origins = {origin for _n, origin, _f, _ms in recorded}
     assert emitted_origins == {ORIGIN_MODEL, ORIGIN_NESTED}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested_fault", ["denied", "gate_failed"])
+async def test_shipped_eval_nested_exclusion_is_not_a_failed_tool_call(
+    tmp_path, monkeypatch, nested_fault
+):
+    """Exercise the shipped exec-tier eval subprocess, bridge, store and screen.
+
+    Approve eval itself, then deny (or break approval for) its nested write.
+    The successful read afterwards proves the kernel/bridge continued rather
+    than a denied outer eval accidentally making this a vacuous assertion.
+    """
+    import json
+    import os
+
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.tools import eval as eval_tool
+    from local_operator.tui.widgets.session_panel import build_session_report
+    from tests.unit.analytics.test_store import _snap
+    from tests.unit.tui.test_session_panel import _section, runtime
+
+    for key in tuple(os.environ):
+        if key.startswith("CMUX_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    approvals = []
+
+    async def approve(tool_name, summary, job_id):
+        approvals.append(tool_name)
+        if tool_name == "eval":
+            return True
+        if nested_fault == "gate_failed":
+            raise RuntimeError("synthetic approval failure")
+        return False
+
+    write = _ok_tool("write_file")
+    write.approval_tier = "write"
+    read = _ok_tool()
+    read.approval_tier = "read"
+    ev = eval_tool.build_eval_tool()
+    assert ev.approval_tier == "exec"
+    args = json.dumps({"code": 'tool("write_file", path="a")\ntool("read", path="b")'})
+    try:
+        recorded = await _run(
+            _calls((0, "c1", "eval", args)) + [StreamEndEvent(stop_reason="toolUse")],
+            [ev, write, read],
+            cwd=str(tmp_path),
+            request_approval=approve,
+        )
+    finally:
+        await eval_tool.close_session_kernel("s1")
+    assert approvals == ["eval", "write_file"], recorded
+    assert [(n, o, f) for n, o, f, _ in recorded] == [
+        ("write_file", "nested", nested_fault),
+        ("read", "nested", ""),
+        ("eval", "model", ""),
+    ]
+    store = AnalyticsStore(tmp_path / "nested.db")
+    try:
+        store.record_batch([_snap(session_id="s1")])
+        store.record_tool_calls(
+            [(i, "s1", n, o, f, ms) for i, (n, o, f, ms) in enumerate(recorded)]
+        )
+        report = store.session_report("s1")
+        stats = report.tool_calls
+        assert stats is not None
+        assert (stats.recorded, stats.ok + stats.nested_ok, stats.all_excluded) == (3, 2, 1)
+        assert stats.excluded == 0 and stats.nested_excluded == 1
+        assert stats.emitted == 1 and stats.tool_call_error_rate == 0
+        for width in (40, 58, 100):
+            rows = _section(build_session_report(report, runtime(), width).plain, "Tool surface")
+            headline = next(row for row in rows if "Tool calls" in row)
+            assert "failed" not in headline
+            if width == 100:
+                assert "2 ok" in headline
+            nested = next(row for row in rows if "└ excluded" in row)
+            assert nested.split("excluded", 1)[1].strip().startswith("1")
+    finally:
+        store.close()

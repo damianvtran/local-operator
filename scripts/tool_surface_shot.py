@@ -91,6 +91,13 @@ STATES: dict[str, list[tuple[str, str, str, int]]] = {
         ("web_fetch", "model", "execution", 1),
     ],
     "nodispatch": [("bash", "model", "denied", 4)],
+    # The nested denial is INCLUDED in the nested subtotal, not another term
+    # to subtract from model-emitted calls (QA round 2's cross-origin defect).
+    "nested-excluded": [
+        ("eval", "model", "", 1),
+        ("read", "nested", "", 1),
+        ("write_file", "nested", "denied", 1),
+    ],
     "nested": [
         ("read", "model", "", 8),
         ("web_fetch", "model", "execution", 2),
