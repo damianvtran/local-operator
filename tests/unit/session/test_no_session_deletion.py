@@ -194,6 +194,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "legacy agents/ layout",
     ),
     (
+        "local_operator/agents.py::AgentRegistry.migrate_agents_dir",
+        "<path>.rmdir",
+        "The drained legacy agents/agents/ directory itself, and only when the "
+        "filesystem confirms it is empty -- rmdir refuses a non-empty directory, "
+        "so no agent data (and nothing under sessions/, which is a sibling of "
+        "agents/ and never reachable from this fixed path) can be removed",
+    ),
+    (
         "local_operator/agents.py::AgentRegistry.export_agent_archive",
         "shutil.rmtree",
         "mkdtemp staging dir",

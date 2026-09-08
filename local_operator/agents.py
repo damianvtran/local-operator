@@ -249,6 +249,7 @@ class AgentRegistry:
     _agents: Dict[str, AgentData]
     _last_refresh_time: float
     _refresh_interval: float
+    _incomplete_agent_dirs: List[Path]
 
     def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
         """
@@ -271,6 +272,10 @@ class AgentRegistry:
 
         self._agents: Dict[str, AgentData] = {}
         self._metadata_complete = True
+        # Concrete directories whose agent.yml could not be read/parsed/validated.
+        # Kept so the strict path can name what to repair: the user-facing error
+        # otherwise says "repair unreadable definitions" while naming none of them.
+        self._incomplete_agent_dirs: List[Path] = []
         self._last_refresh_time = time.time()
         self._refresh_interval = refresh_interval
 
@@ -281,6 +286,68 @@ class AgentRegistry:
         # Load agent metadata
         self._load_agents_metadata()
 
+    def _scan_agents_metadata(self) -> Tuple[Dict[str, AgentData], List[Path]]:
+        """Read every agent definition under ``agents_dir``.
+
+        Returns the agents read and the directories that held an ``agent.yml``
+        which could not be read, parsed or validated.
+
+        Completeness means "every agent definition I could see, I read
+        successfully" -- NOT "every directory here looks like an agent". A
+        subdirectory with no ``agent.yml`` is not a failed read of an agent, it
+        is not an agent at all, so it is skipped without touching completeness.
+        Counting it as incomplete permanently bricked profile launch and team
+        attach on any machine carrying the empty legacy ``agents/agents/``
+        directory that ``migrate_agents_dir`` used to leave behind: the strict
+        path raised forever, and the advice it gave ("repair unreadable agent
+        definitions") named nothing the user could act on because every real
+        definition was in fact fine.
+
+        A directory that HAS an ``agent.yml`` which fails to load still counts
+        as incomplete. That is a genuine unreadable definition, and the strict
+        path must keep failing loudly for it -- silently skipping an edited
+        installed role would let ``resolve_profile`` fall through to the
+        packaged role of the same name and run something the user did not
+        choose (see :meth:`require_complete_metadata`).
+
+        Both this scan's callers go through here so the rule cannot drift
+        between the initial load and the periodic refresh; it previously
+        existed as two copies, and the bug above was present in both.
+        """
+        agents: Dict[str, AgentData] = {}
+        incomplete: List[Path] = []
+
+        if not self.agents_dir.exists():
+            return agents, incomplete
+
+        for agent_dir in self.agents_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+
+            agent_config_file = agent_dir / "agent.yml"
+            if not agent_config_file.exists():
+                # Not an agent directory: a stray temp dir, an editor artifact,
+                # or the drained legacy nested dir. Debug rather than warning --
+                # it is discoverable when someone goes looking, but it is not a
+                # fault and must not be reported to the user as one.
+                logging.debug(
+                    "Skipping non-agent directory in agents dir (no agent.yml): %s",
+                    agent_dir,
+                )
+                continue
+
+            try:
+                with agent_config_file.open("r", encoding="utf-8") as f:
+                    agent_data = yaml.safe_load(f)
+
+                agent = AgentData.model_validate(agent_data)
+                agents[agent.id] = agent
+            except Exception as e:
+                incomplete.append(agent_dir)
+                logging.error(f"Invalid agent metadata in {agent_dir.name}: {str(e)}")
+
+        return agents, incomplete
+
     def _load_agents_metadata(self) -> None:
         """
         Load agents' metadata from agent.yml files in the agents directory.
@@ -289,29 +356,8 @@ class AgentRegistry:
         Raises:
             Exception: If there is an error loading or parsing the agent metadata files
         """
-        # Clear existing agents
-        self._agents = {}
-        self._metadata_complete = True
-
-        # Iterate through all directories in the agents directory
-        for agent_dir in self.agents_dir.iterdir():
-            if not agent_dir.is_dir():
-                continue
-
-            agent_config_file = agent_dir / "agent.yml"
-            if not agent_config_file.exists():
-                self._metadata_complete = False
-                continue
-
-            try:
-                with agent_config_file.open("r", encoding="utf-8") as f:
-                    agent_data = yaml.safe_load(f)
-
-                agent = AgentData.model_validate(agent_data)
-                self._agents[agent.id] = agent
-            except Exception as e:
-                self._metadata_complete = False
-                logging.error(f"Invalid agent metadata in {agent_dir.name}: {str(e)}")
+        self._agents, self._incomplete_agent_dirs = self._scan_agents_metadata()
+        self._metadata_complete = not self._incomplete_agent_dirs
 
     def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
         """
@@ -662,7 +708,19 @@ class AgentRegistry:
         except OSError:
             raise ProfileRegistryUnavailable() from None
         if not self._metadata_complete:
-            raise ProfileRegistryUnavailable()
+            # The full paths go to the local log only. This error crosses the
+            # attach/HTTP transport boundary, where ``session/errors.py``
+            # admits an enumerated CATEGORY rather than owner-supplied prose --
+            # a filesystem path names the operator's home and their agents, so
+            # it must not ride along. Basenames are agent UUIDs (or a
+            # user-chosen directory name) and are equally not worth leaking, so
+            # only the COUNT is carried, which is enough for the user to know
+            # how many definitions to look for and for the log to name them.
+            logging.warning(
+                "Agent registry incomplete; unreadable agent definitions at: %s",
+                ", ".join(str(path) for path in self._incomplete_agent_dirs),
+            )
+            raise ProfileRegistryUnavailable(count=len(self._incomplete_agent_dirs))
 
     def _refresh_if_needed(self) -> None:
         """
@@ -678,37 +736,12 @@ class AgentRegistry:
         Reload agents' metadata from agent.yml files in the agents directory.
         This is used to refresh the in-memory state with changes made by other processes.
         """
-        # Clear existing agents
-        refreshed_agents = {}
-        self._metadata_complete = True
-
-        # First try to load from agent.yml files in the agents directory
-        if self.agents_dir.exists():
-            # Iterate through all directories in the agents directory
-            for agent_dir in self.agents_dir.iterdir():
-                if not agent_dir.is_dir():
-                    continue
-
-                agent_config_file = agent_dir / "agent.yml"
-                if not agent_config_file.exists():
-                    self._metadata_complete = False
-                    continue
-
-                try:
-                    with agent_config_file.open("r", encoding="utf-8") as f:
-                        agent_data = yaml.safe_load(f)
-
-                    agent = AgentData.model_validate(agent_data)
-                    refreshed_agents[agent.id] = agent
-                except Exception as e:
-                    self._metadata_complete = False
-                    # Log the error but continue processing other agents
-                    logging.error(
-                        f"Error refreshing agent metadata from {agent_dir.name}: {str(e)}"
-                    )
+        refreshed_agents, incomplete = self._scan_agents_metadata()
 
         # Update the in-memory agents dictionary
         self._agents = refreshed_agents
+        self._incomplete_agent_dirs = incomplete
+        self._metadata_complete = not incomplete
 
     def get_agent(self, agent_id: str) -> AgentData:
         """
@@ -1223,6 +1256,14 @@ class AgentRegistry:
 
         This method checks for agents in a nested 'agents/agents' directory structure
         and moves them to the correct location in the agents directory.
+
+        The drained ``nested_dir`` is removed afterwards. Leaving it behind is
+        what created the litter this migration is now also responsible for
+        cleaning up: an empty ``agents/agents/`` survived indefinitely, and the
+        metadata scan used to count it as an unreadable agent (see
+        :meth:`_scan_agents_metadata`). Because ``__init__`` runs this
+        migration, an upgraded machine heals itself on the next start rather
+        than needing the user to find and delete the directory.
         """
         nested_dir = self.agents_dir / "agents"
         if not nested_dir.exists():
@@ -1251,6 +1292,24 @@ class AgentRegistry:
                     logging.info(f"Migrated agent {agent_id} from nested directory")
                 except Exception as e:
                     logging.error(f"Failed to migrate agent {agent_id}: {str(e)}")
+
+        try:
+            # ``rmdir``, never ``rmtree``: it refuses a non-empty directory, so
+            # anything that did NOT migrate (a copy that raised, or a child
+            # whose target already existed) keeps its data AND keeps the
+            # directory visible for a human to resolve. Silently deleting
+            # unmigrated agent data would be far worse than the litter this
+            # removal exists to prevent, so the emptiness check is the
+            # filesystem's own and not a pre-flight listing that could race.
+            nested_dir.rmdir()
+            logging.info("Removed drained legacy nested agents directory")
+        except OSError:
+            # Non-empty (agents remain to migrate) or not removable. Both are
+            # states to leave alone: the next start retries the migration.
+            logging.debug(
+                "Legacy nested agents directory retained (not empty or not removable): %s",
+                nested_dir,
+            )
 
     def migrate_legacy_agents(self) -> List[str]:
         """
