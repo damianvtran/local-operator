@@ -1144,3 +1144,92 @@ def test_a_history_fold_clears_pending_echoes() -> None:
     assert fold._pending_user_echoes
     fold.fold_history([Message.user("something else entirely")])
     assert fold._pending_user_echoes == {}
+
+
+def test_a_promoted_compose_key_rekeys_the_phone_row_instead_of_appending() -> None:
+    """The phone must show ONE row for a call whose id arrived late.
+
+    ``_tool_row`` correlates by ``tool_call_id``. A provider that sends the
+    name before the id makes the loop announce the row under ``compose:0`` and
+    then promote it to the real id on one frame naming both. Without honouring
+    that hand-off the lookup misses, a SECOND row is appended, and the
+    placeholder row is left composing forever because every later start and end
+    carries the real id.
+
+    The entry's own ``id`` deliberately does not move: clients diff the
+    transcript by row id, so re-identifying a row mid-turn would read as the
+    row being replaced rather than updated.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="compose:0", tool_name="bash", argument_bytes=8)
+    )
+    tool_rows = [row for row in fold.projection.transcript if row.kind == "tool"]
+    assert len(tool_rows) == 1
+    original_row_id = tool_rows[0].id
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            argument_bytes=64,
+            supersedes_tool_call_id="compose:0",
+        )
+    )
+    tool_rows = [row for row in fold.projection.transcript if row.kind == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0].id == original_row_id
+    assert tool_rows[0].tool_call_id == "real_0"
+
+    # The real start and end settle THAT row rather than opening another.
+    fold.fold_event(ToolExecutionStartEvent(tool_call_id="real_0", tool_name="bash", args={}))
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            result=ToolResult(
+                tool_call_id="real_0", content=[TextContent(text="ok")], is_error=False
+            ),
+        )
+    )
+    tool_rows = [row for row in fold.projection.transcript if row.kind == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0].tool_state == "done"
+
+
+def test_a_compose_event_without_the_supersedes_field_is_unchanged() -> None:
+    """An older runtime omits the field; the phone must behave as before."""
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="c1", tool_name="bash", argument_bytes=8))
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="c2", tool_name="bash", argument_bytes=8))
+    tool_rows = [row for row in fold.projection.transcript if row.kind == "tool"]
+    assert [row.tool_call_id for row in tool_rows] == ["c1", "c2"]
+
+
+def test_a_repeated_supersession_does_not_disturb_an_already_rekeyed_row() -> None:
+    """The hand-off is repeated on every later frame and must stay idempotent.
+
+    The second and third promotions find no placeholder to move, so they take
+    the ordinary path and update the row already keyed by the real id rather
+    than appending another.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="compose:0", tool_name="bash", argument_bytes=5)
+    )
+    for size in (10, 20, 30):
+        fold.fold_event(
+            ToolCallComposeEvent(
+                tool_call_id="real_0",
+                tool_name="bash",
+                argument_bytes=size,
+                supersedes_tool_call_id="compose:0",
+            )
+        )
+    tool_rows = [row for row in fold.projection.transcript if row.kind == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0].tool_call_id == "real_0"
+    assert tool_rows[0].details["argument_bytes"] == 30

@@ -3332,7 +3332,25 @@ class FrontendStateStore:
             ]
         elif kind in {"tool_call_compose", "tool_execution_start"}:
             call_id = str(data.get("tool_call_id") or "")
-            live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
+            # A compose frame may announce that the call's real id has just
+            # arrived and that the row previously seeded under an index-derived
+            # placeholder is the SAME call. Drop the superseded entry with it,
+            # or the seed keeps BOTH id spaces: a joiner is then handed a
+            # composing row keyed by the placeholder that no later
+            # ``tool_execution_start``/``_end`` can ever match, and turn-end
+            # retirement paints it ``⊘ interrupted`` on a call that SUCCEEDED.
+            #
+            # Keyed on the announcement rather than on a rule like *any start
+            # clears the composing entries*: with several calls in flight
+            # nothing else can tell WHICH composing entry a start belongs to,
+            # so the broad rule would drop rows for calls still being dictated.
+            #
+            # The falsy guard keeps an OLDER runtime working: it never sets the
+            # field, so ``superseded`` is empty and this is exactly today's
+            # behaviour.
+            superseded = str(data.get("supersedes_tool_call_id") or "")
+            drop = {call_id, superseded} if superseded else {call_id}
+            live = [item for item in live if str(item.get("tool_call_id") or "") not in drop]
             live.append(data)
         elif kind == "tool_execution_end":
             call_id = str(data.get("tool_call_id") or "")
