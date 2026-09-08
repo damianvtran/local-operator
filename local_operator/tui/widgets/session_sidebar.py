@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from typing import Self
 
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -17,6 +19,7 @@ from textual.binding import Binding
 from textual.geometry import Region
 from textual.message import Message
 from textual.reactive import Reactive
+from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
@@ -201,6 +204,10 @@ class SessionSidebar(Widget, can_focus=True):
         self._catalog_loading = True
         self._offset = 0
         self._frame = 0
+        self._painted_state: tuple[object, ...] | None = None
+        self._painted_lines: dict[int, Strip] = {}
+        self._painted_lines_valid = False
+        self._spinner_paint = False
         self._timer: Timer | None = None
         self._spinner_rate = SIDEBAR_SPINNER_INTERVAL_S
         self._pressed_id: str | None = None
@@ -339,7 +346,11 @@ class SessionSidebar(Widget, can_focus=True):
         # jiggled the mouse.
         self._set_hover(self._hover_y)
         self._sync_animation()
-        self.refresh()
+        # Polling must still adopt fresh summaries (including tooltip-only
+        # status), but an unchanged frame must not invalidate Rich's content
+        # and Textual's compositor every two seconds in every open terminal.
+        if self._paint_state() != self._painted_state:
+            self.refresh()
 
     def show_error(self, message: str) -> None:
         # A refresh error does not erase the last usable catalog.
@@ -403,9 +414,101 @@ class SessionSidebar(Widget, can_focus=True):
         else:
             self._timer.pause()
 
+    def _age(self, entry: CatalogEntry) -> str:
+        age = (
+            format_age(max(0, time.time() - entry.row.mtime)).replace(" ago", "")
+            if self.size.width >= 28
+            else ""
+        )
+        return age if len(age) <= 4 else ""
+
+    def _paint_state(self) -> tuple[object, ...]:
+        # Keep the complete immutable entries, not a partial fingerprint of
+        # their titles/status. New fields must never silently evade invalidation.
+        # Age is time-derived, so equal catalog bytes alone are insufficient.
+        return (
+            self.entries,
+            self.current_id,
+            self.cursor_id,
+            self._requested_id,
+            self._requested_spinning(),
+            self._offset,
+            self.has_focus,
+            self._hover_id,
+            self.error,
+            self._catalog_loading,
+            self.size,
+            tuple(self._age(entry) for entry in self.visible_entries),
+        )
+
+    def refresh(
+        self,
+        *regions: Region,
+        repaint: bool = True,
+        layout: bool = False,
+        recompose: bool = False,
+    ) -> Self:
+        # Any ordinary invalidation owns the next render: hover, theme, resize,
+        # focus and new summaries must never reuse a spinner-only projection.
+        # Textual may call refresh during Widget construction, before our init.
+        if repaint or layout or recompose:
+            self._spinner_paint = False
+            self._painted_lines_valid = False
+        return super().refresh(*regions, repaint=repaint, layout=layout, recompose=recompose)
+
+    def render_line(self, y: int) -> Strip:
+        # Widget's default render_line rebuilds the WHOLE Rich Text for even a
+        # one-cell dirty region. Reuse public content strips only for a known
+        # spinner-only paint; normal rendering and style application stay with
+        # Textual, and no private render/compositor cache is modified.
+        if self._spinner_paint and y in self._painted_lines:
+            return self._painted_lines[y]
+        line = super().render_line(y)
+        self._painted_lines[y] = line
+        return line
+
     def _advance_spinner(self) -> None:
         self._frame += 1
-        self.refresh()
+        if not self._painted_lines_valid or self._paint_state() != self._painted_state:
+            # A pending catalog/focus/age change needs its whole frame; never
+            # let a tick turn that invalidation into only a spinner-cell paint.
+            self.refresh()
+            return
+        if not self.entries and self._catalog_loading:
+            self.refresh(Region(0, 1, 1, 1))
+            return
+        rows = self._display_rows()
+        title = 0 if self._draws_section_headers(rows) else 1
+        regions = []
+        replacements: dict[int, Strip] = {}
+        for y, (_kind, entry) in enumerate(rows, title):
+            if entry is None:
+                continue
+            requested = entry.id == self._requested_id and entry.id != self.current_id
+            if (requested and self._requested_spinning()) or (
+                entry.row.live_state == "busy"
+                and not entry.row.pending
+                and not entry.shows_completion_mark
+            ):
+                line = self._painted_lines.get(y)
+                if line is None:
+                    self.refresh()
+                    return
+                # The old cell carries its exact resolved foreground/background
+                # (including cursor/hover selection). Only its glyph changes.
+                cell = line.crop(2, 3)
+                glyph = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
+                mark = Strip([Segment(glyph, next(iter(cell)).style)], 1)
+                replacements[y] = Strip.join([line.crop(0, 2), mark, line.crop(3)])
+                regions.append(Region(2, y, 1, 1))
+        # refresh() with no regions means the ENTIRE widget, not no work.
+        # Only glyphs move at this cadence; titles, chrome and empty space do
+        # not need recompositing. The existing timer rate is unchanged.
+        if regions:
+            self.refresh(*regions)
+            self._painted_lines.update(replacements)
+            self._painted_lines_valid = True
+            self._spinner_paint = True
 
     def _cursor_index(self) -> int:
         return next((i for i, row in enumerate(self.entries) if row.id == self.cursor_id), 0)
@@ -639,6 +742,10 @@ class SessionSidebar(Widget, can_focus=True):
         self._sync_animation()
 
     def render(self) -> Text:
+        self._spinner_paint = False
+        self._painted_lines.clear()
+        self._painted_lines_valid = True
+        self._painted_state = self._paint_state()
         width = max(1, self.size.width)
         result = Text(no_wrap=True, overflow="crop")
         rows = self._display_rows()
@@ -744,13 +851,7 @@ class SessionSidebar(Widget, can_focus=True):
                     entry.completion_kind, COMPLETION_MARKERS["complete"]
                 )
             line.append(f"{mark or ' '} ", style=theme_mod.semantic_color(ink))
-            age = (
-                format_age(max(0, time.time() - entry.row.mtime)).replace(" ago", "")
-                if width >= 28
-                else ""
-            )
-            if len(age) > 4:
-                age = ""
+            age = self._age(entry)
             title_width = max(1, width - 4 - (len(age) + 1 if age else 0))
             title = truncate_cells(entry.row.name or "Untitled conversation", title_width)
             line.append(title)
