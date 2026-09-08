@@ -120,10 +120,20 @@ def _retained_size(value: object, limit: int) -> int | None:
     This is a small page walk, not a full-history admission pass (the latter
     doubled cold 20k-row replay CPU in the measured prototype). Shared immutable
     values count once within a page and conservatively again across cache entries.
+
+    Deliberately an OVER-estimate: ``sys.getsizeof`` charges per-object CPython
+    overhead (measured ~7.5x a pickled page — 91,960 accounted against 12,172
+    serialized), so the effective retention ceiling is well under the nominal
+    2 MiB. That direction is the safe one for a per-owner budget multiplied
+    across a fleet, but anyone re-tuning the constant should size it against
+    ACCOUNTED bytes rather than expecting a wire-sized figure.
     The fixed allowance covers the four LRU nodes and bookkeeping. Framework
     class/schema objects are process-global, not retained by this cache.
     """
     pending = [value]
+    # Identity-keyed, and safe only because nothing here is freed mid-walk: the
+    # page and its key are held by `pending`/the caller for the whole traversal,
+    # so no id() can be recycled into a false "already counted".
     seen: set[int] = set()
     total = 0
     while pending:

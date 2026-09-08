@@ -133,6 +133,34 @@ def test_advertised_missing_library_names_the_candidate(tmp_path, monkeypatch) -
     assert str(candidate) in message and "query-note" in message and "rc=0" in message
 
 
+def test_unreadable_advertised_library_names_the_candidate_and_keeps_the_cause(
+    tmp_path, monkeypatch
+) -> None:
+    """An unreadable path is not evidence that no library exists.
+
+    The stat itself can fail (a permission-denied mount, a stale automount),
+    and reporting that as "no shared libpython" is the exact
+    misclassification this module exists to prevent.
+    """
+    stdout = f"1\n{tmp_path}\nlibpython-unreadable.dylib\n"
+    monkeypatch.setattr(
+        helper, "_probe", lambda *_: subprocess.CompletedProcess([], 0, stdout, "query-note")
+    )
+    failure = PermissionError(13, "Permission denied")
+
+    def refuse(self):  # noqa: ANN001, ANN202
+        raise failure
+
+    monkeypatch.setattr(Path, "is_file", refuse)
+    with pytest.raises(AssertionError, match="cannot inspect shared libpython") as raised:
+        helper._shared_libpython(tmp_path / "python")
+    message = str(raised.value)
+    assert "libpython-unreadable.dylib" in message
+    assert "rc=0" in message and "query-note" in message
+    assert "no shared libpython" not in message
+    assert raised.value.__cause__ is failure
+
+
 def test_query_failure_preserves_the_copied_interpreters_start_context(
     tmp_path, monkeypatch
 ) -> None:

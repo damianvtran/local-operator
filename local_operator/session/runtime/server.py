@@ -2685,6 +2685,12 @@ class RuntimeServer:
             # Detached owners and full-TUI-only viewers have nobody consuming
             # repaints. Avoid building a large payload at every coalesced tick;
             # welcome frames and all subscribed update cadences are unchanged.
+            #
+            # The warning latch still has to be released: no frame was emitted,
+            # so nothing degraded, and leaving it set would swallow the log line
+            # for the NEXT genuine degradation after a quiet period — exactly
+            # what the once-per-episode latch exists to preserve.
+            self._frame_cap_warned = False
             return
         ordinary = self._projection_payload()
         await asyncio.gather(
