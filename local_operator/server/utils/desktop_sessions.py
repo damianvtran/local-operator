@@ -24,8 +24,14 @@ from typing import Any
 
 from anyio import CancelScope
 
-from local_operator.resume import is_user_session, recent_session_rows, session_preview
+from local_operator.resume import (
+    is_user_session,
+    read_session_attachment,
+    session_preview,
+    write_session_attachment,
+)
 from local_operator.session.attention import AttentionStore
+from local_operator.session.catalog import load_catalog
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
@@ -475,15 +481,41 @@ class DesktopSessions:
 
         return await asyncio.to_thread(acknowledge)
 
-    async def create(self, cwd: str) -> str:
+    async def create(self, cwd: str, *, target: dict[str, str] | None = None) -> str:
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
             raise ValueError("Choose an existing working directory")
+        binding = {"agent": "", "team": ""}
+        if target:
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import validate_target
+            from local_operator.teams import TeamRegistry
+
+            binding[target["kind"]] = await asyncio.to_thread(
+                validate_target,
+                AgentRegistry(self.root),
+                TeamRegistry(self.root),
+                target["kind"],
+                target["name"],
+            )
         session_id = uuid.uuid4().hex[:12]
         path = self.root / "sessions" / session_id
 
         def persist() -> None:
             path.mkdir(parents=True, mode=0o700)
+            if target:
+                write_session_attachment(path, **binding, goal="")
+                stored = read_session_attachment(path)
+                if (
+                    stored is None
+                    or stored.agent != binding["agent"]
+                    or stored.team != binding["team"]
+                ):
+                    # Never publish desktop.json after a best-effort writer lost
+                    # the attachment. No possibly admitted work is deleted.
+                    raise ValueError(
+                        "The selected profile could not be saved. Retry after checking storage."
+                    )
             # An explicitly created desktop draft needs an identity after an
             # HTTP restart, unlike the TUI's uncommitted welcome-screen draft.
             marker = path / "desktop.json"
@@ -493,38 +525,43 @@ class DesktopSessions:
         await asyncio.to_thread(persist)
         return session_id
 
+    async def binding(self, session_id: str) -> dict[str, str | None]:
+        def read() -> dict[str, str | None]:
+            stored = read_session_attachment(self.root / "sessions" / session_id)
+            return {
+                "agent": stored.agent or None if stored else None,
+                "team": stored.team or None if stored else None,
+            }
+
+        return await asyncio.to_thread(read)
+
     async def list(self, limit: int) -> list[dict[str, Any]]:
         def rows() -> list[dict[str, Any]]:
-            existing = [row._asdict() for row in recent_session_rows(self.root, limit=limit)]
-            ids = {row["id"] for row in existing}
-            for marker in (self.root / "sessions").glob("*/desktop.json"):
-                if marker.parent.name not in ids and SESSION_ID.fullmatch(marker.parent.name):
-                    existing.append(
-                        {"id": marker.parent.name, "name": "", "mtime": marker.stat().st_mtime}
-                    )
-            visible = sorted(existing, key=lambda row: row["mtime"], reverse=True)[:limit]
-            # Previews are read AFTER the sort and the limit, so the tail scan
-            # runs once per row the caller will actually see rather than once
-            # per session on disk. Measured 0.10 ms per row on a 38-session
-            # store; the whole call already runs on a worker thread.
-            # One read connection per list, never one per row or an owner bind.
-            #
-            # Guarded for the same reason as `snapshot()`: unread badges are a
-            # decoration on the session list, and losing every session row
-            # because the receipt sidecar is busy is strictly worse than
-            # showing the sessions without badges. Omitting the key degrades to
-            # "not ackable" on the client, which is correct rather than a false
-            # read state.
+            entries = load_catalog(self.root, limit=limit)[:limit]
             attention: dict[str, dict[str, Any]] = {}
             with contextlib.suppress(sqlite3.Error, OSError):
                 attention = AttentionStore(self.root / "attention.db").state_many(
-                    f"session/{row['id']}" for row in visible
+                    f"session/{entry.id}" for entry in entries
                 )
-            for row in visible:
-                row["preview"] = session_preview(self.root / "sessions" / row["id"])
-                if f"session/{row['id']}" in attention:
-                    row["attention"] = attention[f"session/{row['id']}"]
-            return visible
+            result = []
+            for entry in entries:
+                row = entry.row._asdict()
+                stored = read_session_attachment(self.root / "sessions" / entry.id)
+                row.update(
+                    {
+                        "active": entry.active,
+                        "status": {"code": entry.status_code, "label": entry.status},
+                        "binding": {
+                            "agent": stored.agent or None if stored else None,
+                            "team": stored.team or None if stored else None,
+                        },
+                        "preview": session_preview(self.root / "sessions" / entry.id),
+                    }
+                )
+                if f"session/{entry.id}" in attention:
+                    row["attention"] = attention[f"session/{entry.id}"]
+                result.append(row)
+            return result
 
         return await asyncio.to_thread(rows)
 

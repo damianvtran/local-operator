@@ -63,9 +63,15 @@ class Seen(Input):
     completion_token: RequestID
 
 
+class SessionTarget(Input):
+    kind: Literal["agent", "team"]
+    name: str = Field(min_length=1, max_length=128)
+
+
 class CreateSession(Input):
     request_id: RequestID
     cwd: str = Field(min_length=1, max_length=4096)
+    target: SessionTarget | None = None
 
 
 class Image(Input):
@@ -161,8 +167,17 @@ async def errors() -> AsyncIterator[None]:
     try:
         yield
     except KeyError:
-        raise HTTPException(404, "Session or subscription not found") from None
+        raise HTTPException(
+            404, "Requested session, profile, team or subscription not found"
+        ) from None
     except (ReceiptConflict, ValueError) as error:
+        from local_operator.session.errors import (
+            AttachmentUnavailable,
+            ProfileRegistryUnavailable,
+        )
+
+        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable)):
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error:
         # Contention on the shared receipt store is transient and retryable, so
@@ -202,13 +217,17 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     # a bare 500. The decoration is already omitted per row inside `list()`;
     # this ladder covers anything else the pool can raise.
     async with errors():
-        return reply({"sessions": await host(request).list(limit)})
+        rows = await host(request).list(limit + 1)
+        return reply({"sessions": rows[:limit], "truncated": len(rows) > limit, "limit": limit})
 
 
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
     async def create():
-        return {"session_id": await host(request).create(body.cwd)}
+        pool = host(request)
+        target = body.target.model_dump() if body.target else None
+        session_id = await pool.create(body.cwd, target=target)
+        return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
     async with errors():
         return reply(

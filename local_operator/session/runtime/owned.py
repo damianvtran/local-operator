@@ -1122,6 +1122,39 @@ class OwnedSessionHandle(SessionHandle):
             return "already admitted"
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
+        # Restore intentionally keeps missing attachments readable. Admission is
+        # different: executing a plain assistant under a stored profile label
+        # would silently change the task. Check the owner's resolved state, not
+        # just HTTP's earlier preflight (the profile can disappear during boot).
+        from local_operator.session.errors import (
+            AttachmentUnavailable,
+            ProfileRegistryUnavailable,
+        )
+
+        registry = getattr(self._session, "agent_registry", None)
+        complete = getattr(registry, "require_complete_metadata", None)
+        try:
+            if complete is not None and (
+                getattr(self._session, "active_agent", "")
+                or getattr(self._session, "active_team", None)
+                or getattr(self._session, "_unresolved_agent", "")
+                or getattr(self._session, "_unresolved_team", "")
+            ):
+                complete()
+        except ProfileRegistryUnavailable:
+            self._command_reservations.reject(command_id)
+            raise
+        unresolved = getattr(self._session, "_unresolved_agent", "") or getattr(
+            self._session, "_unresolved_team", ""
+        )
+        team = getattr(self._session, "active_team", None)
+        if team is not None:
+            resolve = getattr(self._session, "_resolve_profile_or_specialist", None)
+            if resolve is not None and resolve(team.manager)[0] is None:
+                unresolved = team.manager
+        if unresolved:
+            self._command_reservations.reject(command_id)
+            raise AttachmentUnavailable()
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")

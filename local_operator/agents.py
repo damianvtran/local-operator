@@ -270,6 +270,7 @@ class AgentRegistry:
         self.agents_file: Path = self.config_dir / "agents.json"
 
         self._agents: Dict[str, AgentData] = {}
+        self._metadata_complete = True
         self._last_refresh_time = time.time()
         self._refresh_interval = refresh_interval
 
@@ -290,6 +291,7 @@ class AgentRegistry:
         """
         # Clear existing agents
         self._agents = {}
+        self._metadata_complete = True
 
         # Iterate through all directories in the agents directory
         for agent_dir in self.agents_dir.iterdir():
@@ -298,6 +300,7 @@ class AgentRegistry:
 
             agent_config_file = agent_dir / "agent.yml"
             if not agent_config_file.exists():
+                self._metadata_complete = False
                 continue
 
             try:
@@ -307,6 +310,7 @@ class AgentRegistry:
                 agent = AgentData.model_validate(agent_data)
                 self._agents[agent.id] = agent
             except Exception as e:
+                self._metadata_complete = False
                 logging.error(f"Invalid agent metadata in {agent_dir.name}: {str(e)}")
 
     def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
@@ -641,6 +645,25 @@ class AgentRegistry:
             # Optionally, re-raise or handle more gracefully
             raise Exception(f"Failed to save schedules: {str(e)}") from e
 
+    def require_complete_metadata(self) -> None:
+        """Strict consumers must not mistake a skipped row for authoritative absence.
+
+        Legacy chat reads remain tolerant. Profile launch/catalogue reads opt in
+        because skipping an edited installed role could select a packaged role
+        of the same name. Recheck a failed snapshot so repair is immediately
+        retryable without replacing the session or waiting for cache expiry.
+        """
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        try:
+            self._refresh_if_needed()
+            if not self._metadata_complete:
+                self._refresh_agents_metadata()
+        except OSError:
+            raise ProfileRegistryUnavailable() from None
+        if not self._metadata_complete:
+            raise ProfileRegistryUnavailable()
+
     def _refresh_if_needed(self) -> None:
         """
         Refresh agent metadata from disk if the refresh interval has elapsed.
@@ -657,6 +680,7 @@ class AgentRegistry:
         """
         # Clear existing agents
         refreshed_agents = {}
+        self._metadata_complete = True
 
         # First try to load from agent.yml files in the agents directory
         if self.agents_dir.exists():
@@ -667,6 +691,7 @@ class AgentRegistry:
 
                 agent_config_file = agent_dir / "agent.yml"
                 if not agent_config_file.exists():
+                    self._metadata_complete = False
                     continue
 
                 try:
@@ -676,6 +701,7 @@ class AgentRegistry:
                     agent = AgentData.model_validate(agent_data)
                     refreshed_agents[agent.id] = agent
                 except Exception as e:
+                    self._metadata_complete = False
                     # Log the error but continue processing other agents
                     logging.error(
                         f"Error refreshing agent metadata from {agent_dir.name}: {str(e)}"

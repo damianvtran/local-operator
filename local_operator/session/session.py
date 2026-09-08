@@ -3857,6 +3857,28 @@ class Session:
             return
         if stored is None:
             return
+        # The goal is INDEPENDENT of the profile/team slots and is restored
+        # first, unconditionally. A later early return on an unreadable registry
+        # would otherwise leave the holder empty, and the prescribed recovery
+        # (``/agent <name>``) journals the holder — writing that empty goal over
+        # the user's durable one. Set straight onto the holder: this is a read
+        # of disk state, not a user action, so it must not re-journal.
+        if stored.goal:
+            self._goal_state.set(stored.goal)
+        if stored.agent or stored.team:
+            from local_operator.session.errors import ProfileRegistryUnavailable
+
+            complete = getattr(self.agent_registry, "require_complete_metadata", None)
+            try:
+                if complete is not None:
+                    complete()
+            except ProfileRegistryUnavailable as error:
+                # Histories remain readable, but admission must not use a seed
+                # fallback while an installed definition was skipped as corrupt.
+                self._unresolved_agent = stored.agent
+                self._unresolved_team = stored.team
+                self.attachment_restore_notice = str(error)
+                return
 
         self._restoring_attachment = True
         try:
@@ -3994,6 +4016,19 @@ class Session:
         # it — but the logic lives in one place now.
         from local_operator.agent_profiles import resolve_profile_or_specialist
 
+        # Resolve only from an authoritative registry read. ``resolve_profile``
+        # is deliberately TOLERANT — it falls through to the packaged seed when
+        # a role row is absent — and an incomplete snapshot makes "absent" and
+        # "unreadable" indistinguishable, so a corrupt (or merely stale-since-
+        # repaired) installed definition would be stamped as the packaged role
+        # of the same name and executed as the user's profile. Both callers of
+        # this resolver (``/agent`` attach and team-manager resolution) go
+        # through here, so the guarantee cannot drift between them; the refresh
+        # inside also means an explicit repair takes effect immediately rather
+        # than after the registry's cache interval elapses.
+        complete = getattr(self.agent_registry, "require_complete_metadata", None)
+        if complete is not None:
+            complete()
         return resolve_profile_or_specialist(name, registry=self.agent_registry)
 
     def attach_agent_profile(self, name: str) -> str | None:
