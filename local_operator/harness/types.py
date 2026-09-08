@@ -508,10 +508,12 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id",)
+    __slots__ = ("surface_id", "resource")
 
-    def __init__(self) -> None:
+    def __init__(self, resource: Any = None) -> None:
         self.surface_id = ""
+        # Host-owned persistence stays outside the harness import graph.
+        self.resource = resource
 
 
 @runtime_checkable

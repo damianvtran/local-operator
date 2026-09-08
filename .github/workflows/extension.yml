@@ -13,6 +13,14 @@ on:
       - 'extension/**'
       - 'local_operator/browser_bridge/protocol.py'
       - 'local_operator/browser_bridge/gen_ts.py'
+      - 'local_operator/browser_bridge/resources.py'
+      - 'local_operator/browser_bridge/backend.py'
+      - 'local_operator/harness/types.py'
+      - 'local_operator/harness/subagent.py'
+      - 'local_operator/session/session.py'
+      - 'local_operator/tools/builtin.py'
+      - 'tests/e2e/test_browser_ownership.py'
+      - '.github/workflows/extension.yml'
       # The store workflows are gated here because `release.test.mjs` asserts
       # their job topology (preflight has no `environment:`, the deploying job
       # `needs:` it). That guard is the primary boundary for an unattended
@@ -25,6 +33,14 @@ on:
       - 'extension/**'
       - 'local_operator/browser_bridge/protocol.py'
       - 'local_operator/browser_bridge/gen_ts.py'
+      - 'local_operator/browser_bridge/resources.py'
+      - 'local_operator/browser_bridge/backend.py'
+      - 'local_operator/harness/types.py'
+      - 'local_operator/harness/subagent.py'
+      - 'local_operator/session/session.py'
+      - 'local_operator/tools/builtin.py'
+      - 'tests/e2e/test_browser_ownership.py'
+      - '.github/workflows/extension.yml'
       - '.github/workflows/chrome-web-store.yml'
       - '.github/workflows/chrome-web-store-promote.yml'
   workflow_dispatch:
@@ -53,8 +69,8 @@ jobs:
           node-version: '24'
           cache: pnpm
           cache-dependency-path: extension/pnpm-lock.yaml
-      - name: Install protocol dependencies
-        run: python -m pip install pydantic
+      - name: Install host protocol and end-to-end dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Install extension dependencies
         working-directory: extension
         run: pnpm install --frozen-lockfile
@@ -64,6 +80,10 @@ jobs:
       - name: Run extension tests
         working-directory: extension
         run: pnpm test
+      - name: Exercise session ownership through disposable protocol peer
+        # No Chromium: Node runs the actual extension modules against isolated
+        # Chrome API fixtures; Python drives its real Session and HTTP client.
+        run: python -m pytest tests/e2e/test_browser_ownership.py -m e2e -n0 -q
       - name: Build extension
         working-directory: extension
         run: pnpm build

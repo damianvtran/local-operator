@@ -13,6 +13,7 @@ import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObser
 import { DEFAULT_PORT, getLocal, isRedactedToken } from "./state";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
+import { withOwnership } from "./ownership";
 import {
   RECONNECT_ALARM_NAME,
   RECONNECT_ALARM_PERIOD_MINUTES,
@@ -51,6 +52,10 @@ const HANDLERS: Record<
   // title that arrived after the tab was created. It drives no tab and reads
   // no page, so unlike every other handler it needs no surface admission.
   retitle,
+  owner_recover: async () => ({}),
+  owner_finish: async () => ({}),
+  owner_retain: async () => ({}),
+  owner_release: async () => ({}),
 };
 
 // How long a dial may sit unresolved before we force it closed and retry. A
@@ -186,7 +191,8 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     if (request.method !== "open" && request.method !== "retitle") {
       await reconcileCommandTab(request.params);
     }
-    const result = await handler(request.params, request.id);
+    const result = await withOwnership(request.method, request.params,
+      () => handler(request.params, request.id), close);
     // Push the driven page so the daemon (and the Connected popup) can show
     // the human what the agent is on (finding U3).
     if (typeof result.url === "string" && result.url) {

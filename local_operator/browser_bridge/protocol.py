@@ -65,6 +65,10 @@ METHODS = (
     # issues no later command and so never self-healed. Presentation only: it
     # drives no tab, reads no page, and returns nothing but the applied label.
     "retitle",
+    "owner_recover",
+    "owner_finish",
+    "owner_retain",
+    "owner_release",
 )
 
 
@@ -90,6 +94,10 @@ ORIGIN_PROMPT_TIMEOUT_MS = 60_000
 #: HTTP timeout from them (backend.py) so the daemon's typed timeout always
 #: arrives before the client gives up.
 COMMAND_TIMEOUTS = {
+    "owner_recover": 20.0,
+    "owner_finish": 20.0,
+    "owner_retain": 20.0,
+    "owner_release": 20.0,
     "open": 30.0,
     "goto": 30.0,
     "click": 25.0,
@@ -163,6 +171,13 @@ class ErrorCode(StrEnum):
     TAB_AMBIGUOUS = "tab_ambiguous"
     BUSY = "busy"
     PROTO_MISMATCH = "proto_mismatch"
+    # An ownership-aware refusal: stale generation, foreign proof, ended scope,
+    # a tab belonging to another owner. Typed so the session can tell it from a
+    # bridge fault WITHOUT substring-matching a human message. That distinction
+    # is what makes an `internal` reply to an `owner_*` method mean "this
+    # extension predates ownership" — an already-released extension's wording
+    # cannot be retrofitted, so the NEW side is what has to be unambiguous.
+    OWNER_REFUSED = "owner_refused"
     INTERNAL = "internal"
 
 
