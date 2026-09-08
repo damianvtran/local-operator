@@ -279,6 +279,37 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "the mkdtemp() dir this function just created under $TMPDIR",
     ),
+    # The broker's socket FILE. Its path is `protocol.socket_path()`, which is
+    # either `config_dir()/secrets/broker.sock` or, when that exceeds the
+    # 104-byte sun_path limit, `$TMPDIR/lop-secrets-<uid>-<hash>/broker.sock`.
+    # Both are a fixed basename under a directory this module owns; no session
+    # id, caller argument or secret name reaches either, so neither can name a
+    # path under sessions/. Removing it on shutdown is required: a surviving
+    # socket inode makes the next bind() fail EADDRINUSE forever.
+    (
+        "local_operator/secrets/broker.py::SecretBroker.stop",
+        "<path>.unlink",
+        "the broker's own socket file, at a fixed basename it just bound",
+    ),
+    # Same path, same reasoning, opposite direction: a socket left behind by a
+    # broker that was SIGKILLed is a corpse, and it is only removed after a
+    # connect() probe proves nothing is listening on it.
+    (
+        "local_operator/secrets/broker.py::SecretBroker._reap_stale_socket",
+        "<path>.unlink",
+        "a dead broker's socket file, after probing that nothing listens",
+    ),
+    # `lop secret harden` removes the PLAINTEXT master key once the scrypt-
+    # wrapped copy is safely on disk. The path is `keys.key_path()` — the same
+    # fixed `config_dir()/secrets/master.key` as replace_master_key above — so
+    # it takes no caller input and cannot name a session directory. Removing it
+    # is the entire point of the tier: in passphrase mode no unwrapped key may
+    # remain on disk (design §2.3).
+    (
+        "local_operator/secrets/keys.py::wrap_master_key",
+        "<path>.unlink",
+        "the plaintext master.key, after the wrapped copy is written",
+    ),
     (
         "local_operator/credentials.py::CredentialManager.write_to_file",
         "os.unlink",
