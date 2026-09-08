@@ -2327,6 +2327,21 @@ class OperatorApp(App[None]):
         #: own id or it does not, no swap site has to remember to clear, and a
         #: path added later cannot reintroduce either direction by forgetting.
         self._sessions_that_used_eval: set[str] = set()
+        #: MCP startup outcomes this PROCESS has already announced, as the
+        #: fingerprints `_mcp_startup_fingerprint` builds. The toast is a
+        #: per-process interruption, so the ledger lives here rather than on
+        #: the session and is never persisted: a fingerprint that survived a
+        #: restart would silence the one launch the user actually wants told
+        #: about. See `_report_mcp_startup` for why the key is the outcome's
+        #: content and not the session id.
+        self._announced_mcp_startups: set[tuple[Any, ...]] = set()
+        #: Sessions whose transcript already carries the durable MCP failure
+        #: notices, keyed by session id. Deliberately a DIFFERENT key from the
+        #: toast ledger above: a failure record belongs in the transcript of
+        #: the session it describes, so a second session genuinely deserves
+        #: its own copy — it is the repeat on the SAME session (a re-attach)
+        #: that duplicates a notice the user already scrolled past.
+        self._mcp_failure_notice_sessions: set[str] = set()
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -10663,6 +10678,42 @@ class OperatorApp(App[None]):
         the same failure. So the record goes through :meth:`_system_notice`: it
         lands under the splash, survives the toast, and is there when the
         conversation does begin.
+
+        BOTH surfaces announce AT MOST ONCE, and they are keyed differently
+        because they answer different questions.
+
+        The TOAST is keyed by the outcome's CONTENT, once per app process.
+        ``session.mcp_startup`` is a frozen BOOT SNAPSHOT, and this method runs
+        on every adoption — boot, ``/new``, ``/resume``, a remote takeover, and
+        every sidebar click, which re-adopts a session and replays a snapshot
+        taken minutes ago (``RemoteSession`` even rehydrates the OWNER's round,
+        so attaching to a peer replayed a round this process never ran). MCP
+        servers are process-wide and shared, so re-confirming "12 servers, 425
+        tools" on each sidebar click is pure noise over the user's work.
+
+        Why the CONTENT and not the session id: a per-session key would still
+        toast once per session, which is the reported defect — clicking through
+        five sidebar entries that share one MCP set would raise five identical
+        toasts. Keyed by content, the first announce covers all of them, while
+        a session in a different cwd with a genuinely different server set
+        announces once because that IS news. First loadup is preserved: its
+        fingerprint is new by definition.
+
+        The settle path is unaffected. The 250 ms gate snapshot is ``settling``
+        and therefore unreportable (``format_mcp_startup`` returns ``None``),
+        so nothing is recorded until the settled outcome arrives — and that one
+        carries its own fingerprint and announces.
+
+        Nothing is lost by the suppression: the status band's MCP segment
+        (``_mcp_status``/``_refresh_mcp_status``) is re-read from the LIVE
+        manager on every attach and states the current count unconditionally.
+        That is the surface that legitimately re-states MCP state per attach,
+        and it is precisely what makes silencing the repeat toast safe.
+
+        The NOTICE is keyed per session instead. A durable failure record
+        belongs in the transcript of the session it describes, so a second
+        session deserves its own copy; it is the repeat on the SAME session
+        that duplicates a line the user already has.
         """
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
@@ -10671,8 +10722,28 @@ class OperatorApp(App[None]):
         payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
         if payload is None:
             return
-        text, duration_ms = payload
-        toast.show(text, duration_ms=duration_ms)
+        fingerprint = _mcp_startup_fingerprint(outcome)
+        if fingerprint not in self._announced_mcp_startups:
+            self._announced_mcp_startups.add(fingerprint)
+            text, duration_ms = payload
+            toast.show(text, duration_ms=duration_ms)
+        if not outcome.failures:
+            return
+        # Keyed by (session, outcome) rather than by session alone: a session
+        # whose failure set genuinely CHANGED — the settled round naming a
+        # server the gate snapshot could not — owes the transcript that new
+        # record, while the re-attach this method exists to silence replays a
+        # byte-identical outcome and is suppressed. A session with no usable id
+        # (a reduced facade, a test double) degrades to the fingerprint alone,
+        # which keeps a guard rather than losing one.
+        try:
+            session_key = str(getattr(session, "session_id", "") or "")
+        except Exception:  # noqa: BLE001 — a property may raise on a reduced host
+            session_key = ""
+        notice_key = f"{session_key}\x00{fingerprint!r}"
+        if notice_key in self._mcp_failure_notice_sessions:
+            return
+        self._mcp_failure_notice_sessions.add(notice_key)
         # No "server" in the wording: one failure key is ``discovery`` (the
         # config layer itself), and "MCP server discovery failed" would name a
         # server that does not exist.
@@ -31075,6 +31146,37 @@ def slot_rows(slot: Any) -> int:
     # slot, so the larger is the safe one: it can only ever withhold the inset,
     # which costs a blank row, where the smaller costs a scrollable screen.
     return max(measured, predicted, 1)
+
+
+def _mcp_startup_fingerprint(outcome: Any) -> tuple[Any, ...]:
+    """The MATERIAL content of a startup outcome, as a hashable key.
+
+    The identity a re-announce decision needs is "does this say anything the
+    user has not already been told", so the key is what the toast actually
+    renders from: how many servers were configured, which came up, what failed
+    and why, and the tool tally. Two rounds that agree on all four produce the
+    same sentence, and the second one is the noise `_report_mcp_startup`
+    suppresses.
+
+    Object identity is deliberately NOT the key even though ``McpStartupOutcome``
+    is frozen: ``RemoteSession`` rehydrates the owner's outcome into a fresh
+    instance on every attach (``session/remote.py``), so identity — and a plain
+    ``in`` over a list of dataclasses, which would compare equal but for the
+    unhashable ``failures`` dict — either fails to dedupe or cannot be stored.
+
+    ``configured`` and ``connected`` are sorted because they are SETS with an
+    incidental order: the connect order varies run to run (and between the gate
+    snapshot and the settled round), and an order-sensitive key would re-toast
+    an outcome whose content is identical. ``failures`` is flattened to sorted
+    pairs for the same reason and because a dict cannot be hashed.
+    """
+    failures = dict(getattr(outcome, "failures", {}) or {})
+    return (
+        tuple(sorted(getattr(outcome, "configured", ()) or ())),
+        tuple(sorted(getattr(outcome, "connected", ()) or ())),
+        tuple(sorted(failures.items())),
+        int(getattr(outcome, "tool_count", 0) or 0),
+    )
 
 
 def _canonical_frontend(session: Any) -> bool:
