@@ -475,12 +475,20 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
         await pilot.pause()
         # One press per selectable row, DERIVED rather than a hardcoded count.
         # Travelling from the last row to the first needs len - 1 presses, so
-        # any fixed number is a bet that the registry never grows: at 80 rows
-        # the old literal 80 had one spare press, and adding one setting left
-        # the cursor one row short of the top while the clamp itself was fine
-        # (CI shard 0 on a config carrying fallback chains, which contribute
-        # rows of their own). The clamp under test makes surplus presses free,
-        # so spending one per row is always enough and never too many.
+        # any fixed number is a bet on how long the page is. The old literal 80
+        # covered up to 81 rows and first fell short at 82, leaving the cursor
+        # one row below the top while the clamp itself was correct.
+        #
+        # CI shard 0 hit that: its page was longer than this machine's, and the
+        # reason for the extra rows was NOT established — a page carrying
+        # configured cascade chains is one shape that reaches 82, but it was
+        # not reproduced through the fixtures, so treat the length as an
+        # observation rather than a known cause. That is also why the count is
+        # derived instead of raised: the arrival contract was verified directly
+        # against production across 79-84 rows, so the test now passes at
+        # whatever length the runner produces and the reason stops mattering.
+        # The clamp makes surplus presses free, so one per row is always enough
+        # and never too many.
         for _ in range(len(view._selectable())):
             view.action_move(-1)
         await pilot.pause()
@@ -499,12 +507,12 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
 async def test_arriving_at_the_top_holds_with_cascade_rows(tmp_path: Path) -> None:
     """The same arrival contract on a config whose cascade ADDS rows.
 
-    The page's row count is not fixed: a configured chain contributes rows the
-    empty default never renders, so a developer machine with no chains and a
-    runner with two disagree about how long the list is. The test above ran
-    only the empty shape, which is why a registry addition that shortened its
-    margin failed on CI and passed locally. Pinning the arrival at a LONGER
-    list keeps that gap covered rather than relying on the shorter one.
+    The page's row count is not fixed: writing chains here lengthens it past
+    the shape the test above sees, and that shorter shape is the only one the
+    suite covered when a press budget sized for it fell short on CI. What the
+    extra rows on that runner actually were is not established, so this pins
+    the arrival at a LONGER page by construction rather than asserting why any
+    particular page is long.
     """
     from local_operator import settings_io
     from local_operator.config import ConfigManager
