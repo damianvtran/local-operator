@@ -429,7 +429,8 @@ with its title and age:
 | `/resume` | Pick a past conversation and continue it |
 | `/new`, `/clear`, `/reload` | Fresh conversation · wipe the screen · relaunch this conversation on the current install |
 | `/update` | Install the latest version from PyPI and relaunch |
-| `/goal`, `/loop` | Set an objective, then iterate autonomously toward it |
+| `/goal <text>` | Set the session objective and send the same text to start work; bare `/goal` shows it and `/goal clear` clears it without starting a turn |
+| `/loop` | Iterate autonomously toward the session objective |
 | `/btw` | Ask a side question off the record; it never joins the conversation |
 | `/compact` | Compact the context now (it also happens automatically) |
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |

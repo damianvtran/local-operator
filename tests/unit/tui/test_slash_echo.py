@@ -1281,15 +1281,10 @@ async def test_repeated_panel_commands_do_not_accumulate_a_ledger() -> None:
 
 @pytest.mark.asyncio
 async def test_setting_the_goal_writes_the_users_words_to_the_ledger() -> None:
-    """`/goal <text>` is the one argument that reaches the model, on every later
-    turn. The ledger shows what the model was told, attributed to whoever said
-    it, so this row is content rather than a keystroke.
+    """The goal argument is one ordinary user message, not a slash ledger row.
 
-    The notice beside the row reports status ONLY — repeating the goal there
-    would be the duplicate row this change removed everywhere else. That the
-    row carries the STORED text rather than the typed one is not visible here
-    (the editor strips too, so only the length cap separates them): it is
-    ``test_a_goal_cut_by_the_cap_says_so`` that pins it.
+    The notice reports status only; submission owns the echo and sends the same
+    text immediately as well as storing the standing objective.
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1298,17 +1293,15 @@ async def test_setting_the_goal_writes_the_users_words_to_the_ledger() -> None:
         await _submit(pilot, app, "/goal   land the OAuth refresh fix  ")
         rows = _user_rows(app)
         painted = _painted(app)
-    assert rows == ["/goal land the OAuth refresh fix"], rows
+    assert rows == ["land the OAuth refresh fix"], rows
     assert session.goal == "land the OAuth refresh fix"
-    assert "goal set — applies from the next step" in painted, painted
+    assert session.prompts == ["land the OAuth refresh fix"]
+    assert "goal set" in painted, painted
 
 
 @pytest.mark.asyncio
 async def test_a_goal_cut_by_the_cap_says_so() -> None:
-    """`GoalState.set` caps at 2000 characters silently. That was survivable
-    while the receipt was a system notice; now the text sits in a row
-    ATTRIBUTED TO THE USER, so a silent cut leaves the ledger claiming they
-    typed something ending mid-word."""
+    """Cap the standing objective, not the ordinary user message or its echo."""
 
     class _CappingSession(FakeSession):
         """`FakeSession.set_goal` only strips — this applies the real cap."""
@@ -1331,7 +1324,9 @@ async def test_a_goal_cut_by_the_cap_says_so() -> None:
         await _submit(pilot, app, "/goal " + "x" * (MAX_GOAL_CHARS + 100))
         rows = _user_rows(app)
         notices = _notice_texts(app)
-    assert rows == ["/goal " + "x" * MAX_GOAL_CHARS], len(rows[0]) if rows else rows
+    assert rows == ["x" * (MAX_GOAL_CHARS + 100)], len(rows[0]) if rows else rows
+    assert session.prompts == rows
+    assert session.goal == "x" * MAX_GOAL_CHARS
     assert any(f"shortened to the {MAX_GOAL_CHARS}-character cap" in n for n in notices), notices
 
 
@@ -1534,17 +1529,17 @@ async def test_a_real_command_still_wins_over_the_prose_fallback() -> None:
     assert session.prompts == [], session.prompts
     assert rows == [], rows
 
-    # An ARGUMENT-carrying command still dispatches too: `/goal` is the one
-    # echoing command, so its row proves the handler ran rather than the line
-    # having been sent as prose.
+    # Goal dispatch stores the objective and submits only its argument, not
+    # the slash command itself as prose.
     argued = FakeSession()
     app = OperatorApp(lambda: _factory(argued))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/goal ship it")
         rows = _user_rows(app)
-    assert argued.prompts == [], argued.prompts
-    assert rows == ["/goal ship it"], rows
+    assert argued.prompts == ["ship it"], argued.prompts
+    assert argued.goal == "ship it"
+    assert rows == ["ship it"], rows
 
     # An ALIAS resolves through the same entry, so the branch that now asks the
     # resolver must accept it exactly as it accepts the primary name.

@@ -9663,9 +9663,9 @@ class OperatorApp(App[None]):
     ) -> None:
         """Send a prompt-carrying slash command's argument as a real user turn.
 
-        The shared tail of ``/team <name> <request>`` and ``/agent <name>
-        <message>``: both attach something to the session and then hand the
-        argument to the model. The images the argument cites are resolved from
+        The shared tail of ``/goal <request>``, ``/team <name> <request>`` and
+        ``/agent <name> <message>``: each changes session context before handing
+        the argument to the model. The images the argument cites are resolved from
         the text itself (``resolve_markers``) — the same authority the composer
         uses, so a marker the request no longer cites drops its image and order
         follows the text — and both the resolved list and the raw index→image
@@ -20211,8 +20211,8 @@ class OperatorApp(App[None]):
             if style == "error":
                 notice_kind = "error"
             self._notice(text, notice_kind)
-        # The attach happened on the OWNER (that is where the roster and briefs
-        # are stamped); the request is sent from HERE so it carries this
+        # The goal/attach mutation happened on the OWNER (that is where session
+        # context lives); the request is sent from HERE so it carries this
         # terminal's own images and paste expansion, and so the transcript row
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
@@ -20224,17 +20224,26 @@ class OperatorApp(App[None]):
         # wire but not consumed here is a request the runtime deferred to this
         # terminal and this terminal then dropped, which is the original
         # defect wearing a new hat.
-        if data.get("type") in ("team_attached", "agent_attached"):
+        # Older owners returned only `stored` for /goal and never admitted a
+        # turn. That positive typed receipt is safe to complete; opaque legacy
+        # strings and show/clear results are not proof that a goal was set.
+        legacy_goal = command == "/goal" and not data.get("type") and bool(data.get("stored"))
+        if data.get("type") in ("team_attached", "agent_attached", "goal_set") or legacy_goal:
             # Each receipt syncs ITS OWN segment (review round 1, N1): the
             # post-op push repaints both from ``frontend_state`` a tick later
             # anyway, but the explicit call is what a test reads, and syncing
             # the team band for an agent attach was simply the wrong one.
             if data.get("type") == "team_attached":
                 self._sync_team_band()
-            else:
+            elif data.get("type") == "agent_attached":
                 self._sync_agent_band()
-            request = str(data.get("request") or "")
+            request = arg if legacy_goal else str(data.get("request") or "")
             if request:
+                # Goal receipts carry the expanded text for old/mobile clients.
+                # This terminal still has the chip line: resolve its images
+                # BEFORE expanding pastes, just as ordinary submission does.
+                if data.get("type") == "goal_set":
+                    request = arg
                 self._submit_command_prompt(request, attachments)
 
     def _team_listing_block(self, items: list[Any]) -> RichBlock:
@@ -20493,7 +20502,10 @@ class OperatorApp(App[None]):
                         Callable[[str, str, Sequence[ImageContent]], Awaitable[Any]], remote_route
                     )
                     images = resolve_markers(arg, attachments or {})
-                    outcome = await typed_route(command.removeprefix("/"), arg, images)
+                    # The owner stores the standing goal, so its copy must
+                    # contain paste payloads, not this terminal's private chips.
+                    routed_arg = prompt_arg if command == "/goal" else arg
+                    outcome = await typed_route(command.removeprefix("/"), routed_arg, images)
                 except Exception as error:
                     if (
                         self._session is route_session
@@ -20608,7 +20620,7 @@ class OperatorApp(App[None]):
             else:
                 notice("context breakdown unavailable.")
         elif command == "/goal":
-            self._cmd_goal(prompt_arg, notice)
+            self._cmd_goal(arg, notice, attachments)
         elif command == "/loop":
             self._cmd_loop(prompt_arg, notice)
         elif command == "/btw":
@@ -23596,8 +23608,10 @@ class OperatorApp(App[None]):
         self._run_slash_command(f"/model {row.selector}")
 
     # -- goal / loop --------------------------------------------------------
-    def _cmd_goal(self, arg: str, notice: NoticeFn) -> None:
-        """``/goal`` — show; ``/goal <text>`` — set; ``/goal clear`` — unset.
+    def _cmd_goal(
+        self, arg: str, notice: NoticeFn, attachments: Mapping[int, Marked] | None = None
+    ) -> None:
+        """``/goal`` — show; ``/goal <text>`` — set and send; ``/goal clear`` — unset.
 
         The goal is a standing objective carried in the prompt's volatile
         tail, so it survives every turn (and compaction) without being
@@ -23610,47 +23624,30 @@ class OperatorApp(App[None]):
             # `notice` would collapse it for a typo.
             self._system_notice("session is still starting…", "warning")
             return
-        if not arg:
+        request = expand_pastes(arg, attachments or {}).strip()
+        if not request:
             current = session.goal
             notice(f"goal: {current}" if current else "no goal set — /goal <text> to set one")
             return
-        if arg.lower() in ("clear", "none", "reset"):
+        if request.lower() in ("clear", "none", "reset"):
             session.set_goal("")
             notice("goal cleared")
             return
-        stored = session.set_goal(arg)
-        # The ONE user row a slash command writes, and it is written here
-        # because this is the line that knows the words were taken: from the
-        # next turn on they ride the system prompt's volatile tail, so they are
-        # transcript subject matter and they belong to the user who typed them.
-        #
-        # ``stored``, not ``arg``: ``set_goal`` trims and length-caps, and the
-        # row's whole claim is "this is what the model is being told".
-        #
-        # The notice below therefore reports STATUS only. It used to repeat the
-        # goal text, which with the row above it would be the same duplication
-        # this change removed everywhere else.
-        self._echo_user_command(f"/goal {stored}")
+        stored = session.set_goal(request)
+        # Only the standing objective is capped. The ordinary user message
+        # retains the full request, and the normal submit path owns its ONE
+        # transcript row, busy steering, compaction hold and attachment order.
         from local_operator.session.goal import MAX_GOAL_CHARS
 
-        if len(stored) == MAX_GOAL_CHARS and len(arg.strip()) > MAX_GOAL_CHARS:
-            # Gated on the CAP, not on "the result came back shorter". `set_goal`
-            # is reached through a duck-typed `hasattr`, so an implementation
-            # that normalised further — collapsing newlines in a pasted goal —
-            # would make a length comparison announce a cap that never applied.
-            #
-            # Said out loud at all because the row above now carries the text and
-            # is attributed to the USER: a silent cut leaves the ledger claiming
-            # they typed something ending mid-word. The receipt this replaced
-            # printed the stored text and was equally silent about the cut, but
-            # it was at least system-attributed while doing it.
+        if len(stored) == MAX_GOAL_CHARS and len(request) > MAX_GOAL_CHARS:
             notice(
-                f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
-                "applies from the next step",
+                f"goal set: shortened to the {MAX_GOAL_CHARS}-character cap. "
+                "Sending the full request.",
                 "warning",
             )
-            return
-        notice("goal set — applies from the next step")
+        else:
+            notice("goal set")
+        self._submit_command_prompt(arg, attachments)
 
     def _cmd_loop(self, arg: str, notice: NoticeFn) -> None:
         """``/loop [n]`` — iterate toward the goal; ``/loop stop`` cancels.
@@ -27629,6 +27626,7 @@ class OperatorApp(App[None]):
         )
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        arg = arg.strip()
         session = self._session
         if session is None or not hasattr(session, "set_goal"):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
@@ -27646,17 +27644,17 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"goal set — shortened to the {MAX_GOAL_CHARS}-character cap, "
-                    "applies from the next turn"
+                    f"goal set: shortened to the {MAX_GOAL_CHARS}-character cap. "
+                    "Sending the full request."
                 ),
                 style="warning",
-                data={"stored": stored},
+                data={"type": "goal_set", "stored": stored, "request": arg.strip()},
             )
         return SlashResult(
             kind="notice",
-            text="goal set — applies from the next turn",
+            text="goal set",
             style="info",
-            data={"stored": stored},
+            data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
     def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:

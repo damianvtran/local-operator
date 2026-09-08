@@ -364,16 +364,11 @@ SLASH_COMMANDS: list[SlashCommand] = [
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="analytics",
     ),
-    # THE exception. `/goal <text>` is the one command whose argument reaches
-    # the model: the goal rides the system prompt's volatile tail on every later
-    # turn (`Session.set_goal`). Words the model is given are the transcript's
-    # subject matter, and they belong to the user, so they get a user row rather
-    # than being paraphrased into a system notice. `_cmd_goal` writes that row
-    # itself, only on the branch that actually stored something — the flag is
-    # the permission, not the trigger.
+    # The argument becomes both a standing objective and an ordinary user
+    # message. Submission owns its user row; status/clear never start a turn.
     SlashCommand(
         "goal",
-        "Show, set, or clear the session goal",
+        "Set the goal and start work; show or clear it",
         echo=True,
         consumes_prompt=True,
         desktop_destination="session.goal",

@@ -108,7 +108,9 @@ ATTACH_MAX_CLIENTS = 4
 #: The list is the single source of truth for both sides of that seam, and
 #: ``tests/unit/tui/test_noop_consumers.py`` fails CI if a producer emits a
 #: ``request``-carrying receipt whose type is missing here.
-SLASH_ACTION_RECEIPTS: tuple[str, ...] = ("team_attached", "agent_attached")
+# Goal submissions follow the same ownership rule: old/mobile clients leave
+# admission to the owner; current terminals consume the receipt exactly once.
+SLASH_ACTION_RECEIPTS: tuple[str, ...] = ("team_attached", "agent_attached", "goal_set")
 
 
 def runtime_must_complete(receipt_type: Any, consumers: Any) -> bool:
