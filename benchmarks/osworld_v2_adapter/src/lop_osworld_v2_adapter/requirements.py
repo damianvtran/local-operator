@@ -158,6 +158,39 @@ def is_judged(descriptor: TaskDescriptor) -> bool:
     return False
 
 
+class MissingImagingDecoder(RuntimeError):
+    """The worker has no image decoder, so it cannot publish a frame.
+
+    Every observation is bounded to the model's screen geometry before it is
+    published (``observation.bound_screen_frame``), and that resize needs a
+    real decoder. Without one the adapter cannot honour the dimensions
+    invariant the host verifier enforces, so an episode would die on its FIRST
+    observation — after the VM is allocated and paid for.
+    """
+
+
+def require_imaging_decoder() -> None:
+    """Refuse an adapter environment that cannot resize a frame.
+
+    An ENVIRONMENT precondition rather than a task-derived requirement, which
+    is why it is a check and not a :class:`Requirement`: the ``Requirement``
+    table names values the HOST resolves and injects, and no env var can
+    conjure a missing wheel. It lives in this module anyway because this is
+    where the adapter's preflight refusals are collected, and it is called from
+    ``prepare`` — the last boundary that allocates nothing — so a venv built
+    without the imaging extra fails for free instead of mid-episode.
+    """
+
+    from local_operator.helpers import pillow_image_module
+
+    if pillow_image_module() is None:
+        raise MissingImagingDecoder(
+            "this adapter environment has no image decoder (Pillow), so guest "
+            "screenshots cannot be bounded to the model's screen geometry; "
+            "install the harness 'images' extra in the adapter venv"
+        )
+
+
 def _requirement(name: str, *, kind: str, required: bool) -> Requirement:
     # requirement_id is the name itself: it is unique within an episode and
     # self-describing, which is what rescue-from-descriptor needs.

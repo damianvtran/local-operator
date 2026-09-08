@@ -46,14 +46,18 @@ def test_observation_id_is_content_derived(tmp_path: Path) -> None:
 
 
 def test_artifact_lands_at_the_content_address(tmp_path: Path) -> None:
+    # The address is that of the BOUNDED frame, not the guest capture: the
+    # artifact is what the model saw, so its digest, size and media type all
+    # describe the bytes that were sent.
     builder = ObservationBuilder(tmp_path)
     observation = builder.build(_raw(shade=7), task_id="t", episode_id="e", sequence=0)
     artifact = observation.frames[0].artifact
-    expected = tmp_path / hashlib.sha256(_frame(shade=7)).hexdigest()
-    assert expected.exists()
-    assert artifact.sha256 == hashlib.sha256(_frame(shade=7)).hexdigest()
-    assert artifact.media_type == "image/png"
-    assert artifact.byte_count == len(_frame(shade=7))
+    payload = (tmp_path / artifact.sha256).read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == artifact.sha256
+    assert artifact.byte_count == len(payload)
+    assert artifact.media_type in {"image/png", "image/jpeg"}
+    # The native capture is no longer a published artifact.
+    assert not (tmp_path / hashlib.sha256(_frame(shade=7)).hexdigest()).exists()
 
 
 def test_the_real_verify_artifact_accepts_the_frame(tmp_path: Path) -> None:
@@ -61,15 +65,17 @@ def test_the_real_verify_artifact_accepts_the_frame(tmp_path: Path) -> None:
     observation = builder.build(_raw(), task_id="t", episode_id="e", sequence=0)
     # This is the same call the parent's HostVerifier makes on every frame.
     data = verify_artifact(tmp_path, observation.frames[0].artifact)
-    assert data == _frame()
+    assert hashlib.sha256(data).hexdigest() == observation.frames[0].artifact.sha256
 
 
-def test_geometry_is_native_and_unresized(tmp_path: Path) -> None:
+def test_geometry_keeps_native_and_publishes_the_bounded_model_size(tmp_path: Path) -> None:
     builder = ObservationBuilder(tmp_path)
     observation = builder.build(_raw(), task_id="t", episode_id="e", sequence=0)
     geometry = observation.frames[0].geometry
+    # Native stays the guest's real screen: it is what coordinates convert BACK
+    # to, and it is never inferred from the image.
     assert geometry.native == FrameSize(width=1920, height=1080)
-    assert geometry.model_visible == FrameSize(width=1920, height=1080)
+    assert geometry.model_visible == FrameSize(width=1280, height=720)
 
 
 def test_sequence_zero_carries_the_instruction(tmp_path: Path) -> None:

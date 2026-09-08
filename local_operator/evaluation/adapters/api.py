@@ -12,14 +12,14 @@ import platform
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Annotated, Any, Literal, NamedTuple, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import AfterValidator, Field, field_validator, model_validator
 
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
 from local_operator.evaluation.lifecycle import CleanupPlan
-from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
+from local_operator.evaluation.protocol import ActionBatch, FrameSize, Observation, ProtocolModel
 from local_operator.evaluation.receipts import (
     ZERO_DIGEST,
     Digest,
@@ -863,6 +863,66 @@ class RescuableAdapter(Protocol):
     """
 
     async def begin_rescue(self, params: BeginRescueParams) -> AckResult: ...
+
+
+class BoundFrame(NamedTuple):
+    """A screen frame as the model will actually receive it.
+
+    ``model_visible`` is sniffed back out of ``payload`` rather than computed
+    from the requested edge, so it is the size of the BYTES being shipped and
+    not an arithmetic prediction about them. That distinction is the whole
+    point: the host verifier compares decoded pixels against the geometry an
+    adapter publishes, and a predicted size would let a rounding disagreement
+    inside the resizer surface as a supervision failure mid-episode.
+    """
+
+    payload: bytes
+    media_type: str
+    model_visible: FrameSize
+
+
+def bound_screen_frame(native_bytes: bytes) -> BoundFrame:
+    """Bound a native screenshot to the screen-driving edge for the model.
+
+    The one place an evaluation adapter turns guest pixels into model pixels,
+    so no adapter re-implements the ladder or re-decides the edge. Wraps
+    :func:`~local_operator.imaging.bound_image_for_model` at
+    :data:`~local_operator.imaging.IMAGE_SCREEN_MAX_EDGE` and reports the
+    result's honest size.
+
+    Raises ``ValueError`` when the bytes will not decode OR when no imaging
+    decoder is installed. The second case is the notable one: the ladder's
+    normal answer to a missing decoder is to forward the bytes untouched, and
+    that is exactly what a screen frame must NOT do. Forwarding leaves the
+    model looking at native pixels while the geometry claims the bounded size,
+    which is the coordinate miscalibration this whole seam exists to prevent —
+    so an adapter environment without Pillow fails here rather than shipping a
+    frame whose dimensions invariant cannot hold.
+    """
+
+    from local_operator.helpers import pillow_image_module
+    from local_operator.imaging import IMAGE_SCREEN_MAX_EDGE, bound_image_for_model
+    from local_operator.media import sniff_image
+
+    info = sniff_image(native_bytes)
+    if info is None:
+        raise ValueError("screen frame is not a recognised image format")
+    if pillow_image_module() is None:
+        raise ValueError(
+            "screen frames require an imaging decoder (Pillow) so the frame can be "
+            "resized to the model-visible geometry; install the 'images' extra"
+        )
+    payload, media_type, _summary = bound_image_for_model(
+        native_bytes, info, max_edge=IMAGE_SCREEN_MAX_EDGE
+    )
+    bound_info = sniff_image(payload)
+    if bound_info is None or bound_info.width is None or bound_info.height is None:
+        raise ValueError("bounded screen frame did not report readable dimensions")
+    return BoundFrame(
+        payload=payload,
+        media_type=media_type,
+        model_visible=FrameSize(width=bound_info.width, height=bound_info.height),
+    )
 
 
 def observation_content_id(observation: Observation) -> Digest:

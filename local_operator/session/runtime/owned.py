@@ -49,7 +49,7 @@ from local_operator.mobile.types import (
     ask_pending_request,
 )
 from local_operator.session.runtime.server import SessionHandle
-from local_operator.session.runtime.server import image_blocks as _image_blocks
+from local_operator.session.runtime.server import image_blocks_in_thread as _image_blocks_async
 from local_operator.session.runtime.types import runtime_must_complete
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
@@ -1128,6 +1128,14 @@ class OwnedSessionHandle(SessionHandle):
         if existing is not None:
             await existing.admitted
             return "already admitted"
+        # Bounded BEFORE the reservation, deliberately: the bound is a thread
+        # hop, and awaiting between reserving a producer identity and queueing
+        # the command would open a suspension point inside that window, where
+        # every path out is a reject. Decoding first keeps the reserve-to-queue
+        # span await-free. The cost of bounding an image for a prompt that is
+        # then rejected is a duplicate submission's worth of CPU, which is the
+        # cheaper side of that trade.
+        blocks = await _image_blocks_async(images)
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -1174,7 +1182,7 @@ class OwnedSessionHandle(SessionHandle):
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
-        command = _PromptCommand(command_id, text, _image_blocks(images), admitted, completed)
+        command = _PromptCommand(command_id, text, blocks, admitted, completed)
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
         # Compatibility-only fake/third-party sessions predate durable
@@ -1489,6 +1497,11 @@ class OwnedSessionHandle(SessionHandle):
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
+        # Bounded BEFORE the reservation, deliberately: the bound is a thread
+        # hop, and awaiting between reserving a producer identity and handing
+        # the steer to the session would open a suspension point inside that
+        # window. Decoding first keeps the reserve-to-mutate span await-free.
+        blocks = await _image_blocks_async(images)
         if not self._command_reservations.reserve(
             command_id,
             kind="steer",
@@ -1504,7 +1517,7 @@ class OwnedSessionHandle(SessionHandle):
         if "producer_command_id" in parameters:
             fields["producer_command_id"] = command_id
         try:
-            self._session.steer(text, _image_blocks(images), **fields)
+            self._session.steer(text, blocks, **fields)
         except Exception:
             # No queue insertion means no durable acceptance exists; the same
             # producer identity must remain retryable after this terminal reject.

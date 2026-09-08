@@ -28661,6 +28661,12 @@ class OperatorApp(App[None]):
         if not request:
             return result
         try:
+            # ``image_blocks`` bounds each image, which is CPU-bound, and this
+            # method is synchronous by contract (it runs on the app loop and
+            # cannot await). The stall is bounded by the control socket's 1 MB
+            # line cap on the payload that carried these images: ~50-100 ms of
+            # decode, not the ~315 ms a 20 MP local paste would cost. The paste
+            # path, which has no such cap, uses the threaded form instead.
             images = image_blocks(wire_images)
             self._submit_prompt(request, images, None, typed=request)
         except Exception as exc:  # noqa: BLE001 — the attach landed; name what did not

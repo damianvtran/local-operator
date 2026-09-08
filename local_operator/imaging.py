@@ -152,6 +152,29 @@ IMAGE_MAX_EDGE = 1568
 #: review round 1, F1; QA round 1). The exemption uses the same
 #: ``_is_line_art`` predicate the repair path does.
 IMAGE_INGEST_MAX_EDGE = 1024
+#: Long-edge ceiling for SCREEN-DRIVING frames: desktop and browser screenshots
+#: the model will emit CLICK COORDINATES against. A third bound rather than a
+#: reuse of either neighbour, because it answers a question neither of them
+#: does — not "can the model read this?" but "can it hit a 24x24 button?".
+#:
+#: Measured on real 1920x1080 OSWorld frames. At 1280 the 10-11px UI text of a
+#: browser tab strip and URL bar stays clearly legible, and one model pixel is
+#: 1.5 native pixels, so a coordinate the model emits lands within a pointer
+#: width of what it aimed at. Token cost is ~44% of native (1,228 against
+#: 2,764 at w*h/750). Anthropic's computer-use guidance names 1280x720 as the
+#: accuracy baseline and prescribes it directly when accuracy is poor.
+#:
+#: The two neighbours were measured and rejected FOR THIS USE, so nobody
+#: re-runs the comparison: :data:`IMAGE_INGEST_MAX_EDGE` (1024) saves a further
+#: 36% of tokens but sits at the legibility floor this module records for 6-7pt
+#: body text AND halves click precision to 1.875 native px per model px; 1568
+#: costs 50% more tokens than 1280 for no measured legibility gain on UI
+#: chrome, whose strokes are already anti-aliased at both sizes.
+#:
+#: Format is left to the ladder (PNG while it fits :data:`IMAGE_MAX_BYTES`,
+#: else JPEG): forcing JPEG would spend quality on the light frames that PNG
+#: already carries under the cap.
+IMAGE_SCREEN_MAX_EDGE = 1280
 #: The provider ceiling a REPAIR is measured against, which is deliberately not
 #: :data:`IMAGE_MAX_EDGE`. Anything this module CREATES is bounded to 1568 for
 #: the cost reasons above; but a block that already exists is only worth
@@ -489,6 +512,12 @@ def bound_image_for_model(
     did not choose, and for line art the smallest possible reduction is worth
     real money. See :func:`rebound_oversize_image`, which passes the refusal
     ceiling for bilevel sources so a pixel font is shrunk by 2% instead of 23%.
+
+    The third documented ``max_edge`` caller is SCREEN DRIVING: an evaluation
+    adapter publishing a frame the model will click on passes
+    :data:`IMAGE_SCREEN_MAX_EDGE` (see
+    :func:`~local_operator.evaluation.adapters.api.bound_screen_frame`), which
+    trades legibility against click precision rather than against cost alone.
 
     With no decoder available the whole ladder collapses to
     :func:`_forward_undecoded`.

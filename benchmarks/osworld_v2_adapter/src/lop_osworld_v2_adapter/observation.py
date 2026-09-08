@@ -2,11 +2,25 @@
 
 Coordinate space is stated exactly: ``native`` is ALWAYS the VM's real screen
 (1920x1080 on the V2 AMI), never inferred from the PNG header. We assert the
-PNG dimensions agree with that native size and raise if they do not, because
-a mismatch means the guest resized and every pointer coordinate afterwards is
-silently wrong. ``model_visible == native`` for PR 1 — no resize — which
-removes a whole class of off-by-one from the first paid run; the protocol
-supports adding a resize later without a contract change.
+RAW guest PNG's dimensions agree with that native size and raise if they do
+not, because a mismatch means the guest resized and every pointer coordinate
+afterwards is silently wrong. That check runs on the bytes the guest handed
+us, before any bounding of our own, so it keeps guarding the guest rather than
+our resizer.
+
+The frame is then bounded to the model's screen-driving edge and
+``model_visible`` is the size of THOSE bytes. Two consequences worth stating
+plainly:
+
+* The published artifact IS what the model saw. The evidence bundle holds the
+  model-visible frame, not the native capture, because a bundle is judged
+  against what the model was actually looking at; ``native`` is the adapter's
+  private fact and reaches nobody but the coordinate converter.
+* Every coordinate the model emits is in ``model_visible`` space, and
+  ``actions.py`` (``_native_point`` -> ``FrameGeometry.model_to_native``) is
+  the single converter back to guest pixels. Nothing else in the harness
+  rescales a frame or a coordinate; the host verifier enforces that by
+  checking decoded pixels against ``model_visible``.
 
 The a11y tree is deliberately NOT shipped as a frame. ``FrameRef.geometry`` is
 mandatory and a geometry for an XML document is a fiction, and
@@ -28,10 +42,15 @@ from __future__ import annotations
 import hashlib
 import struct
 import zlib
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from local_operator.evaluation.adapters.api import observation_content_id
+from local_operator.evaluation.adapters.api import (
+    BoundFrame,
+    bound_screen_frame,
+    observation_content_id,
+)
 from local_operator.evaluation.protocol import (
     ArtifactRef,
     FrameGeometry,
@@ -44,6 +63,19 @@ from local_operator.evaluation.protocol import (
 # asserted against the decoded PNG header; a guest that resized mid-episode
 # must fail loudly rather than hand the model a miscalibrated frame.
 NATIVE_SCREEN = FrameSize(width=1920, height=1080)
+
+#: How many distinct native frames keep their bounded form in the builder.
+#:
+#: A ``wait`` or a no-op click returns a byte-identical screenshot, and
+#: re-encoding it would cost ~70ms and — far worse — risk a different artifact
+#: sha for the same screen, which is what ``_frames_identical`` reads to tell
+#: the model "the screen did not change". Memoising on the native sha makes
+#: identical native bytes yield an identical artifact by construction.
+#:
+#: Small because the value is only ever hit by an immediate repeat: an episode
+#: revisiting a screen from twenty steps ago is not the case this serves, and
+#: each entry holds a frame's worth of bytes.
+_BOUND_CACHE_SIZE = 8
 
 
 class ObservationError(ValueError):
@@ -98,6 +130,24 @@ class ObservationBuilder:
 
     def __init__(self, artifact_root: Path) -> None:
         self._artifact_root = artifact_root
+        self._bound_cache: OrderedDict[str, BoundFrame] = OrderedDict()
+
+    def _bound_for(self, native_sha: str, png: bytes) -> BoundFrame:
+        """The bounded form of ``png``, reusing the last few results.
+
+        Keyed on the NATIVE sha so identical guest bytes always produce the
+        identical artifact address — see ``_BOUND_CACHE_SIZE``.
+        """
+
+        cached = self._bound_cache.get(native_sha)
+        if cached is not None:
+            self._bound_cache.move_to_end(native_sha)
+            return cached
+        bound = bound_screen_frame(png)
+        self._bound_cache[native_sha] = bound
+        while len(self._bound_cache) > _BOUND_CACHE_SIZE:
+            self._bound_cache.popitem(last=False)
+        return bound
 
     def build(
         self,
@@ -127,23 +177,39 @@ class ObservationBuilder:
                 "resized, and every pointer coordinate would be wrong"
             )
 
-        sha = hashlib.sha256(png).hexdigest()
+        # Bound to the model's screen edge BEFORE addressing the artifact: the
+        # published frame is the one the model sees, so the content address,
+        # the byte count and the media type all describe those bytes. A
+        # ValueError from the bound (undecodable frame, or an adapter
+        # environment with no decoder) becomes an ObservationError, which is
+        # the failure the episode already knows how to report.
+        native_sha = hashlib.sha256(png).hexdigest()
+        try:
+            bound = self._bound_for(native_sha, png)
+        except ValueError as error:
+            raise ObservationError(f"screenshot could not be bounded for the model: {error}")
+
+        sha = hashlib.sha256(bound.payload).hexdigest()
         # The parent reads the artifact back by opening <root>/<sha256> with
         # O_NOFOLLOW and re-hashing, so the file name IS the content address
         # and there is no extension to disagree over.
         artifact_path = self._artifact_root / sha
         if not artifact_path.exists():
-            artifact_path.write_bytes(png)
+            artifact_path.write_bytes(bound.payload)
 
         frame = FrameRef(
             frame_id="screen",
-            artifact=ArtifactRef(sha256=sha, media_type="image/png", byte_count=len(png)),
+            artifact=ArtifactRef(
+                sha256=sha,
+                media_type=bound.media_type,
+                byte_count=len(bound.payload),
+            ),
             geometry=FrameGeometry(
                 native=NATIVE_SCREEN,
-                # PR 1 ships model_visible == native: the frame goes to the
-                # model unresized, so the conversion is the identity and there
-                # is no off-by-one to debug on the first paid run.
-                model_visible=NATIVE_SCREEN,
+                # Sniffed from the bounded bytes, never computed from the edge:
+                # the host verifier checks decoded pixels against this field,
+                # so it has to be what the file actually is.
+                model_visible=bound.model_visible,
             ),
         )
 
