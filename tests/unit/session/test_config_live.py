@@ -906,6 +906,58 @@ async def test_an_explicit_model_choice_keeps_its_model_and_says_so(tmp_path, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["config", "agent", "flag"])
+@pytest.mark.parametrize("saved_model, expected_notices", [("chosen", 0), ("other", 1)])
+async def test_model_default_pair_save_coalesces_pinned_notices(
+    tmp_path, monkeypatch, source, saved_model, expected_notices
+) -> None:
+    """The real facade emits twice, but its intermediate provider/model pair
+    is not a second user decision. Saving the pin itself needs no keep row.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", "anthropic")
+    manager.set_config_value("model_name", "old")
+    session = make_session(tmp_path, RebindableStream({}), model_source=source)
+    session.set_model(ModelSpec(provider="openai", model_id="chosen"), explicit=source == "config")
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    changes = []
+    watcher.subscribe(changes.append)
+    try:
+        for key, value in (("hosting", "openai"), ("model_name", saved_model)):
+            setting = settings_io.resolve_key(key)
+            assert setting is not None
+            settings_io.write_setting(manager, setting, value)
+        assert len(changes) == 2  # Exercises the reported duplicate's real cause.
+        await _settle(session)
+        assert len(_notices(session)) == expected_notices, _notices(session)
+        assert session.model_label == "openai/chosen"
+        assert session._explicit_model_choice is (source == "config")
+        assert watcher.poll_now() is None
+        if expected_notices:
+            assert "/model saved adopts openai/other" in _notices(session)[0]
+            # Redelivery and spelling-only disk edits are the same decision.
+            session._apply_config_change(changes[-1])
+            await _settle(session)
+            manager.set_config_value("hosting", " OpenAI ")
+            watcher.poll_now()
+            await _settle(session)
+            assert len(_notices(session)) == 1
+            # A genuinely different default earns one new receipt, including
+            # returning to a previous divergence after a matching default.
+            for name, count in (("another", 2), ("chosen", 2), ("other", 3)):
+                write_from_another_process(config_dir, "model_name", name)
+                watcher.poll_now()
+                await _settle(session)
+                assert len(_notices(session)) == count, _notices(session)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source, phrase", [("agent", "an agent profile"), ("flag", "a flag")])
 async def test_an_agent_or_flag_sourced_session_gets_a_notice_only(
     tmp_path, monkeypatch, source: str, phrase: str

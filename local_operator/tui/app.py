@@ -21299,17 +21299,13 @@ class OperatorApp(App[None]):
         "which models can I switch to", which they had no way to ask. The label is
         still reported, as the picker's current-row marker.
 
-        Every route out of here names ``/model default``, because a switch is
-        SESSION-scoped and does not look it. The user who picks a model has just
-        answered "which model do I want", the app confirms the switch, and nothing
-        on screen says the next launch comes back on the old one — so the command
-        that fixes that was reachable only by already knowing it existed.
+        The explicit bare command shows scope guidance. Merely entering the
+        picker (including while typing the next /model default command) must
+        not append help to the conversation after a successful switch.
         """
         session = self._session
         if not arg:
-            # The persist-hint notice is NOT printed here: reopening the list
-            # posts ``ModelQueryOpened`` and ``on_model_query_opened`` prints it,
-            # on this route and on the keystroke route alike.
+            self._system_notice(self._persist_hint_notice())
             self._open_model_picker()
             return
         # ``/model default [<provider>/<id>]`` PERSISTS the choice as the boot
@@ -21609,7 +21605,6 @@ class OperatorApp(App[None]):
             # gate makes this a no-op when the row is already warm.
             self._warm_usage_background()
         persist_result: str | None = None
-        saved_to = ""
         if persist_default:
             # Persist as the boot default. Written independently of the live
             # switch above so the two stay composable (``/model default p/m``
@@ -21645,7 +21640,6 @@ class OperatorApp(App[None]):
                     if setting is None:  # pragma: no cover - both keys are registered
                         raise KeyError(f"{key} is not a registered setting")
                     settings_io.write_setting(manager, setting, value)
-                saved_to = _home_relative(str(manager.config_file))
             except Exception as error:  # config write failure
                 # The write-only form switched nothing, so its failure receipt
                 # must not claim it did (QA round 1, Q1b).
@@ -21668,44 +21662,17 @@ class OperatorApp(App[None]):
                 fast=_fast_label(session),
                 context_window=_context_window(session),
             )
-        # The access note answers "can I use the model I just switched to". On
-        # the write-only form nothing was switched to, so the note is filler on
-        # a row that is already three lines at 50 columns (UX review U7) and
-        # the login warning would be about a provider already serving the
-        # session.
-        suffix, warning = ("", None) if write_only else self._model_access_note(provider)
+        # Successful credential checks need no receipt; actionable access
+        # failures still get their own warning. Saving the current default
+        # changes no access decision at all.
+        _, warning = ("", None) if write_only else self._model_access_note(provider)
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
-            # Names both halves, the file and the keys. "saved" alone is a claim
-            # the user cannot check without quitting and relaunching, and the
-            # PROVIDER is the half that rides along silently — it is written from
-            # the selector's left side, never typed as its own setting.
-            #
-            # "used by new sessions", the noun PERSIST_HINT already uses, not
-            # "from the next launch" (design review D3): a user who ran this
-            # after reading the footer met three phrasings of "when" within two
-            # rows. "New sessions" is also the fuller claim — `/new` reloads
-            # `hosting`/`model_name` before it builds, so the default applies
-            # there as well as at relaunch. The settings page keeps its own
-            # "new launch" vocabulary; it is a different surface.
-            notice(
-                f"boot default saved to {saved_to}: hosting {provider}, "
-                f"model_name {model_id} (used by new sessions){suffix}"
-            )
+            scope = "new sessions" if write_only else "this session + new sessions"
+            notice(f"boot default saved: {provider}/{model_id} ({scope})")
         else:
-            # "(next turn)" alone read as permanent — the complaint behind this
-            # wording. The scope and the one command that widens it belong on the
-            # line that announces the switch, not in documentation the user would
-            # have to already suspect exists.
-            #
-            # TWO clauses and no more. This carried four separators — a
-            # parenthetical with a comma in it, the access note's ` · `, then a
-            # ` — ` onto a sentence of its own — and wrapped at 80 columns into a
-            # run-on. "(this session)" is the half that answers "for how long";
-            # "from the next turn" answered "starting when", which nothing had
-            # asked and which the very next receipt demonstrates anyway.
-            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
+            notice(f"model: {old_label} → {new_label} (this session)")
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -22932,50 +22899,11 @@ class OperatorApp(App[None]):
         completed into it by the command picker, or dispatching `/model` all end up
         here. Before this, only the dispatched route had rows.
 
-        The persist-hint notice is printed HERE for the same reason (UX review
-        U5). It used to be printed by ``_cmd_model`` before it reopened the
-        list, so only a dispatched `/model` (Esc past the command picker, then
-        Enter, or the `/models` alias) ever named `/model saved` and `/settings`
-        — the primary keystroke path, where the command picker completes
-        `/model ` and the list opens without a dispatch, printed nothing. The
-        message fires once per closed→open transition, so this is one row per
-        opening on every route, exactly what the dispatched route already did.
-        ``_system_notice`` rather than ``_notice``: opening the picker is the
-        user configuring the app, not starting a conversation, and a plain
-        notice ends the empty state — which collapses the boot composition and
-        makes the centred prompt unreachable.
-
-        The notice is skipped when the ledger's last ROW ALREADY SAYS IT. The
-        message is meant to fire once per visible opening, and the editor now
-        keeps that true across an Esc (``ModelPicker.dismiss`` — UX review
-        round 2, U8, where each Esc-then-edit cycle stacked another copy). This
-        is the second line of defence for the same property: no sequence of
-        opens that produces nothing between them can print the hint twice,
-        whatever the editor's resync does in future. Compared on the text, so
-        a hint that changed (a switch landed between two opens) still prints.
-
-        THE SCAN SKIPS THE PINNED WORKING LINE (code review round 2, R12). A
-        turn in flight pins its working line to the bottom of the transcript
-        (``TranscriptView.pin_tail``) and every later append is inserted BEFORE
-        it, so mid-turn the hint never lands last and a guard reading only
-        ``blocks()[-1]`` could not match it — the deduplication silently
-        stopped applying in exactly the state where a user re-opening the list
-        while the agent works would stack copies. Walking back over the pinned
-        tail costs one comparison and makes the guard mean what its name says
-        in both states. Only the tail is skipped, not an arbitrary run: two
-        notices with a real block between them are two separate openings and
-        must both print.
+        Opening a picker is transient UI state, not a transcript event. The
+        footer keeps the save shortcut discoverable; explicit /model and /help
+        retain full guidance without repeating it as the user types a command.
         """
         message.stop()
-        hint = self._persist_hint_notice()
-        transcript = self._transcript_view()
-        blocks = transcript.blocks()
-        pinned = transcript.pinned_tail()
-        # The last block that is not the pinned working line — which is where a
-        # mid-turn append actually lands.
-        last = next((b for b in reversed(blocks) if b is not pinned), None)
-        if not (isinstance(last, NoticeBlock) and last.text() == hint):
-            self._system_notice(hint)
         self._populate_model_picker()
 
     def _open_model_picker(self) -> None:
@@ -27888,12 +27816,12 @@ class OperatorApp(App[None]):
         self._probe_quota_after_switch(session)
         self._effort_refusal_shown = None
         self._warm_usage_background()
-        suffix, warning = self._model_access_note(provider)
+        _, warning = self._model_access_note(provider)
         # The switch lands on the SHARED session, so every terminal's band
         # repaints from the canonical update — the receipt below only has to
         # reach the invoker. Mid-turn timing is stated by the owner-side
         # notice path (the streamed turn's own events carry it).
-        text = f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}"
+        text = f"model: {old_label} → {new_label} (this session)"
         if warning:
             text = f"{text}\n{warning}"
         return SlashResult(kind="notice", text=text, style="info")
