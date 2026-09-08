@@ -796,10 +796,13 @@ def replay_tool_call(
 
     The card is built exactly as a live one is — same constructor, same
     summary derivation from the arguments — so a resumed row is
-    indistinguishable from the row the user watched run, apart from the
-    duration the transcript never recorded.
+    indistinguishable from the row the user watched run, including its
+    duration: the harness persists the executor's measured interval as
+    ``provider_payload.duration_s`` beside the result's ``details``, and it is
+    restored here rather than recomputed from when this row was mounted.
     """
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
+    from local_operator.tui.widgets.tool_card import parse_duration
 
     card = ToolCard(
         getattr(call, "id", "") or "",
@@ -817,6 +820,14 @@ def replay_tool_call(
     result_text = getattr(result, "text", "") or ""
     payload = getattr(result, "provider_payload", None) or {}
     details = payload.get("details") if isinstance(payload, dict) else None
+    # Validated, never trusted: the key is absent on every row written before
+    # durations were persisted, and a transcript is an on-disk file another
+    # process may have written. `parse_duration` degrades anything that is not
+    # a finite non-negative number to ``None``, which paints the same blank
+    # column a legacy row paints — the one honest answer when the interval is
+    # unknown. Replay must not fail on a bad value, and must not invent a
+    # ``0.0s`` that says the tool returned instantly.
+    duration_s = parse_duration(payload.get("duration_s")) if isinstance(payload, dict) else None
     if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
         # A user-stopped bang command persists as an error result (the
         # model-facing shape), but the LIVE frame it came from was the dim
@@ -831,9 +842,15 @@ def replay_tool_call(
             result_text=result_text,
             details=details,
             error=_first_line(result_text),
+            duration_s=duration_s,
         )
     else:
-        card.restore(state="success", result_text=result_text, details=details)
+        card.restore(
+            state="success",
+            result_text=result_text,
+            details=details,
+            duration_s=duration_s,
+        )
     # Same rule as `on_tool_ended`: a result carrying image blocks shows
     # them under the settled card, so a resumed session's screenshots are
     # back on screen exactly where the live session showed them.
