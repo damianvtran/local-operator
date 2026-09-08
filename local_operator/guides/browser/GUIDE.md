@@ -99,10 +99,24 @@ orphans.
 Operator diagnostics are conservative:
 
 ```sh
-lop browser tabs --json       # redacted durable ownership records
-lop browser reconcile         # read-only explanation; never a sweep
+lop browser tabs              # durable ownership records + live unowned tabs
+lop browser tabs --json       # the same, machine-readable
 lop browser cleanup SESSION --generation GENERATION --yes
 ```
+
+`reconcile` is an alias for `tabs`, not a second step.
+
+The listing marks the rows cleanup will accept (`<- cleanup candidate`) and
+states why each of the others is refused, so eligibility never has to be
+inferred. Live tabs the bridge is driving are listed separately: handles are
+redacted, so they cannot be attributed to a record, and Local Operator will not
+close them.
+
+**A session killed before it finished has no terminal intent, and cleanup will
+refuse it forever — correctly, because a live owner must not be closed behind
+its back.** The route out is not `cleanup`: resume that session
+(`lop --resume <session_id>`) and let the owner `close` the tab or finalize its
+scope. The listing says this on the row itself.
 
 The cleanup command is for an **explicitly selected, durably terminal owner**.
 Copy its exact session and generation from diagnostics after inspecting the

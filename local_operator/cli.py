@@ -446,11 +446,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Reconcile advertised state against reality: drop tabs that no longer "
         "exist and republish a fresh heartbeat. Safe while sessions are live.",
     )
-    for action in ("tabs", "reconcile"):
-        inventory_browser = browser_subparsers.add_parser(
-            action, help="Inspect redacted browser ownership; never close tabs"
+    for action, blurb in (
+        ("tabs", "List durable ownership records and live tabs (read-only)"),
+        ("reconcile", "Alias for 'tabs': inspect ownership without closing anything"),
+    ):
+        inventory_browser = browser_subparsers.add_parser(action, help=blurb)
+        inventory_browser.add_argument(
+            "--json", action="store_true", help="machine-readable output"
         )
-        inventory_browser.add_argument("--json", action="store_true")
     cleanup_browser = browser_subparsers.add_parser(
         "cleanup", help="Close one proven-terminal browser owner after revalidation"
     )
@@ -1316,7 +1319,10 @@ def browser_command(args: argparse.Namespace) -> int:
     if command in ("tabs", "reconcile", "cleanup"):
         import asyncio
         import json
+        import textwrap
 
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.browser_bridge import state as browser_state
         from local_operator.browser_bridge.resources import (
             cleanup_exact,
             read_inventory,
@@ -1333,25 +1339,116 @@ def browser_command(args: argparse.Namespace) -> int:
             try:
                 result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
             except Exception as exc:
-                print(f"Cleanup blocked: {type(exc).__name__}; no unproven tab was selected.")
+                # The bridge and lease errors already carry operator-grade
+                # sentences naming the command that fixes them; printing the
+                # class name instead threw that away and read as a truncated
+                # message. Keep the class name only for genuinely unexpected types.
+                detail = str(exc) or type(exc).__name__
+                print(f"Cleanup blocked: {detail} Nothing was closed.")
                 return 1
-            print(f"Browser cleanup: {result.state}. {result.detail}")
+            if result.state == "closed":
+                message = "Browser cleanup: closed. The tab was closed and its record settled."
+            elif result.state == "retained":
+                message = f"Browser cleanup: retained — {result.detail or 'the tab is held open'}."
+            elif result.state == "pending":
+                # The generation is deliberately NOT rotated by a failed attempt
+                # any more, so the value they already copied stays correct.
+                message = (
+                    f"Browser cleanup: pending — nothing was closed ({result.detail}). "
+                    "Retry the same command once the bridge answers; "
+                    "the generation you copied is still current."
+                )
+            else:
+                message = f"Browser cleanup: no action taken — {result.detail}."
+            print(textwrap.fill(message, width=78, subsequent_indent="  "))
             return 0 if result.state in ("closed", "retained") else 1
         rows = read_inventory(sessions)
+        # A command called `tabs` must reconcile with the browser and with
+        # `status`: reporting "no records" while the bridge drives seven tabs
+        # renders as its own opposite in EXACTLY the pool-exhausted state an
+        # operator reaches for it in, and `{"resources": []}` reads to any
+        # script as an empty browser. Unowned tabs are listed, never selectable.
+        live_tabs: list[dict[str, Any]] = []
+        current = browser_state.read()
+        if current is not None:
+            # Read-only, and never fatal: an absent or unreachable bridge just
+            # means the live half is unknown, which must not break the listing
+            # of the durable half.
+            probe = browser_install.health(current.port)
+            driven = (probe or {}).get("driven_tabs")
+            if isinstance(driven, list):
+                live_tabs = [entry for entry in driven if isinstance(entry, dict)]
+        # Every durable record is redacted (no capability, no tab handle), so a
+        # record cannot be matched to a live URL here. The honest framing is a
+        # count of records against a count of live tabs, with the live ones
+        # listed as unattributed rather than falsely claimed by a session.
+        unowned = live_tabs
         if args.json:
-            print(json.dumps({"resources": rows, "mode": "read-only"}))
-        elif not rows:
-            print("No durable browser ownership records. Legacy tabs remain unknown and untouched.")
-        else:
-            for row in rows:
-                print(
-                    f"{row['session_id']}  {row['state']}  generation={row.get('generation', '')}"
+            print(
+                json.dumps(
+                    {
+                        "resources": rows,
+                        "unowned_tabs": [
+                            {"url": str(tab.get("url", "")), "title": str(tab.get("title", ""))}
+                            for tab in unowned
+                        ],
+                        "live_tab_count": len(live_tabs),
+                        "mode": "read-only",
+                    },
+                    indent=2,
                 )
+            )
+            return 0
+        if not rows and not live_tabs:
+            print("No browser tabs and no ownership records.")
+            return 0
+        if rows:
+            # Pad the state so the third column starts at one offset: at real
+            # id and token widths an unpadded row loses its columns entirely,
+            # and the generation is moved to its own indented line so an
+            # 80-column terminal cannot wrap it mid-token — a wrapped token's
+            # continuation sits in column 1, looks like a new record, and is
+            # unsafe to copy, which is exactly what cleanup asks you to do.
+            width = max(len(str(row.get("state", ""))) for row in rows)
+            for row in rows:
+                mark = "  <- cleanup candidate" if row.get("cleanup_candidate") else ""
+                # rstrip so an unmarked row carries no trailing padding.
+                print(f"{row['session_id']}  {str(row.get('state', '')):<{width}}{mark}".rstrip())
+                print(f"  generation={row.get('generation', '')}")
                 print(
                     f"  terminal={row.get('terminal') or 'not established'}; "
                     f"retention={row.get('retention') or 'none recorded'}"
                 )
-            print("Read-only. PID absence, age, and localhost URLs never authorize cleanup.")
+                if not row.get("cleanup_candidate") and row.get("blocked_reason"):
+                    # Wrapped: the reasons name a recovery command, and a line
+                    # running past the terminal width is where that command
+                    # would be broken across a wrap and mis-copied.
+                    for line in textwrap.wrap(
+                        f"not cleanable: {row['blocked_reason']}",
+                        width=76,
+                        initial_indent="  ",
+                        subsequent_indent="    ",
+                        break_long_words=False,
+                    ):
+                        print(line)
+        if unowned:
+            if not rows:
+                print(
+                    textwrap.fill(
+                        f"No durable ownership records. {len(unowned)} tab(s) are open with "
+                        "no proven owner — listed below; Local Operator will not close them.",
+                        width=78,
+                    )
+                )
+            print(f"\nlive tabs ({len(unowned)}, not selectable for cleanup):")
+            for tab in unowned:
+                print(f"  - {tab.get('url', '')}")
+            print(
+                "  Handles are redacted, so these cannot be attributed to a record above."
+                "\n  Close an unwanted tab by hand; provenance is unproven."
+            )
+        print("\nRead-only. PID absence, age, and localhost URLs never authorize cleanup.")
+        if any(row.get("cleanup_candidate") for row in rows):
             print("Exact cleanup: lop browser cleanup SESSION --generation GENERATION --yes")
         return 0
     if command == "serve":

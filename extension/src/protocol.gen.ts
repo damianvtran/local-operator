@@ -21,6 +21,7 @@ export enum ErrorCode {
   TAB_AMBIGUOUS = 'tab_ambiguous',
   BUSY = 'busy',
   PROTO_MISMATCH = 'proto_mismatch',
+  OWNER_REFUSED = 'owner_refused',
   INTERNAL = 'internal',
 }
 

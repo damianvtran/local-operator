@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.browser_bridge.backend import BridgeClient, BridgeError
+from local_operator.browser_bridge.protocol import ErrorCode
 
 RESOURCE_NAME = ".browser-resource.json"
 
@@ -42,12 +43,27 @@ class BrowserResource:
         self.previous_generation = ""
         self.recovered = False
         self._lease_at_creation = self._lease_generation()
-        self._host_generation = self._lease_at_creation or secrets.token_urlsafe(24)
+        # Whether the execution lease DEFINES this owner's identity. Only then
+        # is a lease change a resume that must fence us; an owner whose identity
+        # came from the record is authorized by the record plus, for the CLI
+        # path, the lease it holds for exclusivity rather than for naming.
+        self._identity_from_lease = False
 
     @property
     def execution_generation(self) -> str:
-        """A pure identity lookup; stale owners are rejected INSIDE finalization."""
-        return self.generation or self._host_generation
+        """A pure identity lookup; stale owners are rejected INSIDE finalization.
+
+        Never mints: an identity read must not become a write, or merely asking
+        who owns the tab would rotate the answer.
+        """
+        if self.generation:
+            return self.generation
+        if self._lease_at_creation:
+            return self._lease_at_creation
+        try:
+            return str(self._load().get("generation", ""))
+        except (BrowserOwnershipError, OSError, ValueError):
+            return ""
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -70,12 +86,25 @@ class BrowserResource:
             return
         self.record = self._load()
         self.previous_generation = str(self.record.get("generation", ""))
-        # Factory-created sessions use the existing exclusive execution lease.
-        # In-process children have unique transcript directories and no lease;
-        # their private generation still fences a stale finalizer after resume.
         if self._lease_at_creation and self._lease_generation() != self._lease_at_creation:
             raise BrowserOwnershipError("browser host execution lease changed; no action taken")
-        self.generation = self._host_generation
+        # Identity is DURABLE PER SESSION, never per BrowserResource instance.
+        #
+        # Factory-built sessions inherit the exclusive execution lease's
+        # generation, so a resume is a genuinely new execution and the old one
+        # is correctly fenced. In-process children take neither path: they use
+        # `claim_session`, not `acquire_session_lease`, so there is no lease to
+        # read. Minting a per-instance token there made a SECOND Session over
+        # the same directory revoke the FIRST one's authority over a tab it was
+        # still holding — the incumbent's finalizer returned `unresolved` while
+        # the newcomer inherited its surface_id, stranding a tab in the pool
+        # that nobody could close. That is the exact leak this module exists to
+        # remove, so the unleased case ADOPTS the stored identity instead: one
+        # session id means one owner, whichever object is asking.
+        self.generation = (
+            self._lease_at_creation or self.previous_generation or secrets.token_urlsafe(24)
+        )
+        self._identity_from_lease = bool(self._lease_at_creation)
         generations = list(self.record.get("bridge_generations", []))
         for candidate in (self.previous_generation, self.generation):
             if candidate and candidate not in generations:
@@ -88,17 +117,32 @@ class BrowserResource:
             allocation_id=self.record.get("allocation_id") or secrets.token_urlsafe(24),
             state=self.record.get("state", "closed"),
         )
-        if self.previous_generation and self.previous_generation != self.generation:
-            # A resume is a new execution of the SAME conversation, authorized
-            # by the lease. Preserve its tab/retention but retire old run intent.
+        if self._lease_at_creation and self.previous_generation != self.generation:
+            # Only a real lease change is a resume. Gating this on "generation
+            # differs" alone would retire a live owner's terminal intent on the
+            # unleased path, where the generation is now deliberately reused.
             self.record.pop("terminal", None)
             if self.record.get("retention") == "paused scope":
                 self.record["release_pause"] = True
         self._save()
 
+    def adopt(self, generation: str) -> None:
+        """Take on an EXISTING record's identity without minting a new one.
+
+        Operator recovery acts on the row the operator selected, so it must not
+        renumber it: the CLI holds the lease for exclusivity, and the lease's
+        own freshly-minted generation is not this owner's name.
+        """
+        self.record = self._load()
+        if self.record.get("generation") != generation:
+            raise BrowserOwnershipError("browser owner generation is stale; no action taken")
+        self.generation = generation
+        self.previous_generation = generation
+        self._identity_from_lease = False
+
     def assert_current(self) -> None:
-        lease = self._lease_generation()
         current = self._load()
+        lease = self._lease_generation() if self._identity_from_lease else ""
         if (lease and lease != self.generation) or current.get("generation") != self.generation:
             raise BrowserOwnershipError("browser owner generation is stale; no action taken")
 
@@ -130,7 +174,12 @@ class BrowserResource:
         try:
             result = await BridgeClient().call("owner_recover", self.params())
         except BridgeError as exc:
-            if "unknown method" in exc.message or "protocol" in exc.message.lower():
+            # An ownership-AWARE extension refuses with the typed OWNER_REFUSED;
+            # anything else from an `owner_*` method means the extension does
+            # not implement ownership at all. Keying on the typed code rather
+            # than on the old side's wording is what stops a reworded message
+            # from silently degrading this into a raw internal error.
+            if exc.code in (ErrorCode.INTERNAL, ErrorCode.PROTO_MISMATCH):
                 raise BrowserOwnershipError(
                     "Browser ownership recovery requires an updated Local Operator extension. "
                     "Update the extension, reconnect it, then retry; no new tab was allocated."
@@ -231,12 +280,47 @@ class BrowserResource:
             return BrowserCleanupResult("pending", type(exc).__name__)
 
 
+#: States in which a tab is stranded and an operator may recover it. Both are
+#: reachable: ``finish`` writes ``cleanup_pending`` as its durable intent, then
+#: OVERWRITES it with the bridge's own reply, so a failed ``chrome.tabs.remove``
+#: persists ``pending``. Listing one and accepting the other made the single
+#: genuinely-stranded state render as "not a candidate" while cleanup would have
+#: taken it. One tuple, read by both, so they cannot drift apart again.
+_RECOVERABLE_STATES = ("cleanup_pending", "pending")
+
+
+def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
+    """``(eligible, reason)`` for one record — the ONE eligibility rule.
+
+    The reason names what would make the row actionable, because "you copied
+    the wrong generation" and "a human is finishing a login in that tab" are
+    opposite situations and the operator cannot otherwise tell which they are
+    in. Guessing wrong pushes them to retry against a protected tab, which is
+    the behaviour the fence exists to discourage.
+    """
+    if value.get("retention"):
+        return False, f"retained: {value['retention']} — the owning session must release it"
+    if not value.get("terminal"):
+        # The crash shape: killed before finish_browser_scope, so no terminal
+        # intent exists and none may be inferred from the process being gone.
+        # Refusing is correct, but refusing SILENTLY dead-ends the operator, so
+        # name the route that actually works: the owner closes its own tab.
+        return False, (
+            "no terminal intent recorded (owner did not finish) — "
+            "resume it with 'lop --resume <session>' and let it close the tab"
+        )
+    if value.get("state") not in _RECOVERABLE_STATES:
+        return False, f"state is '{value.get('state', 'unresolved')}'; nothing is stranded"
+    return True, ""
+
+
 def read_inventory(directory: Path) -> list[dict[str, Any]]:
     """Redacted local evidence; unknown/live/retained never becomes eligible."""
     rows: list[dict[str, Any]] = []
     for path in sorted(directory.glob(f"*/{RESOURCE_NAME}")):
         try:
             value = json.loads(path.read_text())
+            eligible, reason = cleanup_disposition(value)
             rows.append(
                 {
                     "session_id": path.parent.name,
@@ -244,14 +328,18 @@ def read_inventory(directory: Path) -> list[dict[str, Any]]:
                     "state": value.get("state", "unresolved"),
                     "terminal": value.get("terminal", ""),
                     "retention": value.get("retention", ""),
-                    "cleanup_candidate": bool(value.get("terminal"))
-                    and not value.get("retention")
-                    and value.get("state") == "cleanup_pending",
+                    "cleanup_candidate": eligible,
+                    "blocked_reason": reason,
                 }
             )
         except (OSError, ValueError, TypeError):
             rows.append(
-                {"session_id": path.parent.name, "state": "unresolved", "cleanup_candidate": False}
+                {
+                    "session_id": path.parent.name,
+                    "state": "unresolved",
+                    "cleanup_candidate": False,
+                    "blocked_reason": "record is unreadable",
+                }
             )
     return rows
 
@@ -265,15 +353,29 @@ async def cleanup_exact(directory: Path, generation: str) -> BrowserCleanupResul
     from local_operator.session_lease import acquire_session_lease
 
     value = BrowserResource(directory, directory.name)._load()
-    if value.get("generation") != generation or not value.get("terminal") or value.get("retention"):
-        return BrowserCleanupResult("unresolved", "selection stale, nonterminal, or retained")
+    if not value:
+        return BrowserCleanupResult("unresolved", "no ownership record for that session")
+    if value.get("generation") != generation:
+        return BrowserCleanupResult(
+            "unresolved",
+            "generation does not match the current record — "
+            "re-run 'lop browser tabs' and copy the current generation",
+        )
+    eligible, reason = cleanup_disposition(value)
+    if not eligible:
+        return BrowserCleanupResult("unresolved", reason)
     lease = acquire_session_lease(directory)
     try:
+        # Constructed INSIDE the lease so it reads the generation the lease just
+        # established. Building it outside made a CLI-path resource mint its own
+        # token and persist it, rotating the very identifier the listing had
+        # just told the operator to copy: their retry then failed as "stale"
+        # through no fault of theirs, on every attempt.
         resource = BrowserResource(directory, directory.name)
         current = resource._load()
         if current != value:
             return BrowserCleanupResult("unresolved", "ownership changed; no action taken")
-        resource.initialize()
+        resource.adopt(str(value["generation"]))
         return await asyncio.wait_for(
             resource.finish(resource.generation, str(value["terminal"])), 5.0
         )

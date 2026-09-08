@@ -6800,6 +6800,29 @@ def _browser_cwd_label(cwd: str) -> str:
     return "" if path.name in ("", path.anchor) else path.name
 
 
+def _browser_ownership_text(state: str, has_surface: bool) -> str:
+    """Protocol state -> what the agent should do next.
+
+    ``allocating``/``unresolved`` are wire vocabulary: returned verbatim they
+    read as a success while no tab exists, which sent an agent round a loop of
+    three non-error answers and no tab. Say what is true and what to do.
+    """
+    if state in ("owned", "cleanup_pending") and has_surface:
+        return f"Browser ownership recovered ({state}); your tab is available again."
+    if state == "retained":
+        return "Browser tab retained; it stays open past this turn until you 'release' it."
+    if state == "released":
+        return "Browser retention cleared; the tab closes at the end of this scope."
+    if state == "closed":
+        return "Browser ownership settled; no tab is open. Use 'open' to start one."
+    if state == "allocating":
+        return (
+            "Nothing to recover: an allocation was started but no tab exists. If 'open' "
+            "reported the 8-tab limit, none can be allocated until a tab is released."
+        )
+    return "Nothing to recover: this session has no browser tab. Use 'open' to start one."
+
+
 def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> dict[str, Any]:
     """Trusted wire metadata; model/browser arguments cannot override it."""
     identity = {
@@ -7494,29 +7517,55 @@ async def execute_browser(
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
             return _error(tool_call_id, "browser", str(exc))
         action = str(args.get("action", "")).strip().lower()
-        if action == "recover":
-            result = await resource.recover()
-            state.surface_id = str(result.get("tab", ""))
-            return _text(tool_call_id, "browser", f"Browser ownership: {result.get('state')}.")
-        if action in ("retain", "release"):
-            from local_operator.browser_bridge.backend import BridgeClient
-
-            reason = str(args.get("text", "")).strip()
-            result = await BridgeClient().call(
-                f"owner_{action}", {**resource.params(), "reason": reason}
-            )
-            resource.record["retention"] = reason if action == "retain" else ""
-            if action == "release" and resource.record.get("terminal"):
-                result = await BridgeClient().call(
-                    "owner_finish", {**resource.params(), "outcome": resource.record["terminal"]}
+        try:
+            if action == "recover":
+                result = await resource.recover()
+                state.surface_id = str(result.get("tab", ""))
+                return _text(
+                    tool_call_id,
+                    "browser",
+                    _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
                 )
-                if result.get("state") == "closed":
-                    state.surface_id = ""
-            resource.record["surface_id"] = state.surface_id
-            resource.record["state"] = str(result.get("state", "unresolved"))
-            resource.assert_current()
-            resource._save()
-            return _text(tool_call_id, "browser", f"Browser ownership: {result.get('state')}.")
+            if action in ("retain", "release"):
+                from local_operator.browser_bridge.backend import BridgeClient
+
+                reason = str(args.get("text", "")).strip()
+                if action == "retain" and not reason:
+                    # Caught HERE because `text` defaults to "", so omitting it
+                    # is a well-formed call a model will make; the extension's
+                    # refusal would otherwise arrive as a raw traceback in the
+                    # context of the one action that protects a pending login.
+                    return _error(
+                        tool_call_id,
+                        "browser",
+                        "'retain' needs a reason: pass text='pending login' (or similar) "
+                        "describing why this tab must stay open past your turn.",
+                    )
+                result = await BridgeClient().call(
+                    f"owner_{action}", {**resource.params(), "reason": reason}
+                )
+                resource.record["retention"] = reason if action == "retain" else ""
+                if action == "release" and resource.record.get("terminal"):
+                    result = await BridgeClient().call(
+                        "owner_finish",
+                        {**resource.params(), "outcome": resource.record["terminal"]},
+                    )
+                    if result.get("state") == "closed":
+                        state.surface_id = ""
+                resource.record["surface_id"] = state.surface_id
+                resource.record["state"] = str(result.get("state", "unresolved"))
+                resource.assert_current()
+                resource._save()
+                return _text(
+                    tool_call_id,
+                    "browser",
+                    _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
+                )
+        except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
+            # Same containment the initialize/recover block above already has:
+            # an expected ownership or bridge refusal is a sentence, never a
+            # stack trace spent in the model's context.
+            return _error(tool_call_id, "browser", str(exc))
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
@@ -7538,11 +7587,21 @@ async def execute_browser(
         finally:
             # Lost responses retain the allocation intent. A retry/recover asks
             # the extension for that exact allocation instead of opening twice.
+            #
+            # Swallowing is load-bearing, not defensive habit: a raising
+            # `finally:` DISCARDS the value the `try:` already produced, so an
+            # ownership advance racing a successful open would replace a real
+            # ToolResult (naming a tab that exists) with a traceback telling the
+            # model the action failed. Persistence is best-effort here; the next
+            # command's own `assert_current` is what refuses a stale owner.
             pending = resource.record.get("state") == "allocating" and not state.surface_id
-            resource.remember(
-                state.surface_id,
-                state="cleanup_pending" if failed_close else "allocating" if pending else None,
-            )
+            try:
+                resource.remember(
+                    state.surface_id,
+                    state="cleanup_pending" if failed_close else "allocating" if pending else None,
+                )
+            except (BrowserOwnershipError, OSError, ValueError):
+                logger.warning("browser ownership record not updated", exc_info=True)
             if pending:
                 resource.recovered = False
 

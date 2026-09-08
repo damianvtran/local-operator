@@ -28,7 +28,7 @@ function identity(params: Params): [string, string, string] {
   const session = String(params.requester ?? "");
   const generation = String(params.owner_generation ?? "");
   if (!/^[a-zA-Z0-9_-]{32,}$/.test(proof) || !session.startsWith("session:") || !generation) {
-    throw new BridgeCommandError("internal", "missing private browser ownership proof");
+    throw new BridgeCommandError("owner_refused", "missing private browser ownership proof");
   }
   return [proof, session, generation];
 }
@@ -39,7 +39,7 @@ async function mutate<T>(params: Params, fn: (scope: Scope) => T, create = false
     let scope = all[proof];
     if (!scope && create) scope = all[proof] = { session, generation, allocations: {} };
     if (!scope || scope.session !== session || scope.generation !== generation) {
-      throw new BridgeCommandError("internal", "browser owner generation is stale or unresolved");
+      throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved");
     }
     const result = fn(scope);
     await chrome.storage.session.set({ ownerScopes: all });
@@ -51,20 +51,9 @@ export async function recordAllocation(params: Params, tab: string, state: strin
   if (!params.owner_proof) return; // legacy clients retain capability-only behavior
   await mutate(params, scope => {
     const allocation = String(params.allocation_id ?? "");
-    if (!allocation || scope.terminal) throw new BridgeCommandError("internal", "browser scope ended");
+    if (!allocation || scope.terminal) throw new BridgeCommandError("owner_refused", "browser scope ended");
     scope.allocations[allocation] = { tab: tab || undefined, state };
   });
-}
-
-/** Outstanding allocations survive worker crashes and count against the pool.
- * Only a confirmed close/removal retires them; owner age/PID never does. */
-export async function outstandingReservations(): Promise<number> {
-  const surfaces = await getSurfaces();
-  const all = await scopes();
-  return Object.values(all).flatMap(scope => Object.values(scope.allocations)).filter(
-    allocation => ["allocating", "allocated", "cleanup_pending"].includes(allocation.state)
-      && (!allocation.tab || !surfaces[allocation.tab])
-  ).length;
 }
 
 /** Serialize owner commands through the entire side effect, not just the map
@@ -83,7 +72,7 @@ export function withOwnership(
       // A legacy capability cannot bypass fencing for a modern allocation.
       if (params.tab) {
         const surface = (await getSurfaces())[String(params.tab)];
-        if (surface?.allocationId) throw new BridgeCommandError("internal", "owner-aware client required");
+        if (surface?.allocationId) throw new BridgeCommandError("owner_refused", "owner-aware client required");
       }
       return handler();
     }
@@ -95,7 +84,7 @@ export function withOwnership(
         if (!scope) return { ownership_version: 1, state: "unresolved" };
         const predecessors = Array.isArray(params.previous_generations) ? params.previous_generations : [];
         if (scope.session !== session || (scope.generation !== generation && scope.generation !== params.previous_generation && !predecessors.includes(scope.generation))) {
-          throw new BridgeCommandError("internal", "browser owner generation is stale");
+          throw new BridgeCommandError("owner_refused", "browser owner generation is stale");
         }
         if (scope.generation !== generation) delete scope.terminal;
         scope.generation = generation;
@@ -108,13 +97,13 @@ export function withOwnership(
     }
     if (method === "open") {
       const existing = await mutate(params, scope => {
-        if (scope.terminal) throw new BridgeCommandError("internal", "browser scope ended; resume a new generation first");
+        if (scope.terminal) throw new BridgeCommandError("owner_refused", "browser scope ended; resume a new generation first");
         const id = String(params.allocation_id ?? "");
-        if (!id) throw new BridgeCommandError("internal", "missing browser allocation id");
+        if (!id) throw new BridgeCommandError("owner_refused", "missing browser allocation id");
         return scope.allocations[id];
       }, true);
       if (params.tab) {
-        if (existing?.tab !== params.tab) throw new BridgeCommandError("internal", "tab does not belong to allocation");
+        if (existing?.tab !== params.tab) throw new BridgeCommandError("owner_refused", "tab does not belong to allocation");
         return handler();
       }
       if (existing?.tab && (await getSurfaces())[existing.tab]) {
@@ -142,7 +131,7 @@ export function withOwnership(
       ["tabs", "status", "request_access", "await_access", "cancel_access", "owner_retain", "owner_finish"].includes(method));
     if (method === "owner_retain") {
       const reason = String(params.reason ?? "").trim();
-      if (!reason || reason.length > 500) throw new BridgeCommandError("internal", "retention requires a bounded reason");
+      if (!reason || reason.length > 500) throw new BridgeCommandError("owner_refused", "retention requires a bounded reason");
       await mutate(params, value => { value.retention = reason; });
       return { state: "retained" };
     }
@@ -166,9 +155,9 @@ export function withOwnership(
       }
       return { state: pending ? "pending" : "closed" };
     }
-    if (scope.terminal && method !== "close" && method !== "tabs") throw new BridgeCommandError("internal", "browser scope ended");
+    if (scope.terminal && method !== "close" && method !== "tabs") throw new BridgeCommandError("owner_refused", "browser scope ended");
     if (params.tab && !Object.values(scope.allocations).some(a => a.tab === params.tab)) {
-      throw new BridgeCommandError("internal", "tab does not belong to this browser owner");
+      throw new BridgeCommandError("owner_refused", "tab does not belong to this browser owner");
     }
     return handler();
   };

@@ -9,6 +9,7 @@ import pytest
 
 from local_operator.browser_bridge import resources
 from local_operator.browser_bridge.resources import (
+    RESOURCE_NAME,
     BrowserResource,
     cleanup_exact,
     read_inventory,
@@ -23,6 +24,10 @@ class BridgeFixture:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_close = False
         self.retained = False
+        #: Override the state ``owner_finish`` replies with, so the "extension
+        #: could not remove the tab" answer can be exercised as itself rather
+        #: than as a transport failure.
+        self.finish_state = ""
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
@@ -34,6 +39,8 @@ class BridgeFixture:
         if method == "owner_finish":
             if self.fail_close:
                 raise ConnectionError("disposable fixture unavailable")
+            if self.finish_state:
+                return {"state": self.finish_state}
             return {"state": "retained" if self.retained else "closed"}
         raise AssertionError(method)
 
@@ -84,18 +91,20 @@ async def test_failed_cleanup_survives_reconstruction(
     record = json.loads(resource.path.read_text())
     assert record["terminal"] == "failed"
     assert record["surface_id"] == "bridge:100:private"
-    # Reconstruction models a restarted host. The stable proof and allocation
-    # survive; a new generation is presented with the previous CAS token.
+    # Reconstruction models a restarted host. The proof, the allocation AND the
+    # generation all survive: on an unleased directory identity belongs to the
+    # SESSION, not to the BrowserResource object, so a second instance adopts
+    # the stored owner instead of minting a token that would fence out an
+    # incumbent still holding a live tab (review round 1, B1).
     resumed = BrowserResource(tmp_path, tmp_path.name)
     resumed.initialize()
     assert resumed.params()["owner_proof"] == resource.record["proof"]
-    assert resumed.params()["previous_generation"] == resource.generation
-    assert resumed.generation != resource.generation
+    assert resumed.generation == resource.generation
     bridge.fail_close = False
     await resumed.recover()
     assert resumed.record["surface_id"] == "bridge:100:private"
-    with pytest.raises(RuntimeError, match="stale"):
-        resource.remember("")
+    # The incumbent is NOT fenced out by the reconstruction: same identity.
+    resource.remember("bridge:100:private")
 
 
 @pytest.mark.asyncio
@@ -154,3 +163,116 @@ async def test_dead_process_alone_never_authorizes_cleanup(
     resource.remember("bridge:100:private")
     assert (await cleanup_exact(tmp_path, resource.generation)).state == "unresolved"
     assert not bridge.calls
+
+
+def test_unleased_second_instance_never_fences_out_the_live_owner(tmp_path: Path) -> None:
+    """B1: identity is durable per SESSION, not per BrowserResource instance.
+
+    In-process children take this path — they use ``claim_session``, not
+    ``acquire_session_lease`` — so a per-instance token meant every subagent
+    could have its live tab silently transferred to a newcomer, stranding a
+    tab in the pool that nobody could close.
+    """
+    assert not (tmp_path / ".execution-lease").exists()
+    incumbent = BrowserResource(tmp_path, tmp_path.name)
+    incumbent.initialize()
+    incumbent.remember("bridge:2:live")
+
+    newcomer = BrowserResource(tmp_path, tmp_path.name)
+    newcomer.initialize()
+
+    assert newcomer.generation == incumbent.generation
+    incumbent.remember("bridge:2:live")  # still authoritative over its own tab
+    assert incumbent.record["surface_id"] == "bridge:2:live"
+
+
+def test_identity_read_never_mints_or_rotates(tmp_path: Path) -> None:
+    """execution_generation is a lookup; asking who owns must not renumber."""
+    fresh = BrowserResource(tmp_path, tmp_path.name)
+    assert fresh.execution_generation == ""
+    fresh.initialize()
+    stored = fresh.generation
+    for _ in range(3):
+        assert BrowserResource(tmp_path, tmp_path.name).execution_generation == stored
+    assert json.loads((tmp_path / RESOURCE_NAME).read_text())["generation"] == stored
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_does_not_rotate_the_copied_generation(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """D3/U2: the identifier the listing told the operator to copy stays valid."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.record["terminal"] = "failed"
+    resource.remember("bridge:5:tok", state="cleanup_pending")
+    copied = resource.generation
+    bridge.fail_close = True
+
+    for _ in range(3):
+        result = await cleanup_exact(tmp_path, copied)
+        assert result.state == "pending"
+        assert json.loads((tmp_path / RESOURCE_NAME).read_text())["generation"] == copied
+
+    bridge.fail_close = False
+    assert (await cleanup_exact(tmp_path, copied)).state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_listing_and_cleanup_agree_on_the_stranded_state(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """M1: a failed removal persists 'pending'; both surfaces must accept it."""
+    # Own sessions root: tmp_path.parent is pytest's shared directory and would
+    # scan sibling tests' records.
+    sessions = tmp_path / "sessions"
+    directory = sessions / "stranded"
+    resource = BrowserResource(directory, "stranded")
+    resource.initialize()
+    resource.record["terminal"] = "completed"
+    resource.remember("bridge:100:private")
+    # The extension REPORTS pending when chrome.tabs.remove threw: the reply
+    # overwrites the durable 'cleanup_pending' intent, which is how the two
+    # surfaces came to disagree about the one genuinely stranded state.
+    bridge.finish_state = "pending"
+    assert (await resource.finish(resource.generation, "completed")).state == "pending"
+
+    row = read_inventory(sessions)[0]
+    assert row["state"] == "pending"
+    assert row["cleanup_candidate"] is True, "the one stranded state must be listed as cleanable"
+
+    bridge.finish_state = ""
+    assert (await cleanup_exact(directory, resource.generation)).state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_refusals_name_the_specific_cause_and_the_route_out(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """U1/U4: the crash shape must name resume, not read as a mistyped id."""
+    crashed = tmp_path / "crashed"
+    resource = BrowserResource(crashed, "crashed")
+    resource.initialize()
+    resource.remember("bridge:9:stranded")  # killed before finish: no terminal
+
+    row = read_inventory(tmp_path)[0]
+    assert row["cleanup_candidate"] is False
+    assert "resume" in row["blocked_reason"] and "lop --resume" in row["blocked_reason"]
+
+    refused = await cleanup_exact(crashed, resource.generation)
+    assert refused.state == "unresolved"
+    assert "lop --resume" in refused.detail
+    assert "stale" not in refused.detail, "a live owner is not a stale selection"
+
+    wrong = await cleanup_exact(crashed, "not-the-generation")
+    assert "generation does not match" in wrong.detail
+    missing = await cleanup_exact(tmp_path / "no-such-session", "any")
+    assert "no ownership record" in missing.detail
+
+    retained = tmp_path / "held"
+    held = BrowserResource(retained, "held")
+    held.initialize()
+    held.record.update(terminal="completed", retention="pending login")
+    held.remember("bridge:9:held")
+    assert "pending login" in (await cleanup_exact(retained, held.generation)).detail
+    assert bridge.calls == [], "no refusal may reach the bridge"

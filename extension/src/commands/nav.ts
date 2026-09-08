@@ -295,7 +295,7 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
     const surface = await requireSurface(params.tab);
     const token = surfaceToken(surface);
     if (surface.allocationId && !params.owner_proof) {
-      throw new BridgeCommandError("internal", "owner-aware client required");
+      throw new BridgeCommandError("owner_refused", "owner-aware client required");
     }
     await closeSurface(token, surface);
     return { closed: token };
@@ -321,7 +321,7 @@ export async function close(params: Record<string, unknown>): Promise<Record<str
   // Legacy close inferred its sole target AFTER dispatch authorization. Check
   // the resolved target too, or close({}) bypasses the explicit-handle fence.
   if (surface.allocationId && !params.owner_proof) {
-    throw new BridgeCommandError("internal", "owner-aware client required");
+    throw new BridgeCommandError("owner_refused", "owner-aware client required");
   }
   await closeSurface(token, surface);
   return { closed: token };

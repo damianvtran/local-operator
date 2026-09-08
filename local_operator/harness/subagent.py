@@ -963,12 +963,20 @@ async def _finish_child_browser(
             except (RuntimeError, OSError, ValueError):
                 logger.warning("paused browser ownership changed; retained successor untouched")
         return
-    if callable(getattr(child, "finish_browser_scope", None)):
-        result = await child.finish_browser_scope(
-            scope_id=child.session_id, generation=child.browser_generation, outcome=outcome
-        )
-        if result.state not in ("closed", "retained"):
-            logger.warning("child browser cleanup %s: %s", result.state, result.detail)
+    if resource is None or not callable(getattr(child, "finish_browser_scope", None)):
+        # A host that built a BrowserSurface without a resource has no durable
+        # ownership to settle. Reading the generation anyway raised straight
+        # through the completed/failed paths, replacing the child's real outcome.
+        return
+    result = await child.finish_browser_scope(
+        scope_id=child.session_id,
+        # Off the resource the branch has already proven non-None, not the
+        # Session property, so this cannot fault on an unwired host.
+        generation=resource.execution_generation,
+        outcome=outcome,
+    )
+    if result.state not in ("closed", "retained"):
+        logger.warning("child browser cleanup %s: %s", result.state, result.detail)
 
 
 async def _dispose_child(child: "Session") -> None:
