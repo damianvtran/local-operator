@@ -291,6 +291,22 @@ def normalize_key(text: str) -> str:
         return ",".join(parts)
 
 
+def alternates(text: str) -> frozenset[str]:
+    """The set of individual keys ``text`` binds, normalized.
+
+    A Textual key string is a COMMA-SEPARATED SET, not a scalar: ``"f5,ctrl+g"``
+    binds both, and any one of them firing is enough to make another action
+    holding it unreachable. Every comparison between two configured keys must
+    therefore be a set operation — a string comparison reports ``"f5,ctrl+g"``
+    and ``"ctrl+g"`` as different values while the app has them colliding on
+    ``ctrl+g``, which is how the group guard was bypassed (review round 2, M4).
+
+    Normalized per element through the same path the write boundary uses, so
+    ``"CTRL+G"`` and ``"ctrl+g"`` cannot both be present as distinct members.
+    """
+    return frozenset(part for part in normalize_key(text).split(",") if part)
+
+
 def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
     """Whether ``key`` names something a terminal can actually send."""
     if not key:
@@ -389,14 +405,24 @@ def action_holding(
     sitting at its default — omission is how "unset" is encoded — so an
     inverted map would be blind to exactly the default-keyed actions a user is
     most likely to collide with.
+
+    Compared as ALTERNATE SETS and not as strings. A Textual key string may
+    carry comma-separated alternates (``"f5,ctrl+g"`` binds both), a form
+    ``normalize_key`` preserves and which §H.1 of the design deliberately
+    routes users to via ``lop config edit`` since capture takes one key. A
+    whole-string comparison sees ``"f5,ctrl+g" != "ctrl+g"`` and reports no
+    holder while the app has both actions live on ``ctrl+g`` — measured: three
+    presses fired ``new_session`` every time and ``resume`` was reachable by no
+    key at all (review round 2, M4). Any overlap is a collision, because any
+    single shared alternate is enough to make one action unreachable.
     """
-    wanted = normalize_key(key)
+    wanted = alternates(key)
     if not wanted:
         return None
     for action in KEY_ACTIONS:
         if action.id == excluding:
             continue
-        if effective_key(action, values) == wanted:
+        if wanted & alternates(effective_key(action, values)):
             return action
     return None
 
@@ -423,11 +449,22 @@ def group_conflict(action_id: str, key: str, values: Mapping[str, Any]) -> str |
 
     Takes ``values`` rather than reading config itself, so it stays pure and
     the caller decides which snapshot is authoritative.
+
+    Compares ALTERNATE SETS via :func:`action_holding`, so ``"f5,ctrl+g"``
+    against ``"ctrl+g"`` is caught. The message names the OVERLAPPING keys
+    rather than the whole value, because with alternates in play "that key" is
+    ambiguous — the user typed a two-key string and only one of them is the
+    problem, and a refusal that does not say which is a refusal they cannot
+    act on.
     """
     other = action_holding(key, values, excluding=action_id)
     if other is None:
         return None
-    return f"{other.label.lower()} already uses that key — pick another, or change that row first"
+    shared = sorted(alternates(key) & alternates(effective_key(other, values)))
+    return (
+        f"{other.label.lower()} already uses {', '.join(shared)}"
+        " — pick another, or change that row first"
+    )
 
 
 # ---------------------------------------------------------------------------

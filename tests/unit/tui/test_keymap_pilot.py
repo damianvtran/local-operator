@@ -24,6 +24,7 @@ from local_operator import keymap, settings_io
 from local_operator.config import ConfigManager
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.settings_view import SettingsView
+from tests.unit.tui.conftest import painted_row
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -594,11 +595,17 @@ async def test_the_footer_offers_enter_only_once_a_key_is_pending() -> None:
         _select(view, "keymap.new_session")
         await pilot.press("enter")
         await pilot.pause()
+        # Asserted on the PAINTED row as well as on `display`. The display flag
+        # alone is what this test checked in round 1, and it is satisfiable
+        # while the row renders wrongly — the seam defect (M5/D8) left this
+        # green with the footer reading `any keyenter` (review round 2, M5).
         assert not view._enter_hint.display, "enter advertised before a key was pressed"
+        assert "confirm" not in painted_row(app, view._hints)
 
         await pilot.press("f5")
         await pilot.pause()
         assert view._enter_hint.display, "the commit key was shed at 46x18 while pending"
+        assert "confirm" in painted_row(app, view._hints)
 
 
 @pytest.mark.asyncio
@@ -629,12 +636,19 @@ async def test_a_pending_key_is_marked_without_relying_on_colour() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_live_capture_still_names_its_exit_when_the_page_is_too_short() -> None:
-    """A modal state with no visible representation must still say `esc`.
+async def test_a_capture_does_not_survive_the_page_going_too_short() -> None:
+    """The round-1 D6 guard, REWRITTEN to the contract that replaced it.
 
-    Shrinking while capture is open hides the body but leaves capture live and
-    every app binding disarmed, with nothing on screen naming the way out
-    (design round 1, D6).
+    D6 asked for a modal state with no visible representation to still name
+    `esc`, and round 1 answered by appending the clause to the too-short line.
+    Round 2 (D9) showed that clause being clipped away unmarked at exactly the
+    widths where it was the only thing on screen, and D10 showed the row not
+    painting at all at height 10 — so there is no width at which a string is a
+    general answer.
+
+    The state is now impossible rather than advertised, so this asserts the
+    stronger property: shrinking ENDS the capture, which is what makes the
+    absence of an `esc` clause correct rather than a regression of D6.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -645,8 +659,147 @@ async def test_a_live_capture_still_names_its_exit_when_the_page_is_too_short() 
         _select(view, "keymap.new_session")
         await pilot.press("enter")
         await pilot.pause()
+        assert view._capture is not None
 
         await pilot.resize_terminal(80, 10)
         await pilot.pause()
-        assert view._too_short and view._capture is not None
-        assert "esc" in view._detail_text.plain, "no exit advertised while capture is hidden"
+        assert view._too_short
+        assert view._capture is None, "a capture survived into a page that cannot show it"
+        assert app.check_action("interrupt", ()) is not False, "ctrl+c left disarmed"
+
+
+# ---------------------------------------------------------------------------
+# RENDERED-FRAME GUARDS
+#
+# Everything below asserts on the PAINTED row (`painted_row`, which reads the
+# compositor strips) and not on the widget's model `Text`. That distinction is
+# the whole point of this block and it is not stylistic: three defects in this
+# family have shipped on these two rows, and in every one the model string was
+# correct while the frame was wrong, so every substring assertion passed. See
+# `painted_row`'s docstring in conftest for the list.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(150, 40), (100, 30), (80, 24), (60, 20), (52, 18), (46, 18)])
+async def test_painted_footer_keeps_a_seam_between_every_hint(size: tuple[int, int]) -> None:
+    """Hints must never render as one word (design round 2, D8 / review M5).
+
+    Widths span 150x40 down to 46x18 because the reviewer measured the defect
+    across that whole range, not only at the three the design round sampled —
+    a guard narrower than the defect is a guard that reports a fixed bug.
+
+    The footer paints in DOM order while `plan` carries the SHED order, and
+    capture inverts the two (`enter` leads so it is shed last). Suppressing the
+    seam by plan position therefore silenced it on a hint that paints second,
+    and the row rendered `any keyenter`.
+
+    Asserted on the painted strip because `rendered_hints()` returns the
+    concatenation of the hint models, in which the missing seam is invisible.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.press("f5")
+        await pilot.pause()
+
+        row = painted_row(app, view._hints)
+        assert row, "the footer painted nothing while a key was pending"
+        # Every visible hint's label must be preceded by whitespace or a seam,
+        # never by another hint's last letter. Checked against the labels
+        # actually on screen rather than a fixed list, so the guard survives a
+        # future state offering different keys.
+        for hint in (view._enter_hint, view._exit_hint, view._reset_hint, view._pane_hint):
+            if not hint.display:
+                continue
+            label = hint._key
+            index = row.find(label)
+            if index <= 0:
+                continue
+            preceding = row[index - 1]
+            assert (
+                not preceding.isalnum()
+            ), f"{label!r} is jammed onto the previous hint at {size}: {row!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (80, 24), (60, 20), (46, 18)])
+@pytest.mark.parametrize("scenario", ["empty", "pending", "refused"])
+async def test_the_painted_capture_line_carries_its_exit_or_an_ellipsis(
+    size: tuple[int, int], scenario: str
+) -> None:
+    """The rendered detail row states the way out, or marks that it was cut.
+
+    The round-1 version of this guard read `_detail_text`, which is the model.
+    `.settings-view-detail` is `height: 2` and no-wrap, so the widget clips
+    what the model carried — the round-2 blocker (D9) was exactly a clause
+    present in the model and absent from the frame at every width where it
+    mattered.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.pause()
+        if scenario == "pending":
+            await pilot.press("f5")
+        elif scenario == "refused":
+            await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        row = painted_row(app, view._detail)
+        assert row, f"the capture line painted nothing at {size}"
+        assert "esc cancels" in row, f"{scenario} at {size} painted no exit: {row!r}"
+        assert not row.rstrip().endswith("\u00b7"), f"dangling separator: {row!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 12), (64, 12), (60, 12), (46, 12), (46, 10)])
+async def test_shrinking_below_the_body_floor_never_strands_a_capture(
+    size: tuple[int, int],
+) -> None:
+    """R1, reached by RESIZE rather than by a key (design round 2, D9/D10).
+
+    Capture disarms every app binding including ctrl+c, so it may only be live
+    while the page can say so. Below the body floor it cannot: the row is
+    hidden, the detail line is ~42 cells, and at height 10 the detail widget
+    paints nothing at all — so the escape clause has no guaranteed home and the
+    capture is ended on the way in instead.
+
+    The capture must be entered at a workable size and the terminal shrunk
+    AFTER: the shot helpers press `enter` at the target size, where a too-short
+    page never enters capture and the frame looks fine.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.new_session")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._keymap_capture, "capture did not arm at a workable size"
+
+        await pilot.resize_terminal(*size)
+        await pilot.pause()
+
+        assert view._too_short, f"{size} was expected to be below the body floor"
+        visible_exit = painted_row(app, view._detail)
+        assert not app._keymap_capture or "esc cancels" in visible_exit, (
+            f"capture disarmed the app with no PAINTED exit at {size}: {visible_exit!r}"
+        )
+        assert view._capture is None, f"a capture survived into too-short at {size}"
+        assert not app._keymap_capture, f"the app flag survived into too-short at {size}"
+        assert (
+            app.check_action("interrupt", ()) is not False
+        ), f"ctrl+c is disarmed with no way to say so at {size}"

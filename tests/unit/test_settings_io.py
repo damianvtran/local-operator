@@ -1080,10 +1080,34 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
 
-    with pytest.raises(ValueError, match="already uses that key"):
+    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+
+    # And through the ALTERNATES form, which is the shape `lop config edit`
+    # reaches for a second key (design §H.1) and which bypassed the guard
+    # entirely while it compared whole strings (review round 2, M4).
+    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+g")
 
     # A free key still stores, and re-writing a row's own key is not a clash.
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"
+
+
+@pytest.mark.parametrize(
+    ("existing", "candidate"),
+    [
+        ("f5,ctrl+g", "ctrl+g"),
+        ("ctrl+g", "f5,ctrl+g"),
+        ("ctrl+g", "ctrl+g,ctrl+g"),
+        ("f5,ctrl+g", "ctrl+t,ctrl+g"),
+    ],
+)
+def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, candidate):
+    """All documented alternate forms must reach the same refusal boundary."""
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], existing)
+    with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"

@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.widget import Widget
 
 from local_operator.tui import animation
 from local_operator.tui import theme as theme_mod
@@ -392,3 +393,53 @@ def chevron_colour(cells: list[tuple[str, str | None, str | None]]) -> str | Non
     # Exact cell, not a substring: `$` is ordinary prose, so a typed
     # `$ ls` on the same strip must not steal the marker's ink.
     return next(fg for text, fg, _ in cells if text.strip() in markers)
+
+
+def painted_rows(app: App[None], widget: Widget) -> list[str]:
+    """The text the terminal was SENT for ``widget``'s laid-out rows.
+
+    WHY THIS EXISTS RATHER THAN A MODEL-STRING ASSERTION
+    ====================================================
+
+    A widget's own ``Text`` is what the code *intended*; this is what the user
+    *sees*. The two diverge whenever the paint path clips, pads or drops — and
+    on the settings footer and detail row they have now diverged three times in
+    two commits, each time invisibly:
+
+    * a shed ladder dropped a clause whole where it should have ellipsised;
+    * a hint's ``·`` seam was suppressed on the wrong widget, rendering two
+      hints as one word (``any keyenter``) while both substrings still matched;
+    * a `height: 2` no-wrap row clipped its escape clause away with no mark
+      while the model string carried it in full at every width.
+
+    In all three the model string was CORRECT, so every substring assertion
+    passed. A guard on these rows that reads the model is decorative.
+
+    Sliced by ``widget.region`` rather than by scanning the frame for text,
+    because the failures above are about POSITION and WIDTH: a scan would find
+    ``esc cancels`` painted by some other widget and report a row that is
+    actually blank. Blank rows are dropped so the caller does not have to know
+    which row of a padded widget carries its text (``.settings-view-detail``
+    and ``.settings-view-hints`` both pad one row down), and a widget that is
+    off the frame or unpainted correctly yields ``[]`` rather than raising —
+    "nothing was painted" is a legitimate and important answer, and it is
+    exactly what a height-10 terminal produces.
+    """
+    strips = list(app.screen._compositor.render_strips())
+    region = widget.region
+    rows: list[str] = []
+    for y in range(region.y, region.y + region.height):
+        if not 0 <= y < len(strips):
+            continue
+        # Regions count terminal cells, not Unicode code points. Strip.crop
+        # preserves that geometry when a sibling paints a wide glyph.
+        text = strips[y].crop(max(0, region.x), max(0, region.right)).text.rstrip()
+        if text.strip():
+            rows.append(text)
+    return rows
+
+
+def painted_row(app: App[None], widget: Widget) -> str:
+    """``painted_rows``' first non-blank row, or ``""`` when nothing painted."""
+    rows = painted_rows(app, widget)
+    return rows[0] if rows else ""
