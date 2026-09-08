@@ -4728,6 +4728,7 @@ class OperatorApp(App[None]):
             # A drawer cannot count as a correct visible conversation while it
             # covers the response. Pinned wide sidebars stay open.
             self._set_sidebar_open(False)
+        self._start_resume_fill()
         self._show_sidebar_connection(source)
         if not source.draft.following_tail and source.draft.scroll_anchor_id:
             scroll_revision = source.scroll_revision
@@ -7165,15 +7166,50 @@ class OperatorApp(App[None]):
         duplicate RPC F1 reported, and the cursor it would send is the one the
         first request is already consuming (`history changed while paging`).
         """
-        if not _args or _args[0] is not None:
-            self._interaction.scroll_revision += 1
-        if _args and _args[0] is False:
-            # Explicit End owns its newer-history request and tail handoff.
-            # Re-arming the older-page latch first restores an old top anchor
-            # after End and undoes the user's actual navigation.
-            self._resume_in_zone = False
+        if source.token in self._paging_leases:
+            return None
+        lease = _PagingLease(source_token=source.token)
+        self._paging_leases[source.token] = lease
+        return lease
+
+    def _release_paging_lease(self, lease: _PagingLease | None) -> bool:
+        """Drop ``lease`` only if it is still the holder. Returns whether it was.
+
+        Identity, not source equality: a stale completion arriving after a
+        revisit names the same source as the transaction now in flight, and
+        letting it release on that basis is exactly the bug — the newer fetch
+        loses its gate while it is still running.
+        """
+        if lease is None:
+            return False
+        if self._paging_leases.get(lease.source_token) is not lease:
+            return False
+        del self._paging_leases[lease.source_token]
+        return True
+
+    def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
+        """Coalesce real upward input, never infer demand from layout motion.
+
+        The widget reports True/False for directional input and None for an
+        offset observation. A clamped wheel notch is still input. Observations
+        may complete an animated gesture, but cannot earn another page. One
+        boolean retains at most one additional demand while fetch/mount is
+        busy; a downward gesture cancels that debt.
+        """
+        # A final animation tick may arrive while Textual is unmounting this
+        # surface. Hooks belong to the cached active view; never rediscover a
+        # transcript (or dispatch paging) after that view has been retired.
+        view = self._transcript
+        if view is None or view.parent is None:
             return
-        view = self._transcript_view()
+        upward = args[0] if args else True
+        if upward is not None:
+            # Reader movement, for saved-position ownership, on the same
+            # provenance the paging demand uses: a passive layout correction
+            # must not discard an anchor still being restored.
+            self._interaction.scroll_revision += 1
+            self._resume_fill_active = False
+            self._resume_in_zone = bool(upward)
         if self._resume_pending_tail and view.scroll_y > 0 and view.is_near_bottom():
             self._mount_newer_resume_page()
             return
