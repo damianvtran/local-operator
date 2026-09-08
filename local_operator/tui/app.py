@@ -2903,6 +2903,13 @@ class OperatorApp(App[None]):
         #: session id for the owner notices and empty for disk drift — see
         #: :meth:`_check_build_skew` for why the two differ.
         self._skew_notice_shown: set[tuple[str, str, str, str]] = set()
+        #: The build a self-refreshing runtime was on when it retired, plus how
+        #: to name its session, set by :meth:`_on_runtime_refreshed` and
+        #: consumed once by :meth:`_announce_refresh_completed` after the
+        #: successor binds. Held across that gap because the retiring stamp
+        #: only exists BEFORE the re-bind overwrites it, and the comparison it
+        #: is needed for can only be made after.
+        self._refreshed_from: tuple[Any, str] | None = None
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -11807,16 +11814,78 @@ class OperatorApp(App[None]):
         The latch is reset because it was set by the engage that bound the
         runtime that just left — without the reset the first keystroke after
         ``lop-update`` would pay, in the foreground, a cold start this could
-        have paid in the background. No notice is painted: the operator's bar
-        is "never see this message", the band's ``starting…`` state covers
-        the ~1 s the re-engage takes, and a line of prose for a background
-        housekeeping event is noise. After the bind ``_check_build_skew``
-        runs again and, with a fresh runtime, the owner stamp equals the disk
-        stamp and stays silent.
+        have paid in the background. The band's ``starting…`` state covers the
+        ~1 s the re-engage takes, so nothing here interrupts the user; the one
+        line that IS painted comes after the successor binds and names what
+        changed (:meth:`_announce_refresh_completed`).
+
+        The retiring build is captured HERE because this is the last moment it
+        exists: the facade still carries the stamp it read at dial, and the
+        bind that follows overwrites it with the successor's. Held on the app
+        rather than passed down because the re-engage is a background worker
+        whose completion is where the comparison can first be made.
         """
         logger.debug("runtime retired for a newer build; re-engaging")
+        session = self._session
+        version = str(getattr(session, "owner_version", "") or "")
+        if version:
+            from local_operator.update import BuildStamp
+
+            self._refreshed_from = (
+                BuildStamp(
+                    version=version,
+                    source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+                ),
+                _session_subject(session),
+            )
+        else:
+            # A runtime too old to say what it ran. There is no "from" side to
+            # name, and a half-stated change ("updated to X") reads as an
+            # update that came from nowhere, so this one stays silent.
+            self._refreshed_from = None
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
+
+    def _announce_refresh_completed(self) -> None:
+        """One line naming the version change a self-refresh just made.
+
+        The operator asked for this explicitly: an update that happens on its
+        own should still SAY it happened, in the idle window, once. Everything
+        else about the refresh stays invisible — this fires only after the
+        successor is bound, so the line describes a completed fact rather than
+        an intention.
+
+        Gated on the build ACTUALLY moving. The re-engage tail runs for every
+        engage reason, and a runtime that retired and came back on the same
+        build (a restart that was not an update, a successor that resolved the
+        same install) changed nothing the user could act on; announcing it
+        would turn ordinary re-engagement into a stream of notices.
+
+        ``note`` ink, matching the skew notice one screen away: nothing is
+        wrong and nothing is asked of the user, but this answers a question
+        they would otherwise ask ("why did my session restart?"), which is not
+        what the dim ``info`` receipt is for.
+        """
+        pending, self._refreshed_from = self._refreshed_from, None
+        if pending is None:
+            return
+        before, subject = pending
+        session = self._session
+        version = str(getattr(session, "owner_version", "") or "")
+        if not version:
+            return
+        from local_operator.update import BuildStamp
+
+        after = BuildStamp(
+            version=version,
+            source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+        )
+        if after == before:
+            return
+        self._system_notice(
+            f"{subject} updated to a newer version ({_build_change(before, after)}).",
+            "note",
+        )
 
     def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
@@ -11825,6 +11894,9 @@ class OperatorApp(App[None]):
         session = self._session
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
+            # Nothing will bind, so drop any pending refresh announcement for
+            # the same reason as the two skips below: it has no "to" side.
+            self._refreshed_from = None
             return
         # BEFORE the spawn, which is the moment the disk build matters: the
         # runtime is started from ``sys.executable``, resolved fresh, so a
@@ -11843,6 +11915,10 @@ class OperatorApp(App[None]):
             # `/model` rebuild the session, which adopts and engages again
             # with a real provider in place.
             logger.debug("%s engage skipped: no provider/model configured", reason)
+            # No successor is coming, so a pending refresh announcement has no
+            # "to" side and must not survive to be answered by some later,
+            # unrelated engage against a different session.
+            self._refreshed_from = None
             return
         self._warm_engage_started = True
         self._set_starting(True)
@@ -11864,6 +11940,9 @@ class OperatorApp(App[None]):
                 # to retry.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                # Same reason as the skip above: nothing bound, so there is no
+                # change to name and the pending stamp must not outlive it.
+                self._refreshed_from = None
                 return
             finally:
                 self._set_starting(False)
@@ -11876,6 +11955,13 @@ class OperatorApp(App[None]):
             # binding to it without spawning, i.e. an ordinary first prompt
             # against a stale runtime (review round 1, R1-4).
             self._check_build_skew(reason=f"{reason}-bound")
+            # A pending self-refresh resolves HERE and nowhere else: this is
+            # the first moment the successor's stamp is readable, which is
+            # what makes the announcement a statement of fact rather than of
+            # intent. Unconditional because the pending slot is only ever set
+            # by the refresh path and is cleared on read, so an ordinary
+            # engage finds nothing and says nothing.
+            self._announce_refresh_completed()
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -20100,7 +20186,14 @@ class OperatorApp(App[None]):
         * **owner skew** \u2014 the runtime this session is bound to reports a
           different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
-          construction). The remedy is the RUNTIME's, never the user's: an
+          construction). A difference does not by itself say which side is
+          behind, and getting that backwards is what made this branch report
+          an upgrade as a downgrade: the owner is compared with the build ON
+          DISK (:func:`_owner_matches_disk`), and an owner that MATCHES disk
+          is the current one — the window is the stale side, disk drift above
+          has already said so, and this branch stays completely silent. Only a
+          runtime that differs from disk as well is genuinely stale, and its
+          remedy is the RUNTIME's, never the user's: an
           idle stale runtime is asked to retire now (``request_refresh``, the
           belt for the reaper's own self-refresh) and this viewer re-engages
           a fresh one on its ``retiring`` frame with no notice at all. Every
@@ -20203,12 +20296,34 @@ class OperatorApp(App[None]):
         # fixed, and leaves ``/stop`` ambiguous about which session it acts on
         # (design review round 1, D1). The title is what the user named and can
         # see; "this session" survives only as the fallback for an unnamed one.
-        title = str(getattr(session, "conversation_name", "") or "").strip()
-        subject = f"\u201c{title}\u201d" if title else "this session"
+        subject = _session_subject(session)
         from local_operator.update import BuildStamp
 
         owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
         if owner is not None and owner == loaded:
+            return
+        # WHICH SIDE IS STALE? A difference alone does not say, and this branch
+        # used to assume the runtime always was. On this host the opposite is
+        # the routine shape: a window keeps the build it imported at launch
+        # forever, ``lop-update`` runs several times a day, and a runtime
+        # spawned AFTER it resolves ``sys.executable`` fresh — so the runtime
+        # is the NEWER side. Assuming otherwise asked a perfectly current
+        # runtime to retire (it answered ``kept:``, because ITS comparison is
+        # against disk and found no change), read that as "staying on the old
+        # build", and painted ``newer → older`` promising a switch to a
+        # version it was already running.
+        if owner is not None and _owner_matches_disk(owner, loaded, on_disk):
+            # The RUNTIME is current and the WINDOW is the stale side. Say
+            # nothing and ask for nothing: notice A above has already reported
+            # that the install moved and named ``/reload`` as the remedy, so a
+            # second line about the same fact pointing the other way is the
+            # defect, not the diagnosis.
+            logger.debug(
+                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                reason,
+                owner.label(),
+                loaded.label(),
+            )
             return
         # Stale owner, and what the user is told depends on what the RUNTIME
         # does about it, not on what this viewer guessed.
@@ -31107,6 +31222,57 @@ def _build_change(before: Any, after: Any) -> str:
     if same_version and before.source_ref and after.source_ref:
         return f"{before.version}, {before.source_ref[:7]} \u2192 {after.source_ref[:7]}"
     return f"{before.label()} \u2192 {after.label()}"
+
+
+def _session_subject(session: Any) -> str:
+    """How a build notice NAMES the session it is about.
+
+    The title the user chose and can see, quoted; ``this session`` only when
+    there is none. Shared by every build notice so two of them on one screen
+    cannot name the same conversation two different ways: with a deictic
+    subject in both, two stale sessions in one terminal render as two
+    byte-identical paragraphs, which reads as the app printing one line twice
+    (design review round 1, D1).
+    """
+    title = str(getattr(session, "conversation_name", "") or "").strip()
+    return f"\u201c{title}\u201d" if title else "this session"
+
+
+def _owner_matches_disk(owner: Any, loaded: Any, on_disk: Any) -> bool:
+    """Whether the bound runtime is the CURRENT build and this window is behind.
+
+    The discriminator for build skew, and the reason it compares against DISK
+    rather than ordering version numbers. The build on disk is what a process
+    started right now would run, so it is the only fixed reference the two
+    long-lived populations here — a window frozen at the build it imported,
+    and a runtime spawned at some later moment — can both be measured against.
+    An owner equal to it is by definition not stale, whatever its version
+    string reads next to the window's.
+
+    **Do not "simplify" this into a version comparison.** This host's headline
+    drift is a same-version rebuild: ``lop-update`` builds from ``main`` while
+    ``pyproject.toml`` still names the last released version, so the two builds
+    are ``0.51.30@aaaaaaa`` and ``0.51.30@bbbbbbb`` and NO ordering of version
+    numbers can say which is which. ``BuildStamp`` equality resolves it exactly,
+    because the recorded ref is part of the token.
+
+    ``on_disk`` is ``None`` only when ``installed_build()`` raised, i.e. when
+    check A was skipped too and the reference does not exist. Version ordering
+    is the fallback there and strictly worse: it answers only when the versions
+    differ AND both parse, so an inconclusive comparison (a shared version, an
+    unparseable side) deliberately returns False and leaves the pre-existing
+    advisory line in place — an undiagnosable skew is still worth one line, and
+    silencing it would regress review round 1 finding R1-1.
+    """
+    if on_disk is not None:
+        return owner == on_disk
+    from local_operator.update import parse_version
+
+    owner_parsed = parse_version(owner.version)
+    loaded_parsed = parse_version(loaded.version)
+    if owner_parsed is None or loaded_parsed is None:
+        return False
+    return owner_parsed > loaded_parsed
 
 
 def _model_spec(session) -> Any | None:

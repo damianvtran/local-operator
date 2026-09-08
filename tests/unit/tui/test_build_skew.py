@@ -1097,3 +1097,338 @@ def test_the_notices_carry_no_internal_vocabulary() -> None:
     body = " ".join(literals[1:]) if literals else ""
     for word in ("routed", "predates build reporting", "this terminal", "resend"):
         assert word not in body, f"internal vocabulary reached the notice copy: {word!r}"
+
+
+# --- Which side is stale: the direction the notice must not get backwards ----
+#
+# The defect these pin was reported from a live session sitting IDLE, which
+# painted `"<name>" is running 0.51.30@d7f12d3 -> 0.51.29@2412b1d - it will
+# switch to the new version when it is next idle.` Both halves are wrong: the
+# arrow reads as a downgrade when the runtime is the NEWER side, and there was
+# nothing to say at all. `scripts/build_skew_direction_repro.py` prints the
+# sentence itself; these cells pin the behaviour behind it.
+#
+# The shape is routine here rather than exotic. A window keeps the build it
+# imported at launch forever; `lop-update` runs several times a day; a runtime
+# spawned after it resolves `sys.executable` fresh. An OLD window driving a NEW
+# runtime is therefore the steady state, and the old code, seeing only
+# `owner != loaded`, assumed the runtime was always the stale one.
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_newer_than_this_window_is_completely_silent(monkeypatch, tmp_path) -> None:
+    """The reported case: window behind disk, runtime ON disk, idle.
+
+    Nothing may be asked of the runtime (it is already current, and its own
+    check answers ``kept`` because it compares against the same disk), and no
+    owner notice may be painted. Disk drift has ALREADY told the user the
+    install moved and named ``/reload``; a second line about the same fact
+    pointing the other way is the bug.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.29", source_ref="2412b1daf")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        viewer = _BoundViewer(
+            owner_version="0.51.30",
+            owner_source_ref="d7f12d3a7",
+            idle=True,
+            refresh_answer="kept: build on disk matches (or has not settled)",
+        )
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert viewer.refresh_requests == 0, "a runtime that matches disk is already current"
+    assert not [n for n in notices if OWNER_SKEW in n or MOVES_OVER in n], notices
+    # The window IS behind, and that fact keeps its notice - with the arrow the
+    # right way round and the remedy that actually applies to a window.
+    drift = [n for n in notices if DRIFT in n]
+    assert len(drift) == 1, notices
+    assert "0.51.29@2412b1d \u2192 0.51.30@d7f12d3" in drift[0], drift[0]
+    assert "/reload" in drift[0]
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_newer_than_this_window_is_silent_while_busy(monkeypatch, tmp_path) -> None:
+    """Same shape, BUSY runtime: still nothing to say.
+
+    The busy branch paints C\u2032 without asking anything, so it is a second,
+    independent way into the reversed notice - and the complaint is not limited
+    to idle sessions. Whether the runtime is working says nothing about which
+    side is stale.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.29", source_ref="2412b1daf")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7", idle=False)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert not [n for n in notices if OWNER_SKEW in n or MOVES_OVER in n], notices
+    assert viewer.refresh_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_path) -> None:
+    """Ref-only drift, in both directions - the case that forces the disk compare.
+
+    Both builds say ``0.51.30`` and differ only in the recorded commit, so NO
+    ordering of version numbers can say which is newer. Matching disk is the
+    only fact that does, and it resolves both directions exactly.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    import local_operator.update as update_mod
+
+    on_disk = BuildStamp(version="0.51.30", source_ref="bbbbbbb2222")
+
+    # (a) runtime is the rebuild that is on disk: silent.
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.30", source_ref="aaaaaaa1111")
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="bbbbbbb2222", idle=False)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        current_side = _notices(app)
+
+    assert not [n for n in current_side if OWNER_SKEW in n or MOVES_OVER in n], current_side
+
+    # (b) the window is the one on disk and the runtime is the older rebuild:
+    #     genuinely stale, and it earns the notice.
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = on_disk
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
+        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="aaaaaaa1111", idle=False)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        stale_side = _notices(app)
+
+    skew = [n for n in stale_side if MOVES_OVER in n]
+    assert len(skew) == 1, stale_side
+    assert "aaaaaaa \u2192 bbbbbbb" in skew[0], skew[0]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_disk_falls_back_to_version_order(monkeypatch, tmp_path) -> None:
+    """No disk reference: a strictly newer runtime is still recognised.
+
+    ``installed_build()`` raising skips check A too, so the discriminator has
+    nothing to compare against. Version ordering is the fallback - weaker (it
+    cannot see a ref-only rebuild) but decisive when the versions differ.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.29")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        def _boom(*_a, **_k):
+            raise OSError("no install metadata")
+
+        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        viewer = _BoundViewer(owner_version="0.51.30", idle=True)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert notices == [], notices
+    assert viewer.refresh_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_an_inconclusive_order_keeps_todays_notice(monkeypatch, tmp_path) -> None:
+    """Unreadable disk AND an undecidable pair: keep the advisory line.
+
+    Same version, differing refs, with no disk to appeal to - nothing here can
+    say which side is behind. Silence would regress R1-1 (a resume onto a
+    pre-refresh runtime explained by nothing, with no later seam to repair it),
+    so an undiagnosable skew is still worth exactly one line.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.30", source_ref="aaaaaaa1111")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        def _boom(*_a, **_k):
+            raise OSError("no install metadata")
+
+        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="bbbbbbb2222", idle=False)
+        app._session = viewer
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert len([n for n in notices if MOVES_OVER in n]) == 1, notices
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_version_is_not_guessed_at(monkeypatch, tmp_path) -> None:
+    """Fallback ordering answers only when BOTH sides parse.
+
+    A local ``0.51.30rc1`` is not evidence of anything; treating it as newer
+    would silence a skew on a guess. ``parse_version`` returns ``None`` and the
+    advisory line stands.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.29")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        def _boom(*_a, **_k):
+            raise OSError("no install metadata")
+
+        monkeypatch.setattr(update_mod, "installed_build", _boom)
+        app._session = _BoundViewer(owner_version="0.51.30rc1", idle=False)
+        app._check_build_skew(reason="bind")
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert len([n for n in notices if MOVES_OVER in n]) == 1, notices
+
+
+# --- The completed self-refresh, said once ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tmp_path) -> None:
+    """The operator asked for this: an update that happens on its own says so.
+
+    The line is painted only after the successor BINDS, so it reports a
+    completed fact. The pair is captured across the re-engage: the retiring
+    stamp exists only before the re-bind overwrites it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        # The runtime that is leaving.
+        app._session = _BoundViewer(
+            owner_version="0.51.29",
+            owner_source_ref="2412b1daf",
+            conversation_name="Investigating suspicious pwned notification source",
+        )
+        app._on_runtime_refreshed()
+        # The successor, resolved from the build now on disk.
+        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+        tokens = [block._token for block in app.query(NoticeBlock)]
+
+        # Consumed once: a second engage tail must not repeat it.
+        app._announce_refresh_completed()
+        await pilot.pause()
+        again = _notices(app)
+
+    assert len(notices) == 1, notices
+    assert "0.51.29@2412b1d \u2192 0.51.30@d7f12d3" in notices[0], notices[0]
+    assert "Investigating suspicious pwned" in notices[0], "the line names its session"
+    assert tokens == ["muted"], "a note: nothing is wrong and nothing is asked"
+    assert again == notices, "the pending stamp is cleared on read"
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_build_after_a_refresh_says_nothing(monkeypatch, tmp_path) -> None:
+    """A re-engage that did not change the build is not an update.
+
+    A runtime that came back on the same build (a restart that was not an
+    update, a successor resolving the same install) changed nothing the user
+    could act on, and announcing it would turn ordinary re-engagement into a
+    stream of notices.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._on_runtime_refreshed()
+        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert notices == [], notices
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_engage_never_announces_a_refresh(monkeypatch, tmp_path) -> None:
+    """No pending stamp, no line. The engage tail calls this unconditionally."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert notices == [], notices
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_too_old_to_name_its_build_is_not_half_announced(
+    monkeypatch, tmp_path
+) -> None:
+    """No "from" side means no sentence.
+
+    "updated to X" with nothing it came from reads as an update out of
+    nowhere, which is less informative than saying nothing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._session = _BoundViewer(owner_version="")
+        app._on_runtime_refreshed()
+        assert app._refreshed_from is None
+        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert notices == [], notices
