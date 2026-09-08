@@ -29,6 +29,7 @@ import pytest
 from local_operator.tui.notify import (
     APP_NAME,
     BACKGROUND_FALLBACK_TITLE,
+    BACKGROUND_SNIPPET_MAX_CHARS,
     BEL,
     BODIES,
     BODY_BACKGROUND,
@@ -812,3 +813,43 @@ def test_the_digest_body_says_where_to_go_since_it_cannot_take_you() -> None:
         context.lower() in BODY_BACKGROUND_DIGEST.lower() for context in CONTEXTS.values()
     )
     assert BODY_BACKGROUND_DIGEST != BODY_BACKGROUND
+
+
+def test_the_snippet_budget_fits_a_banner_and_survives_sanitisation() -> None:
+    """The body budget is a READING bound, and `sanitize_text` must honour it.
+
+    No backend clips a body — Notification Centre wraps, and both argv legs are
+    bounded only by ``ARG_MAX`` — so this number is chosen for the reader, not
+    forced by a wire. It has to stay in the range where a banner is still a
+    glance: comfortably under the title cap's order of magnitude and well under
+    a paragraph. Pinned because a later edit that "just raises it a bit" is the
+    way this becomes a wall of text nobody reads.
+
+    ``sanitize_text`` is the enforcement point (it is what the observer path
+    calls), so the budget is asserted THROUGH it rather than as a bare integer.
+    """
+    assert MAX_TITLE_CHARS < BACKGROUND_SNIPPET_MAX_CHARS <= 200
+    long_reply = "word " * 100
+    assert len(sanitize_text(long_reply, BACKGROUND_SNIPPET_MAX_CHARS)) <= (
+        BACKGROUND_SNIPPET_MAX_CHARS
+    )
+    # The security boundary the snippet shares with the title: a model-written
+    # reply reaches an OSC string and an argv, and both BEL and ESC terminate
+    # an OSC sequence early (D16).
+    assert sanitize_text("done\x1b]0;x\x07 ok", BACKGROUND_SNIPPET_MAX_CHARS) == "done ]0;x ok"
+
+
+def test_the_neutral_body_reveals_nothing_about_the_session() -> None:
+    """`BODY_BACKGROUND` is now the OPT-OUT and failure sentence, not the default.
+
+    The observer body carries a transcript snippet by default; this constant is
+    what a user who turned `display.notification_session_name` off receives,
+    and what every unreadable/absent transcript degrades to. Its whole value is
+    that it asserts nothing about the conversation, so it must stay free of
+    anything session-derived — and non-empty, since an empty body renders as a
+    banner with a blank content line.
+    """
+    assert BODY_BACKGROUND
+    # Still routing rather than outcome: repeating a state category here is the
+    # tautology design round 1 removed (D5).
+    assert not any(context.lower() in BODY_BACKGROUND.lower() for context in CONTEXTS.values())

@@ -282,8 +282,10 @@ def background_digest_title(total: int) -> str:
 #: and the rendered captures confirm it lands whole.
 BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
 
-#: The observer path's body line, keyed by ROUTE rather than by state — which
-#: is why it is a single constant and not another entry in :data:`BODIES`.
+#: The observer path's body line when nothing better can be said, and the
+#: FALLBACK the snippet path below degrades to. Keyed by ROUTE rather than by
+#: state — which is why it is a single constant and not another entry in
+#: :data:`BODIES`.
 #:
 #: The state already owns the subtitle (:data:`CONTEXTS`), so repeating it in
 #: the body spent the two most valuable lines under the title saying the same
@@ -291,7 +293,43 @@ BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
 #: the body can say that the subtitle cannot is why this banner exists at all:
 #: the session that finished is not the one on screen. One string for all three
 #: kinds, because it describes the ROUTING decision, not the outcome.
+#:
+#: NO LONGER THE DEFAULT. It states a routing fact the user already knows —
+#: they know which session they were in — so it spent the banner's only content
+#: line telling them nothing about the session that finished. The default is
+#: now that session's last assistant line (see
+#: ``OperatorApp._background_completion_body``). This stays as the sentence for
+#: every case where no snippet may be shown or none exists, because it reveals
+#: nothing about the conversation: it is exactly what a user who opted OUT of
+#: session text in banners is entitled to see, and it is still true.
 BODY_BACKGROUND = "You were in another session"
+
+#: How much of a finished session's last reply a banner may carry.
+#:
+#: Bodies WRAP rather than clip in macOS Notification Centre — unlike the
+#: ~43-char title clip ``background_digest_title`` is written against — so no
+#: backend forces a number here and an unbounded paragraph would simply render
+#: as an unbounded paragraph. That is the defect this bound exists for rather
+#: than a wire limit: a banner is on screen for a few seconds and is read in
+#: about one, so anything past a glance is text the user never reads while the
+#: words that identify the session scroll further from the top of the frame.
+#:
+#: 120 characters is roughly a sentence — enough to say what the model
+#: concluded, short enough to take in at a glance. MEASURED, not assumed: a
+#: 116-char body posted through the real signed bundle renders as exactly three
+#: wrapped lines of ~40 characters beneath the two-line title/subtitle block,
+#: which is the tallest frame that still reads as a banner rather than as a
+#: paragraph. The other two legs agree that shorter
+#: is safer: ``cmux notify --body`` and ``notify-send`` both take the body as
+#: ONE argv element (so length is bounded only by ``ARG_MAX``, which no
+#: sentence approaches), while several libnotify servers silently ellipsise a
+#: long body themselves — a budget we choose renders identically everywhere,
+#: one we leave to the server does not.
+#:
+#: Applies BEFORE the ``osascript`` leg appends its "— reopen with: lop
+#: --resume <id>" tail (~40 chars) and prefixes the subtitle, which is the
+#: cold-machine route only and already accepted as the longest frame here.
+BACKGROUND_SNIPPET_MAX_CHARS = 120
 
 #: BEL. Every terminal ever made honours it; it carries no text, but it is what
 #: raises tmux's ``monitor-bell``, Zellij's ``[!]`` flag and X11 urgency hints,

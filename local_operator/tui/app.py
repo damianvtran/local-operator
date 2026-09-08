@@ -15279,6 +15279,84 @@ class OperatorApp(App[None]):
             stored = ""
         return sanitize_text(stored) or BACKGROUND_FALLBACK_TITLE
 
+    def _background_completion_body(self, entry: CatalogEntry) -> str:
+        """The banner body: what the finished session last SAID, or the neutral line.
+
+        WHAT THIS REPLACED AND WHY. The body was the fixed sentence
+        ``BODY_BACKGROUND`` — "You were in another session" — which states a
+        routing fact the user is already the authority on. They know which
+        session they were looking at; what they cannot know without opening the
+        session is what the other one concluded. So the banner's only content
+        line was spent restating the reader's own situation, and eleven
+        completions in a window produced eleven identical bodies distinguished
+        only by their titles.
+
+        The last assistant line answers the question the banner actually raises
+        ("finished — with what?") and is the same fact the sidebar row already
+        shows, so the two surfaces now agree rather than the banner being the
+        poorer one.
+
+        THE ROUTING CUE IS NOT LOST, it moved to where it was already carried.
+        The title is the OTHER session's name, which is what says this is not
+        the session on screen, and the subtitle carries the state
+        (``CONTEXTS``). Re-adding a routing sentence beside the snippet would
+        reintroduce design round 1's D5 in a new place — the frame would again
+        spend a line on something another line already says — so it is
+        deliberately not re-added.
+
+        GATED ON ``session_names_in_notifications``. That flag exists to keep
+        MODEL-WRITTEN session text off a screen other people can see, and a
+        transcript snippet is strictly more session-derived than the name the
+        flag was written for: a name is a topic, a snippet is content. A user
+        who opted out of the name has necessarily opted out of this, so the
+        opt-out returns the neutral sentence, which asserts nothing about the
+        conversation. Reading the flag here and not only in
+        :meth:`_background_completion_title` is what keeps that promise true of
+        the whole frame rather than of its top line.
+
+        BEST-EFFORT, like every call on this path. ``session_preview`` already
+        returns ``""`` for a missing, unreadable or assistant-text-free
+        transcript and swallows ``OSError`` itself; the broad guard is for
+        everything above that contract (a config dir that cannot be resolved, a
+        transcript whose bytes decode into something unexpected) because this
+        runs inside the 1 s completion poll and a body is chrome while delivery
+        is not. Never returns ``""`` — an empty body would render as a banner
+        with a title and a blank line where the content is.
+
+        ``sanitize_text`` because the snippet reaches an OSC escape and an argv,
+        exactly like the title (D16): the text is model-written, and both BEL
+        and ESC terminate an OSC string. It also enforces
+        :data:`BACKGROUND_SNIPPET_MAX_CHARS`, whose reasoning is on the
+        constant.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.resume import session_preview
+        from local_operator.tui.notify import (
+            BACKGROUND_SNIPPET_MAX_CHARS,
+            BODY_BACKGROUND,
+            sanitize_text,
+            session_names_in_notifications,
+        )
+
+        if not session_names_in_notifications():
+            return BODY_BACKGROUND
+        try:
+            # `max_chars` passed rather than trimming afterwards, so the
+            # word-boundary ellipsis `_condense` applies is computed against the
+            # budget the banner actually has — a cut applied later would land
+            # mid-word after the ellipsis had already been placed elsewhere.
+            preview = session_preview(
+                config_dir() / "sessions" / entry.id,
+                max_chars=BACKGROUND_SNIPPET_MAX_CHARS,
+            )
+        except Exception:  # noqa: BLE001 — a body is chrome; delivery is not
+            logger.debug("background completion preview unavailable", exc_info=True)
+            preview = ""
+        # `sanitize_text` re-applies the budget as its `limit`; that is
+        # deliberate belt-and-braces, since stripping control characters can
+        # only shorten the string and the two bounds therefore agree.
+        return sanitize_text(preview, BACKGROUND_SNIPPET_MAX_CHARS) or BODY_BACKGROUND
+
     def _deliver_background_completion(self, entry: CatalogEntry, identity: str) -> bool:
         """Announce one finished background session; report whether a toast went out.
 
@@ -15312,7 +15390,6 @@ class OperatorApp(App[None]):
         from local_operator.proc import spawn_detached
         from local_operator.session.attention import AttentionStore
         from local_operator.tui.notify import (
-            BODY_BACKGROUND,
             CONTEXTS,
             argv_safe,
             cmux_command,
@@ -15337,10 +15414,11 @@ class OperatorApp(App[None]):
         if not store.claim_delivery(identity, entry.completion_token, backend):
             return False
         title = self._background_completion_title(entry)
-        # The body says why this banner exists — the session that finished is
-        # not the one on screen — because the subtitle already carries the
-        # state and repeating it there spent both lines on one word (D5).
-        body = BODY_BACKGROUND
+        # The body carries what the finished session last SAID, falling back to
+        # the neutral routing sentence when no snippet may be shown or none
+        # exists. See `_background_completion_body` for the privacy gate, the
+        # length budget and why the routing cue is not repeated here (D5).
+        body = self._background_completion_body(entry)
         try:
             if surface is not None:
                 delivered = bool(
