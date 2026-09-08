@@ -90,6 +90,24 @@ WHAT THIS DOES NOT AFFECT
   every PR. So the share is skipped when ``CI`` is set; the memory budget and
   the 2..8 clamp still apply, because a runner that runs out of memory fails
   exactly the way a laptop does.
+
+  **One exception, and it is our own doing.** local-operator's bash tool sets
+  ``CI=1`` on every agent-run command so CLIs behave non-interactively. That
+  made every agent-run suite on the operator's own laptop look like a
+  dedicated runner and take all 14 cores - disabling the share exactly where
+  it was needed. The tool now also sets ``LOCAL_OPERATOR_AGENT_SHELL=1`` and
+  this hook denies on it, so ``CI`` keeps meaning "dedicated runner" for every
+  real provider while the harness stops lying to itself. Deliberately a
+  denylist: an allowlist of provider variables would silently halve
+  parallelism on every provider nobody remembered to add.
+
+* **A memory reserve is held back** on top of the fraction, scaled per host
+  (``min(3072, total // 8)`` MB). It exists because the fraction claims a share
+  of what REMAINS, so sibling suites converge toward zero free memory rather
+  than toward a floor. Note its real reach before tuning it: because the shape
+  is ``min(share, available - reserve)``, it binds only below twice itself and
+  is a floor under one suite's appetite, not a cap on the fleet total. Six
+  simultaneous suites are still not bounded by it.
 """
 
 from __future__ import annotations
@@ -283,6 +301,77 @@ _MEMORY_SHARE = 0.5
 #: halving its workers only makes every PR slower.
 _CPU_SHARE = 0.5
 
+#: Environment marker set by local-operator's own bash tool
+#: (``local_operator/tools/builtin.py``, ``NON_INTERACTIVE_ENV``) on every
+#: agent-run command. Its presence means ``CI`` below is NOT trustworthy as a
+#: "dedicated runner" signal: the harness sets ``CI=1`` to make CLIs
+#: non-interactive, on a shared laptop that may be running several agent
+#: sessions and their suites at once.
+#:
+#: Measured 2026-09-08 on the 14-core / 36 GB host: six concurrent agent-run
+#: suites resolved to 8/6/5/4/4/2 = 29 workers, ~11.2 GB of worker RSS, load
+#: average 220, 8.67 of 10 GB swap consumed, 448 MB free. The leading ``8`` is
+#: how the inversion was found - it is unreachable with the share applied
+#: (``int(14 * 0.5) = 7``), so only a lifted CPU arm can produce it.
+#:
+#: Denylist, not allowlist, and the distinction is load-bearing: narrowing the
+#: check to ``GITHUB_ACTIONS`` and friends would silently drop every provider
+#: not on the list (Jenkins, Azure, Travis, self-hosted runners that set only
+#: ``CI``) to the developer share - the measured 4-vCPU-resolves-to-2 halving
+#: this file already documents as an unacceptable regression. The set of CI
+#: providers is open; the set of harnesses lying about ``CI`` on this machine
+#: is closed and ours.
+_AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
+
+#: Memory held back from the budget entirely, in MB, computed per host.
+#:
+#: WHY: ``_MEMORY_SHARE`` claims a fraction of what REMAINS, so N sibling
+#: suites each halve the remainder - 1 suite leaves 50% free, 3 leave 12.5%,
+#: 6 leave 1.6%. Every suite is individually polite and the fleet still walks
+#: into swap. Holding an absolute floor out of the budget first is what stops
+#: the walk being purely geometric.
+#:
+#: SHAPE - ``min(share, available - reserve)``, NOT ``(available - reserve) *
+#: share``. Subtracting first then halving charges two independent politeness
+#: terms to the same memory, costing ~2.6 workers even when this suite is the
+#: ONLY one running: a solo developer at 6 GB free would drop 5 workers to 2.
+#: The ``min`` form expresses "leave the reserve free" without that penalty.
+#:
+#: THE CONSEQUENCE, which is the single most useful thing to know before
+#: tuning these constants: ``min(a * 0.5, a - reserve) == a * 0.5`` for all
+#: ``a >= 2 * reserve``. So this term BINDS ONLY BELOW ~2x itself (6,144 MB
+#: here) and is invisible above that. It is a floor under a single suite's
+#: appetite when memory is genuinely short - NOT a fleet-total lever. An
+#: earlier draft claimed a ~3.1 GB fleet reclaim, but that reclaim came
+#: entirely FROM the double-charge removed above; the two corrections cancel.
+#:
+#: DELIBERATELY NOT CALLED AN ASYMPTOTE, because it is not one.
+#: ``_MIN_WORKERS`` keeps charging a flat ~2-worker tax once the memory arm is
+#: exhausted, so a deep enough fleet still walks to zero; the reserve
+#: DISPLACES that point rather than preventing it. Modelled at 395 MB/worker
+#: from 12.4 GB available, the trough improves by ~395 MB at every fleet depth
+#: (n=6: 1,735 -> 2,130 MB) and n=10 still goes negative. Six simultaneous
+#: suites remain genuinely unbounded by this term; the durable lever for that
+#: would be a cross-process budget, deliberately not built - see
+#: ``local_operator/harness/group_reaper.py`` on wedged ``flock`` holders
+#: propagating a freeze between sessions, which is not a hazard worth
+#: importing into every ``pytest`` startup.
+#:
+#: SCALED, not flat: a flat 3 GB would reserve three quarters of a 4 GB CI
+#: container. ``total // 8`` gives 512 MB on a 4 GB runner and 4.5 GB on this
+#: 36 GB laptop, where the 3072 cap then binds. Traced on the runners that
+#: matter, all unchanged from today: 2 vCPU/4 GB -> 2, 2 vCPU/8 GB -> 2,
+#: 4 vCPU/16 GB -> 4, 8 vCPU/32 GB -> 8. The memory arm and the 2..8 clamp
+#: apply on CI (see the module docstring), so the reserve applies there too -
+#: intentionally, because a runner that runs out of memory fails exactly the
+#: way a laptop does, and the scaling is what makes that safe.
+#:
+#: SOFTER THAN IT READS on macOS: ``_available_memory_mb`` counts file-backed
+#: page cache, which the kernel would evict under pressure anyway, so this
+#: reserves some memory that was never really at risk.
+_MEMORY_RESERVE_CAP_MB = 3072
+_MEMORY_RESERVE_FRACTION = 8
+
 #: Hard bounds. Below 2 the suite stops being parallel at all (and a one-worker
 #: xdist run is strictly worse than ``-n0``); above 8 buys nothing measurable on
 #: a wait-bound suite and is precisely what produced the load-128 thrash.
@@ -293,6 +382,27 @@ _MAX_WORKERS = 8
 #: harmless on a laptop already under load, large enough to keep the suite
 #: parallel.
 _FALLBACK_WORKERS = 4
+
+
+def _total_memory_mb() -> int | None:
+    """Physical RAM in MB, or ``None`` when it cannot be measured.
+
+    Used only to SCALE the reserve, so an unmeasurable host degrades to no
+    reserve at all rather than to a guess - the pre-existing budget, which is
+    the behaviour this file shipped with. ``os.sysconf`` answers this on both
+    macOS and Linux without a subprocess, unlike the ``vm_stat`` probe below;
+    ``psutil`` remains deliberately not a dependency.
+    """
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):  # not POSIX, or name absent
+        return None
+    if not isinstance(pages, int) or not isinstance(page_size, int):
+        return None
+    if pages <= 0 or page_size <= 0:
+        return None
+    return (pages * page_size) // (1024 * 1024)
 
 
 def _available_memory_mb() -> int | None:
@@ -407,17 +517,38 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
                 )
 
         cpus = os.cpu_count() or 1
-        # `CI` is set by GitHub Actions and essentially every other provider.
-        # On a dedicated runner take all the cores; the share exists only to
-        # protect a shared developer machine.
-        on_ci = bool(os.environ.get("CI"))
+        # `CI` is set by GitHub Actions and essentially every other provider,
+        # so it stays the signal - EXCEPT for the one liar we control. Our own
+        # bash tool injects `CI=1` into every agent-run command to make CLIs
+        # non-interactive, which told this hook "dedicated runner, take all 14
+        # cores" on the shared laptop the share exists to protect, and only
+        # there. Denying that marker keeps every real provider at full
+        # parallelism; see `_AGENT_SHELL_ENV` for why this is not an allowlist.
+        on_ci = bool(os.environ.get("CI")) and not os.environ.get(_AGENT_SHELL_ENV)
         cap = cpus if on_ci else max(1, int(cpus * _CPU_SHARE))
 
         available_mb = _available_memory_mb()
         if available_mb is not None:
             # Budget from AVAILABLE memory, so a machine already hosting three
             # sibling suites hands this run a smaller cap automatically.
-            cap = min(cap, int(available_mb * _MEMORY_SHARE) // _MB_PER_WORKER)
+            budget_mb = available_mb * _MEMORY_SHARE
+            total_mb = _total_memory_mb()
+            if total_mb is not None:
+                # Hold a floor out of the budget entirely, so the fraction is
+                # not the only thing standing between six sibling suites and
+                # zero free memory. `min` rather than subtract-then-halve so a
+                # solo run is not charged twice for the same memory.
+                #
+                # `max(0, ...)` keeps the intermediate meaningful when free
+                # memory is below the reserve and the subtraction goes
+                # negative. It is NOT what guarantees a usable worker count -
+                # the `max(_MIN_WORKERS, ...)` clamp on the return does that,
+                # and would do it from a negative budget too. Kept because a
+                # negative "budget" is nonsense to read in a debugger and
+                # invites a later reader to divide by it somewhere new.
+                reserve_mb = min(_MEMORY_RESERVE_CAP_MB, total_mb // _MEMORY_RESERVE_FRACTION)
+                budget_mb = max(0, min(budget_mb, available_mb - reserve_mb))
+            cap = min(cap, int(budget_mb) // _MB_PER_WORKER)
 
         return max(_MIN_WORKERS, min(_MAX_WORKERS, cap))
     except Exception:  # see docstring: never break the run
