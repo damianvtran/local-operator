@@ -16,18 +16,25 @@ const VERSION = JSON.parse(
 const extensionId = "omibaecbjdhgbbcedbnnnmjpmopfheof";
 const itemPath = `/v2/publishers/test-publisher/items/${extensionId}`;
 
-async function runRelease(args, handlers) {
+// A handler normally returns the JSON payload of a 200. Wrapping it in
+// `rejectWith` makes the stub answer with a non-2xx and that body instead,
+// which is how the store reports a refused upload or publish.
+const rejectWith = (status, body) => ({ __rejectStatus: status, body });
+
+async function runRelease(args, handlers, options = {}) {
+  const { token = "test-token", expectFailure = false } = options;
   let requestIndex = 0;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     try {
-      assert.equal(request.headers.authorization, "Bearer test-token");
+      assert.equal(request.headers.authorization, `Bearer ${token}`);
       const handler = handlers[requestIndex++];
       assert.ok(handler, `unexpected request ${request.method} ${request.url}`);
       const payload = handler(request, Buffer.concat(chunks));
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify(payload));
+      const rejected = payload && payload.__rejectStatus;
+      response.writeHead(rejected ?? 200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify(rejected ? payload.body : payload));
     } catch (error) {
       response.writeHead(500, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: String(error) }));
@@ -35,18 +42,28 @@ async function runRelease(args, handlers) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
+  const options_ = {
+    cwd: import.meta.dirname + "/..",
+    env: {
+      ...process.env,
+      CWS_API_ROOT: `http://127.0.0.1:${port}`,
+      CWS_ACCESS_TOKEN: token,
+      CWS_PUBLISHER_ID: "test-publisher",
+      CWS_EXTENSION_ID: extensionId,
+      CWS_POLL_INTERVAL_SECONDS: "0",
+    },
+  };
   try {
-    const result = await run("bash", ["scripts/chrome-web-store.sh", ...args], {
-      cwd: import.meta.dirname + "/..",
-      env: {
-        ...process.env,
-        CWS_API_ROOT: `http://127.0.0.1:${port}`,
-        CWS_ACCESS_TOKEN: "test-token",
-        CWS_PUBLISHER_ID: "test-publisher",
-        CWS_EXTENSION_ID: extensionId,
-        CWS_POLL_INTERVAL_SECONDS: "0",
-      },
-    });
+    let result;
+    if (expectFailure) {
+      // The script must exit non-zero here; a run that SUCCEEDS is itself the
+      // failure, so it is reported rather than silently accepted.
+      result = await run("bash", ["scripts/chrome-web-store.sh", ...args], options_)
+        .then((ok) => { throw new Error(`expected a non-zero exit, got:\n${ok.stdout}`); },
+          (error) => error);
+    } else {
+      result = await run("bash", ["scripts/chrome-web-store.sh", ...args], options_);
+    }
     assert.equal(requestIndex, handlers.length);
     return result;
   } finally {
@@ -93,6 +110,188 @@ test("publisher refuses any item except the permanent extension ID", async () =>
     }),
     /must be the permanent Local Operator ID/,
   );
+});
+
+// Run 34178951112 failed with nothing but `curl: (22) The requested URL
+// returned error: 400`. The store's explanation HAD been downloaded -- curl's
+// --fail-with-body writes the body and still exits 22, so `set -e` killed the
+// script before anything read the file. These tests pin that the body reaches
+// the release owner, because the log line alone left no way to tell whether to
+// wait, retry, or open the dashboard.
+const IN_REVIEW_BODY = {
+  error: {
+    code: 400,
+    message: "Item is currently in review and cannot be updated.",
+    status: "FAILED_PRECONDITION",
+  },
+};
+
+for (const { name, args, handlers, label } of [
+  {
+    name: "upload",
+    label: "upload",
+    args: ["stage", "local-operator-extension.zip", VERSION],
+    handlers: [() => rejectWith(400, IN_REVIEW_BODY)],
+  },
+  {
+    name: "publish",
+    label: "publish",
+    args: ["stage", "local-operator-extension.zip", VERSION],
+    handlers: [
+      () => ({ itemId: extensionId, uploadState: "SUCCEEDED", crxVersion: VERSION }),
+      () => rejectWith(400, IN_REVIEW_BODY),
+    ],
+  },
+  {
+    name: "fetchStatus",
+    label: "fetchStatus",
+    args: ["promote", VERSION],
+    handlers: [() => rejectWith(400, IN_REVIEW_BODY)],
+  },
+]) {
+  test(`a rejected ${name} call surfaces the store's explanation`, async () => {
+    const error = await runRelease(args, handlers, { expectFailure: true });
+    const output = error.stdout + error.stderr;
+    // The body itself -- the one thing the incident threw away.
+    assert.match(output, /Item is currently in review and cannot be updated\./);
+    assert.match(output, /FAILED_PRECONDITION/);
+    // Which call failed, at what status, for which version.
+    assert.match(output, new RegExp(`${label} call returned HTTP 400`));
+    assert.match(output, new RegExp(`v${VERSION.replaceAll(".", "\\.")}`));
+    // The remedy a release owner acts on.
+    assert.match(output, /cancelSubmission/);
+    // curl's bare exit 22 must no longer be the whole story.
+    assert.notEqual(error.code, 22);
+  });
+}
+
+test("a transport failure is named as one, not reported as an HTTP status", async () => {
+  // Pins the `rc` guard, which a mutation proved load-bearing but unpinned:
+  // deleting it left the whole suite green. It is not redundant with the
+  // status check, because curl reports `http_code=200` alongside `rc=18` on a
+  // transfer truncated against its Content-Length -- a body that parses as
+  // valid JSON while the transfer was in fact broken. Only `rc` catches that.
+  // A closed port is the cheap, deterministic form of the same guard.
+  const server = createServer(() => {});
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  // Release the port before pointing the script at it, so nothing is listening
+  // and the socket cannot collide with an unrelated local service.
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+
+  const error = await run("bash", ["scripts/chrome-web-store.sh", "promote", VERSION], {
+    cwd: import.meta.dirname + "/..",
+    env: {
+      ...process.env,
+      CWS_API_ROOT: `http://127.0.0.1:${port}`,
+      CWS_ACCESS_TOKEN: "test-token",
+      CWS_PUBLISHER_ID: "test-publisher",
+      CWS_EXTENSION_ID: extensionId,
+      CWS_POLL_INTERVAL_SECONDS: "0",
+    },
+  }).then((ok) => { throw new Error(`expected a non-zero exit, got:\n${ok.stdout}`); }, (e) => e);
+
+  const output = error.stdout + error.stderr;
+  // Named as unreachable, carrying curl's own exit code -- NOT dressed up as an
+  // HTTP status, which is what a missing `rc` guard would produce (`HTTP 000`).
+  assert.match(output, /fetchStatus call could not reach the Chrome Web Store \(curl exit \d+\)/);
+  assert.doesNotMatch(output, /returned HTTP/);
+});
+
+// Mirrors BODY_PRINT_LIMIT in chrome-web-store.sh. The straddle test below has
+// to know where the cut falls, which is the one thing about the bound a test
+// cannot discover from the outside.
+const BODY_PRINT_LIMIT = 4000;
+
+test("an oversized error body is bounded and its truncation is disclosed", async () => {
+  // An unbounded echo floods the run log -- a single 400 was measured at
+  // 3,000,626 bytes of step output -- which works against the readability this
+  // script exists to deliver. The cut must be visible, so a partial body is
+  // never mistaken for the store's complete answer.
+  const filler = "F".repeat(200_000);
+  const error = await runRelease(
+    ["stage", "local-operator-extension.zip", VERSION],
+    [() => rejectWith(400, { error: { code: 400, status: "INVALID_ARGUMENT", message: filler } })],
+    { expectFailure: true },
+  );
+  const output = error.stdout + error.stderr;
+  assert.match(output, /\(truncated to \d+ of \d+ characters\)/);
+  // Bounded well below what the stub sent, while still showing the beginning.
+  assert.ok(output.length < 20_000, `expected a bounded log, got ${output.length} characters`);
+  assert.match(output, /INVALID_ARGUMENT/);
+  // Truncating the body must not cost the remedy that follows it.
+  assert.match(output, /cancelSubmission/);
+});
+
+test("a token straddling the truncation boundary is redacted, not cut in half", async () => {
+  // Pins the ORDER of the redact and truncate blocks, which a comment argues
+  // for and nothing enforced: reversing them left the suite 30/30 green while
+  // leaking up to 28 characters of the token. Truncating first cuts the token
+  // in half, and the surviving prefix no longer matches the substitution
+  // pattern, so it prints verbatim -- a partial credential is still a leak.
+  const token = "ya29.a0AfB_STRADDLE-SECRET-TOKEN-VALUE";
+  const body = (pad) => ({
+    error: { code: 400, status: "INVALID_ARGUMENT", message: "P".repeat(pad) + token + "Q".repeat(400) },
+  });
+  // DERIVE the padding that puts the cut inside the token rather than hardcode
+  // it: jq's pretty-printing decides the offset, so a hardcoded pad would stop
+  // straddling the moment the envelope changed and the test would keep passing
+  // while measuring nothing. Half the token either side of the limit gives the
+  // reversed order its longest surviving prefix.
+  const envelope = JSON.stringify(body(0), null, 2).indexOf(token);
+  const pad = BODY_PRINT_LIMIT - envelope - Math.floor(token.length / 2);
+  const rendered = JSON.stringify(body(pad), null, 2);
+  const start = rendered.indexOf(token);
+  assert.ok(
+    start < BODY_PRINT_LIMIT && start + token.length > BODY_PRINT_LIMIT,
+    `the token must straddle the cut to measure anything (start ${start}, limit ${BODY_PRINT_LIMIT})`,
+  );
+
+  const error = await runRelease(
+    ["stage", "local-operator-extension.zip", VERSION],
+    [() => rejectWith(400, body(pad))],
+    { token, expectFailure: true },
+  );
+  const output = error.stdout + error.stderr;
+  // No prefix of the credential may survive -- not the whole token, and not the
+  // leading fragment the cut would otherwise leave behind. Report the surviving
+  // prefix itself on failure: the length is the finding, and a slice of the
+  // output at a fixed offset would show padding rather than the leak. Safe to
+  // print because this token is synthetic and local to the test.
+  assert.ok(!output.includes(token), "the whole token must never reach the log");
+  let survived = "";
+  for (let n = token.length; n >= 1; n -= 1) {
+    if (output.includes(token.slice(0, n))) { survived = token.slice(0, n); break; }
+  }
+  assert.ok(
+    !output.includes(token.slice(0, 8)),
+    `${survived.length} characters of the token survived truncation: ${JSON.stringify(survived)}`,
+  );
+  // The body really was cut here; otherwise the assertions above are vacuous.
+  assert.match(output, /\(truncated to \d+ of \d+ characters\)/);
+});
+
+test("a rejected call does not echo the access token, even if the body carries it", async () => {
+  // A response body is NOT masked by Actions, and an API that echoed request
+  // context could hand the token straight back. Nothing in this output may
+  // carry it: not the body, and not any message the script composes.
+  const token = "ya29.a0AfB_bearer-token-shaped-secret-value";
+  const error = await runRelease(
+    ["stage", "local-operator-extension.zip", VERSION],
+    [() => rejectWith(400, {
+      error: {
+        code: 400,
+        status: "INVALID_ARGUMENT",
+        message: `rejected request authorized by ${token}`,
+      },
+    })],
+    { token, expectFailure: true },
+  );
+  const output = error.stdout + error.stderr;
+  assert.ok(!output.includes(token), "the access token must never reach the log");
+  assert.match(output, /<redacted CWS_ACCESS_TOKEN>/);
+  // Redaction must not cost the diagnosis: the rest of the body still shows.
+  assert.match(output, /INVALID_ARGUMENT/);
 });
 
 test("stage uploads the validated zip and requests deferred publication", async () => {
