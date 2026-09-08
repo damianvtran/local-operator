@@ -20,6 +20,7 @@ from local_operator.session.runtime.server import RuntimeServer
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
+from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
@@ -777,3 +778,67 @@ async def test_end_holds_the_tail_and_still_retires_upward_demand() -> None:
         assert view.is_following_tail is True
         assert arrived.region.bottom <= view.content_region.bottom
         assert arrived.region.y >= view.content_region.y
+
+
+@pytest.mark.asyncio
+async def test_explicit_anchor_offset_outranks_a_tail_following_view() -> None:
+    """An `anchor_offset` the caller supplied wins over the view's tail state.
+
+    The subagent's Home path loads a page and jumps to the top, and those are
+    two different frames: the page can arrive while the jump is still pending,
+    so the view is STILL FOLLOWING THE TAIL at the moment `insert_blocks` arms
+    its anchor. Nothing is armed, and a restore that consults only the armed
+    transaction falls through to the tail branch — throwing the reader to the
+    end of the transcript instead of holding the offset the caller measured.
+
+    Driven at the seam rather than through the loader: reproducing it through
+    the real subagent worker means racing that pending jump, which is what
+    made `test_history_home_key_lands_on_newly_loaded_page` an intermittent
+    net (it caught this regression only 4 runs in 5, and the round-2 commit
+    that introduced the defect shipped past it). Calling `insert_blocks`
+    directly puts the view in the exact state the race produces — following
+    the tail, with an explicit anchor supplied — every single run.
+    """
+    session = FakeSession()
+    session._history = history(count=120)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        await settled(app, pilot)
+        view = app._transcript_view()
+
+        # The state the race leaves behind: the caller's scroll has not landed,
+        # so the view still holds the tail while the page is already arriving.
+        view.follow_tail()
+        for _ in range(4):
+            await pilot.pause()
+        assert view.is_following_tail is True
+
+        retained = view.blocks()
+        assert retained, "no retained content to hold"
+        # What the reader is looking at, named by identity: the assertion below
+        # is about THIS row still being where it was, not about a row index.
+        held = next(block for block in retained if block.virtual_region.bottom > 0)
+
+        page = []
+        for index in range(40):
+            block = AssistantBlock()
+            block.update_text(f"older page row {index:03}")
+            block.finalize_text()
+            page.append(block)
+
+        inserted_at = float(view.max_scroll_y)
+        view.insert_blocks(0, page, anchor_offset=0.0)
+        for _ in range(14):
+            await pilot.pause()
+
+        # The reader is NOT at the end: pre-fix this restored to the tail,
+        # deterministically, because the tail branch owned the decision.
+        assert view.scroll_y < view.max_scroll_y - 1, (
+            "an explicit anchor_offset was overridden by the view's tail state; "
+            "the reader was thrown to the end of the transcript"
+        )
+        # And the anchor did its actual job: the row the reader was on is
+        # still at the top of the viewport, with the page mounted above it.
+        assert abs(view.scroll_y - held.virtual_region.y) < 1.0
+        assert view.max_scroll_y > inserted_at, "the page did not mount above"
+        assert view.blocks()[:40] == page, "the page is not above the retained rows"
