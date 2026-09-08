@@ -37,6 +37,8 @@ from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
 from local_operator.tui.widgets.welcome import (
     HINT_KEY_WIDTH_TIGHT,
     HINTS,
+    KEY_BUDGET_CELLS,
+    KEYED_TIPS,
     LOGO_FULL_MIN_WIDTH,
     LOGO_MARK,
     MARK_PULSE_DEPTH,
@@ -55,6 +57,7 @@ from local_operator.tui.widgets.welcome import (
     WORDMARK_SPACED,
     WelcomeInfo,
     WelcomeView,
+    _resolve_tip,
     build_welcome_lines,
     mark_pulse_color,
     mark_pulse_phase,
@@ -1248,9 +1251,18 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
     of its own (see ``TIP_ROTATE_INTERVAL_S``): under 8 s the row turns over
     while it is being read, over 15 s a short session only ever sees one.
     """
-    assert 8 <= len(TIPS) <= 12
+    # The ceiling moved 12 -> 15 when the three KEYED tips were added, and the
+    # reason is recorded in full on the pool itself: those three teach the only
+    # affordances with no second discovery route (a remappable key has no
+    # picker, unlike every slash command in the pool). The dilution argument
+    # still governs everything else — a further slash-command tip takes a slot
+    # rather than adding one.
+    assert 8 <= len(TIPS) <= 15
     assert len(set(TIPS)) == len(TIPS)
-    assert max(cell_len(f"{TIP_GLYPH} {tip}") for tip in TIPS) <= 60
+    # Measured on the RENDERED sentence, not the template: a keyed entry stores
+    # `{key}` and is what the user reads only after substitution, so measuring
+    # the raw string would check a string nothing ever paints.
+    assert max(cell_len(f"{TIP_GLYPH} {_resolve_tip(tip)}") for tip in TIPS) <= 60
     assert 8.0 <= TIP_ROTATE_INTERVAL_S <= 15.0
 
 
@@ -1526,7 +1538,12 @@ def test_no_width_the_row_is_drawn_at_ever_truncates_a_tip() -> None:
             ]
             drawn = _tip_rows(rows)
             assert len(drawn) == 1, f"tip {index} is not one row at {width} cells"
-            assert drawn[0].strip() == f"{TIP_GLYPH} {tip}", f"truncated at {width} cells"
+            # Compared against the RESOLVED sentence. A keyed entry is stored
+            # as a `{key}` template and substituted at render, so the raw pool
+            # string is not what any width ever draws — asserting on it would
+            # fail on a row that is in fact perfectly intact.
+            expected = f"{TIP_GLYPH} {_resolve_tip(tip)}"
+            assert drawn[0].strip() == expected, f"truncated at {width} cells"
 
 
 def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
@@ -1535,8 +1552,18 @@ def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
     # The setup-state opening tip (TIP_SETUP) is drawn at the same row, so the
     # threshold must clear the WIDEST of the pool AND that tip, or the setup
     # notice would truncate at a width the constant swore was safe.
+    #
+    # A KEYED entry is budgeted at its WORST-CASE key rather than at the key
+    # currently configured — that is what keeps the constant a constant. Were
+    # it measured at the live value, a user who remapped to a long key would
+    # raise the threshold under themselves and the tip row would appear and
+    # disappear as the reel rotated, moving the whole splash.
     assert TIP_MIN_WIDTH == max(
-        cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)
+        *(cell_len(f"{TIP_GLYPH} {tip}") for tip in (*TIPS, TIP_SETUP, TIP_PASTE)),
+        *(
+            cell_len(f"{TIP_GLYPH} {template.format(key='x' * KEY_BUDGET_CELLS)}")
+            for template, _ in KEYED_TIPS
+        ),
     )
     # One cell under it there is no row at all, rather than a fragment of one.
     assert not _tip_rows(_lines(_info(), TIP_MIN_WIDTH - 1, 99))

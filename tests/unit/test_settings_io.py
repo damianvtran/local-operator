@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from local_operator import settings_io
+from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -118,6 +118,15 @@ def _consumer_defaults() -> dict[str, object]:
         "fork.mode": DEFAULT_FORK_MODE,
         "fork.cmux_placement": DEFAULT_FORK_CMUX_PLACEMENT,
     }
+    # The hotkeys have a REAL single-value consumer for the same reason the
+    # fork keys do, and a stricter one: `KeyAction.default` is what
+    # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to
+    # when the override is absent or unusable, so a registry default that
+    # disagreed with it would mean the page offering to reset a row to a key
+    # the app never binds. Derived rather than restated, so adding an action
+    # cannot leave this guard behind.
+    for action in keymap.KEY_ACTIONS:
+        consumers[action.id] = action.default
     for field in type(compaction).model_fields:
         consumers[f"compaction.{field}"] = getattr(compaction, field)
     for key, value in DEFAULT_WEB_SEARCH_CONFIG.items():
@@ -1059,3 +1068,46 @@ def test_bool_settings_read_strictly(tmp_path: Path, raw: object, expected: bool
     manager.update_config({"session": {"cleanup": {"enabled": raw}}})
     setting = settings_io.BY_KEY["session.cleanup.enabled"]
     assert settings_io.read_setting(ConfigManager(tmp_path), setting) is expected
+
+
+def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path) -> None:
+    """`lop config edit` and `PATCH /v1/settings` have no UI that could warn.
+
+    The group check therefore lives at the write boundary every writer funnels
+    through, not in the page. Before review round 1's M2 fix both writes
+    succeeded and one action became unreachable.
+    """
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
+
+    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+
+    # And through the ALTERNATES form, which is the shape `lop config edit`
+    # reaches for a second key (design §H.1) and which bypassed the guard
+    # entirely while it compared whole strings (review round 2, M4).
+    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+g")
+
+    # A free key still stores, and re-writing a row's own key is not a clash.
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"
+
+
+@pytest.mark.parametrize(
+    ("existing", "candidate"),
+    [
+        ("f5,ctrl+g", "ctrl+g"),
+        ("ctrl+g", "f5,ctrl+g"),
+        ("ctrl+g", "ctrl+g,ctrl+g"),
+        ("f5,ctrl+g", "ctrl+t,ctrl+g"),
+    ],
+)
+def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, candidate):
+    """All documented alternate forms must reach the same refusal boundary."""
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], existing)
+    with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
