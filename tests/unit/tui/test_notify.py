@@ -834,8 +834,10 @@ def test_the_snippet_budget_fits_a_banner_and_survives_sanitisation() -> None:
         BACKGROUND_SNIPPET_MAX_CHARS
     )
     # The security boundary the snippet shares with the title: a model-written
-    # reply reaches an OSC string and an argv, and both BEL and ESC terminate
-    # an OSC sequence early (D16).
+    # reply reaches an argv and an AppleScript string literal, so control
+    # characters are stripped there for the same reason they are on a title
+    # (D16). It does NOT reach an OSC string — the only OSC emitter sends a
+    # fixed `BODIES` constant (review round 1, m2).
     assert sanitize_text("done\x1b]0;x\x07 ok", BACKGROUND_SNIPPET_MAX_CHARS) == "done ]0;x ok"
 
 

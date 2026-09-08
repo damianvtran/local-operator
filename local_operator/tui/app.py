@@ -15279,8 +15279,15 @@ class OperatorApp(App[None]):
             stored = ""
         return sanitize_text(stored) or BACKGROUND_FALLBACK_TITLE
 
-    def _background_completion_body(self, entry: CatalogEntry) -> str:
-        """The banner body: what the finished session last SAID, or the neutral line.
+    def _background_completion_body(self, entry: CatalogEntry, kind: str) -> str:
+        """The banner body for one finished session, chosen by what it says truthfully.
+
+        ALL THREE KINDS, EXPLICITLY. ``complete`` carries the session's last
+        assistant line. ``error`` and ``interrupted`` carry the house sentence
+        for that state (``BODIES[kind]`` — "Stopped with an error" / "Stopped
+        before finishing"). Any kind outside :data:`CONTEXTS`, and every case
+        where no snippet may be shown or none exists, degrades to
+        ``BODY_BACKGROUND``.
 
         WHAT THIS REPLACED AND WHY. The body was the fixed sentence
         ``BODY_BACKGROUND`` — "You were in another session" — which states a
@@ -15323,21 +15330,62 @@ class OperatorApp(App[None]):
         is not. Never returns ``""`` — an empty body would render as a banner
         with a title and a blank line where the content is.
 
-        ``sanitize_text`` because the snippet reaches an OSC escape and an argv,
-        exactly like the title (D16): the text is model-written, and both BEL
-        and ESC terminate an OSC string. It also enforces
-        :data:`BACKGROUND_SNIPPET_MAX_CHARS`, whose reasoning is on the
-        constant.
+        ``sanitize_text`` because the snippet is model-written text reaching an
+        argv (``cmux notify``, the signed bundle, ``notify-send``) and an
+        AppleScript string literal on the ``osascript`` leg. It does NOT reach
+        an OSC escape: the only OSC emitter is ``notification_writes``, whose
+        sole caller passes the fixed ``BODIES`` constant, never this text. The
+        scrub is still required — control characters in argv and in the
+        AppleScript literal, plus the one-line collapse a banner body needs —
+        and it also enforces :data:`BACKGROUND_SNIPPET_MAX_CHARS`, whose
+        reasoning is on the constant. (Review round 1, m2: the earlier wording
+        here named a wire this body does not travel.)
         """
         from local_operator.paths import config_dir
         from local_operator.resume import session_preview
         from local_operator.tui.notify import (
             BACKGROUND_SNIPPET_MAX_CHARS,
+            BODIES,
             BODY_BACKGROUND,
             sanitize_text,
             session_names_in_notifications,
         )
 
+        if kind != "complete":
+            # THE SNIPPET IS ONLY TRUE OF A SESSION THAT COMPLETED. `error` and
+            # `interrupted` are published from `outcome.error`/`outcome.aborted`
+            # — runtime facts that are never an assistant message — and
+            # `session_preview` filters to `role == "assistant"`, so on those
+            # kinds it can only return the last thing the model said BEFORE the
+            # thing that went wrong: typically a success sentence under a
+            # `Needs attention` subtitle, the two content lines of the frame
+            # asserting opposite things (review round 1 M1, design round 1 D1).
+            # `session.py`'s attention anchor already refuses exactly this — it
+            # resolves to `completion-{token}` rather than `messages[-1].id` for
+            # the non-complete kinds because "failure may precede the first
+            # assistant message" — and a body must not assert what the anchor
+            # declines to point at.
+            #
+            # WHY `interrupted` IS GATED TOO, though its snippet reads
+            # coherently. Design round 1 accepted restricting the gate to
+            # `error` alone: an aborted session really was mid-work, so a
+            # mid-work last line is honest there. It is gated anyway because the
+            # honesty is a property of the TEXT, not of the state — an
+            # interrupted session whose last assistant turn happened to close a
+            # sub-task ("All 412 tests pass. The migration is complete.") lands
+            # in exactly M1's frame, and nothing in the kind tells the two
+            # apart. Splitting the rule would make correctness depend on a
+            # judgement no code here can make, on a lock screen where prose is
+            # read once with nothing beside it to check it against. "Snippet iff
+            # complete" is decidable from the kind alone, and what it costs is a
+            # sentence for 14 of 332 completions in the maintainer's real store.
+            #
+            # `BODIES[kind]` rather than `BODY_BACKGROUND`: the house vocabulary
+            # already says the true thing for these states and says more than
+            # the routing sentence does. Unknown kinds keep the neutral fallback
+            # — the same default-to-quiet discipline `digest_subtitle` follows,
+            # so a future kind cannot inherit a claim written for another one.
+            return BODIES.get(kind, BODY_BACKGROUND)
         if not session_names_in_notifications():
             return BODY_BACKGROUND
         try:
@@ -15413,28 +15461,41 @@ class OperatorApp(App[None]):
         store = AttentionStore(config_dir() / "attention.db")
         if not store.claim_delivery(identity, entry.completion_token, backend):
             return False
-        title = self._background_completion_title(entry)
-        # The body carries what the finished session last SAID, falling back to
-        # the neutral routing sentence when no snippet may be shown or none
-        # exists. See `_background_completion_body` for the privacy gate, the
-        # length budget and why the routing cue is not repeated here (D5).
-        body = self._background_completion_body(entry)
         try:
+            # INSIDE THE GUARD, because the claim above is already taken. A
+            # raise between `claim_delivery` and here escapes to the caller's
+            # per-row handler, which sets `released = True` but never calls
+            # `release_delivery` for this row — leaving a claim that asserts a
+            # toast nobody received, the exact hole `release_delivery` exists to
+            # close. Both helpers are internally guarded so nothing reachable
+            # today raises here; the placement is what keeps that true of a
+            # helper someone adds later (review round 1, m3).
+            title = self._background_completion_title(entry)
+            # The body says what the finished session last SAID when it
+            # COMPLETED, and the house sentence for its state otherwise; it
+            # falls back to the neutral routing sentence when no snippet may be
+            # shown or none exists. See `_background_completion_body` for the
+            # kind gate, the privacy gate, the length budget and why the routing
+            # cue is not repeated here (D5).
+            body = self._background_completion_body(entry, kind)
             if surface is not None:
                 delivered = bool(
                     spawn_detached(cmux_command(surface, title, CONTEXTS.get(kind, ""), body))
                 )
             else:
                 delivered = detached_notify(
-                    # `argv_safe` for parity with the cmux branch above, which
-                    # applies it inside `cmux_command`. A model-written name can
-                    # begin with `-`; this title lands in argv slot 1 of the
-                    # signed bundle, where it is positional and so not misparsed
-                    # today — the wrap exists so the two branches cannot drift
-                    # into disagreeing about whether a title is shape-safe
-                    # (review round 1, m2).
+                    # `argv_safe` on BOTH values for parity with the cmux branch
+                    # above, which applies it inside `cmux_command`. Model-
+                    # written text can begin with `-`; title and body land in
+                    # argv slots 1 and 2 of the signed bundle, where they are
+                    # positional and so not misparsed today — the wrap exists so
+                    # the two branches cannot drift into disagreeing about
+                    # whether this text is shape-safe (review round 1, m2). The
+                    # body needs it at least as much as the title now that it
+                    # carries a model-written sentence rather than a constant
+                    # (review round 1 remediation, m1).
                     argv_safe(title),
-                    body,
+                    argv_safe(body),
                     session_id=entry.id,
                     subtitle=CONTEXTS.get(kind, ""),
                 )

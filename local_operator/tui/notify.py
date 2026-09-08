@@ -294,10 +294,13 @@ BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
 #: the session that finished is not the one on screen. One string for all three
 #: kinds, because it describes the ROUTING decision, not the outcome.
 #:
-#: NO LONGER THE DEFAULT. It states a routing fact the user already knows —
-#: they know which session they were in — so it spent the banner's only content
-#: line telling them nothing about the session that finished. The default is
-#: now that session's last assistant line (see
+#: NO LONGER THE DEFAULT ON A COMPLETED SESSION. It states a routing fact the
+#: user already knows — they know which session they were in — so it spent the
+#: banner's only content line telling them nothing about the session that
+#: finished. For ``complete`` the body is now that session's last assistant
+#: line; for ``error`` and ``interrupted`` it is the matching :data:`BODIES`
+#: sentence, because a snippet on those kinds is pre-failure text that asserts
+#: an outcome the session did not have (see
 #: ``OperatorApp._background_completion_body``). This stays as the sentence for
 #: every case where no snippet may be shown or none exists, because it reveals
 #: nothing about the conversation: it is exactly what a user who opted OUT of
