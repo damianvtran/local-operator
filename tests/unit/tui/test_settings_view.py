@@ -473,7 +473,15 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
 
         view.action_jump(1)
         await pilot.pause()
-        for _ in range(80):
+        # One press per selectable row, DERIVED rather than a hardcoded count.
+        # Travelling from the last row to the first needs len - 1 presses, so
+        # any fixed number is a bet that the registry never grows: at 80 rows
+        # the old literal 80 had one spare press, and adding one setting left
+        # the cursor one row short of the top while the clamp itself was fine
+        # (CI shard 0 on a config carrying fallback chains, which contribute
+        # rows of their own). The clamp under test makes surplus presses free,
+        # so spending one per row is always enough and never too many.
+        for _ in range(len(view._selectable())):
             view.action_move(-1)
         await pilot.pause()
         assert view._selected == view._selectable()[0]
@@ -485,6 +493,43 @@ async def test_arriving_at_the_top_shows_the_section_header_that_owns_the_row() 
         view.action_jump(0)
         await pilot.pause()
         assert view._body.scroll_offset.y == 0
+
+
+@pytest.mark.asyncio
+async def test_arriving_at_the_top_holds_with_cascade_rows(tmp_path: Path) -> None:
+    """The same arrival contract on a config whose cascade ADDS rows.
+
+    The page's row count is not fixed: a configured chain contributes rows the
+    empty default never renders, so a developer machine with no chains and a
+    runner with two disagree about how long the list is. The test above ran
+    only the empty shape, which is why a registry addition that shortened its
+    margin failed on CI and passed locally. Pinning the arrival at a LONGER
+    list keeps that gap covered rather than relying on the shorter one.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_chains(
+        ConfigManager(tmp_path), {"alpha": ["anthropic/a"], "beta": ["openrouter/b"]}
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(view._selectable()) > 80, "the cascade rows did not lengthen the page"
+
+        view.action_jump(1)
+        await pilot.pause()
+        for _ in range(len(view._selectable())):
+            view.action_move(-1)
+        await pilot.pause()
+        assert view._selected == view._selectable()[0]
+        assert view._body.scroll_offset.y == 0, "the owning section header is scrolled off"
 
 
 @pytest.mark.asyncio
