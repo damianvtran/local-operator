@@ -22056,9 +22056,17 @@ class OperatorApp(App[None]):
             # and the user read a second row — `config.yml changed: model_name
             # needs a relaunch` — that is worded for an edit someone ELSE made,
             # names only the key that happened to differ, and says "when" a
-            # second time in a third phrasing. Two facade calls because the
-            # registry holds the pair as two settings; each notifies once and
-            # both arrive as local, so neither prints.
+            # second time in a third phrasing.
+            #
+            # Two facade calls, because the registry holds the pair as two
+            # settings — and each notifies the watcher separately, so this
+            # loop delivers TWO changes and the first carries a torn pair (new
+            # provider, old model name). Both arrive as ``local``, which is
+            # what keeps them silent: ``_on_config_change`` above returns
+            # early, and ``Session._on_configured_model_changed`` now reads
+            # the same flag. Until #785 the session did NOT, and printed a
+            # ``keeping ...`` notice off that torn pair, contradicting the
+            # receipt written below it.
             try:
                 from local_operator import settings_io
                 from local_operator.config import ConfigManager

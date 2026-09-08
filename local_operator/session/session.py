@@ -3526,9 +3526,8 @@ class Session:
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
-            # ``_apply_config_change``). ``_adopt_configured_model`` passes
-            # ``explicit=True`` too — for the fallback-pin withdrawal below —
-            # and resets this flag itself afterwards.
+            # ``_apply_config_change``, which now never selects a model off a
+            # default reload — only reports one).
             self._explicit_model_choice = True
         # The measured byte cap belonged to the provider that demonstrated it,
         # and that provider is gone. Keeping it would pin a session to a
@@ -11096,6 +11095,10 @@ class Session:
         values = getattr(change, "values", None)
         if not isinstance(values, Mapping):
             return
+        # ``disk`` for anything this session did not write, which is the
+        # conservative default: only the model branch below consults it, and
+        # only to stay quiet about a write this process already reported.
+        source = getattr(change, "source", "disk")
         if any(key.startswith("compaction.") for key in changed):
             # Same outcome as the factory's ``coerce_compaction_settings`` at
             # build (dict -> validated, invalid -> defaults, absent -> None,
@@ -11155,7 +11158,7 @@ class Session:
             if self._job_id is None:
                 self._web_tools_dirty = True
         if "hosting" in changed or "model_name" in changed:
-            self._on_configured_model_changed(values)
+            self._on_configured_model_changed(values, local=source == "local")
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -11187,15 +11190,49 @@ class Session:
             return
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
-    def _on_configured_model_changed(self, values: Mapping[str, Any]) -> None:
+    def _on_configured_model_changed(self, values: Mapping[str, Any], *, local: bool) -> None:
         """Defaults seed NEW conversations; reloading them never selects a model.
 
         A watcher cannot identify which pane authored an edit. Local commands
         that promise a switch call set_model explicitly on their own session.
         Treating a config-sourced birth as a subscription moved every sibling
         at the next provider call, invalidating its cache and conversation.
+
+        ``local`` writes print NOTHING, and that is a correctness fix rather
+        than a volume one (#785). The model default is TWO registry keys, and
+        ``settings_io`` notifies once per FACADE call — so ``/model default
+        p/m``, which loops over ``("hosting", provider)`` and ``("model_name",
+        model_id)``, delivers two synchronous changes to this listener. The
+        first carries a TORN pair: the new provider beside the OLD model name,
+        a combination the user never asked for and that was never on disk as a
+        unit. It differs from the session's model, so the check below fired and
+        printed ``keeping <model>; default changed for new sessions`` — for a
+        save whose whole point was to make that model the default. The receipt
+        the command had already written said the opposite one line above.
+
+        Suppressing on ``source`` rather than coalescing the notices is what
+        matches the watcher's own contract: ``ConfigChange.source`` exists to
+        say "this process wrote it, and the surface that wrote it already told
+        the user" (see :class:`~local_operator.config_watch.ConfigChange` and
+        the TUI's ``_on_config_change``, which has honoured it since it was
+        added). Nothing was lost by staying quiet here — every in-process
+        writer of these two keys is a ``/model`` form that prints its own
+        receipt naming the pair it saved.
+
+        Torn pairs are exclusive to that fast path, which is why the fix is
+        scoped to it and not to the notice. An edit from ANOTHER process
+        arrives through the poll, and a config write is one atomic
+        ``os.replace`` of the whole file, so a single tick sees both keys move
+        together and delivers one change carrying the matched pair. Verified
+        rather than assumed: a two-key external save followed by one
+        ``poll_now()`` produces exactly one delivery, ``changed_keys ==
+        {hosting, model_name}``. So the notice a user actually needs — someone
+        else changed the default under me — still prints, once, with a pair
+        that is real.
         """
         if self._job_id is not None:
+            return
+        if local:
             return
         if (values.get("hosting"), values.get("model_name")) == (
             self.model.provider,

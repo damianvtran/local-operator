@@ -976,6 +976,99 @@ async def test_the_writing_pane_is_a_no_op(tmp_path, monkeypatch) -> None:
         await session.dispose()
 
 
+@pytest.mark.asyncio
+async def test_saving_the_default_here_never_reports_the_torn_pair(tmp_path, monkeypatch) -> None:
+    """A local two-key save prints NOTHING, torn intermediate included (#785).
+
+    ``/model default p/id`` writes ``hosting`` and ``model_name`` as two
+    separate facade calls, and each notifies the watcher synchronously — so a
+    listener sees the new provider beside the OLD model name before it sees
+    the pair the user asked for. That torn pair matches nothing, so the
+    divergence check fired and printed ``keeping ...`` for a save whose
+    receipt one line above said the opposite.
+
+    The session under test is pinned to a THIRD model, so the final pair
+    diverges too: without the source gate this emits twice, and a fix that
+    only coalesced to the last delivery would still emit once. Both must be
+    silent, because the writing surface printed its own receipt.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", MODEL.provider)
+    manager.set_config_value("model_name", MODEL.model_id)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        session.set_model(MODEL.model_copy(update={"model_id": "chosen"}), explicit=True)
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        # Exactly the loop in ``OperatorApp._activate_resolved_model``: the
+        # facade, one call per key, each notifying this process's watcher.
+        for key, value in (("hosting", "openai"), ("model_name", "gpt-x")):
+            setting = settings_io.resolve_key(key)
+            assert setting is not None, key
+            settings_io.write_setting(manager, setting, value)
+        await _settle(session)
+
+        assert _notices(session) == [], _notices(session)
+        # Silence is not inertness: the save landed and the pin held.
+        assert session.model.model_id == "chosen"
+        saved = ConfigManager(config_dir)
+        assert saved.get_config_value("hosting") == "openai"
+        assert saved.get_config_value("model_name") == "gpt-x"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_another_process_changing_the_default_still_says_so_once(
+    tmp_path, monkeypatch
+) -> None:
+    """The other half of #785: suppression is scoped to LOCAL writes only.
+
+    An external edit is one atomic ``os.replace`` of the whole file, so a
+    single tick carries both keys and cannot tear — the notice a user needs
+    ("someone changed the default under me") survives, exactly once, naming a
+    pair that really is on disk. This is what proves the source gate did not
+    buy quiet by going deaf.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", MODEL.provider)
+    manager.set_config_value("model_name", MODEL.model_id)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        session.set_model(MODEL.model_copy(update={"model_id": "chosen"}), explicit=True)
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        for key, value in (("hosting", "openai"), ("model_name", "gpt-x")):
+            write_from_another_process(config_dir, key, value)
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        # One delivery carrying BOTH keys is why the disk path needs no
+        # coalescing; if this ever splits, the notice below would double.
+        assert change.changed_keys == frozenset({"hosting", "model_name"})
+        await _settle(session)
+
+        keep = _notices(session)
+        assert len(keep) == 1, keep
+        assert "keeping test/chosen" in keep[0] and "new sessions" in keep[0]
+        assert session.model.model_id == "chosen"
+    finally:
+        await session.dispose()
+
+
 # ---------------------------------------------------------------------------
 # 10. Web tools: inventory at the turn boundary, never mid-turn
 # ---------------------------------------------------------------------------
