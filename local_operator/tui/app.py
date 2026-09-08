@@ -21669,7 +21669,11 @@ class OperatorApp(App[None]):
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
-            scope = "new sessions" if write_only else "this session + new sessions"
+            # A cold viewer can save the next runtime's default, but its
+            # disconnected set_model is a no-op. Do not claim a live switch
+            # merely because the requested pair differs from its stale label.
+            switches_session = not write_only and not bool(getattr(session, "is_cold", False))
+            scope = "this session + new sessions" if switches_session else "new sessions"
             notice(f"boot default saved: {provider}/{model_id} ({scope})")
         else:
             notice(f"model: {old_label} → {new_label} (this session)")
