@@ -522,6 +522,7 @@ def test_entry_from_json_rejects_bad_rows():
 @pytest.mark.asyncio
 async def test_message_batch_fsyncs_once_off_loop_and_indexes_after_commit(tmp_path, monkeypatch):
     """Disk spikes cannot park sibling sessions; one closed batch is one commit."""
+    import asyncio
     import os
     import threading
 
@@ -534,7 +535,12 @@ async def test_message_batch_fsyncs_once_off_loop_and_indexes_after_commit(tmp_p
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", fsync)
-    transcript = Transcript(tmp_path / "batch")
+    # Production async constructors use a worker: birth is durable before
+    # live discovery, while each later journal batch still has ONE fsync.
+    transcript = await asyncio.to_thread(Transcript, tmp_path / "batch")
+    assert len(calls) == 1
+    assert all(thread != loop_thread for thread in calls)
+    calls.clear()
     messages = [Message.user(str(index)) for index in range(12)]
     rows = await transcript.append_messages(messages)
     assert len(calls) == 1

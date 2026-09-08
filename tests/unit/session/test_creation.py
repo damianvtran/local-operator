@@ -82,6 +82,16 @@ def test_legacy_birthtime_and_read_only_fallback(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_creation_metadata_does_not_consume_retention_budget(tmp_path):
+    from local_operator.session.cleanup import _dir_bytes
+
+    (tmp_path / "transcript.jsonl").write_text("row\n")
+    before = _dir_bytes(tmp_path)
+    ensure_session_created_at(tmp_path, 1788841600.123)
+    assert before == 4
+    assert _dir_bytes(tmp_path) == before
+
+
 def test_publish_is_atomic_no_clobber(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         dates = list(pool.map(lambda n: ensure_session_created_at(tmp_path, n), range(10, 30)))

@@ -1567,7 +1567,9 @@ async def _construct_child_session(
     # ``hub op='resume'`` rebuilds a child on its old directory, and a marker
     # lost to an earlier failed write is worth retrying while we are here.
     mark_session_origin(session_dir, ORIGIN_SUBAGENT, label=label, agent=agent)
-    transcript = Transcript(session_dir)
+    # Birth metadata must be durable before publication, without its fsync
+    # blocking the parent or other children sharing this event loop.
+    transcript = await asyncio.to_thread(Transcript, session_dir)
     # The operator's standing instructions are machine-wide, so a delegated
     # slice inherits them for the same reason it inherits the goal: the parent
     # authoring a task prompt is not a reliable channel for a preference the

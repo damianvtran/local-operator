@@ -10425,9 +10425,18 @@ class Session:
                     # v0.35.2; future mutations replace only the sidecar,
                     # avoiding quadratic history while preserving a
                     # rolling-upgrade resume path.
-                    if (rows or records) and self._transcript.latest_custom(
-                        SUBAGENT_ROSTER_CUSTOM_TYPE
-                    ) is None:
+                    # Latched on RECORDS, not on rows. A job row is registered
+                    # before its child exists, so the first persist of a launch
+                    # carries the row and no record yet — and this entry is
+                    # written exactly once. Latching on the row therefore froze
+                    # a legacy reader's view at "a child with no way to reach
+                    # it", which is strictly worse than no entry: the sidecar
+                    # every current reader uses was correct, so nothing local
+                    # showed it. Rows alone still qualify when there is no comms
+                    # instance at all, because then no record is ever coming.
+                    if (
+                        records or (rows and self._subagent_comms is None)
+                    ) and self._transcript.latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE) is None:
                         await self._transcript.append_custom(
                             SUBAGENT_ROSTER_CUSTOM_TYPE,
                             {"jobs": rows, "records": payload["records"]},

@@ -115,10 +115,10 @@ class CatalogEntry:
            a latch: the instant the row stops being ``busy`` the ``✗`` and
            "Unseen error" come back, because ``unseen`` stays true until
            somebody actually reads the session.
-        2. The row does not sink. :attr:`rank` does not consult this predicate,
-           so a suppressed row holds its unseen tier and its place near the top
-           of "Active Sessions" for the whole time it is suppressed. It is
-           de-emphasised, never lost.
+        2. The row stays in "Active Sessions": membership is independent of
+           ranking. While busy or wedged it uses the in-progress category, below
+           unviewed completed outcomes; when it stops, its unread outcome earns
+           that outcome's category again. Creation time orders each category.
         3. The alternative IS the reported bug, one class down. Painting an
            error mark over a running session's spinner is the same lie about
            the same row — "this is broken" over a session that is working.
