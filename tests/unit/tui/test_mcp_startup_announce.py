@@ -500,6 +500,94 @@ async def test_an_eviction_releases_every_session_the_card_spoke_for() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_sibling_card_displacing_an_announce_does_not_spend_it() -> None:
+    """Review round 3, R3-2 — the evictor is another SESSION's MCP card.
+
+    Two sidebar clicks in quick succession is the gesture this whole PR is
+    about, and inside the first card's 5 s the second session's DIFFERENT
+    sentence takes the slot. The first card was thrown away unread, so its
+    session is owed the announce back exactly as it would be after a copy
+    receipt — the evictor being another MCP card changes nothing about what
+    the user did or did not read.
+
+    The round-3 head returned early here: ``_last_mcp_announce`` had already
+    moved to the evicting card's generation, so the guard fired before the
+    per-session release ever ran and ``a`` stayed marked as told for a card
+    nobody saw. That is U2 reopened for the cross-session case.
+    """
+    first = _session(_outcome(), session_id="a")
+    second = _session(_outcome(**_SLACK_DOWN), session_id="b")
+    app = OperatorApp(lambda: _factory(first))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        assert "MCP ready: 3 servers" in toast.message
+
+        # No dismissal: b's card displaces a's while a's is still showing.
+        app._adopt_session(second, replay_history=False)
+        assert await _until(pilot, lambda: "failed: slack" in toast.message)
+
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(first, replay_history=False)
+        assert await _until(
+            pilot, lambda: toast.display
+        ), "a sibling session's card spent an announce its own session never read"
+        assert "MCP ready: 3 servers, 425 tools" in toast.message
+
+
+@pytest.mark.asyncio
+async def test_a_retired_card_does_not_lend_its_words_to_a_new_failure() -> None:
+    """Review round 3, R3-1 / UX round 3, U3-1 — inheritance needs a card on
+    screen, and only a session with no record of its own may take one.
+
+    ``_last_mcp_announce`` is cleared by eviction alone, so after the ordinary
+    retirement — a timer expiring, or the user clicking the card away — it
+    still names a card that left the screen. A session whose server then
+    genuinely dies matched those retired words and inherited them, and its
+    failure was never announced at all: the worst outcome this surface has,
+    and the exact thing the inheritance branch claims to be safe from because
+    "the user is looking at it already".
+
+    Gating on the session having NO record of its own is what makes that claim
+    true: a session that has been told something else is not looking at these
+    words, whatever is or is not on screen. It cannot cost the shared-set case,
+    which is precisely the sessions that have no record yet.
+    """
+    healthy = _session(_outcome(), session_id="a")
+    broken = _session(_outcome(**_SLACK_DOWN), session_id="b")
+    app = OperatorApp(lambda: _factory(healthy))
+    async with app.run_test(size=(100, 24)) as pilot:
+        toast = app.query_one(Toast)
+        assert await _until(pilot, lambda: toast.display)
+        toast.dismiss_toast()  # read and dismissed — the ordinary path
+        await pilot.pause()
+
+        app._adopt_session(broken, replay_history=False)
+        assert await _until(pilot, lambda: "failed: slack" in toast.message)
+        toast.dismiss_toast()  # read and dismissed too; the screen is now empty
+        await pilot.pause()
+        assert toast.display is False
+
+        # a's own slack now dies. Its record says "healthy", so this is news a
+        # was never told, and the words b left behind are not on screen.
+        healthy.mcp_startup = _outcome(**_SLACK_DOWN)
+        app._adopt_session(healthy, replay_history=False)
+        assert await _until(
+            pilot, lambda: toast.display
+        ), "a genuine new failure inherited a card that had already retired"
+        assert "failed: slack" in toast.message
+
+        # And it stays announced: the record now holds the failure, so the
+        # repeat is silent for the right reason rather than the wrong one.
+        toast.dismiss_toast()
+        await pilot.pause()
+        app._adopt_session(healthy, replay_history=False)
+        await _quiet(pilot)
+        assert toast.display is False
+
+
+@pytest.mark.asyncio
 async def test_an_announce_the_user_actually_saw_is_not_re_announced() -> None:
     """The other half of U2: eviction is not the same as expiry.
 
@@ -897,7 +985,9 @@ async def test_the_announce_record_is_bounded_by_sessions_not_outcomes() -> None
     entries behind, for the life of the process. The record is now one entry
     per ATTACHED session \u2014 outcome churn on one session rewrites that
     session's entry, and a re-attach adds nothing \u2014 so the bound is the
-    session count (276 B measured per entry), not the outcome count. This
+    session count, not the outcome count — which is the term that decides
+    whether a cap is needed, and unlike a byte figure it is not
+    measurement-method dependent (review round 3, R3-4). This
     asserts the shape, so a future change back to per-outcome growth fails
     here rather than in a memory profile.
     """

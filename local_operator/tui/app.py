@@ -1584,9 +1584,13 @@ class _ApprovalsFollow(NamedTuple):
 class _McpAnnounce(NamedTuple):
     """An MCP startup announce that was actually put on screen.
 
-    Two fields because "has the user been told this" and "is the card carrying
-    it still the one on screen" are different questions, and the second cannot
-    be answered by the words.
+    Two fields because "has the user been told this" and "is this the same
+    CARD that carried it" are different questions, and the second cannot be
+    answered by the words.
+
+    Held as the app's ``_last_mcp_announce`` this is the most recent announce,
+    not the card on screen: only an eviction clears it, so it survives the card
+    being dismissed or timing out (UX round 3, U3-3).
 
     ``sentence`` is the UNTRUNCATED text, so the comparison is width-independent
     (review round 2, R2-1/R2-2). ``generation`` is :attr:`Toast.generation` at
@@ -2382,12 +2386,26 @@ class OperatorApp(App[None]):
         #: global slot re-announced on every single click, 20 in 20, which is
         #: the reported defect at full strength.
         #:
-        #: CURRENT: the sentence the card on screen is carrying, with the
-        #: generation of that card. A session seeing a sentence that another
-        #: session has just put on screen is already looking at it, so it
-        #: inherits that record rather than raising a duplicate — that is what
-        #: keeps four sidebar clicks onto one shared MCP set to one toast even
-        #: though the four sessions have no per-session record between them.
+        #: CURRENT: the sentence the most recent announce carried, with the
+        #: generation of that card, held until that card is EVICTED. A session
+        #: that has never been told anything and whose sentence is the one the
+        #: user was most recently shown inherits that record rather than raising
+        #: a duplicate — that is what keeps four sidebar clicks onto one shared
+        #: MCP set to one toast even though the four sessions have no
+        #: per-session record between them, and it must keep working across the
+        #: card being dismissed between those clicks, which is the honest
+        #: sidebar gesture.
+        #:
+        #: Deliberately NOT "the card on screen": nothing clears this on the
+        #: ordinary retirement (timer expiry, or the user clicking the card
+        #: away), so it outlives the card, and writing the screen invariant here
+        #: promised a guarantee the code does not maintain (UX round 3, U3-3).
+        #: What makes the outliving safe is the `told is None` gate below rather
+        #: than any screen state — a session carrying its own, contradicting
+        #: record can never inherit over the top of it, so retired words cannot
+        #: swallow a genuine new failure (review round 3, R3-1; UX round 3,
+        #: U3-1). What is left is a session with no history reading words the
+        #: user was shown moments ago, which is the shared-set case itself.
         #:
         #: Together they give A→A silent, A→B→A on the SAME session announcing
         #: (a server that breaks, recovers and breaks again is the most
@@ -2403,10 +2421,18 @@ class OperatorApp(App[None]):
         #:
         #: Bounded by the sessions ATTACHED in this process, not by attaches
         #: and not by outcomes: a re-attach and a changed outcome both write
-        #: the same entry. 276 B per entry measured (dict slot 26 B + key
-        #: string 68 B + record 182 B), so a thousand attached sessions cost
-        #: ~270 KiB and a day's sidebar catalogue is kilobytes. No cap is
-        #: warranted and none is imposed (review round 1, R1-3's standard).
+        #: the same entry, so the entry count is the count of distinct sessions
+        #: the user has clicked into since launch, and a day's sidebar
+        #: catalogue is hundreds at the outside. Each entry is a key string
+        #: plus a two-field record — hundreds of bytes, not kilobytes — so no
+        #: cap is warranted and none is imposed (review round 1, R1-3's
+        #: standard). Stated structurally rather than as a byte figure on
+        #: purpose: three rounds measured 194 B, 276 B and 286 B for this
+        #: entry and all three were honest, because the answer depends on
+        #: whether the key string and the shared sentence fall inside the
+        #: measurement window (review round 3, R3-4; QA round 3, Q3-2). The
+        #: session count is the term that decides whether a cap is needed, and
+        #: it is not method-dependent.
         #:
         #: Written when the toast is DISPLAYED, not when `show` is called — the
         #: single slot may evict a 5 s courtesy card, and recording at call
@@ -10847,14 +10873,24 @@ class OperatorApp(App[None]):
             return
         text, duration_ms = payload
         # A session with no usable id (a reduced facade, a test double) shares
-        # one bucket with every other id-less host, so a second such host loses
-        # a notice it was owed. Accepted: no production session reaches here
-        # without an id — `SessionProtocol.session_id` returns `str`, `Session`
-        # falls back to the transcript directory name and `RemoteSession` takes
-        # the id as a constructor argument — and a shared bucket still dedupes
-        # the repeat this method exists to stop (review round 1, R1-4). Derived
-        # once and shared with the notice ledger below, so the two surfaces can
-        # never disagree about which session they are talking about.
+        # one bucket with every other id-less host. Under the per-session record
+        # that degrades further than it did under round 1's global slot, and the
+        # justification written there no longer holds: two id-less hosts with
+        # DIFFERENT outcomes now flip the single `""` entry on every attach, so
+        # alternating between them announces every time — the reported defect at
+        # full strength in this lane, measured at 20 of 20 clicks (review round
+        # 3, R3-3; QA round 3, Q3-1). It is accepted rather than fixed because
+        # no production session reaches here without an id, which QA traced
+        # rather than assumed: all three `_report_mcp_startup` callers are on
+        # the adopted-session path, `SessionProtocol.session_id` returns `str`,
+        # `Session` falls back to the transcript directory name,
+        # `RemoteSession` takes the id as a constructor argument, and the one
+        # `str | None` implementation (`headless_print`) is never adopted by
+        # this app. Keying id-less hosts by `id(session)` would close the lane
+        # but buy nothing reachable, so the honest statement is that a keyless
+        # host announces per attach. Derived once and shared with the notice
+        # ledger below, so the two surfaces can never disagree about which
+        # session they are talking about.
         try:
             session_key = str(getattr(session, "session_id", "") or "")
         except Exception:  # noqa: BLE001 — a property may raise on a reduced host
@@ -10875,12 +10911,27 @@ class OperatorApp(App[None]):
         told = self._announced_mcp_startup.get(session_key)
         if told is None or told.sentence != sentence:
             showing = self._last_mcp_announce
-            if showing is not None and showing.sentence == sentence:
-                # Another session just put these words on screen and they are
-                # still there, so this session is looking at its news already.
-                # It inherits that card's generation, so one eviction releases
-                # every session the card spoke for — otherwise a piggybacking
-                # session would keep a record for a card nobody read.
+            if told is None and showing is not None and showing.sentence == sentence:
+                # A session with NO history of its own, landing on words another
+                # session raised most recently: it is looking at its news
+                # already. It inherits that card's generation, so one eviction
+                # releases every session the card spoke for — otherwise a
+                # piggybacking session would keep a record for a card nobody
+                # read.
+                #
+                # `told is None` is the load-bearing half. `_last_mcp_announce`
+                # is released by eviction only, so after the ORDINARY
+                # retirement — the timer expiring, the user clicking the card
+                # away — it still names words that have left the screen. A
+                # session whose server then genuinely died matched those retired
+                # words and was marked told, so its failure never announced at
+                # all (review round 3, R3-1; UX round 3, U3-1). A session that
+                # was told something else is, by its own record, not looking at
+                # these words — whatever is on screen — so it may never inherit
+                # over the top of that. Gating on `toast.display` instead is the
+                # wrong reading and breaks the case this branch exists for: the
+                # shared-set clicks legitimately inherit across a card the user
+                # already dismissed.
                 self._announced_mcp_startup[session_key] = showing
             else:
                 # Tagged with the app so the eviction notice can be told from
@@ -10933,13 +10984,21 @@ class OperatorApp(App[None]):
         any that piggybacked on the words already being on screen. Sessions told
         by an earlier card are untouched: they were told by a card that retired
         normally, and re-arming them would announce news they have read.
+
+        That per-session filter is the ONLY release, and it always runs. The
+        global slot is a separate, weaker fact — the card showing most recently
+        — and short-circuiting on it dropped exactly the case this PR is about:
+        two quick sidebar clicks, where session ``b``'s card displaces ``a``'s
+        unread, moves the slot to ``b``'s generation, and left ``a`` marked told
+        for a card nobody saw (review round 3, R3-2). The filter needs no such
+        guard because it is already scoped to the evicted card's generation, so
+        it can only ever release the sessions that card spoke for.
         """
         if message.owner is not MCP_STARTUP_TOAST_OWNER:
             return
         showing = self._last_mcp_announce
-        if showing is None or showing.generation != message.generation:
-            return
-        self._last_mcp_announce = None
+        if showing is not None and showing.generation == message.generation:
+            self._last_mcp_announce = None
         self._announced_mcp_startup = {
             key: announce
             for key, announce in self._announced_mcp_startup.items()
