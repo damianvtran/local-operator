@@ -31,10 +31,13 @@ class ProfileRegistryUnavailable(ValueError):
         which is what the original wording could not do when the true cause was
         a directory that is not an agent at all.
 
-        ``count`` is optional because :func:`admission_error` reconstructs this
-        error from a bare code on the far side of the transport, where no
-        detail is available.
+        ``count`` is optional because the raising site does not always have a
+        number: a scan that died on an ``OSError`` never attributed the failure
+        to specific directories, and an older peer sends no count at all.
         """
+        # Kept so the transport can forward the integer itself rather than
+        # re-parsing it out of the rendered sentence.
+        self.count = count
         detail = ""
         if count is not None:
             noun = "definition" if count == 1 else "definitions"
@@ -46,10 +49,24 @@ class ProfileRegistryUnavailable(ValueError):
         )
 
 
-def admission_error(code: str) -> ValueError | None:
-    """Decode only an enumerated category, never owner-supplied message text."""
+def admission_error(code: str, count: int | None = None) -> ValueError | None:
+    """Decode only an enumerated category, never owner-supplied message text.
+
+    ``count`` is carried as its own integer field rather than being recovered
+    from the peer's message, which is the whole point: the wording is rebuilt
+    locally from the category, so the only thing crossing the transport is a
+    number. An integer cannot name a path, a socket address or another
+    conversation's identity, so it does not widen what the module docstring
+    admits -- unlike ``str(exc)``, which is why that is still never trusted.
+
+    Anything that is not a plain non-negative ``int`` is dropped rather than
+    rendered: the far side is untrusted input, and a caller that omits the
+    field (an older runtime) must degrade to the countless wording, not raise.
+    """
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == ProfileRegistryUnavailable.code:
-        return ProfileRegistryUnavailable()
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            count = None
+        return ProfileRegistryUnavailable(count=count)
     return None

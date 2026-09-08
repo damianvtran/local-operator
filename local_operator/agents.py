@@ -286,27 +286,93 @@ class AgentRegistry:
         # Load agent metadata
         self._load_agents_metadata()
 
+    #: Files ``save_agent`` creates alongside ``agent.yml``. Their presence is
+    #: what distinguishes "an agent whose definition vanished" from "a
+    #: directory that was never an agent" -- see :meth:`_claims_to_be_an_agent`.
+    _AGENT_DATA_NAMES = (
+        "conversation.jsonl",
+        "execution_history.jsonl",
+        "learnings.jsonl",
+        "schedules.jsonl",
+        "context.pkl",
+        "current_plan.txt",
+        "instruction_details.txt",
+        "system_prompt.md",
+    )
+
+    @classmethod
+    def _claims_to_be_an_agent(cls, agent_dir: Path) -> bool:
+        """Does this directory assert that an agent lives here?
+
+        The predicate behind the completeness rule, and it must answer
+        "cannot prove otherwise" as YES. Asking ``Path.exists()`` instead was a
+        silent-substitution hole: it follows symlinks and swallows ``OSError``,
+        so a directory that unambiguously holds an agent took the "not an agent
+        at all" branch whenever the target failed to resolve -- a dangling
+        ``agent.yml`` symlink, a symlink loop, or an unreadable parent. The
+        strict path then reported a clean registry, ``resolve_profile`` found no
+        row, and the operator silently ran the PACKAGED role of the same name
+        with none of their edits. ``os.path.lexists`` alone is not enough
+        either: it is ``False`` for both of the ``agent.yml``-genuinely-absent
+        cases below and, being ``lstat``-with-``except OSError``, it reports a
+        ``chmod 000`` parent as "no agent here".
+
+        Two independent signals, either of which means "agent":
+
+        1. **The ``agent.yml`` NAME is taken.** ``lstat`` does not follow the
+           link, so a dangling symlink and a loop both answer yes and land in
+           the unreadable bucket rather than the skip bucket. Only ``ENOENT``
+           proves the name free; any other ``OSError`` (``EACCES`` on the
+           parent, ``ENOTDIR``) means we cannot prove absence, and guessing
+           "absent" is the unsafe guess.
+        2. **Agent data files remain.** ``agent.yml`` can be genuinely gone
+           while the agent's history is still on disk -- an interrupted
+           ``migrate_agents_dir`` copy, or a user who deleted the wrong file.
+           That is a definition that failed to read, not an empty directory,
+           and it must keep raising exactly as it did before this rule existed.
+
+        A directory that answers no to both is not an agent: the drained legacy
+        ``agents/agents/``, a stray temp dir, a ``.DS_Store``.
+        """
+        try:
+            os.lstat(agent_dir / "agent.yml")
+            return True
+        except FileNotFoundError:
+            pass  # Name is genuinely free; fall through to the data-file probe.
+        except OSError:
+            return True
+
+        for name in cls._AGENT_DATA_NAMES:
+            try:
+                os.lstat(agent_dir / name)
+                return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+        return False
+
     def _scan_agents_metadata(self) -> Tuple[Dict[str, AgentData], List[Path]]:
         """Read every agent definition under ``agents_dir``.
 
-        Returns the agents read and the directories that held an ``agent.yml``
-        which could not be read, parsed or validated.
+        Returns the agents read and the directories that hold an agent which
+        could not be read, parsed or validated.
 
         Completeness means "every agent definition I could see, I read
         successfully" -- NOT "every directory here looks like an agent". A
-        subdirectory with no ``agent.yml`` is not a failed read of an agent, it
-        is not an agent at all, so it is skipped without touching completeness.
-        Counting it as incomplete permanently bricked profile launch and team
-        attach on any machine carrying the empty legacy ``agents/agents/``
-        directory that ``migrate_agents_dir`` used to leave behind: the strict
-        path raised forever, and the advice it gave ("repair unreadable agent
-        definitions") named nothing the user could act on because every real
-        definition was in fact fine.
+        subdirectory that does not claim to be an agent at all (see
+        :meth:`_claims_to_be_an_agent`) is not a failed read, so it is skipped
+        without touching completeness. Counting it as incomplete permanently
+        bricked profile launch and team attach on any machine carrying the
+        empty legacy ``agents/agents/`` directory that ``migrate_agents_dir``
+        used to leave behind: the strict path raised forever, and the advice it
+        gave ("repair unreadable agent definitions") named nothing the user
+        could act on because every real definition was in fact fine.
 
-        A directory that HAS an ``agent.yml`` which fails to load still counts
-        as incomplete. That is a genuine unreadable definition, and the strict
-        path must keep failing loudly for it -- silently skipping an edited
-        installed role would let ``resolve_profile`` fall through to the
+        A directory that DOES claim to be an agent and fails to load still
+        counts as incomplete. That is a genuine unreadable definition, and the
+        strict path must keep failing loudly for it -- silently skipping an
+        edited installed role would let ``resolve_profile`` fall through to the
         packaged role of the same name and run something the user did not
         choose (see :meth:`require_complete_metadata`).
 
@@ -317,6 +383,11 @@ class AgentRegistry:
         agents: Dict[str, AgentData] = {}
         incomplete: List[Path] = []
 
+        # A vanished agents_dir yields an empty scan here rather than an error:
+        # this is also the TOLERANT path (``list_agents`` and friends), which
+        # has always answered "no agents" instead of raising. The strict path
+        # does not accept that answer and checks the directory itself -- see
+        # :meth:`require_complete_metadata`.
         if not self.agents_dir.exists():
             return agents, incomplete
 
@@ -325,7 +396,7 @@ class AgentRegistry:
                 continue
 
             agent_config_file = agent_dir / "agent.yml"
-            if not agent_config_file.exists():
+            if not self._claims_to_be_an_agent(agent_dir):
                 # Not an agent directory: a stray temp dir, an editor artifact,
                 # or the drained legacy nested dir. Debug rather than warning --
                 # it is discoverable when someone goes looking, but it is not a
@@ -698,6 +769,11 @@ class AgentRegistry:
         because skipping an edited installed role could select a packaged role
         of the same name. Recheck a failed snapshot so repair is immediately
         retryable without replacing the session or waiting for cache expiry.
+
+        A snapshot that SUCCEEDS is still cached for ``refresh_interval``, so a
+        registry that breaks again is not noticed until the interval elapses.
+        That asymmetry is deliberate -- the recheck exists to make repair
+        retryable, not to re-stat the tree on every profile launch.
         """
         from local_operator.session.errors import ProfileRegistryUnavailable
 
@@ -706,7 +782,23 @@ class AgentRegistry:
             if not self._metadata_complete:
                 self._refresh_agents_metadata()
         except OSError:
+            # Deliberately COUNTLESS: the scan died before it could attribute
+            # the failure to specific directories, so there is no number to
+            # report. ``errors.py`` allows the bare form for exactly this and
+            # for the far side of the transport.
             raise ProfileRegistryUnavailable() from None
+
+        # "The agents directory is gone" is an unreadable registry, not an
+        # empty one. The tolerant scan answers zero agents for it (the callers
+        # there predate this rule and must keep working), but for the strict
+        # path zero-because-vanished is indistinguishable from zero-because-
+        # empty, and every role would then resolve to a packaged seed with no
+        # warning. ``__init__`` creates the directory, so this is only
+        # reachable when something removes it under a live registry.
+        if not self.agents_dir.exists():
+            logging.warning("Agent registry incomplete; agents dir is missing: %s", self.agents_dir)
+            raise ProfileRegistryUnavailable() from None
+
         if not self._metadata_complete:
             # The full paths go to the local log only. This error crosses the
             # attach/HTTP transport boundary, where ``session/errors.py``
@@ -1278,12 +1370,24 @@ class AgentRegistry:
                 if target_dir.exists():
                     continue
 
+                created_target = False
                 try:
-                    # Create the target directory
-                    target_dir.mkdir(parents=True, exist_ok=True)
+                    # ``exist_ok`` is deliberately OFF: it is what makes the
+                    # rollback below provably safe. The check above already
+                    # skipped a pre-existing target, so reaching a
+                    # ``FileExistsError`` means another process created it in
+                    # the meantime -- and then it is not ours to remove.
+                    target_dir.mkdir(parents=True)
+                    created_target = True
 
-                    # Move all files from nested directory to the target directory
-                    for file_path in agent_dir.glob("*"):
+                    # ``agent.yml`` is copied LAST so a copy that dies partway
+                    # cannot leave a target that looks like a healthy agent
+                    # while its history is missing. Combined with the rollback
+                    # below, a torn migration is either fully undone or fully
+                    # visible -- never a definition-less directory that the
+                    # scan has to classify.
+                    sources = sorted(agent_dir.glob("*"), key=lambda path: path.name == "agent.yml")
+                    for file_path in sources:
                         target_file = target_dir / file_path.name
                         shutil.copy2(file_path, target_file)
 
@@ -1292,6 +1396,28 @@ class AgentRegistry:
                     logging.info(f"Migrated agent {agent_id} from nested directory")
                 except Exception as e:
                     logging.error(f"Failed to migrate agent {agent_id}: {str(e)}")
+                    # Roll the half-written target back so the next start
+                    # retries this agent from scratch. Without it the partial
+                    # directory is skipped forever by the ``target_dir.exists()``
+                    # check above, stranding the agent in the nested dir.
+                    #
+                    # This ``rmtree`` is safe where the one removing
+                    # ``nested_dir`` would not be, on two counts: every file
+                    # here is a COPY whose source is still intact (``agent_dir``
+                    # is only removed after the loop completes), and
+                    # ``created_target`` proves this directory was created by
+                    # this attempt, so no pre-existing agent data can be inside
+                    # it.
+                    if created_target:
+                        try:
+                            shutil.rmtree(target_dir)
+                        except OSError as cleanup_error:
+                            logging.error(
+                                "Failed to roll back partial migration of agent %s at %s: %s",
+                                agent_id,
+                                target_dir,
+                                cleanup_error,
+                            )
 
         try:
             # ``rmdir``, never ``rmtree``: it refuses a non-empty directory, so
