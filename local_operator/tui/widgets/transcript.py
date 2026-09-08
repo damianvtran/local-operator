@@ -1733,6 +1733,18 @@ class WakeBlock(ExpandableActionBlock):
 #: own the viewport.
 _SENDER_FIELD_MAX_CHARS = 120
 
+#: How much of a peer's message body is fed to the collapsed row's preview.
+#:
+#: NOT a display cap — the row truncates itself to the width it is given, and a
+#: second truncation rule beside that one would be a defect. This bounds the
+#: WORK: both the sanitize and `truncate_cells` walk the string handed to them,
+#: and a peer body is capped on the wire at `PEER_MESSAGE_MAX_BYTES` (256 KiB),
+#: which is four orders of magnitude more text than a single row can show.
+#: Chosen far above any reachable row (the widest terminal times the widest
+#: name column is still a few hundred cells) so it can never be the thing that
+#: decides what a reader sees, while keeping the per-repaint cost flat.
+_SNIPPET_SOURCE_MAX_CHARS = 4096
+
 
 def _sanitize_sender_field(value: object) -> str:
     """One line of bounded, plain text from an advisory sender field.
@@ -1784,8 +1796,10 @@ def _sanitize_line(value: object) -> str:
     codepoint list would miss the next bidi control someone finds.
 
     Newlines and tabs deliberately SURVIVE here (``strip_control_sequences``
-    keeps them for multi-line tool output). Every caller on this spine renders
-    one row, so each collapses whitespace itself.
+    keeps them for multi-line tool output) — this function is not what makes a
+    string single-line. Every caller on this spine renders ONE row and collapses
+    whitespace itself immediately after, so no newline reaches a row; a future
+    caller that skips the collapse would need its own.
     """
     return "".join(
         char
@@ -1865,6 +1879,42 @@ class PeerMessageBlock(ExpandableActionBlock):
         #: with the frame (the discipline the old header row count followed,
         #: and ``UserBlock._receipt_row`` before it).
         self._chrome_rows: int = 1
+        #: The collapsed row's preview of the body, sanitized and flattened
+        #: ONCE here rather than on every repaint.
+        #:
+        #: `_refresh_row` runs on hover, focus, expand/collapse, `retheme`,
+        #: `on_resize` AND `_invalidate_name_col` — and that last one repaints
+        #: every ledger block when the shared name column moves, so one peer
+        #: card's cost is paid by the whole ledger. The strip is a regex plus a
+        #: per-character `unicodedata.category` scan, and it runs over the
+        #: WHOLE body while all but one row of the result is discarded. The
+        #: body is not small by contract: `PEER_MESSAGE_MAX_BYTES` is 256 KiB,
+        #: which measured 23.9 ms of loop-thread CPU per repaint — real CPU on
+        #: the event loop, not scheduling noise (`time.thread_time`, the
+        #: measure AGENTS.md's timing section calls the honest one here).
+        #:
+        #: This mirrors `ToolCard`, which strips once at construction rather
+        #: than per paint — the precedent the snippet strip was modelled on,
+        #: and the half of it this class had not copied. Safe to cache because
+        #: `_text` is assigned once and never mutated; a block whose body
+        #: changed would need a new block, as every other transcript receipt
+        #: does.
+        #:
+        #: Order matters: strip FIRST, then collapse whitespace. Stripping can
+        #: expose a newline that was inside an escape's payload, and collapsing
+        #: first would leave it to be measured into a word's width and printed
+        #: literally mid-row.
+        #:
+        #: Sliced before sanitizing, and the slice is deliberately far larger
+        #: than any row: `truncate_cells` walks the string it is given, so a
+        #: 256 KiB snippet cost 0.89 ms per repaint even once the strip was
+        #: cached. `_SNIPPET_SOURCE_MAX_CHARS` cells cannot be reached by a row
+        #: (`TOOL_NAME_COL_MAX` plus a terminal's width is orders of magnitude
+        #: below it), so this bounds the work without being a second truncation
+        #: rule that could disagree with the row's own. Only the PREVIEW is
+        #: bounded \u2014 `text()` and the expansion read `_text` directly, so
+        #: `/copy` and the opened card stay byte-verbatim.
+        self._snippet = " ".join(_sanitize_line(body[:_SNIPPET_SOURCE_MAX_CHARS]).split())
         self._row_count = 1
         self._applied_rows = -1
         self._built_width = -1
@@ -2048,12 +2098,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         # treating one trust boundary two opposite ways is the drift; this is
         # the shared helper, not a second implementation.
         #
-        # Order matters: strip FIRST, then collapse whitespace. Stripping can
-        # expose a newline that was inside an escape's payload, and collapsing
-        # first would leave it to be measured into a word's width and printed
-        # literally mid-row.
-        snippet = " ".join(_sanitize_line(self._text).split())
-        return identity, snippet
+        # Computed ONCE in `__init__` (see :attr:`_snippet`), not here: this
+        # method runs on every repaint, and the strip is ~20x the cost of the
+        # whitespace collapse it replaced.
+        return identity, self._snippet
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         """Re-fit the card at the new width (same guard as the tool card)."""
@@ -2191,9 +2239,24 @@ class PeerMessageBlock(ExpandableActionBlock):
         # which: `"lo-usage-panel" — my PR #744 merged — Release: patch`.
         # `·` is the separator the neighbouring `send` row already reserves
         # for structure (`_send_summary`'s `" · ".join`), and prose does not
-        # contain it — so the two halves of one cross-session conversation
-        # gain a shared punctuation vocabulary to go with their mirrored
-        # icons, and the seam survives its own content.
+        # contain it — measured at 1921 em-dashes against 89 interpuncts
+        # (21.6:1) across this tree's markdown — so the two halves of one
+        # cross-session conversation gain a shared punctuation vocabulary to go
+        # with their mirrored icons, and the seam survives its own content.
+        #
+        # Two known residual collisions, both looked at in a rendered frame and
+        # both judged safe, recorded so the next reader does not re-derive them:
+        #
+        # - A peer QUOTING a ledger row relays `·`-joined text, so a structural
+        #   and a quoted separator can share a line. This is the em-dash problem
+        #   at 21.6x lower frequency, and the quoted name still delimits the
+        #   seam; it is not worth a third glyph.
+        # - `·` is also `NOTICE_GLYPHS["info"]`, and `_SPINNER`'s docstring in
+        #   this file records a real defect from that collision — a `"· "` head
+        #   painted in the same dim ink at the same column as an info notice.
+        #   This use does not repeat it: the notice's glyph LEADS its row in the
+        #   icon column, while this one sits mid-row inside a card band the
+        #   notice does not have, so the two never align.
         composed = f"{identity} · {snippet}" if snippet else identity
         summary = truncate_cells(composed, budget)
 
@@ -2265,12 +2328,6 @@ class PeerMessageBlock(ExpandableActionBlock):
             row.append("\n" + indent, style=header_style)
             row.append(truncate_cells(wrapped, line_width), style=header_style)
             chrome += 1
-        row.append("\n", style=dim)
-        chrome += 1
-        #: Everything above the body is the app's own furniture; the body is
-        #: the peer's words. `copy_row_is_chrome` reads this, so a drag over an
-        #: open receipt pastes the message and nothing else.
-        self._chrome_rows = chrome
 
         # A peer that sent nothing (or only whitespace) has no body worth
         # painting: `_body_rows` always returns at least one entry, so an empty
@@ -2285,15 +2342,41 @@ class PeerMessageBlock(ExpandableActionBlock):
         body_rows = self._body_rows(line_width)
         while body_rows and not body_rows[-1].strip():
             body_rows.pop()
-        if not body_rows:
-            return row
+
+        # The separator is appended ONLY once a body is known to follow, and
+        # that ordering is the whole finding. Appending it first left an empty
+        # card ending on a dangling "\n": Rich paints a row for it and
+        # `str.splitlines()` does not count one, so the card painted 3 rows
+        # while `_row_count`/`settled_rows()` reported 2 and `_chrome_rows`
+        # (3) exceeded the row count it is supposed to index into. That is the
+        # same self-contradiction about its own height that this class's
+        # hostile-pid fix closed one commit earlier — a separator with nothing
+        # under it is furniture for a body that does not exist.
+        if body_rows:
+            row.append("\n", style=dim)
+            chrome += 1
+        #: Everything above the body is the app's own furniture; the body is
+        #: the peer's words. `copy_row_is_chrome` reads this, so a drag over an
+        #: open receipt pastes the message and nothing else.
+        self._chrome_rows = chrome
+
         for wrapped in body_rows:
             row.append("\n" + indent, style=text_style)
             row.append(truncate_cells(wrapped, line_width), style=text_style)
         return row
 
     def settled_rows(self) -> int:
-        """Rows settled now: one collapsed, the whole card when expanded."""
+        """Rows settled now: one collapsed, the whole card when expanded.
+
+        The ``_finalized`` gate is defensive and cannot be observed False:
+        ``__init__`` calls :meth:`finalize` unconditionally, so the block is
+        finalized before any caller can hold a reference to it. Mutating the
+        gate away therefore leaves the suite green — that is an EQUIVALENT
+        mutant rather than a missing guard, so do not go hunting for a test to
+        write for it. The gate stays because it is :class:`WakeBlock`'s
+        contract for this method and the two ledger cards are read side by
+        side; the count itself IS guarded, and a constant return goes red.
+        """
         return self._row_count if self._finalized else 0
 
     def spans_multiple_rows(self) -> bool:
