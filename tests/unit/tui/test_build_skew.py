@@ -69,7 +69,7 @@ DRIFT = "was updated after this window opened"
 # row and quietly stopped meaning "no owner notice" (review round 2, R2-3).
 OWNER_SKEW = "is running "
 OWNER_UNKNOWN = "running an older version than this window"
-MOVES_OVER = "will move to the new version when its current work finishes"
+MOVES_OVER = "will switch to the new version when it is next idle"
 
 
 class _BoundViewer(FakeSession):

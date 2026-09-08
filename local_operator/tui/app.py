@@ -11236,24 +11236,45 @@ class OperatorApp(App[None]):
         membership FOLLOW the card rather than the moment the notice was
         written: a notice gains the class and the card's exact width while the
         card is up, and sheds both — back to the full-width spine — when it is
-        not. ``set_class`` only fires the block's re-centre (``NoticeBlock.set_class``)
-        on a real change, so an unchanged sync costs nothing.
+        not. An unchanged sync still costs nothing, but the guard is Textual's
+        own: ``add_class``/``remove_class`` return early when the class set is
+        already what was asked for, so no style update is queued. The block has
+        no ``set_class`` override to fire — the re-wrap comes from ``on_resize``,
+        which is how the width assigned below arrives.
         """
         transcript = self._transcript_view()
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        # The card sits inside the transcript's content box with equal ground on
-        # both sides, so a notice given the card's width and offset by the same
-        # half-difference lands on the card's exact column. The transcript's own
-        # one-cell left gutter is inside that box, so the centre of the CONTENT
-        # is what the offset aims at. The block cannot be centred BY the
-        # stylesheet: `align-horizontal` aligns a container's children, never the
-        # node carrying it, so the offset is computed here alongside the width
-        # the same clamp resolves. When the card is gone the width is RESET to
-        # `1fr` — left at the boot value it narrowed the notice for the rest of
-        # the session, dead space to its right at any width.
-        content_box = box - transcript.styles.gutter.width
-        offset = max(0, (content_box - card) // 2)
+        # The card is centred by the stylesheet in `box` — the screen's own
+        # content box — so the offset that lands a notice on the card's column
+        # has to be computed against THAT box, then rebased into the transcript's
+        # coordinate space. The block cannot be centred BY the stylesheet:
+        # `align-horizontal` aligns a container's children, never the node
+        # carrying it, so the offset is computed here alongside the width the
+        # same clamp resolves. When the card is gone the width is RESET to `1fr`
+        # — left at the boot value it narrowed the notice for the rest of the
+        # session, dead space to its right at any width.
+        #
+        # The gutter is SUBTRACTED rather than excluded from the centring, and
+        # the distinction is the whole bug. An offset is relative to the block's
+        # own parent, so the transcript's one-cell left gutter is already spent
+        # before the offset applies; centring inside `box - gutter` instead
+        # centred the notice in a box the card is not centred in. The old form
+        # resolved to `(box - card - 1) // 2` against this one's `(box - card)
+        # // 2`, so the two agreed only where `box - card` happened to be EVEN:
+        # `(d - 1) // 2 == d // 2 - 1` holds for even `d` alone.
+        #
+        # Measured on the unfixed code, over the CARDED widths only — below the
+        # card threshold this offset never applies at all, so 70 and 80 (no
+        # card) say nothing about it either way. One cell of drift at 86, 88,
+        # 90, 100 and 110 (`box - card` odd), zero at 85, 87, 120, 140, 160 and
+        # 190 (even) — a defect that hides at exactly the width its own
+        # regression test ran at, which is why the guard is parametrized across
+        # both parities. The threshold itself: 85 is the FIRST carded width
+        # (`box=83`, `card=75`, `d=8 == BOOT_CARD_MIN_INSET`) and 84 (`d=7`) the
+        # last uncarded one; 86 is merely the lowest carded width that drifts,
+        # since 85's `d` is even.
+        offset = max(0, (box - card) // 2 - transcript.styles.gutter.left)
         for block in transcript.query(".notice-block"):
             block.set_class(card_up, BOOT_COLUMN_CLASS)
             if card_up:
@@ -19271,8 +19292,8 @@ class OperatorApp(App[None]):
           a fresh one on its ``retiring`` frame with no notice at all. Every
           other outcome \u2014 a busy runtime, a ``kept`` answer, an old runtime
           that does not know the op \u2014 is a runtime that is STAYING on the old
-          build, and earns one ``note`` line saying it will move over when its
-          current work finishes. No notice ever asks the user to ``/stop``
+          build, and earns one ``note`` line saying it will switch over once it
+          is next idle. No notice ever asks the user to ``/stop``
           (design-runtime-autorefresh \u00a73.3/\u00a73.5).
 
         The COPY deliberately says "session" and "window" rather than
@@ -19399,14 +19420,23 @@ class OperatorApp(App[None]):
         # warning: nothing is wrong and nothing is asked of the user; not
         # ``info`` either, whose dim ink the widget reserves for a receipt
         # nobody has to read \u2014 this answers "why is my session on an older
-        # version?") saying it will move over when its work finishes, which
-        # the runtime's own reaper does.
+        # version?") saying it will switch over once it is idle, which the
+        # runtime's own reaper does.
+        #
+        # "when it is next idle", NOT "when its current work finishes": the
+        # notice paints on a brand-new ``/new`` splash with no work in flight,
+        # where promising the end of work that does not exist is confusing and
+        # arguably untrue. ``may_refresh`` gates the retire on ``is_busy()``
+        # being false, so idleness \u2014 not the completion of a particular task \u2014
+        # is literally the condition the runtime waits for, and it is the one
+        # that is also true of a session sitting at an empty prompt (design
+        # review round 1, D3).
         idle_probe = getattr(session, "owner_idle", None)
         ask = getattr(session, "request_refresh", None)
         owner_idle = bool(idle_probe()) if callable(idle_probe) else False
 
         def announce_stale() -> None:
-            """C\u2032: this session is on an older build and will move on its own.
+            """C\u2032: this session is on an older build and will switch on its own.
 
             One function, two callers (the busy branch and the ``kept`` answer
             of the idle branch) so the two states cannot drift into two
@@ -19434,7 +19464,7 @@ class OperatorApp(App[None]):
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
-                    f"will move to the new version when its current work finishes.",
+                    "will switch to the new version when it is next idle.",
                     scope,
                     notice_kind="note",
                 )
@@ -19444,7 +19474,7 @@ class OperatorApp(App[None]):
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
-                f"move to the new version when its current work finishes.",
+                "switch to the new version when it is next idle.",
                 scope,
                 notice_kind="note",
             )
@@ -19611,10 +19641,19 @@ class OperatorApp(App[None]):
                 # against whatever runtime is live by then (design review
                 # round 1, D2). Kept ``warning`` because the lost attach is
                 # still the headline; the tail states the automatic repair.
+                #
+                # "once it is next idle", NOT "when its current work finishes",
+                # for the reason the build-skew notices give at the same wording
+                # (design review round 1, D3): ``may_refresh`` gates the retire
+                # on ``is_busy()`` being false, so idleness is literally the
+                # condition, and a session that has no work in flight is told
+                # about the end of work that does not exist. This notice paints
+                # on the same runtime-refresh mechanism as those two, so it
+                # states the same promise in the same words.
                 self._notice(
                     "this session is running a version too old to attach a team "
                     "(before 0.46.25); nothing was attached. It will move to the new "
-                    "version on its own when its current work finishes.",
+                    "version on its own once it is next idle.",
                     "warning",
                 )
                 return
