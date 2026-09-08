@@ -11215,20 +11215,37 @@ class Session:
         say "this process wrote it, and the surface that wrote it already told
         the user" (see :class:`~local_operator.config_watch.ConfigChange` and
         the TUI's ``_on_config_change``, which has honoured it since it was
-        added). Nothing was lost by staying quiet here — every in-process
-        writer of these two keys is a ``/model`` form that prints its own
-        receipt naming the pair it saved.
+        added). ``local`` covers exactly the writers that go through the
+        ``settings_io`` facade, because only ``settings_io._store`` calls
+        ``notify_local``: the ``/model`` forms, which print their own receipt
+        naming the pair they saved, and the ``/settings`` Model section, which
+        reports scope on its own surface — its rows repaint to the values just
+        typed, under a ``takes effect: new sessions`` label. Each is its own
+        receipt, so staying quiet here loses nothing the user needed.
 
-        Torn pairs are exclusive to that fast path, which is why the fix is
-        scoped to it and not to the notice. An edit from ANOTHER process
-        arrives through the poll, and a config write is one atomic
-        ``os.replace`` of the whole file, so a single tick sees both keys move
-        together and delivers one change carrying the matched pair. Verified
-        rather than assumed: a two-key external save followed by one
-        ``poll_now()`` produces exactly one delivery, ``changed_keys ==
-        {hosting, model_name}``. So the notice a user actually needs — someone
-        else changed the default under me — still prints, once, with a pair
-        that is real.
+        Writers that reach ``ConfigManager.set_config_value`` directly are NOT
+        covered, since that call has no ``notify_local`` hook: ``/login``
+        (``OperatorApp._save_login_defaults``), the missing-model setup
+        recovery and the CLI ``login`` all write this pair and arrive here as
+        ``disk``, so they still print. Pre-existing, and unchanged by #785 —
+        but it means anyone extending this gate has to route the write through
+        the facade rather than add another source check.
+
+        What is verified about the disk path is narrower than "it cannot
+        tear". A config write is one atomic ``os.replace`` of the whole file,
+        so a two-key external save that a SINGLE tick observes delivers one
+        change carrying the matched pair; that is what
+        ``test_another_process_changing_the_default_still_says_so_once`` pins,
+        and it is why the notice a user actually needs — someone else changed
+        the default under me — prints once with a real pair. Two separate
+        replaces are NOT seen as one. External edits that straddle a tick (the
+        poll interval, or a per-write kqueue wake on macOS) arrive as two
+        ``disk`` deliveries, the first carrying a torn pair, and print twice.
+        That is pre-existing on the disk path, is not the contradiction #785
+        describes, and is deliberately not addressed here: closing it needs
+        per-tick coalescing of the notice, which a source flag cannot express.
+        The fix is scoped to ``local`` because ``source`` identifies that
+        writer set exactly, not because tearing is impossible elsewhere.
         """
         if self._job_id is not None:
             return

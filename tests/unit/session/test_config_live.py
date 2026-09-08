@@ -1056,8 +1056,11 @@ async def test_another_process_changing_the_default_still_says_so_once(
             write_from_another_process(config_dir, key, value)
         change = watcher.poll_now()
         assert change is not None and change.source == "disk"
-        # One delivery carrying BOTH keys is why the disk path needs no
-        # coalescing; if this ever splits, the notice below would double.
+        # Narrower than "the disk path cannot tear": what is pinned is that a
+        # two-key save observed by ONE tick arrives as a single matched pair,
+        # so the notice below is single. Two external writes that straddle a
+        # tick do split, and do double it — pre-existing and out of scope for
+        # #785 (see ``Session._on_configured_model_changed``).
         assert change.changed_keys == frozenset({"hosting", "model_name"})
         await _settle(session)
 
