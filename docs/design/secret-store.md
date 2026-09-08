@@ -413,11 +413,13 @@ Schema:
 
 ```sql
 PRAGMA journal_mode=WAL;
-CREATE TABLE meta(k TEXT PRIMARY KEY, v BLOB);       -- schema_version, key_generation, kdf params
+CREATE TABLE meta(k TEXT PRIMARY KEY, v BLOB);       -- schema_version, key_generation,
+                                                     -- key_fingerprint, kdf params
 CREATE TABLE secrets(
   id            TEXT PRIMARY KEY,                     -- UUIDv4, immutable
   name_index    BLOB NOT NULL UNIQUE,                 -- HMAC blind index
   key_generation INTEGER NOT NULL,
+  format_version INTEGER NOT NULL,                    -- record format, for §13 skew
   nonce         BLOB NOT NULL,
   ciphertext    BLOB NOT NULL,                        -- {value, name, description, kind}
   kind          TEXT NOT NULL,                        -- 'string' | 'file'
@@ -860,6 +862,18 @@ continuous across the rename.
 Every retrieval, store, update, delete, rename and failed authorization is
 appended to the `audit` table **and** mirrored to
 `~/.local-operator/secrets/audit.log` (0600, `chflags uappnd`).
+
+> **Shipped in PR 1 vs. still outstanding.** PR 1 writes an audit row for every
+> *successful* retrieval, store, update, delete and rotation, with the hash
+> chain and `audit --verify` below. It does **not** yet record FAILED
+> operations — a `get` for a name that does not exist, or a record that fails
+> authentication, currently leaves no row — and it does not yet mirror to
+> `audit.log` or set `chflags uappnd`. Both gaps belong to the broker PR, which
+> owns the peer identity (pid, executable path) that makes a failure row worth
+> recording and is the process that can hold an append-only file open. Until
+> then the trail shows what succeeded, not an attacker probing for secret
+> names; this paragraph describes the destination, and the note describes what
+> is actually on disk today.
 
 Recorded: timestamp, event, `secret_id` (never the value), session id, peer pid,
 peer executable path (`proc_pidpath`, spike 1), and outcome.

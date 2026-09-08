@@ -268,6 +268,58 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> master.key, both under config_dir()/secrets",
     ),
+    # The same temp file, unlinked when the rename fails. The name is
+    # `master.key.new.<pid>.<random>` next to `master.key`; it is per-process precisely
+    # so concurrent rotations cannot consume each other's, and no caller input
+    # reaches it.
+    (
+        "local_operator/secrets/keys.py::replace_master_key",
+        "<path>.unlink",
+        "the master.key.new.<pid>.<random> temp FILE this call just wrote",
+    ),
+    # Removing a rotation's staged key. The paths come from
+    # `keys.staged_key_paths()`, which globs `master.key.incoming*` inside
+    # config_dir()/secrets -- no caller input reaches the pattern or the
+    # directory, so it cannot name anything under sessions/. The unlink is
+    # additionally gated on the file holding THIS caller's key, which is what
+    # stops one rotation deleting another's only on-disk copy.
+    (
+        "local_operator/secrets/keys.py::discard_staged_master_key",
+        "<path>.unlink",
+        "master.key.incoming* under config_dir()/secrets, holding this call's own key",
+    ),
+    # Same shape as `replace_master_key` below: a temp FILE inside the secrets
+    # directory renamed onto the staged-key FILE beside it. Both names are
+    # built from `keys.secrets_dir()` plus fixed prefixes and this process's
+    # pid/random suffix; no caller input reaches either, so neither can name a
+    # path under sessions/. The rename replaces only the temporary this call
+    # just wrote.
+    (
+        "local_operator/secrets/keys.py::stage_master_key",
+        "os.replace",
+        "temp FILE -> master.key.incoming.<pid>.<random>, both under config_dir()/secrets",
+    ),
+    # The same staging temporary, unlinked when its rename fails. Named
+    # `master.stage.<pid>.<random>.tmp` under config_dir()/secrets and never
+    # derived from caller input.
+    (
+        "local_operator/secrets/keys.py::stage_master_key",
+        "<path>.unlink",
+        "the master.stage.<pid>.<random>.tmp temp FILE this call just wrote",
+    ),
+    # Exclusive creation of master.key on concurrent first use: the payload is
+    # written to `master.key.new.<pid>.<random>` and hardlinked onto
+    # `master.key`, so only a complete file is ever published and only one
+    # caller can publish it. This unlink clears that temporary on EVERY exit —
+    # the lost race included, where the link left the target untouched. Both
+    # names come from `keys.key_path()` (config_dir()/secrets plus a fixed
+    # basename) and this process's own pid/random suffix; no caller input and
+    # no session id reaches either, so neither can name a path under sessions/.
+    (
+        "local_operator/secrets/keys.py::create_private_file",
+        "<path>.unlink",
+        "the master.key.new.<pid>.<random> temp FILE this call just wrote",
+    ),
     # `lop secret file` materialises a file-shaped secret for the lifetime of
     # one command. The directory removed is the one `tempfile.mkdtemp()`
     # returned to this same function moments earlier, under $TMPDIR — it is

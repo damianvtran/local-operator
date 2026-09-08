@@ -238,7 +238,14 @@ def test_loosened_permissions_are_reported_and_stdout_stays_empty(cli) -> None:
 
 
 def test_set_refuses_an_existing_name(cli) -> None:
-    cli("set", "TOKEN", stdin=b"first\n")
+    first = cli("set", "TOKEN", stdin=b"first\n")
+    # Asserted explicitly so a failure of the FIRST set is attributable. QA saw
+    # this test fail once as `assert 0 == 2` — the second set succeeding, which
+    # means the first set's row was absent — and could not reproduce it in ~250
+    # attempts. Without this line the symptom is laundered into a confusing
+    # assertion about the second command; with it, the next occurrence names
+    # itself.
+    assert first.returncode == 0, f"the FIRST set failed: rc={first.returncode} {first.stderr!r}"
     again = cli("set", "TOKEN", stdin=b"second\n")
     assert again.returncode == 2
     assert b"already exists" in again.stderr
@@ -348,26 +355,30 @@ def test_run_can_rename_the_variable(cli) -> None:
     assert result.stdout == b"[key-value]"
 
 
-def test_file_materialises_a_readable_path_and_removes_it(cli) -> None:
-    """§7's mechanism: a real, re-openable file that is gone afterwards."""
+def test_file_materialises_a_readable_path_and_removes_it(cli, tmp_path: Path) -> None:
+    """§7's mechanism: a real, re-openable file that is gone afterwards.
+
+    The probe path is under ``tmp_path`` and NOT a fixed ``/tmp`` name. A
+    shared path made this test delete a concurrent run's probe on a machine
+    that is explicitly worked through many worktrees at once: four simultaneous
+    invocations reproducibly gave two passes and two ``FileNotFoundError``
+    failures, which the next agent has to diagnose from scratch.
+    """
     cli("set", "SA_JSON", "--kind", "file", stdin=b'{"type":"service_account"}\n')
+    probe = tmp_path / "materialised-path"
     script = (
         'printf "[%s]" "$(cat "$GOOGLE_APPLICATION_CREDENTIALS")"; '
         # Re-open it: the design rejected FIFOs and /dev/fd because a second
         # open reads zero bytes there, and google-auth opens more than once.
         'printf "[%s]" "$(cat "$GOOGLE_APPLICATION_CREDENTIALS")"; '
-        'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS" > /tmp/lop-secret-path-probe'
+        f'printf "%s" "$GOOGLE_APPLICATION_CREDENTIALS" > "{probe}"'
     )
     result = cli("file", "SA_JSON", "--", "bash", "-c", script)
     assert result.stdout == b'[{"type":"service_account"}][{"type":"service_account"}]'
 
-    leaked = Path("/tmp/lop-secret-path-probe")
-    try:
-        materialised = Path(leaked.read_text())
-        assert not materialised.exists(), "the plaintext file outlived the command"
-        assert not materialised.parent.exists(), "the private directory was not removed"
-    finally:
-        leaked.unlink(missing_ok=True)
+    materialised = Path(probe.read_text())
+    assert not materialised.exists(), "the plaintext file outlived the command"
+    assert not materialised.parent.exists(), "the private directory was not removed"
 
 
 def test_file_uses_a_custom_env_var(cli) -> None:

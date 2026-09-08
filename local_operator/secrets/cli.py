@@ -94,7 +94,15 @@ def add_parser(subparsers: Any) -> None:
 
     for name in ("rm", "delete"):
         remove_parser = actions.add_parser(name, help="Remove a secret permanently")
-        remove_parser.add_argument("name")
+        # Optional because `--id` is the alternative way to name the target. A
+        # record whose ciphertext will not open has no readable name and no
+        # valid blind index, so `--id` is the only way to remove one — without
+        # it a single damaged row is unremovable short of editing SQLite by
+        # hand. `list` prints the id of every such row.
+        remove_parser.add_argument("name", nargs="?")
+        remove_parser.add_argument(
+            "--id", help="Remove by record id; the way to remove an undecryptable record"
+        )
         remove_parser.add_argument(
             "--yes", action="store_true", help="Do not prompt for confirmation"
         )

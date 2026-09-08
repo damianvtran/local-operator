@@ -21,6 +21,7 @@ and it will instead ask the broker, with this layer unchanged.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -35,6 +36,7 @@ from local_operator.secrets import audit
 from local_operator.secrets.crypto import (
     RECORD_FORMAT_VERSION,
     RecordMetadata,
+    key_fingerprint,
     name_index,
     open_record,
     seal,
@@ -47,11 +49,13 @@ from local_operator.secrets.errors import (
     SecretExists,
     SecretNotFound,
     SecretStoreError,
+    StaleKeyEpoch,
 )
 from local_operator.secrets.keys import (
     FILE_MODE,
     check_mode,
     ensure_secrets_dir,
+    replace_master_key,
     store_path,
 )
 
@@ -69,6 +73,20 @@ KINDS = ("string", "file")
 #: Descriptions are operator-written labels shown by ``list``; the ceiling only
 #: has to keep a pathological paste from bloating every record.
 MAX_DESCRIPTION_LENGTH = 1024
+
+#: ``meta`` key holding the fingerprint of the master key the store is sealed
+#: under. This is the store's KEY EPOCH, and it exists because ``BEGIN
+#: IMMEDIATE`` serialises statements but not key epochs: a session that loaded
+#: the key before a rotation would otherwise commit a record sealed under the
+#: old key and indexed under the old index key, unreachable and undecryptable
+#: forever, while reporting success. Every write compares its own key against
+#: this row inside its own transaction and fails closed on a mismatch.
+#:
+#: Absent on a store created before this row existed. That case is treated as
+#: "epoch unknown", not as a mismatch, and the next write backfills it —
+#: refusing to write to a pre-existing store would be a worse failure than the
+#: race this guards.
+KEY_FINGERPRINT_KEY = "key_fingerprint"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v BLOB);
@@ -140,10 +158,39 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _read_meta_int(connection: sqlite3.Connection, key: str, default: int) -> int:
+    """Read an integer ``meta`` row, refusing a corrupted one cleanly.
+
+    The conversion is guarded because ``meta.v`` is a BLOB column that SQLite
+    will happily hold TEXT or NULL in: a hand-corrupted row made ``bytes()`` or
+    ``int()`` raise something that is not a :class:`SecretStoreError`, which
+    escaped the CLI's one-line error contract and printed a 29-line traceback
+    into a command routinely run inside ``$( )``. The value is unusable either
+    way; the only question is whether the operator gets a sentence or a stack.
+    """
     row = connection.execute("SELECT v FROM meta WHERE k = ?", (key,)).fetchone()
-    if row is None:
+    if row is None or row[0] is None:
         return default
-    return int(bytes(row[0]).decode("ascii"))
+    try:
+        return int(bytes(row[0]).decode("ascii"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise IncompatibleStore(
+            f"This secret store's {key!r} metadata is not a number ({row[0]!r}). "
+            "The store's metadata is damaged; it cannot be read safely."
+        ) from exc
+
+
+def _read_meta_blob(connection: sqlite3.Connection, key: str) -> bytes | None:
+    row = connection.execute("SELECT v FROM meta WHERE k = ?", (key,)).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return bytes(row[0])
+
+
+def _write_meta_blob(connection: sqlite3.Connection, key: str, value: bytes) -> None:
+    connection.execute(
+        "INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        (key, value),
+    )
 
 
 def _write_meta_int(connection: sqlite3.Connection, key: str, value: int) -> None:
@@ -171,6 +218,119 @@ def _payload(name: str, description: str, value: bytes) -> bytes:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def recorded_key_fingerprint(base: Path | None = None) -> bytes | None:
+    """The fingerprint of the key the store on disk is currently sealed under.
+
+    Read without a key, because the caller of this function is deciding WHICH
+    key to use — it is how an interrupted rotation is detected and completed
+    (see :func:`local_operator.secrets.access.resolve_master_key`). Returns
+    ``None`` when there is no store, no fingerprint row (a store predating the
+    row), or a damaged one: every one of those means "cannot tell", and the
+    caller falls back to the installed key rather than guessing.
+    """
+    path = store_path(base)
+    if not path.exists():
+        return None
+    try:
+        with closing(_connect(path)) as connection:
+            return _read_meta_blob(connection, KEY_FINGERPRINT_KEY)
+    except sqlite3.DatabaseError:
+        return None
+
+
+def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
+    """Install ``key`` as ``master.key`` ONLY if the store is still sealed under it.
+
+    A compare-and-swap, and the reason it exists is that installing
+    unconditionally destroys the store. ``rotate`` is stage → COMMIT → install,
+    and the epoch guard inside the re-seal transaction serialises the COMMITs —
+    but it said nothing about the installs that follow them, which ran outside
+    any transaction. So a rotator that committed EARLIER could install its now
+    superseded key LATER::
+
+        A: COMMIT  -> db sealed under Ka
+        B: COMMIT  -> db sealed under Kb   (legitimate; B adopted Ka first)
+        B: install Kb, discard staged Kb   (correct)
+        A: install Ka, discard staged Ka   (last writer wins -- Ka is STALE)
+
+    Final state: the database needs Kb, ``master.key`` holds Ka, and both staged
+    copies are gone, so Kb exists NOWHERE. Every secret is unrecoverable and
+    both processes exit 0 printing ``rotated N secret(s)``. Reproduced
+    deterministically 3/3 with two real ``lop secret rotate`` processes and no
+    crash anywhere, and 7/8 from ordinary contention between four of them.
+    :func:`local_operator.secrets.access.resolve_master_key` cannot repair it:
+    it adopts a STAGED key matching the database, and the matching one was
+    legitimately discarded by the rotation that installed it.
+
+    **The fix is to make commit-and-install atomic with respect to other
+    rotators by putting the install under the database's OWN write lock.**
+    ``BEGIN IMMEDIATE`` here takes the same lock the re-seal transaction takes,
+    so an install and a competing COMMIT cannot interleave: either this call
+    finishes first and the competitor's later COMMIT+install lands on top of it,
+    or the competitor commits first and the fingerprint read below no longer
+    matches, and this install is REFUSED instead of clobbering.
+
+    Chosen over an exclusive rotation lock held across commit and install, for
+    three reasons. It adds no new lock primitive, so there is no second lock to
+    order against SQLite's and therefore no deadlock to reason about. It is not
+    an ``flock``, so it cannot reproduce #401 — a thread parked in ``flock()``
+    blocks a sibling's ``close()`` of that descriptor on macOS, whereas SQLite
+    contention is bounded by ``busy_timeout`` and raises rather than hangs. And
+    it fails CLOSED by construction: a lock that cannot be taken tempts a
+    degrade-to-unlocked path, which here would be exactly the unguarded install
+    that loses the store.
+
+    Ordinary writes are NOT serialised behind rotation by this. They already
+    contend for the same write lock for their own transactions; this adds one
+    short read-only transaction per rotation, not a lock that spans one.
+
+    **The install stays AFTER the COMMIT and is deliberately not folded into the
+    re-seal transaction.** Writing ``master.key`` before that COMMIT would leave
+    a crash window where the database is still under the OLD key while the new
+    one is installed and the old one is gone — the R2 invariant (at every
+    instant, a key that opens the store exists on disk) inverted. With the
+    ordering kept, R2 holds under concurrency too: before this call the staged
+    key is the copy that opens the committed database; after ``os.replace``
+    ``master.key`` is; a crash between them leaves the staged file for
+    ``resolve_master_key`` to adopt; and a refusal leaves the winner's install
+    untouched, so the key on disk is the one the database is sealed under at
+    every instant. Re-proven with four SIGKILLs landing inside this function
+    while three rotators contended: 0 stores left unopenable.
+
+    Returns ``True`` when the key was installed, ``False`` when another rotation
+    superseded it. Nothing is unlinked on either path: this function is reached
+    both by a rotator installing its OWN staged key and by
+    :func:`local_operator.secrets.access.resolve_master_key` completing somebody
+    ELSE's interrupted rotation, and only the owner is entitled to discard a
+    staged file (see
+    :func:`local_operator.secrets.keys.discard_staged_master_key` — removing
+    another rotation's staged key is the loss that check exists to prevent).
+    The rotator therefore does its own discard on a refusal.
+
+    A store with no database or no fingerprint row cannot be superseded by
+    anything, so the install proceeds unconditionally; that is the same
+    "cannot tell, do not guess" fallback :func:`recorded_key_fingerprint` uses.
+    """
+    path = store_path(base)
+    if not path.exists():
+        replace_master_key(base, key)
+        return True
+
+    with closing(_connect(path)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            recorded = _read_meta_blob(connection, KEY_FINGERPRINT_KEY)
+            if recorded is not None and recorded != key_fingerprint(key):
+                # Superseded. Refusing is what keeps the winner's key installed.
+                return False
+            replace_master_key(base, key)
+            return True
+        finally:
+            # Read-only throughout: the transaction exists solely to hold the
+            # write lock across the fingerprint check and the file install.
+            connection.execute("ROLLBACK")
 
 
 class SecretStore:
@@ -212,6 +372,8 @@ class SecretStore:
                 _write_meta_int(connection, "schema_version", SCHEMA_VERSION)
             if _read_meta_int(connection, "key_generation", 0) == 0:
                 _write_meta_int(connection, "key_generation", 1)
+            if _read_meta_blob(connection, KEY_FINGERPRINT_KEY) is None:
+                _write_meta_blob(connection, KEY_FINGERPRINT_KEY, key_fingerprint(self._master_key))
         self._restrict_modes()
 
     def exists(self) -> bool:
@@ -236,10 +398,19 @@ class SecretStore:
             self._path.with_name(self._path.name + "-wal"),
             self._path.with_name(self._path.name + "-shm"),
         ):
-            try:
-                os.chmod(candidate, FILE_MODE)
-            except FileNotFoundError:
-                continue
+            # The exists()/chmod pair is a TOCTOU on the sidecars, not on the
+            # database: SQLite unlinks `-wal` and `-shm` when the last
+            # connection closes, so a concurrent session can remove one inside
+            # this gap and fail an operation that was otherwise fine (observed
+            # once naturally in ~200 rotation-heavy concurrent runs). A file
+            # that no longer exists carries no ciphertext and needs no mode, so
+            # the disappearance is the desired end state rather than an error.
+            # Only FileNotFoundError is suppressed; a permission failure on a
+            # file that IS there still raises, because that one leaves real
+            # ciphertext at a mode this function promised to remove.
+            with contextlib.suppress(FileNotFoundError):
+                if candidate.exists():
+                    os.chmod(candidate, FILE_MODE)
 
     def _open(self, *, for_write: bool) -> sqlite3.Connection:
         """Open an existing store, refusing an incompatible or exposed one."""
@@ -273,6 +444,40 @@ class SecretStore:
         """The generation new records are sealed under."""
         with closing(self._open(for_write=False)) as connection:
             return _read_meta_int(connection, "key_generation", 1)
+
+    def _guard_key_epoch(self, connection: sqlite3.Connection) -> None:
+        """Refuse a write whose key is no longer the store's key.
+
+        MUST be called inside the caller's ``BEGIN IMMEDIATE`` transaction, not
+        before it. That is the entire protection: ``BEGIN IMMEDIATE`` takes the
+        write lock, so a ``rotate`` cannot land between this check and the
+        INSERT that follows it. Checking outside the transaction would restore
+        the race it exists to close.
+
+        The failure this prevents is not hypothetical. A session that loaded
+        the master key before another session's ``rotate`` would seal its
+        record under the superseded key and index it under the superseded index
+        key, then COMMIT and report "stored". The row is then unreachable by
+        name (the index does not match) and undecryptable (the key is gone) —
+        and because it is undecryptable, it also poisons every enumeration that
+        touches it. Refusing the write costs one retry with a fresh key.
+
+        A store with no fingerprint row predates this guard; it is backfilled
+        rather than refused, because breaking every existing store would be a
+        worse outcome than the race.
+        """
+        recorded = _read_meta_blob(connection, KEY_FINGERPRINT_KEY)
+        mine = key_fingerprint(self._master_key)
+        if recorded is None:
+            _write_meta_blob(connection, KEY_FINGERPRINT_KEY, mine)
+            return
+        if recorded != mine:
+            raise StaleKeyEpoch(
+                "This store's master key was rotated by another session after this one "
+                "loaded it, so this write was refused rather than being sealed under a "
+                "key that no longer exists. Re-run the command; it will pick up the "
+                "current key."
+            )
 
     # -- record helpers ----------------------------------------------------
 
@@ -371,6 +576,7 @@ class SecretStore:
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._guard_key_epoch(connection)
                 generation = _read_meta_int(connection, "key_generation", 1)
                 if connection.execute(
                     "SELECT 1 FROM secrets WHERE name_index = ?", (index,)
@@ -450,6 +656,7 @@ class SecretStore:
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._guard_key_epoch(connection)
                 existing, _ = self._decode(self._row_for(connection, canonical))
                 new_description = (
                     existing.description
@@ -531,16 +738,89 @@ class SecretStore:
         return record
 
     def list(self) -> list[SecretRecord]:
-        """Every record's metadata, name-sorted. Never returns values.
+        """Every readable record's metadata, name-sorted. Never returns values.
 
-        A record that fails to authenticate propagates rather than being
-        skipped: a store with a corrupt record is something the operator must
-        learn the first time they look at it, not on the day they need that
-        one secret.
+        Damaged records are REPORTED, not propagated. This used to raise on the
+        first record that failed to authenticate, on the reasoning that the
+        operator must learn about corruption the first time they look. The
+        reasoning was right and the mechanism was wrong: raising means one bad
+        row takes down ``list``, ``status`` and every subsequent ``rotate``,
+        so the operator learns that something is broken and simultaneously
+        loses every tool for finding out what, including access to the
+        untouched secrets sitting beside it. Enumeration is the surface an
+        operator reaches for *when* the store is damaged; it is the one path
+        that must keep working.
+
+        So a record that will not open is surfaced through
+        :meth:`damaged_records` and through ``list``'s and ``status``'s output
+        rather than by making the store unusable, and :meth:`delete_record_id`
+        gives the operator a way to remove it.
+        """
+        return self._enumerate()[0]
+
+    def damaged_records(self) -> list[str]:
+        """Record ids present in the store that cannot be authenticated.
+
+        Empty in every healthy store. A non-empty result means tampering, disk
+        damage, or a record sealed under a key that no longer exists — the last
+        of which is what a pre-guard concurrent rotation used to produce.
+        """
+        return self._enumerate()[1]
+
+    def _enumerate(self) -> tuple[list[SecretRecord], list[str]]:
+        """Split every row into the records that open and the ids that do not.
+
+        One pass, so ``list`` and ``status`` cannot disagree about which rows
+        are damaged. Only :class:`SecretCorrupt` and
+        :class:`IncompatibleStore` are caught per row: those mean "this record
+        is unreadable", which is precisely the condition to report and step
+        over. A failure to read the store at all still propagates.
         """
         with closing(self._open(for_write=False)) as connection:
             rows = connection.execute(f"SELECT {_RECORD_COLUMNS} FROM secrets").fetchall()
-        return sorted((self._decode(row)[0] for row in rows), key=lambda record: record.name)
+        records: list[SecretRecord] = []
+        damaged: list[str] = []
+        for row in rows:
+            try:
+                records.append(self._decode(row)[0])
+            except (SecretCorrupt, IncompatibleStore):
+                damaged.append(str(row[0]))
+        return sorted(records, key=lambda record: record.name), sorted(damaged)
+
+    def delete_record_id(self, record_id: str, *, session_id: str | None = None) -> bool:
+        """Remove a row by its id, without needing to decrypt it.
+
+        The repair path for a damaged record. :meth:`delete` looks a row up by
+        blind index and decodes it, so it cannot touch a record whose name is
+        unreadable — the operator was left with a row that broke enumeration
+        and that no command could remove. This deletes by primary key, which
+        needs no key material for the row itself.
+
+        Returns whether a row was removed. Still audited, and still guarded by
+        the key epoch: removing a record is a write.
+        """
+        now = time.time()
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._guard_key_epoch(connection)
+                cursor = connection.execute("DELETE FROM secrets WHERE id = ?", (record_id,))
+                removed = cursor.rowcount > 0
+                if removed:
+                    audit.append(
+                        connection,
+                        event="delete",
+                        ts=now,
+                        outcome="ok",
+                        secret_id=record_id,
+                        session_id=session_id,
+                        pid=os.getpid(),
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        return removed
 
     def delete(self, name: str, *, session_id: str | None = None) -> SecretRecord:
         """Remove a secret, returning what was removed."""
@@ -548,6 +828,7 @@ class SecretStore:
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._guard_key_epoch(connection)
                 record, _ = self._decode(self._row_for(connection, name))
                 connection.execute("DELETE FROM secrets WHERE id = ?", (record.record_id,))
                 audit.append(
@@ -576,18 +857,44 @@ class SecretStore:
         work here: each record is opened under its OWN generation before being
         re-sealed under the next one.
 
-        The caller installs the new key file only after this returns, so a
-        crash mid-rotation leaves the old key still matching the untouched
-        database.
+        **The caller must have STAGED the new key on disk before calling this**
+        (:func:`local_operator.secrets.keys.stage_master_key`), and installs it
+        as ``master.key`` after this returns. That ordering is load-bearing and
+        the reverse of what an earlier version of this docstring claimed: by
+        the time this method commits, the database is re-sealed under
+        ``new_master_key``, and the old key opens NOTHING. A crash in the
+        window between this COMMIT and the install is survivable only because
+        the staged file already holds the new key —
+        :func:`local_operator.secrets.access.resolve_master_key` matches it
+        against the fingerprint written below and finishes the install. Commit
+        first with the key only in memory and an ordinary power cut during a
+        rotate loses every secret in the store, unrecoverably.
         """
         now = time.time()
         with closing(self._open(for_write=True)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                # The rotator itself must still be holding the store's current
+                # key: two concurrent rotations would otherwise each re-seal
+                # from a different starting point and the loser's key would be
+                # the one on disk.
+                self._guard_key_epoch(connection)
                 generation = _read_meta_int(connection, "key_generation", 1) + 1
                 rows = connection.execute(f"SELECT {_RECORD_COLUMNS} FROM secrets").fetchall()
+                moved = 0
                 for row in rows:
-                    record, value = self._decode(row)
+                    try:
+                        record, value = self._decode(row)
+                    except (SecretCorrupt, IncompatibleStore):
+                        # A record this key cannot open cannot be re-sealed
+                        # under the next one either, and refusing to rotate
+                        # until it is gone would mean a single damaged row
+                        # blocks the operator's response to a suspected key
+                        # compromise — the moment rotation matters most. It is
+                        # left exactly as it is, still visible through
+                        # `damaged_records()` and still removable by id, and
+                        # the count returned reflects what actually moved.
+                        continue
                     index = name_index(new_master_key, record.name)
                     metadata = RecordMetadata(
                         record_id=record.record_id,
@@ -612,7 +919,15 @@ class SecretStore:
                             record.record_id,
                         ),
                     )
+                    moved += 1
                 _write_meta_int(connection, "key_generation", generation)
+                # The epoch moves in the SAME transaction as the re-seal, so
+                # the fingerprint on disk always describes the key the
+                # ciphertexts are actually under — including for a process that
+                # crashes immediately after this COMMIT, which is how
+                # `resolve_master_key` recognises the staged key as the right
+                # one.
+                _write_meta_blob(connection, KEY_FINGERPRINT_KEY, key_fingerprint(new_master_key))
                 audit.append(
                     connection,
                     event="rotate",
@@ -626,7 +941,7 @@ class SecretStore:
                 connection.execute("ROLLBACK")
                 raise
         self._master_key = new_master_key
-        return len(rows)
+        return moved
 
     def record_broker_event(
         self,
