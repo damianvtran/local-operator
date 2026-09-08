@@ -40,6 +40,7 @@ from local_operator.server.routes import (
     credentials,
     desktop_catalogues,
     desktop_lifecycle,
+    desktop_profiles,
     desktop_radient,
     desktop_sessions,
     health,
@@ -350,6 +351,7 @@ app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
+app.include_router(desktop_profiles.router)
 app.include_router(desktop_lifecycle.router)
 app.include_router(desktop_radient.router)
 

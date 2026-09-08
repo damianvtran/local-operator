@@ -1122,6 +1122,24 @@ class OwnedSessionHandle(SessionHandle):
             return "already admitted"
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
+        # Restore intentionally keeps missing attachments readable. Admission is
+        # different: executing a plain assistant under a stored profile label
+        # would silently change the task. Check the owner's resolved state, not
+        # just HTTP's earlier preflight (the profile can disappear during boot).
+        unresolved = getattr(self._session, "_unresolved_agent", "") or getattr(
+            self._session, "_unresolved_team", ""
+        )
+        team = getattr(self._session, "active_team", None)
+        if team is not None:
+            resolve = getattr(self._session, "_resolve_profile_or_specialist", None)
+            if resolve is not None and resolve(team.manager)[0] is None:
+                unresolved = team.manager
+        if unresolved:
+            self._command_reservations.reject(command_id)
+            raise ValueError(
+                "The attached profile or team could not be restored. "
+                "Choose an available profile or detach it before sending."
+            )
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
