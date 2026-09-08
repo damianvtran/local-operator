@@ -537,6 +537,34 @@ The pieces, and what each guarantees:
   pinned `local-operator`, and — for paid runs — the `osworld` extra
   (upstream `desktop_env` and its ~380-package dependency tree; the committed
   lock resolves 424 packages in total).
+
+  Two construction details are load-bearing and cost about twenty minutes to
+  rediscover, because each fails *after* the previous gate passes:
+
+  - **`uv venv` cannot build this venv, at any flag combination.** It always
+    writes `bin/python3.12` as a symlink to `bin/python` (and that to the
+    managed toolchain), so discovery rejects the launch path with
+    `AdapterDiscoveryError: adapter launch path has a symlink or lexical
+    alias` before any spend. `--link-mode copy` and
+    `--python-preference only-managed` do not change this; they govern the
+    *package* store, not the interpreter shims. Use
+    `<base-python> -m venv --copies --without-pip <venv>`.
+  - **`venv --copies` copies the interpreter but not its runtime library.**
+    On the uv-managed macOS toolchain the copied binary resolves
+    `libpython3.12.dylib` through `@rpath` relative to the venv, so it dies at
+    startup with `dyld: Library not loaded: @rpath/libpython3.12.dylib`.
+    Copy `<toolchain>/lib/libpython3.12.dylib` into `<venv>/lib/` after
+    creating the venv. A venv whose interpreter cannot start is indisting-
+    uishable, from the batch log, from a harness bug.
+
+  **Both packages must be installed as wheels, never `-e`.** An editable
+  install writes no `RECORD`, so `distribution_digest` cannot verify the
+  entry module and load fails with `adapter entry module is not uniquely
+  RECORD-covered`. An editable `local-operator` is worse than a hard failure:
+  it *works*, and stamps the version from the checkout's `pyproject.toml`
+  into evidence — observed reporting `0.51.0` for a tree at `0.51.19`, which
+  is the self-consistent-and-wrong failure §4 warns about. Build both with
+  `uv build --wheel` and install the artifacts.
 - **Exact-distribution discovery.** Before launch, `worker_argv` re-resolves
   both spawn boundaries symlink-free, verifies the release manifest, and
   re-hashes the workspace. At load, `distribution_digest` hashes every RECORD
