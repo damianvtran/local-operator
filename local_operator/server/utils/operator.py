@@ -628,7 +628,9 @@ class ServerOperator:
         persist_conversation: bool = False,
         job_id: Optional[str] = None,
         status_queue: StatusQueue | None = None,
+        model_selection_override: bool = True,
     ) -> None:
+        self.model_selection_override = model_selection_override
         self.executor = executor
         self.config_manager = config_manager
         self.credential_manager = credential_manager
@@ -708,6 +710,7 @@ class ServerOperator:
             },
             request_hosting=self.hosting,
             request_model=self.model,
+            model_selection_override=self.model_selection_override,
             current_agent=self.current_agent,
             persist_conversation=self.persist_agent_conversation,
             job_id=self.job_id,
@@ -861,6 +864,8 @@ def create_operator(
         request_hosting=request_hosting,
         request_model=request_model,
         current_agent=current_agent,
+        persist_conversation=persist_conversation,
+        model_selection_override=bool(request_hosting or request_model),
     )
 
     executor = ServerExecutor(
@@ -882,6 +887,7 @@ def create_operator(
         env_config=env_config,
         hosting=hosting,
         model=model_name,
+        model_selection_override=bool(request_hosting or request_model),
         current_agent=current_agent,
         persist_conversation=persist_conversation,
         job_id=job_id,

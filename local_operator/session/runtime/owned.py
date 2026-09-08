@@ -3634,6 +3634,7 @@ async def spawn_owned_session(
     provider: str | None = None,
     model_id: str | None = None,
     resume: str | None = None,
+    model_selection_override: bool = True,
 ) -> OwnedSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
@@ -3698,6 +3699,7 @@ async def spawn_owned_session(
         yolo=False,
         train=False,
         resume=resume,
+        model_selection_override=model_selection_override,
     )
     session = await create_session(
         args,

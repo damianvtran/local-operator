@@ -416,6 +416,8 @@ class RemoteSession:
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
+        self._birth_model: ModelSpec | None = None
+        self._model_selection_override = False
         self._takeover_factory = takeover_factory
         self._surface = surface
         self._desktop_visible = False
@@ -781,6 +783,8 @@ class RemoteSession:
         cwd: str,
         takeover_factory: Callable[[], Any],
         surface: str = "terminal",
+        initial_model: ModelSpec | None = None,
+        model_selection_override: bool = False,
     ) -> "RemoteSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -806,6 +810,8 @@ class RemoteSession:
         )
         self._cwd = cwd
         self._can_go_cold = True
+        self._birth_model = initial_model
+        self._model_selection_override = model_selection_override
         state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
@@ -850,7 +856,7 @@ class RemoteSession:
         The checkpoint is authoritative for what it carries and the synthesised
         state is authoritative for the rest, so the two are merged rather than
         one replacing the other: ``cwd`` and the model come from THIS process
-        (the config may have changed since; the checkpoint's copy is history),
+        (using the shared conversation-selection reader, not mutable defaults),
         while the roster, todos, title and costs come from disk. ``jobs`` are
         stamped ``restored`` for the same reason the session's own restore does
         — a restored row has no in-process trajectory, and the panel says so
@@ -1168,7 +1174,25 @@ class RemoteSession:
                 config = ConfigManager(config_dir=self._config_dir)
                 provider = str(config.get_config_value("hosting", "") or "")
                 model_id = str(config.get_config_value("model_name", "") or "")
-                model = FrontendModelSpec(provider=provider, model_id=model_id)
+                from local_operator.session.model_selection import read_model_selection
+
+                saved = read_model_selection(self._config_dir / "sessions" / self._session_id)
+                if self._birth_model is not None and (
+                    saved is None or self._model_selection_override
+                ):
+                    model = FrontendModelSpec(**self._birth_model.model_dump())
+                elif saved is not None:
+                    model = FrontendModelSpec(
+                        provider=saved.provider,
+                        model_id=saved.model_id,
+                        reasoning_effort=saved.effort,
+                    )
+                else:
+                    if provider and not model_id:
+                        from local_operator.model.defaults import default_model_for
+
+                        model_id = default_model_for(provider) or ""
+                    model = FrontendModelSpec(provider=provider, model_id=model_id)
             except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 logger.debug("cold state could not read the configured model", exc_info=True)
             if model is None:
@@ -1756,7 +1780,10 @@ class RemoteSession:
             await engage_runtime(
                 self._session_id,
                 self._cwd,
-                WarmErrand(),
+                WarmErrand(
+                    initial_model=self._birth_model,
+                    model_selection_override=self._model_selection_override,
+                ),
                 config_dir=self._config_dir,
                 # The engage yields TIME, not the runtime: a candidate it
                 # spawned keeps constructing and the foreground caller's own
@@ -1765,6 +1792,9 @@ class RemoteSession:
                 preempt=preempt,
                 preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
             )
+            # The owner has now consumed startup intent. A later recovery must
+            # prefer its journal, including explicit switches made after boot.
+            self._model_selection_override = False
         except TimeoutError as error:
             # The engage ran out of deadline — either its own 30 s or, when a
             # foreground caller arrived, the yield budget above. Both mean the
@@ -2931,6 +2961,24 @@ class RemoteSession:
         self._streaming = state.streaming
         self._generation = state.generation
         self._model = state.selected_model
+        # Keep the concrete primary seen at birth OR on an attached owner. A
+        # speculatively warmed owner can retire before its first durable row;
+        # a connected viewer must still seed its successor with that selection,
+        # not whatever global default happened to change while it was idle.
+        from local_operator.providers.registry import get_provider_definition
+
+        selected = state.selected_model
+        if (
+            selected is not None
+            and selected.model_id
+            and (
+                self._birth_model is None
+                or (self._birth_model.provider, self._birth_model.model_id)
+                != (selected.provider, selected.model_id)
+            )
+            and get_provider_definition(selected.provider) is not None
+        ):
+            self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
         self.jobs.replace(state.jobs)
         self._subagent_comms.replace(state.jobs)
         self.wake_scheduler.replace(state.wakes)

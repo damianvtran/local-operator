@@ -55,7 +55,7 @@ from local_operator.paths import config_dir as app_config_dir
 
 # Pure path policy, no engine — see local_operator/resume.py for why it is
 # its own module rather than living here.
-from local_operator.resume import resume_dir
+from local_operator.resume import ResumeNotFound, resume_dir
 
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
@@ -426,8 +426,8 @@ def resolve_hosting_model(
     Raises ``ValueError`` with the legacy message shapes when either value is
     missing, so the CLI's red-banner handler reports it exactly like before.
     The pair-only shape every existing caller expects; the composition root
-    uses :func:`resolve_hosting_model_with_source` because the SOURCE decides
-    whether the session later follows a ``hosting``/``model_name`` edit.
+    uses :func:`resolve_hosting_model_with_source` to distinguish deliberate
+    resume overrides from synthesized bootstrap arguments.
     """
     hosting, model_name, _source = resolve_hosting_model_with_source(agent, args, config_manager)
     return hosting, model_name
@@ -436,34 +436,51 @@ def resolve_hosting_model(
 def resolve_hosting_model_with_source(
     agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str, str]:
-    """``resolve_hosting_model`` plus WHERE the model SELECTION came from.
+    """Resolve conversation identity, retaining the provenance of real overrides.
 
-    The third element is ``"agent"``, ``"flag"`` or ``"config"``. The session
-    stores it as ``model_source``: only a ``"config"``-sourced session switches
-    when the file's default changes, because for the other two the file never
-    chose the model (see ``Session._apply_config_change``).
-
-    Keyed on EITHER field of the pair, not on the hosting alone (review round
-    1, R3). Both directions have to classify as chosen: a model name from
-    config under a flagged hosting is a flag-chosen run, and — the harmful
-    direction — ``--model X`` with no ``--hosting`` is equally chosen, because
-    ``cli.py`` registers the two flags independently and ``lop exec --model
-    <pinned>`` is the spelling a user reaches for to pin a run. Keyed on
-    hosting only, that run classified ``"config"`` and another pane's ``/model
-    default`` moved it off the model the flag named — a file default silently
-    overriding an explicit flag, which is the converse of the rule this source
-    exists to enforce.
-
-    The HOSTING's own origin stays separate and narrower, because
-    :class:`HostingUnknownError` uses it to name the place the bad value came
-    from ("passed with --hosting", "on the agent record"). Widening that one
-    would have ``--model gpt-5`` under a config hosting report the config's
-    typo as having been passed on a flag the user never typed — a repair
-    instruction pointing at the wrong file.
+    New: agent > CLI > defaults. Resume: deliberate CLI override > durable
+    selection > birth precedence for legacy histories with no usable evidence.
+    Agent/profile edits and synthesized bootstrap arguments are not overrides.
     """
-    # The SOURCE is tracked alongside the value, not just the value: the repair
-    # offered when this turns out to be unusable writes the config file, which
-    # is only the last of these three. See HostingUnknownError.source.
+    # Resolve durable identity BEFORE validating global defaults or building a
+    # provider client. A removed/invalid default cannot make a valid saved
+    # conversation impossible to resume. Bootstrap callers pass resolved pairs
+    # too, so their values are not automatically deliberate resume overrides.
+    from local_operator.providers.registry import get_provider_definition
+    from local_operator.session.model_selection import read_model_selection
+
+    directory = None
+    resume = getattr(args, "resume", None)
+    if resume:
+        try:
+            directory = resume_dir(config_manager.config_dir, str(resume))
+        except (ResumeNotFound, ValueError, FileNotFoundError):
+            # A viewer may own only a freshly minted id, with no directory yet.
+            pass
+    elif getattr(args, "train", False):
+        # The legacy unnamed --train/server persistence path uses the registry's
+        # stable autosave id, not a new conversation on each request.
+        agent_id = str(agent.id) if agent is not None else "autosave"
+        directory = Path(config_manager.config_dir) / "agents" / agent_id
+    saved = read_model_selection(directory) if directory is not None else None
+    explicit = getattr(args, "model_selection_override", True)
+    flag_hosting = getattr(args, "hosting", None) if explicit else None
+    flag_model = getattr(args, "model", None) if explicit else None
+    if saved is not None:
+        if flag_hosting or flag_model:
+            from local_operator.model.defaults import default_model_for
+
+            provider = flag_hosting or saved.provider
+            model = flag_model or default_model_for(provider)
+            if get_provider_definition(provider) is None:
+                raise HostingUnknownError(
+                    _unknown_hosting_message(provider, "flag"), provider, "flag"
+                )
+            if not model:
+                raise ModelNotConfiguredError(_no_model_message(provider), provider)
+            return provider, model, "flag"
+        return saved.provider, saved.model_id, "resume"
+
     agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
     flag_hosting: str | None = getattr(args, "hosting", None)
     hosting = agent_hosting or flag_hosting or config_manager.get_config_value("hosting")
@@ -478,7 +495,7 @@ def resolve_hosting_model_with_source(
     model_source = (
         "agent"
         if (agent_hosting or agent_model)
-        else "flag" if (flag_hosting or flag_model) else "config"
+        else "flag" if explicit and (flag_hosting or flag_model) else "config"
     )
     model_name: str | None = (
         agent_model or flag_model or config_manager.get_config_value("model_name")
@@ -499,8 +516,6 @@ def resolve_hosting_model_with_source(
     # working config into a setup prompt. It is also the exact lookup
     # `configure_model` performs, so this accepts precisely what the engine
     # accepts -- a preflight stricter than the engine is its own outage.
-    from local_operator.providers.registry import get_provider_definition
-
     if get_provider_definition(hosting) is None:
         # Before the default-model lookup below: an unknown provider has no
         # default model either, so checking the model first reported the missing
@@ -1857,8 +1872,8 @@ async def _prepare(
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,
-        # Whether a later ``hosting``/``model_name`` edit switches this session
-        # (config-sourced) or only prints a keep notice (agent/flag).
+        # Provenance distinguishes deliberate resume flags from persisted
+        # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
     )
     return _SessionPlan(

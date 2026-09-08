@@ -1721,6 +1721,12 @@ class MobileDaemon:
         else:
             env.pop("LOP_MOBILE_CHILD_MODEL", None)
         env["LOP_MOBILE_CHILD_RESUME"] = session_id
+        # Unlike a viewer's synthesized birth seed these optional fields came
+        # from the Start request itself, so they are deliberate overrides.
+        if provider or model_id:
+            env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
+        else:
+            env.pop("LOP_MODEL_SELECTION_OVERRIDE", None)
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)

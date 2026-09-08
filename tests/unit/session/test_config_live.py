@@ -191,26 +191,6 @@ def compaction_of(session: Session) -> CompactionSettings:
     return settings
 
 
-async def _settled_model(session: Session) -> ModelSpec:
-    """``session.model`` after the background model adopt has landed.
-
-    ``_apply_config_change`` spawns the switch (``build_model_spec`` may hit
-    the network for a real provider), so the observer AWAITS the session's
-    background tasks rather than the clock. The probe table's other observers
-    are sync; the live-apply test awaits whatever an observer returns.
-    """
-    import asyncio
-
-    pending = [task for task in session._background_tasks if not task.done()]
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    return session.model
-
-
-async def _settled_model_attr(session: Session, attr: str) -> Any:
-    return getattr(await _settled_model(session), attr)
-
-
 def _web_tool_offered(session: Session, name: str) -> bool:
     """Whether ``name`` is in the inventory after the next turn-boundary reconcile.
 
@@ -348,16 +328,6 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
     "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
-    # -- model: the session's OWN spec, after the background adopt settles -----
-    # Observed on ``session.model``, not the snapshot: what makes these keys
-    # live is that a config-sourced session SWITCHES. ``model_name`` probes
-    # against the ``test`` provider the session boots on; ``hosting`` moves to
-    # ``openai`` with no ``model_name`` set, which exercises the
-    # default-model fallback and resolves from the static registry (verified
-    # with sockets blocked: ~4 ms, no network). The observer awaits the
-    # background adopt so the switch has landed before it reads.
-    "hosting": ("openai", lambda s, w: _settled_model_attr(s, "provider")),
-    "model_name": ("probe-model", lambda s, w: _settled_model_attr(s, "model_id")),
     # -- web_tools: the inventory after the next turn boundary -----------------
     # Observed through the SAME reconcile the turn start runs, on a session
     # whose inventory starts with both tools, so a disable is seen as the tool
@@ -592,21 +562,15 @@ async def test_a_non_live_key_does_not_quietly_apply_to_a_running_session(tmp_pa
 
 
 def test_the_scope_of_every_reclassified_key_is_the_one_its_consumer_earns() -> None:
-    """The reversal of the original build-time design, pinned as a DECISION.
+    """Scope is a behavioral contract, not a side effect of section grouping.
 
-    ``tool_approval_mode``, ``hosting``/``model_name`` and ``web_*.enabled``
-    were kept out of LIVE on purpose and are now IN it on purpose: the gate,
-    the model and the web tools all follow the file in a running session. A
-    future relabel in either direction must be a decision, not a side effect
-    of a section split. ``auto_save_conversation`` and ``session.cleanup.*``
-    go the other way — nothing reads them after process start, so the honest
-    label is NEW_LAUNCH, not the "new sessions" the old section claimed.
+    Approvals and web inventory remain live. Provider/model defaults seed new
+    conversations only; store cleanup is applied at process startup.
     """
     scope_of = {s.name: s.scope for s in settings_io.SECTIONS}
+    assert scope_of["model"] is settings_io.Scope.NEW_SESSIONS
     for key, section in (
         ("tool_approval_mode", "approvals"),
-        ("hosting", "model"),
-        ("model_name", "model"),
         ("web_search.enabled", "web_tools"),
         ("web_fetch.enabled", "web_tools"),
     ):
@@ -842,37 +806,27 @@ async def _settle(session: Session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_model_name_edit_alone_switches_a_config_sourced_session(
-    tmp_path, monkeypatch
-) -> None:
-    """The operator's exact report: ``/model default`` (or ``lop config edit
-    model_name``) in one pane printed "model_name needs a relaunch" in every
-    other. A bare ``model_name`` diff, ``hosting`` untouched, is the common
-    shape and must switch on its own — the pair is re-read as a whole."""
+async def test_a_model_name_edit_never_rebuilds_an_existing_selection(tmp_path, monkeypatch):
+    """Shared reloads cannot open an asynchronous model-adoption race at all."""
+    from local_operator.model import configure as configure_mod
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a default reload must not configure a conversation model")
+
+    monkeypatch.setattr(configure_mod, "build_model_spec", forbidden)
     config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
-    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    session = make_session(tmp_path, RebindableStream({}))
     _capture_events(session)
     watcher = process_watcher(config_dir)
     subscribe(session, watcher)
     try:
-        write_from_another_process(config_dir, "model_name", "m-next")
-        change = watcher.poll_now()
-        assert change is not None and change.changed_keys == {"model_name"}
-        await _settle(session)
-        assert (session.model.provider, session.model.model_id) == ("test", "m-next")
-        # The receipt names both ends and the cause, and comes from the session.
-        assert any("test/m → test/m-next" in n and "config.yml" in n for n in _notices(session))
-        # Adopting the file is not the user choosing: a SECOND edit applies too.
-        write_from_another_process(config_dir, "model_name", "m-after")
-        watcher.poll_now()
-        await _settle(session)
-        assert session.model.model_id == "m-after"
-        # And the boot selector re-based, so the journal row for this switch is
-        # skipped on resume (the new default IS the boot).
-        assert session._boot_selector == "test/m-after"
+        for target in ("m-next", "m-after"):
+            write_from_another_process(config_dir, "model_name", target)
+            watcher.poll_now()
+            await _settle(session)
+            assert session.model.model_id == "m"
+        assert any("new sessions" in n for n in _notices(session))
     finally:
         await session.dispose()
 
@@ -898,9 +852,7 @@ async def test_an_explicit_model_choice_keeps_its_model_and_says_so(tmp_path, mo
         await _settle(session)
         assert session.model.model_id == "chosen"
         keep = [n for n in _notices(session) if "keeping test/chosen" in n]
-        assert keep and "chosen with /model" in keep[0] and "/model saved" in keep[0], _notices(
-            session
-        )
+        assert keep and "new sessions" in keep[0] and "/model saved" in keep[0], _notices(session)
     finally:
         await session.dispose()
 
@@ -928,9 +880,9 @@ async def test_an_agent_or_flag_sourced_session_gets_a_notice_only(
         watcher.poll_now()
         await _settle(session)
         assert session.model.model_id == "m"
-        assert any(phrase in n and "keeping test/m" in n for n in _notices(session)), _notices(
-            session
-        )
+        assert any(
+            "new sessions" in n and "keeping test/m" in n for n in _notices(session)
+        ), _notices(session)
     finally:
         await session.dispose()
 
@@ -983,9 +935,9 @@ async def test_an_unknown_provider_in_config_warns_and_does_not_switch(
         warnings = [
             e
             for e in _EVENTS[id(session)]
-            if e.type == "notice" and getattr(e, "kind", "") == "warning"
+            if e.type == "notice" and getattr(e, "kind", "") == "info"
         ]
-        assert warnings and "unknown provider 'no-such-provider'" in warnings[0].text
+        assert warnings and "keeping test/m" in warnings[0].text
     finally:
         await session.dispose()
 
@@ -1083,134 +1035,6 @@ async def test_a_child_keeps_its_spawn_inventory(tmp_path, monkeypatch) -> None:
         session._reconcile_web_tools()
         assert "web_search" in _offered(session)
     finally:
-        await session.dispose()
-
-
-@pytest.mark.asyncio
-async def test_a_model_choice_during_a_parked_adopt_is_not_undone(tmp_path, monkeypatch) -> None:
-    """Review round 1, R2 — the race, reproduced and closed.
-
-    ``_adopt_configured_model`` awaits ``build_model_spec`` on a thread (it may
-    fetch a provider listing), and on return re-checked only ``_disposed``. A
-    ``/model`` choice made inside that window was silently undone AND
-    ``_explicit_model_choice`` was reset to ``False``, which disabled the keep
-    rule for every LATER edit — so one race cost the user their pick and their
-    protection from the next edit too.
-
-    The spec build is held open here so the window is deterministic rather than
-    timing-dependent.
-    """
-    import asyncio
-
-    from local_operator.model import configure as configure_mod
-
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
-    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
-    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
-    _capture_events(session)
-    watcher = process_watcher(config_dir)
-    subscribe(session, watcher)
-
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    def _slow_build(hosting: str, model_id: str, *a, **k):
-        # Runs on the thread `to_thread` put it on; hop back to signal.
-        loop.call_soon_threadsafe(entered.set)
-        asyncio.run_coroutine_threadsafe(_wait_release(), loop).result(timeout=5)
-        return MODEL.model_copy(update={"provider": hosting, "model_id": model_id})
-
-    async def _wait_release() -> None:
-        await release.wait()
-
-    monkeypatch.setattr(configure_mod, "build_model_spec", _slow_build)
-    try:
-        write_from_another_process(config_dir, "model_name", "m-from-config")
-        watcher.poll_now()
-        await asyncio.wait_for(entered.wait(), timeout=5)
-
-        # The user chooses WHILE the adopt is parked on its thread hop.
-        session.set_model(MODEL.model_copy(update={"model_id": "m-user-chose"}), explicit=True)
-        assert session._explicit_model_choice is True
-
-        release.set()
-        await _settle(session)
-
-        assert (
-            session.model.model_id == "m-user-chose"
-        ), "a parked adopt landed a stale spec over a newer explicit /model choice"
-        assert session._explicit_model_choice is True, (
-            "the adopt cleared _explicit_model_choice, disabling the keep rule "
-            "for every later config edit"
-        )
-        # The abandon is silent: no receipt for a switch that did not happen.
-        assert not [n for n in _notices(session) if "m-from-config" in n], _notices(session)
-
-        # And the keep rule really is still in force for the NEXT edit.
-        write_from_another_process(config_dir, "model_name", "m-later")
-        watcher.poll_now()
-        await _settle(session)
-        assert session.model.model_id == "m-user-chose"
-    finally:
-        release.set()
-        await session.dispose()
-
-
-@pytest.mark.asyncio
-async def test_a_newer_config_edit_wins_over_an_in_flight_adopt(tmp_path, monkeypatch) -> None:
-    """R2, second half. Two edits arriving inside one ``build_model_spec``
-    used to be two tasks with no ordering — last writer wins, which is
-    whichever thread happened to finish, not whichever edit the operator made
-    last. The generation guard makes the NEWER edit the one that lands."""
-    import asyncio
-
-    from local_operator.model import configure as configure_mod
-
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
-    ConfigManager(config_dir).set_config_value("hosting", MODEL.provider)
-    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
-    _capture_events(session)
-    watcher = process_watcher(config_dir)
-    subscribe(session, watcher)
-
-    entered_first = asyncio.Event()
-    release = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    seen: list[str] = []
-
-    def _build(hosting: str, model_id: str, *a, **k):
-        seen.append(model_id)
-        if model_id == "m-first":
-            loop.call_soon_threadsafe(entered_first.set)
-            asyncio.run_coroutine_threadsafe(_wait_release(), loop).result(timeout=5)
-        return MODEL.model_copy(update={"provider": hosting, "model_id": model_id})
-
-    async def _wait_release() -> None:
-        await release.wait()
-
-    monkeypatch.setattr(configure_mod, "build_model_spec", _build)
-    try:
-        write_from_another_process(config_dir, "model_name", "m-first")
-        watcher.poll_now()
-        await asyncio.wait_for(entered_first.wait(), timeout=5)
-
-        # A SECOND edit lands while the first is still resolving.
-        write_from_another_process(config_dir, "model_name", "m-second")
-        watcher.poll_now()
-        release.set()
-        await _settle(session)
-
-        assert "m-second" in seen, seen
-        assert (
-            session.model.model_id == "m-second"
-        ), "the older in-flight adopt overwrote the newer edit"
-    finally:
-        release.set()
         await session.dispose()
 
 

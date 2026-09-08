@@ -138,6 +138,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
 from local_operator.session.naming import (
     CONVERSATION_NAME_CUSTOM_TYPE,
     MAX_TITLE_CHARS,
@@ -176,24 +177,6 @@ logger = logging.getLogger(__name__)
 #: An entry with ``active: None`` records the recovery, which is what lets
 #: ``latest_custom``'s backward scan land on "no fallback pinned" after one.
 ACTIVE_ROUTE_CUSTOM_TYPE = "active_model_route"
-
-#: Transcript custom-entry type recording the model the user explicitly
-#: SELECTED mid-session (``/model <provider>/<id>``), so a resumed session
-#: comes back on it instead of silently reverting to the boot default. The
-#: sibling of :data:`ACTIVE_ROUTE_CUSTOM_TYPE`, which records where a
-#: provider FALLBACK routed requests; this one records where the USER did.
-#: Without it a ``/model`` switch survived exactly as long as the process:
-#: quit and ``--resume`` replayed the whole conversation onto the config
-#: default, which contradicts what the transcript itself shows the user
-#: choosing.
-#:
-#: Each row snapshots ``boot`` — the selector the session was CONSTRUCTED
-#: with — beside the selection, so the restore can tell a journalled switch
-#: that still applies from one stranded by a changed boot selection (a
-#: ``/model default`` write, an edited agent profile, an explicit
-#: ``--hosting``/``--model`` flag on the resume itself). A changed boot
-#: selection wins: it is the newer, more deliberate choice.
-SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 
 #: Transcript custom-entry type holding a snapshot of the subagents this
 #: session launched (see ``SubagentComms.snapshot``) plus their job rows (see
@@ -1686,13 +1669,10 @@ class Session:
         conversation_name: ConversationName | None = None,
         #: Where the BOOT model came from: ``"config"`` (the ``hosting`` /
         #: ``model_name`` keys), ``"agent"`` (a profile), ``"flag"``
-        #: (``--hosting``/``--model``) or ``"child"`` (a subagent, whose spec
-        #: was picked at spawn). Decides whether a later ``config.yml`` edit
-        #: to those keys SWITCHES this session: only a config-sourced session
-        #: follows the file, because for the others the file was never what
-        #: chose the model. Defaults to ``"config"`` because that is the
-        #: composition root's common case and what every caller predating
-        #: this kwarg meant.
+        #: (deliberate ``--hosting``/``--model``), ``"resume"`` (the journal),
+        #: or ``"child"`` (selected at spawn). Only a deliberate flag may
+        #: supersede journalled identity. Shared defaults never change any
+        #: existing session, regardless of where its birth selection came from.
         model_source: str = "config",
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
@@ -1820,31 +1800,14 @@ class Session:
         #: is never tagged; ``_load_conversation_name`` sets it from the
         #: ``_is_unnamed_fork()`` verdict it already computes at construction.
         self._wears_inherited_title = False
-        #: The ``provider/model_id`` this session was CONSTRUCTED with — the
-        #: boot selection resolved from agent > CLI flag > config. Captured
-        #: before any restore or switch moves ``_model``, because it is the
-        #: reference every ``selected_model`` journal row carries: a resume
-        #: whose boot selection no longer matches a row's ``boot`` must NOT
-        #: adopt that row (the changed default/flag/profile is the newer
-        #: choice). See :data:`SELECTED_MODEL_CUSTOM_TYPE`.
+        # Birth provenance is diagnostic only. Shared defaults never own a
+        # running conversation; explicit resume flags are separately identified
+        # by the factory so synthesized bootstrap pairs cannot erase history.
         self._boot_selector = f"{model.provider}/{model.model_id}"
         self._model_source = model_source
-        #: True once the user has made a deliberate model CHOICE in this
-        #: session (``/model p/id``, the phone's switch, or a restored
-        #: ``selected_model`` row). A ``hosting``/``model_name`` edit on disk
-        #: then leaves this session alone and prints a keep notice instead —
-        #: the user's explicit pick outranks the default it replaced. Cleared
-        #: only by :meth:`_adopt_configured_model` itself, so a session that
-        #: is following config keeps following it across successive edits.
         self._explicit_model_choice = False
-        #: Bumped by :meth:`_on_configured_model_changed` on every dispatch, and
-        #: captured by :meth:`_adopt_configured_model` before its thread hop.
-        #: An adopt whose generation is stale when it returns has been
-        #: superseded by a newer ``hosting``/``model_name`` edit and abandons,
-        #: so two edits arriving inside one ``build_model_spec`` resolve in
-        #: EDIT order rather than in whichever-thread-finished-first order
-        #: (review round 1, R2).
-        self._configured_model_generation = 0
+        self._selection_needs_initial_write = True
+        self._model_migration_notice = False
         #: Set by :meth:`_apply_config_change` when ``web_search.enabled`` /
         #: ``web_fetch.enabled`` moved; consumed at the next TURN boundary by
         #: :meth:`_reconcile_web_tools`. Deferred rather than applied on the
@@ -3634,12 +3597,10 @@ class Session:
           rides ``set_model`` on the same pair too, and the journal stores no
           sampling — so re-journalling on those would append identical rows for
           a change the row cannot even express.
-        - **Only a non-boot selection.** The boot model deliberately persists
-          no effort (the ``/effort`` non-goal): ``_restore_selected_model``
-          skips a row whose selector equals the boot selector, so a boot-model
-          effort change has nothing to restore onto and journalling one would
-          both be inert and break the non-goal. A selection the user switched
-          to already has a row whose effort must stay truthful.
+        - **Only a non-birth selection.** This retains the existing /effort
+          policy: effort changes alone do not create model-switch records on
+          the birth model. Initial identity is now durable at admission, but
+          that is not an expansion of this effort-change journalling policy.
         """
         if previous.reasoning_effort == model.reasoning_effort:
             return
@@ -4848,6 +4809,7 @@ class Session:
         copy boundary; active history rewrites are refused explicitly.
         """
         busy = self._is_streaming or self._turn_lock.locked()
+        await self._ensure_selected_model()
         fork_id, omitted = await self._transcript.fork_snapshot(
             message=message, is_compacting=lambda: self._compacting
         )
@@ -4960,6 +4922,7 @@ class Session:
         from local_operator.fork import ForkError, fork_session
 
         try:
+            await self._ensure_selected_model()
             # On a worker thread: the copy is small in practice (the largest
             # transcript in a real store measured 216 KB) but its size is
             # user-controlled, and a turn boundary is not a place to hold the
@@ -6338,6 +6301,7 @@ class Session:
             # the fresh signal rather than running work the user just stopped.
             signal.abort("interrupted")
         try:
+            await self._ensure_selected_model()
             for message in initial:
                 await self._transcript.append_message(
                     message,
@@ -10692,11 +10656,13 @@ class Session:
         """
         model = self._model
         payload = {
+            "version": 2,
             "selector": f"{model.provider}/{model.model_id}",
             "effort": model.reasoning_effort,
             "boot": self._boot_selector,
         }
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
+        self._selection_needs_initial_write = False
         current = self._model
         if (f"{current.provider}/{current.model_id}", current.reasoning_effort) == (
             payload["selector"],
@@ -10713,61 +10679,44 @@ class Session:
             # done and create exactly one successor.
             asyncio.get_running_loop().call_soon(self._spawn_selected_model_write)
 
-    def _restore_selected_model(self) -> None:
-        """Re-adopt the model a ``/model`` switch selected before the quit.
+    async def _ensure_selected_model(self) -> None:
+        """Durably select before admitting work, never for an abandoned draft.
 
-        Guarded twice, each a real situation rather than paranoia:
-
-        - persisted ``boot`` differs from THIS construction's boot selection →
-          the journal belongs to a boot default the user has since changed (a
-          ``/model default`` write, an edited agent profile, an explicit
-          ``--hosting``/``--model`` flag on the resume command itself). The
-          changed selection is the newer choice and wins; adopting the row
-          would make the flag the user just typed silently not work.
-        - the journalled selector equals the boot selection → the user
-          switched and later switched back; nothing to do, and skipping the
-          no-op keeps a fresh session's construction byte-identical to one
-          that never switched.
-
-        Tolerant of a malformed or unresolvable entry, matching
-        :meth:`_load_conversation_name`: a resume must not be refused because
-        one bookkeeping row could not be read, and a selector whose provider
-        no longer resolves (an uninstalled registry entry) logs and falls
-        back to the boot model rather than constructing a session around a
-        spec that cannot serve requests.
-
-        Restores quietly (no event, no journal write): construction runs
-        before any front end subscribes, so hosts read ``model`` when they
-        build their chrome, and re-journalling the row it just read would
-        grow the transcript on every resume.
+        Initial selections and legacy migrations use the same row as /model.
+        Awaiting here also closes immediate-switch -> fork and missed-wake
+        races: a request or snapshot cannot outrun the background writer.
         """
-        details = self._transcript.latest_custom(SELECTED_MODEL_CUSTOM_TYPE)
-        if not details:
-            return
-        selector = str(details.get("selector") or "")
-        if "/" not in selector:
-            return
-        boot = str(details.get("boot") or "")
-        if boot != self._boot_selector:
-            return
-        if selector == self._boot_selector:
-            return
-        raw_effort = details.get("effort")
-        effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
-        # Validate the PROVIDER before adopting the row, exactly as the TUI's
-        # `/model` does and for the same reason: `spec_for_target` does not
-        # raise on an unknown provider, it returns a spec with `base_url=None`.
-        # A provider that has since left the registry (a renamed id, a build
-        # without it) would therefore resume the session onto a spec that
-        # cannot serve requests, and the failure would surface on the first
-        # prompt as a network error rather than as the stale journal row it is.
-        from local_operator.providers.registry import get_provider_definition
-
-        provider = selector.split("/", 1)[0]
-        if get_provider_definition(provider) is None:
-            logger.warning(
-                "dropping persisted model selection naming an unknown provider: %r", selector
+        if self._selection_needs_initial_write:
+            await self._persist_selected_model()
+        await self._flush_selected_model()
+        if self._model_migration_notice:
+            self._model_migration_notice = False
+            await self._emit(
+                NoticeEvent(
+                    text=(
+                        "Saved model information is incomplete; "
+                        f"using {self.model_label}. "
+                        "This selection is now saved for future resumes."
+                    ),
+                    kind="warning",
+                    headline="Model selected",
+                )
             )
+
+    def _restore_selected_model(self) -> None:
+        """Restore conversation identity independently of today's defaults."""
+        from local_operator.session.model_selection import selection_from_payloads
+
+        saved = selection_from_payloads(row.payload for row in self._transcript.entries())
+        if self._model_source == "flag":
+            return
+        if saved is None:
+            self._model_migration_notice = bool(self._transcript.entries())
+            return
+        selector, effort = saved.selector, saved.effort
+        self._selection_needs_initial_write = not saved.authoritative or saved.recovered
+        self._model_migration_notice = saved.recovered
+        if selector == self.model_label and effort == self._model.reasoning_effort:
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -10778,6 +10727,8 @@ class Session:
         spec = self._spec_for_route(selector, effort)
         if spec is None:
             logger.warning("dropping unresolvable persisted model selection: %r", selector)
+            self._selection_needs_initial_write = True
+            self._model_migration_notice = True
             return
         self._model = spec
         # A restored row IS the user's earlier explicit choice, so a config
@@ -11037,17 +10988,9 @@ class Session:
           the same validation the constructor applied; an unset or invalid
           value restores the manager's built-in default rather than freezing
           the last explicit one, so "reset to default" on the page means it.
-        * ``hosting`` / ``model_name`` — the running model FOLLOWS the file
-          iff it came from the file: ``_model_source == "config"`` and no
-          explicit ``/model`` choice since boot. Otherwise a keep notice says
-          so and names ``/model saved`` as the way to adopt the default. A
-          CHILD (``_job_id`` set) never follows: its spec was chosen at spawn
-          (tier or parent) and a review child losing its cache prefix
-          mid-task is pure cost. The switch itself is :meth:`set_model` — the
-          same operation ``/model`` performs, landing at the next provider
-          call and never splitting a response. Either key alone triggers it
-          (a bare ``model_name`` edit is the common case); the pair is
-          re-read from ``values`` as a whole.
+        * ``hosting`` / ``model_name`` — announce that NEW conversations use
+          the default; never mutate this conversation's selection. Explicit
+          /model commands select on their owning session, not through a watcher.
         * ``web_search.enabled`` / ``web_fetch.enabled`` — marked dirty here
           and reconciled into the inventory at the next TURN boundary
           (:meth:`_reconcile_web_tools`), top-level sessions only. The tools
@@ -11173,168 +11116,30 @@ class Session:
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
     def _on_configured_model_changed(self, values: Mapping[str, Any]) -> None:
-        """Decide whether a ``hosting``/``model_name`` edit moves THIS session.
+        """Defaults seed NEW conversations; reloading them never selects a model.
 
-        Sync and cheap: the decision is made here, the switch (which resolves
-        model metadata, possibly over the network) runs in the background.
-        The keep notice is emitted from here too, so a session that declines
-        still tells the user why the pane did not move — the TUI prints no
-        clause of its own for the ``model`` section precisely because only
-        this process knows the answer.
+        A watcher cannot identify which pane authored an edit. Local commands
+        that promise a switch call set_model explicitly on their own session.
+        Treating a config-sourced birth as a subscription moved every sibling
+        at the next provider call, invalidating its cache and conversation.
         """
         if self._job_id is not None:
             return
-        if self._model_source != "config" or self._explicit_model_choice:
-            label = self.model_label
-            if self._explicit_model_choice:
-                reason = "chosen with /model"
-            elif self._model_source == "agent":
-                reason = "chosen by an agent profile"
-            else:
-                reason = "chosen by a flag"
-            self._spawn_background(
-                self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"keeping {label} — {reason}; config.yml default changed, "
-                            "/model saved adopts it"
-                        ),
-                        kind="info",
-                        # A glance for the boot toast, so it does not fall
-                        # through to a blind cut landing mid-phrase (design
-                        # round 1, D3). See ``NoticeEvent.headline``.
-                        headline="Model unchanged",
-                    )
-                )
-            )
+        if (values.get("hosting"), values.get("model_name")) == (
+            self.model.provider,
+            self.model.model_id,
+        ):
             return
-        # Bumped BEFORE the spawn so an adopt already parked on its thread hop
-        # sees a generation newer than the one it captured and stands down.
-        self._configured_model_generation += 1
-        self._spawn_background(self._adopt_configured_model(values))
-
-    async def _adopt_configured_model(self, values: Mapping[str, Any]) -> None:
-        """Switch onto the ``hosting``/``model_name`` pair in ``values``.
-
-        Mirrors ``resolve_hosting_model``'s config arm (an empty model falls
-        back to the provider's default) and ``_restore_selected_model``'s
-        validation (an unknown provider is a warning, never a switch onto a
-        spec that cannot serve). ``build_model_spec`` may fetch a provider
-        listing over a blocking client, so it runs on a thread exactly as the
-        runtime's ``/model`` op does. The chosen effort rides along when the
-        new model's ladder has it, as the TUI's ``/model`` carries it.
-
-        Goes through :meth:`set_model` with ``explicit=True`` so a pinned
-        fallback is withdrawn (the default the fallback was rescuing is gone),
-        then RESTORES ``_explicit_model_choice`` to what it was before the
-        call rather than assigning ``False``: adopting the file is not the user
-        choosing, so a session that was following config keeps following it —
-        but a session that had already recorded a real ``/model`` choice must
-        not have that record erased by an adopt (review round 1, R2, second
-        half). The boot selector is re-based too, so a ``selected_model``
-        journal row written for this switch is skipped on resume (the new
-        default IS the boot).
-
-        **The apply is guarded against the await.** ``build_model_spec`` may
-        fetch a provider listing, so the thread hop below is a real window in
-        which the user can type ``/model`` and a second config edit can land.
-        Reproduced in review: a ``/model`` choice made during a parked adopt
-        was silently undone AND its ``_explicit_model_choice`` reset, which
-        disabled the keep rule for every later edit. Two guards close it, both
-        re-checked AFTER the await:
-
-        * ``_explicit_model_choice`` — a user choice that landed while this was
-          in flight outranks the file, the same rule
-          :meth:`_on_configured_model_changed` applies before spawning; and
-        * ``_configured_model_generation`` — bumped by every dispatch, so a
-          NEWER adopt (a second edit while the first was resolving) wins and
-          the older task abandons rather than last-writer-wins between two
-          tasks with no ordering.
-
-        Both abandon silently: the newer decision emits its own receipt, and a
-        second line about a switch that did not happen is noise.
-
-        Reads ``values`` — the watcher's validated snapshot — never a fresh
-        ``ConfigManager`` (the module docstring of ``config_watch`` explains
-        why a listener must not construct one).
-        """
-        generation = self._configured_model_generation
-        explicit_before = self._explicit_model_choice
-        hosting = str(values.get("hosting") or "").strip().lower()
-        model_name = str(values.get("model_name") or "").strip()
-        if not hosting:
-            return
-        from local_operator.providers.registry import get_provider_definition
-
-        if get_provider_definition(hosting) is None:
-            await self._emit(
+        self._spawn_background(
+            self._emit(
                 NoticeEvent(
                     text=(
-                        f"config.yml names unknown provider {hosting!r}; "
-                        f"keeping {self.model_label}"
+                        f"keeping {self.model_label}; default changed for new sessions. "
+                        "/model saved adopts it here"
                     ),
-                    kind="warning",
+                    kind="info",
+                    headline="Model unchanged",
                 )
-            )
-            return
-        if not model_name:
-            from local_operator.model.defaults import default_model_for
-
-            model_name = default_model_for(hosting) or ""
-            if not model_name:
-                await self._emit(
-                    NoticeEvent(
-                        text=(
-                            f"config.yml sets hosting {hosting} with no model_name and "
-                            f"{hosting} has no default; keeping {self.model_label}"
-                        ),
-                        kind="warning",
-                    )
-                )
-                return
-        current = self._model
-        if (current.provider, current.model_id) == (hosting, model_name):
-            # The writer's own pane: `/model default` already switched it (or
-            # it was already there). Nothing to do, and no receipt owed.
-            return
-        from local_operator.model.configure import build_model_spec
-
-        try:
-            spec = await asyncio.to_thread(build_model_spec, hosting, model_name)
-        except Exception as error:  # noqa: BLE001 — reported, never a broken session
-            await self._emit(
-                NoticeEvent(
-                    text=f"could not resolve {hosting}/{model_name} from config.yml: {error}",
-                    kind="warning",
-                )
-            )
-            return
-        if self._disposed:
-            return
-        if self._explicit_model_choice and not explicit_before:
-            # The user chose while this adopt was resolving. Their pick is
-            # newer and explicit; applying the file's spec now would undo it.
-            return
-        if self._configured_model_generation != generation:
-            # A newer config edit has already been dispatched. It resolves
-            # against the newer values and owns the receipt.
-            return
-        chosen_effort = current.reasoning_effort
-        if chosen_effort and chosen_effort in tuple(spec.reasoning_efforts or ()):
-            spec = spec.model_copy(update={"reasoning_effort": chosen_effort})
-        previous_label = self.model_label
-        self.set_model(spec, explicit=True)
-        # RESTORED, not cleared: see the docstring. ``set_model(explicit=True)``
-        # sets the flag as a side effect of withdrawing a pinned fallback, and
-        # this call is the file's decision rather than the user's — so the flag
-        # goes back to whatever the user's own history had made it.
-        self._explicit_model_choice = explicit_before
-        self._boot_selector = f"{spec.provider}/{spec.model_id}"
-        await self._emit(
-            NoticeEvent(
-                text=f"model: {previous_label} → {self.model_label} — config.yml default changed",
-                kind="info",
-                headline=f"model: {self.model_label}",
             )
         )
 

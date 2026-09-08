@@ -4390,6 +4390,8 @@ def main() -> int:
             tui_config = config_manager.get_config_value("tui", None)
             theme_name = tui_config.get("theme", "dark") if isinstance(tui_config, dict) else "dark"
 
+            viewer_started = False
+
             async def viewer_factory(resume_id: "str | None"):
                 """Build the TUI's session facade: a VIEWER, never an owner.
 
@@ -4414,15 +4416,35 @@ def main() -> int:
                 runtime materialises the directory for it on the first real
                 write — an engaged-but-unused session leaves nothing behind.
                 """
+                nonlocal viewer_started
                 import uuid as _uuid
 
+                from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_owner_record
                 from local_operator.session.remote import RemoteSession
+                from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
                 # Same expression session_factory uses for a new session's
                 # directory name, so ids minted by either path are one shape.
                 session_id = resume_id or _uuid.uuid4().hex[:12]
+                # The CLI flags belong to startup, not every /new or picker
+                # resume in this viewer. Refresh the file only at this boundary.
+                birth_args = argparse.Namespace(**vars(args))
+                birth_args.resume = resume_id
+                if viewer_started:
+                    birth_args.hosting = None
+                    birth_args.model = None
+                viewer_started = True
+                initial_model = None
+                try:
+                    provider, model_id = resolve_hosting_model(
+                        current_agent, birth_args, ConfigManager(config_directory)
+                    )
+                    initial_model = ModelSpec(provider=provider, model_id=model_id)
+                except ValueError:
+                    # Setup mode must still open without a configured model.
+                    pass
 
                 async def take_over():
                     # A viewer must never win the transcript lease — the
@@ -4455,12 +4477,22 @@ def main() -> int:
                 degraded_reason = ""
                 if record is not None:
                     try:
-                        return await RemoteSession.connect(
+                        attached = await RemoteSession.connect(
                             record,
                             session_id,
                             config_dir=config_directory,
                             takeover_factory=take_over,
                         )
+                        if initial_model is not None and (birth_args.hosting or birth_args.model):
+                            # A live resume needs the same deliberate override
+                            # as a cold one; send it to the existing owner,
+                            # never replace its journal from the viewer.
+                            receipt = await attached.route_shared_slash(
+                                "model", f"{initial_model.provider}/{initial_model.model_id}"
+                            )
+                            if isinstance(receipt, dict) and receipt.get("style") == "error":
+                                attached.degraded_reason = str(receipt.get("text") or "")
+                        return attached
                     except (ConnectionError, OSError, TimeoutError) as error:
                         # The runtime died between the scan and the dial, or is
                         # too old to attach to. Cold is the honest fallback:
@@ -4491,6 +4523,8 @@ def main() -> int:
                     config_dir=config_directory,
                     cwd=os.getcwd(),
                     takeover_factory=take_over,
+                    initial_model=initial_model,
+                    model_selection_override=bool(birth_args.hosting or birth_args.model),
                 )
                 if degraded_reason:
                     viewer.degraded_reason = degraded_reason

@@ -763,7 +763,12 @@ async def test_a_restored_reading_is_dropped_when_the_model_changed(
     )
 
     viewer = await RemoteSession.cold(
-        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        SESSION_ID,
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=_never,
+        initial_model=FrontendModelSpec(provider="openai", model_id="gpt-5.6-sol"),
+        model_selection_override=True,
     )
     try:
         state = viewer.frontend_state
