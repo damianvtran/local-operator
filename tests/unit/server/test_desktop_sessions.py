@@ -1,6 +1,7 @@
 """Desktop stream algebra, resource bounds and durable retry invariants."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -422,3 +423,43 @@ async def test_only_a_typed_actionable_error_reaches_the_user(tmp_path):
         "then send the message again."
     )
     assert await relay(ActionableConnectionError(vetted)) == vetted
+
+
+@pytest.mark.asyncio
+async def test_served_list_order_is_the_catalogs_rank(tmp_path):
+    """The HTTP surface inherits `rank_entries`, wake key included.
+
+    `DesktopSessions.list` orders through `load_catalog` -> `rank_entries`, so
+    every ordering key the sidebar gains lands on this endpoint too -- the wake
+    key among them. That is easy to miss because the mobile daemon has its OWN
+    sort and is genuinely untouched by the same change, so "the catalog decides"
+    holds for one remote surface and not the other. Asserting the served order
+    IS `rank_entries` keeps the desktop half honest without restating the ladder
+    here: if the two ever diverge this fails, whichever one moved.
+    """
+    from local_operator.session.catalog import load_catalog, rank_entries
+    from local_operator.wakes import store as wake_store
+
+    # Cold sessions only, so the tier ties and the wake key is what decides.
+    # The armed session is the OLDEST, which is exactly where birth date alone
+    # would sort it last.
+    for session_id, created in [("newest", 300), ("middle", 200), ("armed", 100)]:
+        path = tmp_path / "sessions" / session_id
+        path.mkdir(parents=True)
+        (path / "created_at.json").write_text(str(created))
+        (path / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    wake_store.write_entry(
+        tmp_path,
+        "armed",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "next_due_at": 10**12}],
+    )
+
+    served = [row["id"] for row in await DesktopSessions(tmp_path).list(50)]
+    catalog = load_catalog(tmp_path, limit=50)
+    assert served == [entry.id for entry in catalog]
+    # Re-ranked from a SHUFFLED input, so this pins the sort rather than merely
+    # agreeing that two calls returned the same list.
+    assert served == [entry.id for entry in rank_entries(catalog[::-1])]
+    # And concretely: the armed row leads despite being the oldest.
+    assert served == ["armed", "newest", "middle"]
