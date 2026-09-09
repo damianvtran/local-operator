@@ -59,6 +59,7 @@ import traceback
 import unicodedata
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -69,6 +70,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -1065,12 +1067,29 @@ def _rejection_is_environmental(exc: ValidationError) -> bool:
     the distinction is made from the raised TYPE and never from message text —
     the same source-of-truth rule ``_classify_fault`` is built on.
 
-    Conservative on purpose: one environment-dependent rejection anywhere in
-    the error set makes the whole call environmental. A ``ValidationError``
-    reports every failed field at once, so a mixed set (a genuine shape error
-    plus a vanished config tier) cannot be split into two verdicts on one
-    call, and the fail-safe direction is to NOT bill the model. Under-claiming
-    merely leaves the figure incomplete; over-claiming corrupts it.
+    ANY, not ALL: one environment-dependent rejection anywhere in the error
+    set makes the whole call environmental. A ``ValidationError`` reports
+    every failed field at once, so a mixed set cannot be split into two
+    verdicts on one call, and not billing the model is the better way to be
+    wrong — under-claiming leaves the figure incomplete, over-claiming
+    corrupts it.
+
+    That rule is only safe because the environmental branch is NARROW. While
+    ``_validate_effort_tier`` raised environmentally for every refusal, one
+    invented tier laundered a genuine ``extra="forbid"`` reported in the same
+    call — under-claiming in aggregate but actively erasing faults that were
+    correctly attributed. It now raises environmentally only for a value the
+    schema really advertised, so a laundering pair is not environmental under
+    either rule and ANY is the right choice for what remains.
+
+    **Two failure directions, only one of them safe.** The ANY rule above
+    fails toward ``execution``. The ``ctx`` read below fails the other way: a
+    validator raising a bare ``ValueError``, or a pydantic that stopped
+    populating ``ctx``, reads as a model fault. That is the over-claiming
+    direction, and it is not reachable today — ``exc.errors()`` defaults to
+    ``include_context=True`` and nothing in the tree overrides it — but it is
+    the honest description of the mechanism, so do not read the paragraph
+    above as a guarantee about this one.
     """
     for err in exc.errors():
         if isinstance((err.get("ctx") or {}).get("error"), EnvironmentDependentRejectionError):
@@ -1105,6 +1124,17 @@ def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -
         return _error(tool_call_id, tool_name, body)
     return _invalid_arguments(tool_call_id, tool_name, body)
 
+
+#: Public name for :func:`_validation_error`, for callers OUTSIDE the ``tools``
+#: package. The underscore form is this module's own spelling and is shared
+#: freely within ``tools`` (``eval``, ``lsp``, ``agent_tool``, ``team_tool``),
+#: but ``web_fetch``/``web_search`` are separate packages: importing a private
+#: name across that boundary claims a privacy the tree does not honour and
+#: makes a refactor of this module's internals silently break them. They must
+#: share the helper — a fault class that differs by which tool the model
+#: picked is the defect this whole change exists to remove — so the sharing
+#: gets a supported name rather than being done through the back door.
+validation_error_result = _validation_error
 
 #: The shape every ``execute_*`` in this module has. It differs from
 #: ``ToolExecuteFn`` only in accepting ``context=None``, which the bare-tool
@@ -8487,7 +8517,78 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 # never advertise tools that can only error.
 
 
-def _validate_effort_tier(value: str | None) -> str | None:
+#: Key under which the ``effort`` members a BUILD actually advertised are
+#: handed to ``model_validate`` as ``context=``, read back in the validator
+#: through ``ValidationInfo.context``.
+ADVERTISED_EFFORT_KEY = "advertised_effort"
+
+#: The advertised set for the tool currently executing, published by the
+#: builder's wrapper (:func:`_with_advertised_effort`) and read at the
+#: ``model_validate`` call.
+#:
+#: A ContextVar rather than a parameter because the executor signature is the
+#: fixed five-argument ``ToolExecutor`` contract, and rather than a module
+#: global because concurrent calls — a parent and its subagents run on one
+#: loop — must not see each other's snapshot; a ContextVar is copied per task.
+#:
+#: It cannot be recomputed at call time, which is the whole point: reading
+#: ``configured_effort_tiers()`` here would yield the CURRENT tiers, making
+#: "was advertised" collapse into "is valid now" and every refusal a model
+#: fault — losing exactly the operator-config case this PR fixed. Only the
+#: build side knows what the model was shown.
+#:
+#: ``None`` means no build published a snapshot (a direct call to the module
+#: level executor, e.g. from a test). That is treated as environmental, the
+#: under-claiming direction, because a call whose provenance is unknown must
+#: not be billed to the model. Production always publishes: every advertised
+#: ``task``/``agent`` tool is built through its builder.
+_ADVERTISED_EFFORT: ContextVar[frozenset[str] | None] = ContextVar(
+    "advertised_effort", default=None
+)
+
+
+def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) -> ToolExecutor:
+    """Publish what this build advertised for the duration of one call.
+
+    Wraps the builder's executor so the validator can tell an operator's
+    vanished tier from a value the model invented. Reset in a ``finally`` so a
+    raising tool cannot leak one tool's snapshot into the next call.
+    """
+    advertised = advertised_effort_members(parameters)
+
+    async def wrapper(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: AbortSignal | None = None,
+        on_update: Callable[[AgentToolUpdate], None] | None = None,
+        context: ToolContext | None = None,
+    ) -> ToolResult:
+        token = _ADVERTISED_EFFORT.set(advertised)
+        try:
+            return await executor(tool_call_id, args, signal, on_update, context)
+        finally:
+            _ADVERTISED_EFFORT.reset(token)
+
+    wrapper.__name__ = getattr(executor, "__name__", "execute")
+    wrapper.__qualname__ = wrapper.__name__
+    return wrapper
+
+
+def effort_validation_context() -> dict[str, Any]:
+    """Validation context carrying the advertised ``effort`` members."""
+    return {ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get()}
+
+
+def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
+    """What ``effort`` members the schema offered, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    members = context.get(ADVERTISED_EFFORT_KEY)
+    return frozenset(members) if isinstance(members, (set, frozenset, list, tuple)) else None
+
+
+def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None:
     """Refuse an ``effort`` the live config cannot honour, naming what can be.
 
     Shared by both ``task`` forms and the ``agent`` tool so the three fields
@@ -8496,21 +8597,44 @@ def _validate_effort_tier(value: str | None) -> str | None:
     agree except across a mid-session edit, and this is the side that must be
     right — an accepted-but-stale tier would reach the strict launch path and
     fail there with less context than the message here carries.
+
+    **The refusal splits into two fault classes, and only the build-time
+    record can tell them apart.** ``effort_tier_rejection`` says only "not
+    usable now"; whether that is the model's mistake depends on what the model
+    was shown:
+
+    - The value WAS in the advertised enum and is gone now — the operator
+      edited a tier away, or ``config.yml`` became unreadable (which
+      ``configured_effort_tiers`` reports as "no tiers" by design rather than
+      raising). The model picked from the menu it was given; billing it would
+      put an operator config error into a published accuracy figure.
+    - The value was NEVER advertised — including the common case where no
+      tiers are configured at all and ``_advertise_effort_tiers`` DELETES the
+      property, so ``effort`` is a field the schema does not contain. The
+      model invented it, which is the same kind of mistake as an
+      ``extra="forbid"`` key, and is a model fault.
+
+    Treating both as environmental also laundered any genuine violation
+    reported in the SAME call: one invented tier made the whole
+    ``ValidationError`` environmental and erased a co-reported
+    ``extra="forbid"``. Narrow branch, no laundering.
     """
     if value is None:
         return None
     rejection = effort_tier_rejection(value)
-    if rejection is not None:
-        # NOT a model fault, however it reads. The enum the model chose from
-        # was rendered into the schema at BUILD time and this check reads
-        # config at CALL time, so a value that was valid when advertised can
-        # be refused because the operator edited a tier away — or because
-        # ``config.yml`` became unreadable, which ``configured_effort_tiers``
-        # reports as "no tiers" by design rather than raising. Billing that to
-        # the model would put an operator config error into a published
-        # accuracy figure.
+    if rejection is None:
+        return value
+    advertised = _advertised_effort(info)
+    if advertised is None or value in advertised:
+        # ``None`` is "no build published a snapshot" — a direct call to the
+        # module-level executor, which production never makes (every
+        # advertised task/agent tool is built through its builder). Unknown
+        # provenance takes the environmental branch deliberately: a call whose
+        # schema cannot be established must not be billed to the model, which
+        # is the same under-claiming preference the rest of this boundary
+        # applies.
         raise EnvironmentDependentRejectionError(rejection)
-    return value
+    raise ValueError(rejection)
 
 
 def _advertise_effort_tiers(
@@ -8581,6 +8705,32 @@ def _advertise_effort_tiers(
             if isinstance(entry, dict):
                 patch(entry.get("properties"))
     return patched
+
+
+def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[str]:
+    """The ``effort`` members a BUILT schema offers, read back from the schema.
+
+    The tool's own parameters are the record of what the model was shown, so
+    the advertised set is recovered from them rather than tracked separately —
+    one source of truth, and it cannot fall out of step with what shipped. An
+    empty set is the meaningful answer for a session with no tiers configured:
+    ``_advertise_effort_tiers`` deletes the property outright, so any
+    ``effort`` the model sends is a field its schema does not contain.
+
+    Read at CALL time and handed to ``model_validate`` as validation context;
+    see :func:`_validate_effort_tier` for why the distinction decides a fault
+    class.
+    """
+    properties = (parameters or {}).get("properties")
+    if not isinstance(properties, dict):
+        return frozenset()
+    effort = properties.get("effort")
+    if not isinstance(effort, dict):
+        return frozenset()
+    for variant in effort.get("anyOf") or [effort]:
+        if isinstance(variant, dict) and isinstance(variant.get("enum"), list):
+            return frozenset(str(member) for member in variant["enum"])
+    return frozenset()
 
 
 def _effort_tier_field_description() -> str:
@@ -8662,8 +8812,8 @@ class TaskItem(BaseModel):
 
     @field_validator("effort")
     @classmethod
-    def _effort_is_configured(cls, value: str | None) -> str | None:
-        return _validate_effort_tier(value)
+    def _effort_is_configured(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validate_effort_tier(value, info)
 
 
 class TaskParams(BaseModel):
@@ -8694,8 +8844,8 @@ class TaskParams(BaseModel):
 
     @field_validator("effort")
     @classmethod
-    def _effort_is_configured(cls, value: str | None) -> str | None:
-        return _validate_effort_tier(value)
+    def _effort_is_configured(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validate_effort_tier(value, info)
 
     context: str = Field(
         default="",
@@ -9145,7 +9295,7 @@ async def execute_task(
     between children.
     """
     try:
-        params = TaskParams(**args)
+        params = TaskParams.model_validate(args, context=effort_validation_context())
     except ValidationError as exc:
         return _validation_error(tool_call_id, "task", exc)
 
@@ -9223,21 +9373,22 @@ async def execute_task(
 def build_task_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_launcher is None:
         return None
+    parameters = _advertise_effort_tiers(
+        TaskParams.model_json_schema(),
+        description=_effort_tier_field_description(),
+    )
     return AgentTool(
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
         description=_task_tool_description(),
-        parameters=_advertise_effort_tiers(
-            TaskParams.model_json_schema(),
-            description=_effort_tier_field_description(),
-        ),
+        parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=execute_task,
+        execute=_with_advertised_effort(execute_task, parameters),
     )
 
 
