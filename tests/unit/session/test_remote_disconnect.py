@@ -433,3 +433,311 @@ async def test_a_recall_with_no_client_declines_instead_of_claiming_success(
     assert remote.recall_steering(message) is False, "no client means no recall"
     assert remote._recall_task is None, "and no op was issued"
     await _cancel_recovery(remote)
+
+
+# --- the live-but-silent owner: recovery must reach a verdict ---------------
+#
+# An owner that is LIVE (a record is found on every pass) but SILENT (the
+# socket accepts, the canonical sync never lands) is the shape that had NO
+# bounded exit: `COLD_FALLBACK_S` returns only for `_can_go_cold`, and the
+# takeover the legacy arm is written to reach lives in the no-record `else`
+# branch a discoverable record never takes. Reported from the field as a
+# session whose model could not be switched by any retry or `/resume`.
+
+
+def _live_record() -> Any:
+    """A record that always reads live, protocol 5, frontend-capable."""
+    import time as _time
+
+    from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+    from local_operator.session.runtime.types import SessionRecord
+
+    return SessionRecord(
+        pid=99999,
+        kind="tui",
+        session_id="s1",
+        conversation_name="probe",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+        protocol=5,
+        capabilities=[FRONTEND_CAPABILITY],
+        heartbeat_at=_time.time(),
+    )
+
+
+def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[RemoteSession, list[float]]:
+    """A terminal viewer whose owner accepts the dial and then never speaks.
+
+    Bounds are compressed so the exits are exercised in milliseconds; every
+    assertion is on the VERDICT, never on elapsed time.
+    """
+    import time as _time
+
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+    monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BLOCKED_S", 0.05)
+    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (_live_record(), None))
+
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    # The surface the operator actually uses: connect() defaults to "terminal".
+    assert remote._can_go_cold is False
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+
+    dials: list[float] = []
+
+    async def silent_dial(record: Any) -> Any:
+        dials.append(_time.monotonic())
+        # The REAL `_dial` stamps the identity on entry, before the sync it
+        # will never get; without this the `_runtime_pid` assertion below is
+        # vacuous, because nothing ever set the pid it checks is cleared.
+        remote._runtime_pid = record.pid
+        return asyncio.get_running_loop().create_future()  # never resolves
+
+    monkeypatch.setattr(remote, "_dial", silent_dial)
+    return remote, dials
+
+
+async def _await_verdict(remote: RemoteSession) -> None:
+    """Wait on the STATE, never on the clock."""
+    for _ in range(600):
+        if not remote._recovering:
+            return
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_live_but_silent_owner_does_not_latch_the_viewer_forever(
+    tmp_path, monkeypatch
+) -> None:
+    """THE regression guard: recovery must not latch `_recovering` forever.
+
+    Fails on the pre-fix tree, where the loop has no reachable return while a
+    record keeps being found. `_recovering` is not a cosmetic flag: it is what
+    refuses `/model`, `/goal`, `/rename`, `/effort`, `/compact`, `/fork` and
+    `/credential` at every request/response seam.
+    """
+    remote, dials = _silent_owner_facade(tmp_path, monkeypatch)
+    remote._on_disconnected("send timeout")
+    assert remote._recovering is True, "the premise: recovery is running"
+    await _await_verdict(remote)
+
+    # SAMPLED BEFORE TEARDOWN. Cancelling the recovery task runs the loop's
+    # `finally`, which clears `_recovering` and makes a broken tree look green
+    # — this test passed against the defect for exactly that reason once.
+    latched = remote._recovering
+    await _cancel_recovery(remote)
+
+    assert latched is False, (
+        "the viewer latched in recovery against a live-but-silent owner: "
+        f"dials={len(dials)} — every /model, /fork, /compact is refused forever"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_give_up_exit_leaves_a_viewer_that_can_bind_again(tmp_path, monkeypatch) -> None:
+    """`_can_go_cold` must be flipped BEFORE `_go_cold`, or the fix is worse.
+
+    `_ensure_bound` returns immediately when `_can_go_cold` is False, so
+    clearing `_recovering` without the flip yields a viewer that is cold,
+    permanently unbindable, and silently no-ops — worse than the honest
+    refusal it replaces. Nothing else covers that variant.
+    """
+    remote, _ = _silent_owner_facade(tmp_path, monkeypatch)
+    remote._on_disconnected("send timeout")
+    await _await_verdict(remote)
+    exhausted = remote.exhausted_recovery
+    can_go_cold = remote._can_go_cold
+    runtime_pid = remote.runtime_pid
+    await _cancel_recovery(remote)
+
+    assert can_go_cold is True, "the viewer can never bind again"
+    assert exhausted is True, "the cold state is not distinguishable from 'no runtime'"
+    # `runtime_pid` promises None while cold. Today `_discard_rejected_client`
+    # already clears it on every failure path, so this pins the INVARIANT at
+    # the exit rather than a defect: a stale live pid would let
+    # `take_unannounced_cleanup` claim another runtime's notice (F3).
+    assert runtime_pid is None, f"a stale owner pid outlived the unbind: {runtime_pid}"
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_is_no_longer_driven_by_the_recovery_flag(tmp_path, monkeypatch) -> None:
+    """The PERMANENT refusal lifts: `_recovering` no longer gates the seams.
+
+    A cold viewer still refuses a routed slash on `client is None` — that is
+    the ordinary, self-correcting cold state every viewer reaches after
+    `/stop`, and it is not what this fix is about. What changed is that the
+    refusal is no longer held open by a flag nothing can clear: the facade is
+    rebindable, so the next action repairs it. Asserted on the CAUSE (the
+    flag, and the dial the repair reaches) rather than on the string, because
+    both causes raise the same sentence.
+    """
+    remote, dials = _silent_owner_facade(tmp_path, monkeypatch)
+    # `_bind_under_lock` imports both of these function-locally, so the
+    # module-level patches the fixture makes do not reach it. The engage is a
+    # no-op because the record below already names a live runtime — which is
+    # exactly what `engage_runtime` short-circuits on in production.
+    import local_operator.mobile.attach_client as attach_client
+    import local_operator.session.runtime.launch as launch
+
+    monkeypatch.setattr(attach_client, "find_owner_record", lambda *a: (_live_record(), None))
+    monkeypatch.setattr(launch, "engage_runtime", lambda *a, **k: asyncio.sleep(0))
+
+    remote._on_disconnected("send timeout")
+    await _await_verdict(remote)
+
+    # Issued BEFORE teardown, for the same reason `latched` is sampled early.
+    recovering = remote._recovering
+    dials_before = len(dials)
+    # The repair path the user actually takes: any action rebinds. It must
+    # reach the DIAL — a viewer left with `_can_go_cold` False returns from
+    # `_ensure_bound` immediately and silently no-ops forever instead.
+    try:
+        await asyncio.wait_for(remote._ensure_bound(), timeout=1.0)
+    except (asyncio.TimeoutError, ConnectionError, OSError):
+        pass  # the owner is still silent; that it TRIED is the assertion
+    dials_after = len(dials)
+    await _cancel_recovery(remote)
+
+    assert recovering is False, "the recovery flag still gates every seam"
+    assert dials_after > dials_before, (
+        "the repair path never reached a dial: this viewer is permanently "
+        f"unbindable (dials {dials_before} -> {dials_after})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch) -> None:
+    """The silent half of the defect: `prompt` waits on `_owner_ready` forever.
+
+    `_on_disconnected` clears `_owner_ready` and the only setters are
+    `_go_cold`, the takeover branch and the deliberate-stop arms — none of
+    which fired on this path. The user saw no message and no spinner
+    resolution, which is worse than the refusal `/model` at least printed.
+    """
+    remote, _ = _silent_owner_facade(tmp_path, monkeypatch)
+    released = asyncio.Event()
+
+    async def parks_on_owner_ready() -> None:
+        await remote._owner_ready.wait()
+        released.set()
+
+    waiter = asyncio.create_task(parks_on_owner_ready())
+    await asyncio.sleep(0)
+    remote._on_disconnected("send timeout")
+    assert released.is_set() is False, "the premise: the prompt path is parked"
+
+    await _await_verdict(remote)
+    for _ in range(100):
+        if released.is_set():
+            break
+        await asyncio.sleep(0.01)
+    was_released = released.is_set()
+    waiter.cancel()
+    await _cancel_recovery(remote)
+
+    assert was_released is True, "the prompt path is still parked on _owner_ready"
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
+    tmp_path, monkeypatch
+) -> None:
+    """Guard against over-reach: the chase contract survives for a DEAD owner.
+
+    The give-up exit is scoped to the record-present branch. With no record
+    the loop must still reach `_takeover_factory` and keep chasing, exactly as
+    ``test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer`` pins.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (None, None))
+    attempts: list[int] = []
+
+    async def failing_takeover() -> Any:
+        attempts.append(1)
+        raise RuntimeError("the lease is held by another follower")
+
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=failing_takeover,
+    )
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    went_cold: list[str] = []
+    remote.set_went_cold_callback(lambda: went_cold.append("cold"))
+
+    remote._on_disconnected("owner exited")
+    for _ in range(80):
+        if len(attempts) >= 3:
+            break
+        await asyncio.sleep(0.01)
+    still_chasing = remote._recovering
+    cold_calls = list(went_cold)
+    await _cancel_recovery(remote)
+
+    assert len(attempts) >= 3, f"the loop stopped chasing a successor: {len(attempts)}"
+    assert still_chasing is True, "the no-record branch took the give-up exit"
+    assert cold_calls == [], "a dead owner took the give-up cold exit"
+
+
+@pytest.mark.asyncio
+async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monkeypatch) -> None:
+    """The dial-failure arm paces at `_RECOVERY_DIAL_CAP_S`, not the old 0.5.
+
+    That arm `continue`s, skipping the sleep at the bottom of the loop, so its
+    own sleep is the only pacing on the path — and against `ATTACH_MAX_CLIENTS`
+    with LRU eviction its rate is a real cascade risk. Asserted structurally on
+    the delay sequence handed to `asyncio.sleep`, never as a rate measured
+    against wall time.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 60.0)
+    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 60.0)
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (_live_record(), None))
+
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+
+    async def refusing_dial(record: Any) -> Any:
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(remote, "_dial", refusing_dial)
+
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float, *args: Any, **kwargs: Any) -> Any:
+        delays.append(delay)
+        return await real_sleep(0, *args, **kwargs)  # run the loop hot
+
+    monkeypatch.setattr(remote_module.asyncio, "sleep", recording_sleep)
+
+    remote._on_disconnected("send timeout")
+    for _ in range(400):
+        if delays and max(delays) >= remote_module._RECOVERY_DIAL_CAP_S:
+            break
+        await real_sleep(0.005)
+    observed = list(delays)
+    await _cancel_recovery(remote)
+
+    assert observed, "the dial-failure arm never paced at all"
+    assert max(observed) == pytest.approx(remote_module._RECOVERY_DIAL_CAP_S), (
+        f"the backoff ceiling is {max(observed)}, not _RECOVERY_DIAL_CAP_S "
+        f"({remote_module._RECOVERY_DIAL_CAP_S}) — sequence={observed[:12]}"
+    )
+    assert (
+        remote_module._RECOVERY_DIAL_CAP_S > remote_module._BIND_RETRY_DELAY_CAP_S
+    ), "the two backoff shapes are meant to have diverged"

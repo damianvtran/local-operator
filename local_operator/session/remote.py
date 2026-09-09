@@ -94,6 +94,7 @@ from local_operator.session.frontend_state import (
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
     read_replay_suffix,
@@ -127,6 +128,63 @@ UNIDENTIFIED_STEER_ID = "remote-steer"
 #: that before concluding nothing is coming. Only the viewer path uses it; the
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
+
+#: The SECOND, longer bound on recovery — the one that applies when the viewer
+#: cannot go cold at ``COLD_FALLBACK_S`` (``_can_go_cold`` is False, i.e. every
+#: terminal ``connect()`` viewer, which is what the TUI builds).
+#:
+#: It exists because that path had NO bounded exit at all. ``COLD_FALLBACK_S``
+#: returns only for a viewer that may go cold; the legacy arm beneath it ends
+#: the in-flight turn and keeps looping, and the takeover that arm is written
+#: to reach lives in the no-record ``else`` branch — so an owner that is LIVE
+#: BUT SILENT (a record is found every pass, the socket accepts, the canonical
+#: sync never lands) kept the loop cycling forever with no verdict to offer.
+#: ``_recovering`` is set for the whole of that loop, so what latches is not a
+#: cosmetic flag: it is the state that REFUSES ``/model``, ``/goal``,
+#: ``/rename``, ``/effort``, ``/compact``, ``/fork`` and ``/credential`` with
+#: ``_RECONNECTING_SLASH_NOTICE``, and that PARKS ``prompt`` silently on
+#: ``_owner_ready`` with no message and no spinner resolution. Reported from
+#: the field as a session whose model could not be switched by any number of
+#: retries or ``/resume``s.
+#:
+#: DERIVED from ``HEARTBEAT_TIMEOUT_S`` rather than written as a literal 90.0,
+#: because the question this bounds is the owner's own liveness contract: the
+#: registry classifies a record ``wedged`` rather than ``live`` after one
+#: heartbeat timeout, and a viewer must not conclude an owner is unreachable
+#: FASTER than the registry concludes it is wedged — a turn-boundary stall
+#: inside that window is normal (see ``FRONTEND_SYNC_BACKSTOP_S`` on the
+#: 15-vs-45 s window). Two of them also buys ~6 genuine attempts at the
+#: measured silent-owner cadence of one redial per ``FRONTEND_SYNC_BLOCKED_S``.
+#: A bare literal would silently stop tracking that contract if the heartbeat
+#: moved.
+#:
+#: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
+#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_owner``), so the
+#: transcript stays on screen, ``_owner_ready`` is set, and the next prompt
+#: re-engages through ``_ensure_bound`` against this very same live record.
+RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
+
+#: Backoff ceiling for ``_recover_owner``'s DIAL-FAILURE arm specifically.
+#:
+#: That arm ``continue``s, which skips the sleep at the bottom of the loop, so
+#: its own ``sleep(delay)`` is the only pacing on the path — the ceiling has to
+#: move here and nowhere else. It matters for the FAST-FAILURE owner shape (a
+#: socket that accepts and then rejects the welcome), measured at 2.33 accepted
+#: connections/second. Against ``ATTACH_MAX_CLIENTS`` with LRU eviction that is
+#: a real cascade: every slot this loop takes evicts a legitimate client, the
+#: prior art being the 272-eviction burst documented on
+#: ``_discard_rejected_client``. 2.0 s cuts the worst-case slot-take rate ~4x
+#: while keeping the first four retries inside ~1 s, which is the window a
+#: runtime restarting after ``kill -9`` actually republishes in.
+#:
+#: DELIBERATELY DIVERGED from ``_BIND_RETRY_DELAY_CAP_S``, whose comment says
+#: the two backoff shapes were copied from each other on purpose. They are no
+#: longer the same shape and must not be re-unified: ``_bind_under_lock`` is
+#: bounded to ``_BIND_RETRY_ATTEMPTS`` inside a wall-clock budget, so it cannot
+#: storm and a longer cap there would only add latency a user sits through.
+#: This loop is bounded in wall-clock but not in attempts, so its ceiling is
+#: what limits the rate.
+_RECOVERY_DIAL_CAP_S = 2.0
 
 #: Loop turns granted after a sync wall-clock expiry BEFORE the expiry is
 #: believed. This is the load-bearing half of the fix for the false timeout,
@@ -290,9 +348,13 @@ _MODEL_INTENT_PENDING = (
 #: attempt starts from a clean facade and no attach slot leaks against
 #: ``ATTACH_MAX_CLIENTS``. ``find_owner_record`` is re-run per attempt so a
 #: runtime that retired and respawned between attempts is picked up rather
-#: than redialled at its dead pid. Backoff shape copied from
-#: ``_recover_owner`` (``remote.py`` ``delay = min(delay * 1.7, 0.5)``) so the
-#: two redial loops behave the same way.
+#: than redialled at its dead pid. The backoff shape was originally copied from
+#: ``_recover_owner`` so the two redial loops behaved the same way; the CEILINGS
+#: have since deliberately diverged (``_RECOVERY_DIAL_CAP_S`` is 2.0 s) and this
+#: one is deliberately LEFT at 0.5. This loop is bounded to
+#: ``_BIND_RETRY_ATTEMPTS`` inside a wall-clock budget, so it cannot storm attach
+#: slots the way an attempt-unbounded loop can, and a longer cap here would only
+#: add latency to a bind a caller is waiting on. Do not re-unify them.
 _BIND_RETRY_ATTEMPTS = 3
 _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
@@ -595,6 +657,15 @@ class RemoteSession:
         self._gate_key: tuple[str, str, int] | None = None
         self._disposed = False
         self._recovering = False
+        #: Recovery ran to ``RECOVERY_GIVE_UP_S`` without ever getting usable
+        #: state out of an owner that stayed DISCOVERABLE the whole time. It
+        #: is the difference between the two ways a viewer can be cold, which
+        #: the user has to be told apart: ordinarily cold means no runtime is
+        #: running and "send a message to start one" is the lever, but here a
+        #: runtime IS running and merely never answered — so that sentence is
+        #: false in its premise. Read through ``exhausted_recovery`` rather
+        #: than directly; see it for why this is public at all.
+        self._recovery_exhausted = False
         self._recovery_task: asyncio.Task[None] | None = None
         #: Generation of the turn that was live when the socket dropped, or
         #: ``None`` when nothing was streaming. Recovery uses this to decide
@@ -1368,6 +1439,28 @@ class RemoteSession:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
 
+    @property
+    def exhausted_recovery(self) -> bool:
+        """Cold because the owner never answered — not because none is running.
+
+        PUBLIC because the TUI has to pick a sentence and the two cold states
+        need different ones. The generic cold copy ("no runtime is running for
+        this session; send a message to start one") is true for a fresh viewer
+        and for one whose runtime exited, and FALSE here: recovery gave up
+        against a record that stayed discoverable, so a runtime is alive and
+        simply busy. A predicate rather than another ``getattr(session,
+        "_recovering")`` private read at the call site, because the app already
+        reaches into this facade's privates in several places and each one is a
+        rename away from silently reading ``False`` forever.
+
+        Latches until the facade next binds, which is the honest lifetime: the
+        state it describes is "the last recovery attempt gave up", and any
+        successful bind is the evidence that it no longer holds. Never true on
+        a local ``Session`` — callers use ``getattr(session, ...)`` for the
+        same reason they do for ``is_cold``.
+        """
+        return self._recovery_exhausted
+
     async def attach_existing(self) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
@@ -2100,6 +2193,11 @@ class RemoteSession:
             self._finish_sync()
             self._deliberate_stop = False
             self._stopped_announced = False
+            # A bind is the evidence that the last give-up no longer describes
+            # this facade. Cleared on the success tail (not at entry) so a
+            # failed retry leaves the flag — and the sentence it selects —
+            # standing, which is the state that is still true.
+            self._recovery_exhausted = False
             self._owner_ready.set()
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
@@ -3764,6 +3862,10 @@ class RemoteSession:
         # the next message engages a fresh runtime. Without a bound the loop
         # would redial forever against a session nobody is running.
         cold_deadline = time.monotonic() + COLD_FALLBACK_S
+        # The second, longer bound for the surface that cannot take the branch
+        # above. See ``RECOVERY_GIVE_UP_S`` for why it is derived from the
+        # heartbeat contract rather than calibrated here.
+        give_up_deadline = time.monotonic() + RECOVERY_GIVE_UP_S
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
@@ -3775,9 +3877,13 @@ class RemoteSession:
                         )
                         self._go_cold()
                         return
-                    # The LEGACY attach surface has no cold state to fall into
-                    # (``_can_go_cold`` is desktop-only) and its contract is to
-                    # keep chasing a successor. But the turn must still reach a
+                    # The LEGACY attach surface does not go cold at THIS bound
+                    # (``_can_go_cold`` is desktop-only) because its contract is
+                    # to keep chasing a successor. It does now go cold at a
+                    # second, longer one — see the give-up branch below; this
+                    # comment used to say it had "no cold state to fall into"
+                    # at all, which is how the forever-latch survived review.
+                    # But the turn must still reach a
                     # verdict: with the abort deferred to recovery, a genuine
                     # owner death whose takeover keeps failing (lease held by
                     # another follower, or any raise — both retry forever by
@@ -3796,6 +3902,71 @@ class RemoteSession:
                             COLD_FALLBACK_S,
                         )
                         self._end_turn_locally(direct=True)
+                    # ...and AFTER that verdict, the loop itself must reach one.
+                    # Ending the turn left ``_recovering`` set, and the only
+                    # other exits are the cold branch above (unreachable here)
+                    # and the takeover in the no-record ``else`` — which a
+                    # LIVE BUT SILENT owner never reaches, because a record is
+                    # found on every pass. So the chase had no terminal state:
+                    # ``/model`` and every other mutation seam refused forever
+                    # and ``prompt`` parked silently on ``_owner_ready``.
+                    #
+                    # Going cold here does not weaken the chase contract, which
+                    # is written for a DEAD owner and is vacuous for a live one:
+                    # ``acquire_session_lease`` raises ``SessionLeaseHeldError``
+                    # unless the holder is proven dead, so a live owner cannot
+                    # be taken over even if this arm did reach the factory. Nor
+                    # does it engage a second runtime for a session that has
+                    # one: ``engage_runtime`` short-circuits on a discoverable
+                    # record and, failing that, waits rather than spawning while
+                    # a live pid holds the lease. ``_takeover_factory`` stays
+                    # armed for a LATER genuine death — a subsequent owner loss
+                    # re-enters this loop and, with the record gone by then,
+                    # takes the else-branch exactly as it always has.
+                    if time.monotonic() >= give_up_deadline:
+                        logger.info(
+                            "no usable state from the runtime for %s after %.0fs; "
+                            "unbinding — the conversation stays and the next action "
+                            "reconnects",
+                            self._session_id,
+                            RECOVERY_GIVE_UP_S,
+                        )
+                        # LOAD-BEARING, and it must precede ``_go_cold``.
+                        # ``_ensure_bound`` returns immediately when this flag
+                        # is False, so clearing ``_recovering`` while leaving it
+                        # unset would produce a viewer that reports ``is_cold``
+                        # and can NEVER bind again — a silent no-op in place of
+                        # today's honest refusal, which is the worse bug.
+                        # Mirrors the refresh arm of ``_go_cold``, which flips
+                        # the same flag with the same reasoning: from here on
+                        # this facade is a viewer.
+                        self._can_go_cold = True
+                        # BELT, not a live repair: verified unreachable with a
+                        # stamped pid today, because this check runs at the TOP
+                        # of a pass and every way the previous pass could fail
+                        # (failed dial, refused sync, timeout) routes through
+                        # ``_discard_rejected_client``, which clears it. It is
+                        # kept because the invariant it upholds is not local:
+                        # ``_go_cold`` does NOT clear the identity ``_dial``
+                        # stamps on entry, while ``runtime_pid`` promises None
+                        # while cold, and ``take_unannounced_cleanup`` reads
+                        # that pid to decide notice ownership — a stale match
+                        # claims another runtime's notice and blanks the
+                        # terminal that should have shown it (the F3 hazard the
+                        # dial-failure arm below documents). Any future exit
+                        # added between a successful dial and this check would
+                        # reintroduce it silently. Cleared locally rather than
+                        # inside ``_go_cold`` to keep this off the desktop path.
+                        self._runtime_pid = None
+                        # Set BEFORE ``_go_cold``: the went-cold callback fires
+                        # inside it, and a notice handler that asks the facade
+                        # why it went cold must not read a flag that is still
+                        # being written.
+                        self._recovery_exhausted = True
+                        self._go_cold()
+                        # ``finally`` clears ``_recovering``: the refusals lift
+                        # and the parked prompt is released by ``_owner_ready``.
+                        return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
@@ -3836,7 +4007,13 @@ class RemoteSession:
                         # the runtime it tried.
                         self._discard_rejected_client()
                         await asyncio.sleep(delay)
-                        delay = min(delay * 1.7, 0.5)
+                        # ``_RECOVERY_DIAL_CAP_S``, not the 0.5 this loop shared
+                        # with ``_bind_under_lock``: the ``continue`` below
+                        # skips the sleep at the bottom of the loop, so this is
+                        # the only pacing on the dial-failure path and it is the
+                        # one that can storm attach slots. The two shapes have
+                        # deliberately diverged; see the constant.
+                        delay = min(delay * 1.7, _RECOVERY_DIAL_CAP_S)
                         continue
                     try:
                         # BLOCKED envelope, NOT the generous backstop — a

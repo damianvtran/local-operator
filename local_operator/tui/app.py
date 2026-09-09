@@ -23479,6 +23479,28 @@ class OperatorApp(App[None]):
                     "try /model again in a moment",
                     "warning",
                 )
+            elif bool(getattr(session, "exhausted_recovery", False)):
+                # Cold, but NOT because no runtime is running: recovery gave up
+                # against an owner that stayed discoverable the whole time and
+                # simply never answered. The generic sentence below asserts
+                # something false there — "send a message to start one" tells
+                # the user to start a runtime that is already alive, which is
+                # exactly the dead end the operator reported when no number of
+                # /model retries or /resumes would switch the model.
+                #
+                # Says what is true and ends in the next step, the pattern
+                # `_MODEL_INTENT_PENDING` and `_SYNC_UNRESPONSIVE_REASON` both
+                # follow: the retry itself is the reconnect, because the facade
+                # is rebindable again (`_can_go_cold` was flipped at that exit)
+                # and `_ensure_bound` rediscovers the same live record.
+                # Deliberately avoids runtime vocabulary the user cannot act on
+                # — "owner", "viewer", "cold" — and names the transcript,
+                # because the screen is about to look like a fresh session.
+                self._system_notice(
+                    "this session's runtime is busy and stopped responding — "
+                    "the conversation is intact; try /model again to reconnect",
+                    "warning",
+                )
             else:
                 self._system_notice(
                     "no runtime is running for this session; "

@@ -9713,6 +9713,50 @@ async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
     assert _unwrapped("(this session)") not in text, text
 
 
+class _ExhaustedRecoveryLabelSession(_ColdAsyncLabelSession):
+    """Cold because recovery GAVE UP on an owner that stayed discoverable.
+
+    The state ``RemoteSession._recover_owner`` reaches at
+    ``RECOVERY_GIVE_UP_S``: a runtime is alive and simply never answered, so
+    the generic cold sentence is false in its premise.
+    """
+
+    @property
+    def exhausted_recovery(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_switch_after_recovery_gave_up_does_not_claim_no_runtime_is_running() -> None:
+    """The generic cold copy asserts something FALSE on this path.
+
+    A viewer whose owner is live but silent unbinds at ``RECOVERY_GIVE_UP_S``
+    and is then cold — but "no runtime is running for this session; send a
+    message to start one" tells the user to start a runtime that is already
+    running, which is the dead end the operator hit: no number of /model
+    retries or /resumes would switch the model. The honest sentence names the
+    busy runtime, reassures about the transcript (the screen is about to look
+    like a fresh session) and ends in the next step, which really does repair
+    it now that the facade is rebindable.
+    """
+    session = _ExhaustedRecoveryLabelSession()
+    ctrl = _AccessController(stored=("openrouter", "anthropic"))
+    app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
+    async with app.run_test(size=(110, 24)) as pilot:
+        await _await_session(app, pilot)
+        app._run_slash_command("/model anthropic/claude-fable-5-1")
+        await pilot.pause()
+        text = _unwrapped(_transcript_text(app))
+    assert _unwrapped("no runtime is running for this session") not in text, (
+        "the false premise is still printed for a live-but-silent owner: " + text
+    )
+    assert _unwrapped("this session's runtime is busy and stopped responding") in text, text
+    assert _unwrapped("the conversation is intact") in text, text
+    assert _unwrapped("try /model again to reconnect") in text, text
+    # Still a refusal, not a receipt: nothing was switched.
+    assert _unwrapped("(this session)") not in text, text
+
+
 class _StoppedFollowerSession(_AsyncLabelSession):
     """The shape a real follower is in after ``/stop``: the socket is closed
     (``is_cold``) but ``frontend_state`` still carries the owner's LAST
