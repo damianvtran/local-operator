@@ -55,7 +55,14 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
@@ -91,6 +98,8 @@ from local_operator.tools.builtin import (
     _text,
     _validate_effort_tier,
     _validation_error,
+    _with_advertised_effort,
+    effort_validation_context,
     spill_truncate,
 )
 
@@ -167,17 +176,21 @@ class AgentParams(BaseModel):
 
     @field_validator("effort")
     @classmethod
-    def _effort_is_configured(cls, value: str | None) -> str | None:
+    def _effort_is_configured(cls, value: str | None, info: ValidationInfo) -> str | None:
         """A pin must name a tier a launch could honour TODAY.
 
         Before this, any of ``lo|med|hi`` was accepted and stored, and the pin
         then failed at every launch of the role once the strict path refused
         the unconfigured tier. Refusing here keeps a stale pin from ever being
         written; the launch path still catches one that went stale later.
+
+        ``info`` carries what the schema advertised, which is what decides
+        whether a refusal is the model's fault or the operator's — see
+        :func:`_validate_effort_tier`.
         """
         if value == "inherit":
             return value
-        return _validate_effort_tier(value)
+        return _validate_effort_tier(value, info)
 
     delegate: bool | None = Field(
         default=None,
@@ -1176,7 +1189,7 @@ async def execute_agent(
     """
 
     try:
-        params = AgentParams(**args)
+        params = AgentParams.model_validate(args, context=effort_validation_context())
     except ValidationError as exc:
         return _validation_error(tool_call_id, "agent", exc)
 
@@ -1231,6 +1244,11 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
 
     if getattr(context, "agent_registry", None) is None:
         return None
+    parameters = _advertise_effort_tiers(
+        AgentParams.model_json_schema(),
+        description=_effort_pin_description(),
+        extra=("inherit",),
+    )
     return AgentTool(
         name="agent",
         label="Agent roles",
@@ -1242,11 +1260,7 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             "specialist is the reusable base a team layers collaboration and "
             "project briefs on top of."
         ),
-        parameters=_advertise_effort_tiers(
-            AgentParams.model_json_schema(),
-            description=_effort_pin_description(),
-            extra=("inherit",),
-        ),
+        parameters=parameters,
         # Writes land in the user's own configuration directory, never in the
         # workspace, and are trivially reversible by editing the profile back.
         # Gating them behind an approval prompt would make an agent improving
@@ -1258,5 +1272,5 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,
-        execute=execute_agent,
+        execute=_with_advertised_effort(execute_agent, parameters),
     )

@@ -12,6 +12,8 @@ for an HTTP 500). Each class is therefore pinned at its own source.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any, Literal
 
 import pytest
@@ -423,3 +425,557 @@ async def test_shipped_eval_nested_exclusion_is_not_a_failed_tool_call(
             assert nested.split("excluded", 1)[1].strip().startswith("1")
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# The classification BOUNDARY: malformed argument vs unsatisfiable request.
+#
+# Both arrive at the same generic handler as an is_error result from a tool
+# body, and before the marker existed both recorded as `execution` — which is
+# how a session with four model-caused invalid calls rendered a 0.0% error
+# rate. These pin the boundary in BOTH directions, because the permissive
+# direction (calling an execution error a model fault) inflates a published
+# benchmark and is the worse failure.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_read_tool(tmp_path) -> AgentTool:
+    """The REAL shipped ``read``, not a stand-in: the claim under test is that
+    its own argument parsing is classified correctly."""
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    return next(t for t in create_tools(context) if t.name == "read")
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_range_is_a_model_fault_not_an_execution_error(tmp_path):
+    """The operator's exact repro: ``range='"270-330"'`` — a line range with
+    literal quote characters embedded.
+
+    ``range`` is typed ``str | None``, so this passes the loop's schema check
+    and fails inside the tool body. It is unambiguously the model emitting an
+    argument the tool cannot use, and recording it as ``execution`` is what
+    laundered it out of the accuracy figure.
+    """
+    (tmp_path / "a.txt").write_text("l1\nl2\nl3\n")
+    recorded = await _run(
+        _calls((0, "c1", "read", '{"path":"a.txt","range":"\\"270-330\\""}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "invalid_arguments"}
+
+
+@pytest.mark.asyncio
+async def test_a_wellformed_range_on_a_missing_file_stays_an_execution_error(tmp_path):
+    """The regression that matters most. A path that does not exist is
+    UNSATISFIABLE, not malformed — the file may have vanished after the model
+    planned the call — so it must NOT be credited to the model."""
+    recorded = await _run(
+        _calls((0, "c1", "read", '{"path":"ghost.txt","range":"1-5"}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_regex_is_a_model_fault_but_a_missing_path_is_not(tmp_path):
+    """``grep``'s two rejections sit three lines apart in the same function and
+    fall on opposite sides of the boundary."""
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    grep = next(t for t in create_tools(context) if t.name == "grep")
+
+    bad_regex = await _run(
+        _calls((0, "c1", "grep", '{"pattern":"("}')) + [StreamEndEvent(stop_reason="toolUse")],
+        [grep],
+        cwd=str(tmp_path),
+    )
+    assert _faults(bad_regex) == {"grep": "invalid_arguments"}
+
+    missing_path = await _run(
+        _calls((0, "c1", "grep", '{"pattern":"x","path":"no/such/dir"}'))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [grep],
+        cwd=str(tmp_path),
+    )
+    assert _faults(missing_path) == {"grep": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_tool_body_raising_the_typed_error_is_translated_by_the_executor():
+    """A tool may RAISE rather than hand-build a marked result; the executor
+    performs the translation so every tool gets it for free."""
+    from local_operator.harness.types import InvalidToolArgumentsError
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        raise InvalidToolArgumentsError("not a duration: 'soonish'")
+
+    tool = AgentTool(
+        name="wake",
+        parameters={"type": "object", "properties": {"in": {"type": "string"}}},
+        execute=execute,
+    )
+    recorded = await _run(
+        _calls((0, "c1", "wake", '{"in":"soonish"}')) + [StreamEndEvent(stop_reason="toolUse")],
+        [tool],
+    )
+    assert _faults(recorded) == {"wake": "invalid_arguments"}
+
+
+def test_the_tool_bodys_fault_class_is_one_the_reader_counts():
+    """The value a tool body writes must be one ``MODEL_FAULTS`` recognises.
+
+    ``harness`` carries no analytics dependency (see ``LoopConfig``), so the
+    writer's spelling and the reader's frozenset are pinned only here. A drift
+    would not raise — it would write a fault name no rate counts, silently
+    returning the figure to the under-reporting this PR fixes.
+
+    Deliberately NOT asserting ``loop.FAULT_KEY == types.FAULT_KEY``: the loop
+    now IMPORTS both names, so that compares an object with itself and can
+    never fail. What is worth pinning is the cross-package agreement below.
+    """
+    from local_operator.analytics.model import EXCLUDED_FAULTS, MODEL_FAULTS
+    from local_operator.harness import types as types_module
+
+    assert types_module.FAULT_INVALID_ARGUMENTS in MODEL_FAULTS
+    assert types_module.FAULT_INVALID_ARGUMENTS not in EXCLUDED_FAULTS
+    # The key is what the store reads out of ``details``; the store's own
+    # schema comment documents this exact string.
+    assert types_module.FAULT_KEY == "__fault"
+
+
+@pytest.mark.asyncio
+async def test_the_builtin_guard_does_not_swallow_the_typed_error():
+    """``_guard`` wraps every builtin and catches ``Exception`` INSIDE the tool,
+    so the loop's translation branch never sees a raise from one.
+
+    Without its own branch there, the guard's catch-all converted a deliberate
+    argument-shape rejection into an unmarked "failed unexpectedly" traceback —
+    the marker lost, the call recorded as ``execution``, and the raise mechanism
+    silently useless for exactly the tools it was built for. A genuine internal
+    error must still take the traceback path.
+    """
+    from local_operator.harness.types import InvalidToolArgumentsError
+    from local_operator.tools.builtin import _guard
+
+    @_guard("demo")
+    async def malformed(tool_call_id, args, signal=None, on_update=None, context=None):
+        raise InvalidToolArgumentsError("not a duration: 'soonish'")
+
+    @_guard("demo")
+    async def internal(tool_call_id, args, signal=None, on_update=None, context=None):
+        raise RuntimeError("genuine internal failure")
+
+    rejected = await malformed("c", {}, None, None, None)
+    assert rejected.is_error and rejected.details == {"__fault": "invalid_arguments"}
+    assert "Traceback" not in rejected.text
+
+    crashed = await internal("c", {}, None, None, None)
+    assert crashed.is_error
+    assert not (crashed.details or {}).get("__fault"), "an internal error is not a model fault"
+
+
+# ---------------------------------------------------------------------------
+# `_validation_error`: a pydantic rejection is a model fault ONLY when it is a
+# pure function of the arguments.
+#
+# This is the change with the widest blast radius in this area — it reclassifies
+# every params-model rejection across every tool — and it shipped without
+# behavioural coverage, which is exactly how the `effort` case below survived to
+# review. Both directions are pinned here.
+# ---------------------------------------------------------------------------
+
+
+def _shipped_task_tool(tmp_path) -> AgentTool:
+    """The REAL ``task``, whose schema is rendered from live config at BUILD
+    time while its validator re-reads config at CALL time — the gap under test.
+
+    ``task`` is ``createIf``-gated on a launcher, so one is supplied; nothing in
+    these tests launches anything, the call is refused during validation.
+    """
+    from local_operator.tools.registry import create_tools
+
+    def _launcher(
+        label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+    ) -> str:
+        raise AssertionError("validation must refuse the call before any launch")
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1", subagent_launcher=_launcher)
+    return next(t for t in create_tools(context) if t.name == "task")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args,why",
+    [
+        ({"path": "a.txt", "bogus": 1}, "extra=forbid"),
+        ({"path": "a.txt", "range": 5}, "declared type"),
+    ],
+)
+async def test_a_static_shape_violation_is_a_model_fault(tmp_path, args, why):
+    """`extra="forbid"` and a wrong declared type are decidable from the
+    arguments alone, so they are the model violating the tool's contract."""
+    (tmp_path / "a.txt").write_text("l1\nl2\n")
+    recorded = await _run(
+        _calls((0, "c1", "read", json.dumps(args))) + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "invalid_arguments"}, why
+
+
+@pytest.mark.asyncio
+async def test_a_cross_field_validator_is_still_a_model_fault(tmp_path):
+    """A cross-field rule is a pure function of the arguments — the model could
+    have satisfied it — so the environmental escape hatch must not catch it."""
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    edit = next(t for t in create_tools(context) if t.name == "edit")
+    recorded = await _run(
+        _calls((0, "c1", "edit", json.dumps({"path": "a.txt", "old_text": "a"})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [edit],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"edit": "invalid_arguments"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damage,why",
+    [
+        ("values:\n  subagents:\n    models: {}\n", "operator removed the tier"),
+        ("values: [ this is not: valid yaml\n", "config.yml became unreadable"),
+    ],
+)
+async def test_an_effort_tier_that_vanished_after_build_is_not_the_models_fault(
+    tmp_path, monkeypatch, damage, why
+):
+    """The blocker this suite missed: `effort`'s enum is rendered into the
+    schema at BUILD time, but `_validate_effort_tier` re-reads config at CALL
+    time. The model emits the one value its own schema offered and is refused
+    because the world moved.
+
+    The corrupt-config variant is the sharper one: `configured_effort_tiers`
+    swallows a read failure and reports "no tiers" ON PURPOSE, so that a broken
+    config costs the operator a tier picker rather than a session. Billing that
+    to the model would put an operator config error into a published accuracy
+    figure — the over-claiming direction `InvalidToolArgumentsError` names as
+    the worse one.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+    )
+
+    # Build the tool while the tier exists, so the advertised enum contains it.
+    task = _shipped_task_tool(tmp_path)
+    effort = task.parameters["properties"]["effort"]
+    assert "med" in json.dumps(effort), "the schema must have offered the tier"
+
+    (config_dir / "config.yml").write_text(damage)
+
+    recorded = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "effort": "med"})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "execution"}, why
+
+
+@pytest.mark.asyncio
+async def test_a_non_string_effort_fails_on_declared_type_before_the_validator(
+    tmp_path, monkeypatch
+):
+    """The escape hatch must not blanket-exempt the FIELD.
+
+    Named for what it actually covers: ``123`` is rejected on declared type,
+    so it never reaches ``_validate_effort_tier`` at all. That makes it a
+    check on the field not being exempted wholesale — NOT coverage of the
+    validator's own branch, which
+    ``test_an_effort_tier_that_was_never_advertised_is_the_models_fault``
+    exercises. The previous name implied the latter and was the reason a real
+    gap in that branch read as covered.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+
+    recorded = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "effort": 123})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_task_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "invalid_arguments"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args,expected,why",
+    [
+        ({"op": "create", "message": "m", "in": "soonish"}, "invalid_arguments", "duration"),
+        ({"op": "create", "message": "m", "at": "whenever"}, "invalid_arguments", "time"),
+        ({"op": "create", "message": "m", "at": "2001-01-01T00:00:00Z"}, "execution", "past"),
+    ],
+)
+async def test_the_real_wake_tool_separates_malformed_from_unsatisfiable(
+    tmp_path, args, expected, why
+):
+    """Driven through the REAL ``wake``, not a synthetic stand-in.
+
+    Two fixture tests in this module raise the typed error from a tool NAMED
+    ``wake``, which made the suite read as though the shipped tool were covered
+    when it was not. ``'soonish'`` could never be a duration; a timestamp in
+    2001 is perfectly well-formed and merely unsatisfiable.
+    """
+    from local_operator.tools.registry import create_tools
+
+    class _Scheduler:
+        schedules: list[Any] = []
+
+        async def update(self, schedules: list[Any]) -> None:
+            return None
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1", wake_scheduler=_Scheduler())
+    wake = next(t for t in create_tools(context) if t.name == "wake")
+    recorded = await _run(
+        _calls((0, "c1", "wake", json.dumps(args))) + [StreamEndEvent(stop_reason="toolUse")],
+        [wake],
+        cwd=str(tmp_path),
+        wake_scheduler=_Scheduler(),
+    )
+    assert _faults(recorded) == {"wake": expected}, why
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_spill_handle_is_a_model_fault(tmp_path):
+    """The handle rides inside ``path``, a plain schema string, so a value that
+    is not a handle at all can only be rejected in the tool body — the same
+    argument its sibling regex branch already carries."""
+    recorded = await _run(
+        _calls((0, "c1", "read", json.dumps({"path": "spill://not-a-valid-handle!!"})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [_shipped_read_tool(tmp_path)],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"read": "invalid_arguments"}
+
+
+@pytest.mark.asyncio
+async def test_validity_does_not_depend_on_which_tool_the_model_picked(tmp_path):
+    """``web_fetch``/``web_search`` built their own validation results and so
+    classified an identical modelling mistake differently from ``read``.
+
+    A benchmark whose denominator moves with tool identity is the hidden
+    dependence the analytics origin-partition prose exists to prevent.
+    """
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(cwd=str(tmp_path), session_id="s1")
+    built = {t.name: t for t in create_tools(context)}
+    faults = {}
+    for name, args in (
+        ("read", {"path": "a.txt", "bogus": 1}),
+        ("web_fetch", {"url": "https://example.com", "bogus": 1}),
+        ("web_search", {"query": "x", "bogus": 1}),
+    ):
+        if name not in built:  # web tools are createIf-gated on configuration
+            continue
+        recorded = await _run(
+            _calls((0, "c1", name, json.dumps(args))) + [StreamEndEvent(stop_reason="toolUse")],
+            [built[name]],
+            cwd=str(tmp_path),
+        )
+        faults[name] = _faults(recorded)[name]
+    assert set(faults.values()) == {"invalid_arguments"}, faults
+    assert "read" in faults and len(faults) > 1, f"web tools were not exercised: {faults}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configured,sent,why",
+    [
+        ("med", "hi", "tier exists but this one was never offered"),
+        ("med", "turbo", "value is not a tier name at all"),
+        (None, "hi", "no tiers configured, so `effort` is not in the schema"),
+    ],
+)
+async def test_an_effort_tier_that_was_never_advertised_is_the_models_fault(
+    tmp_path, monkeypatch, configured, sent, why
+):
+    """The model invented a value the schema never offered — a model fault.
+
+    This is the branch the round-1 fix over-corrected: it treated EVERY
+    ``effort`` refusal as environmental, so a value the model made up booked
+    as ``execution``. Config is written once here and never touched, so
+    nothing environmental happens at all.
+
+    The third case is this machine's real shape: with no tiers configured,
+    ``_advertise_effort_tiers`` DELETES the property, so sending ``effort`` is
+    sending a field the schema does not contain — the same kind of mistake as
+    a stray key.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    models:\n"
+        + (f"      {configured}: anthropic/claude-sonnet-4-5\n" if configured else "      {}\n")
+    )
+
+    from local_operator.tools.builtin import advertised_effort_members
+
+    task = _shipped_task_tool(tmp_path)
+    effort = (task.parameters.get("properties") or {}).get("effort")
+    advertised = advertised_effort_members(task.parameters)
+    if configured is None:
+        assert effort is None, "with no tiers the property must be dropped entirely"
+        assert advertised == frozenset()
+    else:
+        # Against the ENUM, not the rendered JSON: the description names tiers
+        # in prose, so a substring check would pass for the wrong reason.
+        assert sent not in advertised, "the value under test must NOT be advertised"
+
+    recorded = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "effort": sent})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "invalid_arguments"}, why
+
+
+@pytest.mark.asyncio
+async def test_an_invented_tier_cannot_launder_a_genuine_violation(tmp_path, monkeypatch):
+    """The regression the narrow branch removes.
+
+    `_rejection_is_environmental` is ANY-of, so while an invented tier counted
+    as environmental it erased every real violation reported in the same
+    `ValidationError` — `extra="forbid"`, the canonical model fault this
+    change exists to capture. The two co-occur naturally: a model confused
+    enough to invent a tier is the model likely to also pass a stray key.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+    )
+    task = _shipped_task_tool(tmp_path)
+
+    control = await _run(
+        _calls((0, "c1", "task", json.dumps({"label": "x", "prompt": "y", "bogus": 1})))
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(control) == {"task": "invalid_arguments"}, "control: extra=forbid is a fault"
+
+    paired = await _run(
+        _calls(
+            (
+                0,
+                "c1",
+                "task",
+                json.dumps({"label": "x", "prompt": "y", "effort": "hi", "bogus": 1}),
+            )
+        )
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(paired) == {"task": "invalid_arguments"}, "an invented tier must not erase it"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tools_do_not_see_each_others_advertised_effort():
+    """The advertised set is per-call, not process-wide.
+
+    A parent and its subagents run on one event loop and can hold tools built
+    from different configs; a module global would let one tool's snapshot
+    decide another's fault class. Pins the ContextVar's isolation and that it
+    is reset after the call rather than leaking into the next one.
+    """
+    from local_operator.tools.builtin import _ADVERTISED_EFFORT, _with_advertised_effort
+
+    async def report(tool_call_id, args, signal=None, on_update=None, context=None):
+        await asyncio.sleep(0)  # force interleaving
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="probe",
+            content=[TextContent(text=",".join(sorted(_ADVERTISED_EFFORT.get() or [])))],
+        )
+
+    def schema(*members: str) -> dict[str, Any]:
+        return {"properties": {"effort": {"anyOf": [{"type": "string", "enum": list(members)}]}}}
+
+    first = _with_advertised_effort(report, schema("med"))
+    second = _with_advertised_effort(report, schema("hi", "lo"))
+    left, right = await asyncio.gather(
+        first("1", {}, None, None, None), second("2", {}, None, None, None)
+    )
+
+    assert (left.text, right.text) == ("med", "hi,lo")
+    assert _ADVERTISED_EFFORT.get() is None, "the snapshot must not outlive the call"
+
+
+@pytest.mark.asyncio
+async def test_a_static_violation_paired_with_a_vanished_tier_is_not_billed_to_the_model(
+    tmp_path, monkeypatch
+):
+    """The ANY-vs-ALL judgement call, pinned.
+
+    `_rejection_is_environmental` returns True if ANY sub-error is
+    environmental, and this is the only shape where that choice is observable:
+    a genuine `extra="forbid"` reported in the same `ValidationError` as a
+    tier that really was advertised and really did vanish. One call cannot
+    carry two verdicts, so the rule picks `execution` — not billing the model
+    is the better way to be wrong.
+
+    This is safe ONLY because the environmental branch is narrow. The
+    sibling test `test_an_invented_tier_cannot_launder_a_genuine_violation`
+    is its counterpart: an INVENTED tier is not environmental, so the same
+    pairing there stays `invalid_arguments`. Both must hold, or the ANY rule
+    is a laundering channel rather than a conservative default.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    (config_dir / "config.yml").write_text(
+        "values:\n  subagents:\n    models:\n      med: anthropic/claude-sonnet-4-5\n"
+    )
+    task = _shipped_task_tool(tmp_path)
+
+    # The tier really was on offer, then the operator removed it.
+    (config_dir / "config.yml").write_text("values:\n  subagents:\n    models: {}\n")
+
+    recorded = await _run(
+        _calls(
+            (
+                0,
+                "c1",
+                "task",
+                json.dumps({"label": "x", "prompt": "y", "effort": "med", "bogus": 1}),
+            )
+        )
+        + [StreamEndEvent(stop_reason="toolUse")],
+        [task],
+        cwd=str(tmp_path),
+    )
+    assert _faults(recorded) == {"task": "execution"}
