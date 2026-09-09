@@ -792,6 +792,149 @@ async def test_a_crash_with_a_secret_on_real_fd2_is_scrubbed(isolated: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_retry_loop_of_one_secret_does_not_wedge_the_kernel(isolated: Path) -> None:
+    """R9 regression: the ORDINARY retry shape, not a pathological big value.
+
+    The scrub channel is a 64 KiB pipe the worker writes from inside
+    ``register`` — before the value reaches the cell — so anything that parks
+    the write parks the retrieval, and the kernel dies at the timeout taking
+    all session state with it. Nothing caches a retrieval, so a loop that
+    re-fetches ONE token per attempt (a retry, a paginated API walk) publishes
+    once per iteration while the ledger stays size 1: at 200 bytes a record
+    that filled the pipe at ~319 iterations.
+
+    This asserts the CELL COMPLETES. It is the availability half of the
+    invariant the fix is built on: a dropped scrub record degrades to an
+    unscrubbed crash tail (the documented pre-R1 fallback), never to a blocked
+    retrieval. 400 iterations is comfortably past the old wedge point, and the
+    generous timeout means a FAIL here is a park, not a slow machine.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.tools import eval as eval_tool
+
+    open_store(create=True).set("RETRY_TOKEN", b"R" * 200)
+    tool = eval_tool.build_eval_tool()
+    context = ToolContext(cwd="/tmp", session_id="retry-loop")
+    code = "n = 0\nfor _ in range(400):\n    t = secrets['RETRY_TOKEN']\n    n += 1\nn\n"
+    result = await tool.execute("c1", {"code": code, "timeout": 60}, AbortSignal(), None, context)
+    assert not result.is_error, f"the retrieval loop wedged: {result.text[:400]}"
+    assert "400" in result.text
+    await eval_tool.close_session_kernel("retry-loop")
+
+
+def test_publication_dedups_with_the_ledger_not_beside_it() -> None:
+    """R9 regression: re-registering one value publishes exactly once.
+
+    ``add()`` on a set dedups for free, which hid that publication sat OUTSIDE
+    it: five registrations of one identical value produced five publishes
+    against a ledger of size 1. That asymmetry is what turned an ordinary
+    retry loop into hundreds of records for a scrub set with one entry in it,
+    and it is the half of the fix that removes the pressure rather than
+    surviving it.
+    """
+    from local_operator.secrets import runtime
+
+    published: list[str] = []
+    ledger = runtime._RedactionLedger()
+    original = runtime._PUBLISH_HOOK
+    runtime.set_publish_hook(published.append)
+    try:
+        for _ in range(5):
+            ledger.register("one-identical-value")
+        ledger.register("a-second-value")
+    finally:
+        runtime.set_publish_hook(original)
+
+    assert published == ["one-identical-value", "a-second-value"]
+    assert sorted(ledger.values()) == ["a-second-value", "one-identical-value"]
+
+
+def test_a_full_scrub_pipe_drops_the_record_instead_of_parking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9: past the channel's capacity, publication must return, not block.
+
+    The acceptance criterion stated as an assertion, and it takes the REAL
+    setup path: the fd is handed over the way the parent hands it over, so the
+    non-blocking mode under test is the one ``_install_scrub_channel`` sets
+    rather than one the test quietly supplied for it. That ordering matters —
+    a test that sets the mode itself passes against a worker that never sets
+    it at all.
+
+    The mode assertion is deliberately first. It is the property that makes
+    the park impossible, and checking it fails FAST where the behaviour it
+    protects can only fail by hanging forever (a park is not an exception and
+    no ``except`` or assertion can catch it). With that established, filling
+    the pipe and publishing exercises the drop: the record is lost, which
+    downgrades the crash tail for that one value to the documented pre-R1
+    unscrubbed behaviour, and the retrieval stays free to complete.
+    """
+    import os as _os
+
+    from local_operator.tools import eval_worker
+
+    read_fd, write_fd = _os.pipe()
+    monkeypatch.setattr(eval_worker, "_SCRUB_FD", None)
+    try:
+        monkeypatch.setenv(eval_worker._SCRUB_FD_ENV, str(write_fd))
+        eval_worker._install_scrub_channel()
+        assert eval_worker._SCRUB_FD == write_fd, "the worker ignored the handed-over fd"
+        assert not _os.get_blocking(write_fd), (
+            "the scrub fd is BLOCKING: a full pipe now parks the retrieval that "
+            "published onto it, killing the kernel and all session state"
+        )
+
+        # Fill it. A non-blocking write to a full pipe raises rather than
+        # parking, which is how this loop terminates at all.
+        with contextlib.suppress(BlockingIOError):
+            while True:
+                _os.write(write_fd, b"x" * 4096)
+
+        eval_worker._publish_secret_value("value-that-does-not-fit")
+        # Dropped, not buffered, and the channel stays usable for the next
+        # value once the parent drains: a full pipe is a transient condition.
+        assert eval_worker._SCRUB_FD == write_fd
+    finally:
+        eval_worker._SCRUB_FD = None
+        _os.close(read_fd)
+        _os.close(write_fd)
+
+
+@pytest.mark.asyncio
+async def test_secrets_retrieved_across_cells_still_scrub_a_later_crash(
+    isolated: Path,
+) -> None:
+    """R9 must not cost R1: draining early keeps values, it does not spend them.
+
+    Draining the pipe on the healthy path means the crash path is no longer
+    its only reader, so the values a crash needs are the ones EARLIER
+    exchanges already consumed. This retrieves in one cell and crashes in a
+    later one — if the drain dropped what it read, the fd-2 tail would come
+    back raw.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.tools import eval as eval_tool
+
+    open_store(create=True).set("EARLY", b"EARLYLEAK-2b7c-4410")
+    tool = eval_tool.build_eval_tool()
+    context = ToolContext(cwd="/tmp", session_id="cross-cell-crash")
+    first = await tool.execute(
+        "c1", {"code": "token = secrets['EARLY']\nlen(token)\n"}, AbortSignal(), None, context
+    )
+    assert not first.is_error, first.text
+    result = await tool.execute(
+        "c2",
+        {"code": "import os\nos.write(2, f'TAIL {token}'.encode())\nos._exit(3)\n"},
+        AbortSignal(),
+        None,
+        context,
+    )
+    assert result.is_error
+    assert "EARLYLEAK-2b7c-4410" not in result.text, "a drained value stopped scrubbing"
+    assert "TAIL [redacted]" in result.text
+
+
+@pytest.mark.asyncio
 async def test_list_on_a_machine_with_no_store_is_not_an_error(isolated: Path) -> None:
     """`list` is the orienting verb; an error there reads as 'broken'."""
     result = await _call("list")

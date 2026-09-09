@@ -109,6 +109,17 @@ class _RedactionLedger:
             # every character of every output.
             return
         with self._lock:
+            if value in self._values:
+                # R9: publication dedups WITH the set, not beside it. Nothing
+                # caches a retrieval (see the mapping's docstring), so the
+                # ordinary retry loop — `secrets["TOK"]` once per attempt —
+                # re-registers one identical value hundreds of times while the
+                # ledger stays size 1. Publishing each of those spent the
+                # parent's bounded scrub channel on records it already had, at
+                # a few hundred bytes a turn. Returning here makes the channel
+                # cost proportional to DISTINCT secrets, which is what the
+                # parent's scrub set is made of.
+                return
             self._values.add(value)
         _publish(value)
 

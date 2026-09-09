@@ -160,6 +160,18 @@ class _Kernel:
         # platform where the side channel could not be set up — the crash path
         # then scrubs nothing, which is the pre-R1 behaviour and still safe.
         self.scrub_read = scrub_read
+        # R9: the pipe is drained on the NORMAL path (after every exchange),
+        # not only on the crash path. A pipe nothing reads is a fixed 64 KiB
+        # CUMULATIVE budget on everything the worker will ever publish, and
+        # the worker publishes from inside the retrieval; draining routinely
+        # is what keeps that budget per-exchange instead of per-kernel.
+        # Values accumulate here because a drain consumes them from the pipe,
+        # so the crash path can no longer be the only reader of the full set.
+        self.scrub_values: list[str] = []
+        # Bytes of a record split across two reads. A drain can land
+        # mid-record; the remainder is carried to the next one rather than
+        # discarded, which would lose that value's scrub entry entirely.
+        self.scrub_partial: bytes = b""
         self.last_used = time.monotonic()
         self.generation = uuid.uuid4().hex
 
@@ -526,6 +538,11 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     try:
         scrub_read, scrub_write = os.pipe()
         os.set_inheritable(scrub_write, True)
+        # Non-blocking once, at setup, rather than per drain: the drain now
+        # runs after every exchange (R9) and a mode change per call is both
+        # wasted syscalls and a window where a failure would leave the parent
+        # reading a blocking fd inside the response path.
+        os.set_blocking(scrub_read, False)
         env = dict(os.environ)
         env["LOCAL_OPERATOR_EVAL_SCRUB_FD"] = str(scrub_write)
         spawn_options["env"] = env
@@ -623,25 +640,28 @@ async def _read_crash_stderr(kernel: _Kernel) -> str:
 
 
 def _drain_scrub_channel(kernel: _Kernel) -> list[str]:
-    """Collect every value the worker published on the kernel's scrub pipe.
+    """Drain the scrub pipe into the kernel's set and return it.
 
     The pipe is framed as ``<len>\x00<bytes>\x00`` per value (see the worker's
     ``_publish_secret_value``). A crashed worker has closed its write end, so
     draining reads whatever it buffered; a kernel that never retrieved a secret
     yields ``[]``. A worker spawned without the channel (``scrub_read is
-    None``) drains to ``[]``, which is the safe pre-R1 behaviour. Any framing
-    damage yields whatever whole values were recovered; a partial trailing
-    record is dropped rather than risk splitting a value into scrub-resistant
-    fragments.
+    None``) drains to ``[]``, which is the safe pre-R1 behaviour.
+
+    R9: this is called after EVERY exchange, not only on the crash path, so it
+    is incremental — each call consumes what is in the pipe now, and values
+    accumulate on the kernel. Draining is what bounds the worker's publication
+    budget: the worker's write is non-blocking and DROPS a record onto a full
+    pipe, so a pipe left unread turns ordinary secret use into an unscrubbed
+    crash tail (and, before the worker's write was made non-blocking, into a
+    wedged retrieval). A partial trailing record is CARRIED to the next drain
+    rather than dropped, because with routine draining a split record is the
+    normal case rather than a sign of damage.
     """
     fd = kernel.scrub_read
     if fd is None:
-        return []
-    try:
-        os.set_blocking(fd, False)
-    except (AttributeError, OSError):
-        return []
-    buf = b""
+        return kernel.scrub_values
+    buf = kernel.scrub_partial
     try:
         while True:
             try:
@@ -653,7 +673,6 @@ def _drain_scrub_channel(kernel: _Kernel) -> list[str]:
             buf += chunk
     except OSError:
         pass
-    values: list[str] = []
     i = 0
     while i < len(buf):
         sep = buf.find(b"\x00", i)
@@ -662,13 +681,19 @@ def _drain_scrub_channel(kernel: _Kernel) -> list[str]:
         try:
             length = int(buf[i:sep])
         except ValueError:
+            # Framing damage: the rest of the buffer cannot be parsed against
+            # a length that is not a number. Drop it rather than resynchronise
+            # onto bytes that could split one value into scrub-resistant
+            # fragments; values already recovered stay valid.
+            i = len(buf)
             break
         end = sep + 1 + length
         if end + 1 > len(buf):
             break
-        values.append(buf[sep + 1 : end].decode("utf-8", errors="replace"))
+        kernel.scrub_values.append(buf[sep + 1 : end].decode("utf-8", errors="replace"))
         i = end + 1  # skip the trailing NUL
-    return values
+    kernel.scrub_partial = buf[i:]
+    return kernel.scrub_values
 
 
 async def _exchange(
@@ -783,10 +808,20 @@ async def _exchange(
         channel = response.get("stream")
         if channel:
             # A progress frame, not the answer: publish it and keep reading.
+            # R9: drain here too. A long-running cell that retrieves inside a
+            # loop while streaming would otherwise fill the pipe without ever
+            # reaching the per-response drain below, which is exactly the
+            # cumulative-budget shape this fix exists to remove.
+            _drain_scrub_channel(kernel)
             if on_stream is not None:
                 with contextlib.suppress(Exception):
                     on_stream(str(channel), str(response.get("text") or ""))
             continue
+        # R9: the pipe is drained on the healthy path, before returning. The
+        # worker publishes from inside `register`, which runs BEFORE the value
+        # reaches the cell, so an undrained pipe costs the crash-tail scrub
+        # (records are dropped) rather than merely delaying it.
+        _drain_scrub_channel(kernel)
         return response
 
 

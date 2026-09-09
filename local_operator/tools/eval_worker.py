@@ -98,17 +98,42 @@ def _publish_secret_value(value: str) -> None:
     Called from the runtime ledger's ``register`` hook, so it fires on the
     retrieval itself — before the cell that just received the value can write
     it anywhere. Length-prefixed and NUL-terminated so the parent frames one
-    value per record across pipe-read boundaries. Best-effort: a closed or
-    absent fd must never turn a retrieval into a crash, so all failures are
-    swallowed; the parent reads what arrived and treats a short read as "no
-    values".
+    value per record across pipe-read boundaries.
+
+    R9: THE WRITE IS NON-BLOCKING, AND THAT IS THE LOAD-BEARING PROPERTY.
+    ``register`` publishes BEFORE the value reaches the caller, so anything
+    that parks here parks the retrieval itself — and a blocking ``os.write``
+    onto a full pipe does not raise, it parks forever, which no ``except``
+    can rescue. The pipe holds 64 KiB and the parent drains it between
+    exchanges, so a full pipe means one cell out-published a whole drain
+    cycle. The ranking that settles what to do then: a dropped record
+    degrades to an UNSCRUBBED CRASH TAIL for that one value, which is the
+    documented pre-R1 fallback and survivable; a blocked write degrades to a
+    dead kernel and total loss of session state, which is not. Availability
+    of the retrieval outranks completeness of the crash-tail scrub, so a
+    record that does not fit is dropped.
+
+    A record smaller than ``PIPE_BUF`` is written atomically or not at all, so
+    an ordinary token-sized value can only ever be dropped WHOLE. A larger
+    value can be cut short, which would desynchronise the parent's framing and
+    cost every LATER value too — so a short write retires the channel instead,
+    leaving the partial record as the trailing one the parent already drops.
     """
+    global _SCRUB_FD
     fd = _SCRUB_FD
     if fd is None:
         return
     try:
         data = value.encode("utf-8", errors="replace")
-        os.write(fd, str(len(data)).encode("ascii") + b"\x00" + data + b"\x00")
+        record = str(len(data)).encode("ascii") + b"\x00" + data + b"\x00"
+        written = os.write(fd, record)
+        if written != len(record):
+            # Framing is now damaged; every later record would be misparsed.
+            # Stop publishing rather than corrupt values already delivered.
+            _SCRUB_FD = None
+    except BlockingIOError:
+        # The pipe is full. Drop this record — see the ranking above.
+        pass
     except BaseException:  # noqa: BLE001 — publication must never fault a cell
         pass
 
@@ -118,7 +143,10 @@ def _install_scrub_channel() -> None:
 
     Reads ``LOCAL_OPERATOR_EVAL_SCRUB_FD`` once. The fd is inherited from the
     parent; it is made non-inheritable so a grandchild process cannot hold it
-    open and stall the parent's read at the crash path.
+    open and stall the parent's read at the crash path, and NON-BLOCKING so a
+    full pipe can never park a retrieval (R9 — see ``_publish_secret_value``).
+    Both are required: if the non-blocking mode cannot be set, the channel is
+    left absent rather than run in a mode that can wedge the kernel.
     """
     global _SCRUB_FD
     raw = os.environ.pop(_SCRUB_FD_ENV, None)
@@ -130,7 +158,8 @@ def _install_scrub_channel() -> None:
         return
     try:
         os.set_inheritable(fd, False)
-    except OSError:
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError):
         return
     _SCRUB_FD = fd
     # Lazy: the runtime module is only present once the worker has imported it
