@@ -28253,9 +28253,11 @@ class OperatorApp(App[None]):
             # written to the encrypted long-term store. Synchronous because the
             # write is a few ms of local SQLite and the operator is waiting at
             # the composer to hear whether their secret is durable now.
-            from local_operator.secrets.promote import promote_session_credential
+            from local_operator.secrets.promote import (
+                promote_session_credential_guarded,
+            )
 
-            notice(promote_session_credential(store, parsed.key).message)
+            notice(promote_session_credential_guarded(store, parsed.key).message)
             return
         if parsed.action == "forget-all":
             # Snapshot the names BEFORE the clear: clear_credentials() empties

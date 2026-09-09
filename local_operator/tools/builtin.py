@@ -10883,16 +10883,14 @@ def _promote_credential(store: Any, key: str, description: str) -> str:
     and must SAY so, because the model's plan depends on which it was.
 
     Imported lazily: the crypto stack stays off the path of every `ask` that
-    does not persist, which is nearly all of them.
+    does not persist, which is nearly all of them. The never-raises guard lives
+    in :func:`promote_session_credential_guarded` so the ``/credential
+    --persist`` and viewer paths share the same robustness level (R4) rather
+    than this path carrying a second one.
     """
-    try:
-        from local_operator.secrets.promote import promote_session_credential
+    from local_operator.secrets.promote import promote_session_credential_guarded
 
-        result = promote_session_credential(store, key, description=description)
-    except Exception:
-        logger.warning("could not promote %s to the long-term store", key, exc_info=True)
-        return "stored for this session only — saving it long-term failed"
-    return result.message
+    return promote_session_credential_guarded(store, key, description=description).message
 
 
 def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:

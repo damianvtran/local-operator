@@ -318,61 +318,110 @@ async def test_live_bash_stream_scrubs_a_registered_value(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_the_stream_guard_is_load_bearing(tmp_path: Path, monkeypatch) -> None:
-    """THE RED. Revert the union and the same value paints — proving the fix.
+    """THE RED. With the union reverted, the same value paints in the peek buffer.
 
-    Without this, the test above could be passing because of
-    `redact_tool_result` or `_redact_tool_text` rather than because of the pipe
-    filter, and the guard would be untested scenery.
+    R2. The previous form was provably inert: it monkeypatched
+    ``_stream_redaction_values``, collected the live updates but never asserted
+    on them, and its only real assertion — an empty ``_PipeRedactor`` passing
+    bytes through — is tautological. The pipe filter's guarantee is genuinely
+    carried by the two peek-buffer tests below, so this RED is pointed at the
+    same surface they guard: a background job's peek buffer, which the model
+    reads with NO finished ToolResult and which the result path's
+    ``redact_tool_result`` never touches. The union is reverted the way the
+    reviewer demonstrated (``_stream_redaction_values`` returns the injected
+    map alone), the command is run as a background job, and the secret is
+    asserted to be PRESENT in the peek buffer — the leak must be shown to
+    exist, not assumed. Mutation-verified: this test reds under the revert.
     """
-    store = BrokerAwareStore()
-    store.register_redaction("brokered-abcdef123456")
-    context = ToolContext(cwd=str(tmp_path), variables=store)
+    from local_operator.harness.jobs import AsyncJobManager
 
-    # The pre-fix behaviour exactly: build the stream filter from the INJECTED
-    # credential map alone, ignoring registrations.
+    manager = AsyncJobManager()
+    store = BrokerAwareStore()
+    store.register_redaction("loadbearing-9f3e1a")
+    context = ToolContext(cwd=str(tmp_path), variables=store, jobs=manager, session_id="s")
+
+    # The pre-fix behaviour exactly: the stream filter sees the INJECTED
+    # credential map alone, ignoring broker registrations.
     monkeypatch.setattr(
         builtin,
         "_stream_redaction_values",
         lambda store, injected: [str(v) for v in injected.values() if v],
     )
     command = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
-        'import sys\nsys.stdout.write("line brokered-abcdef123456\\n")\n'
+        "import sys,time\n"
+        'for ch in "loadbearing-9f3e1a":\n'
+        "    sys.stdout.write(ch); sys.stdout.flush(); time.sleep(0.005)\n"
+        'sys.stdout.write("\\n"); sys.stdout.flush()\n'
+        "time.sleep(0.4)\n"
     )
-    painted: list[str] = []
-    await builtin.execute_bash(
-        "bash-red",
-        {"command": command},
-        AbortSignal(),
-        lambda update: painted.append(getattr(update.content[0], "text", "")),
-        context,
+    started = await builtin.execute_bash(
+        "bash-red", {"command": command, "background": True}, AbortSignal(), None, context
     )
-    # `_redact_tool_text` still cleans the emitted snapshot, so the leak is
-    # asserted where the pipe filter is the ONLY guard: the bytes the sink
-    # actually received.
-    raw = builtin._PipeRedactor({}).feed(b"line brokered-abcdef123456\n", final=True)
-    assert b"brokered-abcdef123456" in raw, "the RED harness itself is broken"
+    job_id = (started.details or {})["job_id"]
+    try:
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            probe = manager.read_output(job_id, 0)
+            if probe is not None and "loadbearing-9f3e1a" in probe[0]:
+                break
+        window = manager.read_output(job_id, 0)
+        assert window is not None
+        # The union is dead, so the pipe filter does not know the registered
+        # value and the peek buffer carries it raw — the leak, demonstrated on
+        # the channel the filter alone guards.
+        assert "loadbearing-9f3e1a" in window[0], (
+            "with the union reverted the secret must paint in the peek buffer; "
+            "if it does not, the RED harness is broken"
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            await manager.cancel(job_id)
 
 
 @pytest.mark.asyncio
 async def test_a_broken_sink_withholds_live_output_instead_of_leaking(
     tmp_path: Path,
 ) -> None:
-    """Fail-closed, end to end, and the command still completes."""
+    """Fail-closed, end to end, on the channel the stream guard owns.
+
+    R3. The previous form asserted on ``result.text`` — a channel the finished
+    result's ``redact_tool_result`` keeps clean regardless of what the pipe
+    filter published, so it proved nothing about the fail-closed path it names.
+    The live snapshot and the peek buffer are doubly guarded (both also pass
+    ``_redact_tool_text``), so neither can isolate the pipe filter's branch
+    either. The one observable no downstream guard re-cleans is the filter's
+    own sink — exactly what it appended. This captures the sink and asserts
+    the withheld notice — not the secret — is what landed there. Mutation-
+    verified: reds under M3 (the sink failing OPEN, the reviewer-demonstrated
+    revert). The command still completes: failing closed must cost the live
+    view, not the run.
+    """
 
     class Broken(BrokerAwareStore):
         def redaction_values(self):
             raise RuntimeError("sink down")
 
     store = Broken()
-    context = ToolContext(cwd=str(tmp_path), variables=store)
+    context = ToolContext(cwd=str(tmp_path), variables=store, session_id="s")
     command = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
         'import sys\nfor _ in range(5): sys.stdout.write("would-be-secret\\n")\n'
     )
-    result = await builtin.execute_bash(
-        "bash-closed", {"command": command}, AbortSignal(), None, context
-    )
-    assert "would-be-secret" not in result.text
-    assert "withheld" in result.text
+    sinks: list[Any] = []
+    real_sink = builtin._BashOutput
+    builtin._BashOutput = lambda: sinks.append(real_sink()) or sinks[-1]  # type: ignore[assignment]
+    try:
+        result = await builtin.execute_bash(
+            "bash-closed", {"command": command}, AbortSignal(), None, context
+        )
+    finally:
+        builtin._BashOutput = real_sink  # type: ignore[assignment]
+    sink_bytes = b"".join(b"".join(s.chunks()) for s in sinks) if sinks else b""
+    assert (
+        b"would-be-secret" not in sink_bytes
+    ), "the broken sink's bytes reached the pipe filter unfiltered (fail-open)"
+    assert b"withheld" in sink_bytes, "the fail-closed notice must be what the filter emitted"
+    # Failing closed costs the live view only — the command still completed.
+    assert result.is_error is False
 
 
 # --------------------------------------------------------------------------
@@ -708,6 +757,38 @@ def test_secrets_is_prebound_in_the_worker_namespace_without_importing_crypto() 
 
     proxy = eval_worker._LazySecrets()
     assert "retrieves one value" in repr(proxy)
+
+
+@pytest.mark.asyncio
+async def test_a_crash_with_a_secret_on_real_fd2_is_scrubbed(isolated: Path) -> None:
+    """R1 regression: the worker's REAL fd-2 tail is scrubbed with the ledger.
+
+    ``redirect_stderr`` swaps the ``sys.stderr`` OBJECT, not the fd, so
+    ``os.write(2, ...)`` (the deliberate form) and any inherited-stderr
+    subprocess (``curl -v`` with a token in the Authorization header — the
+    accidental form) write straight past the in-worker ledger. The value set
+    lives in the worker, so it is published to the parent on a side channel at
+    the moment of retrieval; this drives a REAL worker crash with a secret on
+    fd 2 and asserts the returned tool result carries the marker, not the
+    bytes.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.tools import eval as eval_tool
+
+    open_store(create=True).set("CRASH_DEMO", b"CRASHLEAK-f00dcafe-9517")
+    tool = eval_tool.build_eval_tool()
+    context = ToolContext(cwd="/tmp", session_id="crash-leak")
+    code = (
+        "import os\n"
+        "token = secrets['CRASH_DEMO']\n"
+        "os.write(2, f'BOOM got {token}'.encode())\n"
+        "os._exit(3)\n"
+    )
+    result = await tool.execute("c1", {"code": code}, AbortSignal(), None, context)
+    assert result.is_error, "a hard worker crash must surface as an error"
+    assert "crashed" in result.text
+    assert "CRASHLEAK-f00dcafe-9517" not in result.text, "the fd-2 tail leaked raw"
+    assert "BOOM got [redacted]" in result.text
 
 
 @pytest.mark.asyncio

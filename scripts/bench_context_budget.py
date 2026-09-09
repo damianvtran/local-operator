@@ -108,8 +108,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The remaining 556 is the price of the capability and is paid only where it
 #: is usable: ``build_secret_tool`` is a createIf factory that returns ``None``
 #: when the store modules will not import, so a session that cannot reach a
-#: store carries no schema for it. The new ceiling keeps the same ~2% headroom
-#: the comment below describes, and the next context reduction tightens it.
+#: store carries no schema for it. R7: the branch measures 27,201, which is
+#: main's 26,492 + ~709 — the tool's 556 plus ~150 from the ask ``persist``
+#: schema growth, the registry inventory line and the guide's own row, so the
+#: arithmetic closes without re-measuring. Headroom at 27,250 is 49 tokens
+#: (~0.2% — tighter than the ~2% this comment's sibling describes, in the safe
+#: direction), and the next context reduction tightens it.
 BUDGET_BILLED_TOKENS = 27_250
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

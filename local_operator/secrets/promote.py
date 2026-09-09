@@ -107,7 +107,13 @@ def promote_session_credential(
             False,
             key,
             f"{key} already exists in the long-term store; it was NOT replaced. "
-            f"Use `lop secret rm {key}` first, or promote it under another name.",
+            # R8: this message rides a model-visible channel (the ask-persist
+            # path reports it to the model), so it must not coach an
+            # irreversible CLI delete the model could attempt. "Ask the
+            # operator" is the safe wording — `lop secret rm` prompts without
+            # `--yes` and cannot be done silently, so nothing here is a thing
+            # the model can act on.
+            f"Ask the operator to remove or rename it, or promote it under another name.",
             already_present=True,
         )
     except SecretStoreError as exc:
@@ -118,3 +124,33 @@ def promote_session_credential(
         f"Promoted {key} to the encrypted long-term store; it now survives this session. "
         f"Reachable as $(lop secret get {key}).",
     )
+
+
+def promote_session_credential_guarded(
+    store: Any,
+    key: str,
+    *,
+    description: str = "",
+    base: Path | None = None,
+) -> PromotionResult:
+    """``promote_session_credential`` that never raises (R4).
+
+    The ``/credential --persist`` owner path, the viewer route and the ask
+    path all promote the same session credential, but only the ask path used
+    to absorb a non-``SecretStoreError`` from the store stack (an unwrapped
+    ``sqlite3.OperationalError``, an ``OSError`` on the key file). The same
+    promotion must not have two robustness levels, so the guard lives here and
+    every caller takes it. The session copy is already in session memory by
+    the time this runs, so a failure degrades to "session only" rather than
+    losing the secret — and says so, because the operator's (or model's) plan
+    depends on which it was. A traceback carries names only, never the value.
+    """
+    try:
+        return promote_session_credential(store, key, description=description, base=base)
+    except Exception:
+        logger.warning("could not promote %s to the long-term store", key, exc_info=True)
+        return PromotionResult(
+            False,
+            key,
+            "Kept for this session only — saving it to the long-term store failed.",
+        )

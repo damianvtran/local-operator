@@ -110,6 +110,7 @@ class _RedactionLedger:
             return
         with self._lock:
             self._values.add(value)
+        _publish(value)
 
     def values(self) -> list[str]:
         """Registered values, longest first.
@@ -143,6 +144,35 @@ def registered_values() -> list[str]:
 def scrub(text: str) -> str:
     """``text`` with every retrieved secret replaced by ``[redacted]``."""
     return _LEDGER.scrub(text)
+
+
+#: Optional hook the eval worker installs so the parent process learns the
+#: values it must scrub out of the worker's real-fd crash tail. The worker owns
+#: the transport (a dedicated fd); this module owns the trigger (registration).
+#: ``None`` in every non-worker process, where no such parent exists.
+_PUBLISH_HOOK: Any = None
+
+
+def set_publish_hook(hook: Any) -> None:
+    """Install the per-registration publish hook (worker only; see R1)."""
+    global _PUBLISH_HOOK
+    _PUBLISH_HOOK = hook
+
+
+def _publish(value: str) -> None:
+    """Notify the installed hook of a newly registered value, best-effort.
+
+    A hook failure (the parent's fd closed, an old parent) must never fault
+    the retrieval that triggered it — the value is already safely in this
+    process's ledger, which covers every in-worker channel.
+    """
+    hook = _PUBLISH_HOOK
+    if hook is None:
+        return
+    try:
+        hook(value)
+    except BaseException:  # noqa: BLE001 — publication is advisory, never fatal
+        pass
 
 
 class SecretsMapping(Mapping[str, SecretValue]):

@@ -96,17 +96,15 @@ def build_secret_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: exists only where a secret store is actually reachable.
 
     Gated on REACHABILITY, which is what ``AGENTS.md`` says a ``createIf``
-    factory may ask. Two conditions, and both are about the dependency rather
-    than about which host spawned the session:
-
-    * the storage stack imports (a source checkout without the optional crypto
-      dependency installed must not advertise a tool whose every call errors),
-      and
-    * a store already exists on disk, OR one could be created.
-
-    The second is deliberately permissive: ``store`` is the verb that CREATES
-    the store, so gating on "a store already exists" would make the first
-    secret unstorable through the tool and leave the agent no way in.
+    factory may ask. R5: the gate is IMPORTS ONLY. The storage stack must
+    import (a source checkout without the optional crypto dependency installed
+    must not advertise a tool whose every call errors), and that is the whole
+    check — there is deliberately NO disk condition. ``store`` is the verb that
+    CREATES the store, so gating on "a store already exists" would make the
+    first secret unstorable through the tool and leave the agent no way in.
+    The consequence, worth naming rather than leaving a reader hunting for a
+    check that is not there: on a read-only config dir the tool still appears
+    and every verb errors per-call at the store layer.
     """
     del context  # gating is on the machine's store, not on session state
     try:

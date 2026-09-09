@@ -2359,9 +2359,11 @@ class OwnedSessionHandle(SessionHandle):
             # that matter are the owner's: the session memory holding the value
             # and the config dir holding the encrypted long-term store. Only a
             # name and an outcome sentence cross back — never the value.
-            from local_operator.secrets.promote import promote_session_credential
+            from local_operator.secrets.promote import (
+                promote_session_credential_guarded,
+            )
 
-            outcome = promote_session_credential(store, key)
+            outcome = promote_session_credential_guarded(store, key)
             return {
                 "ok": True,
                 "promoted": outcome.ok,

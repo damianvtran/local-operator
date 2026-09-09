@@ -79,6 +79,74 @@ TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]
 _PROTOCOL_OUT = sys.stdout
 _PROTOCOL_IN = sys.stdin
 
+#: R1. The parent's crash path must scrub the worker's REAL fd-2 tail, but the
+#: values live in this process's ledger, unreachable across the boundary. The
+#: worker publishes each value to the parent on a dedicated fd at the moment of
+#: registration, so the parent's scrub set is byte-identical to the ledger the
+#: other channels use rather than a second, divergent record — the exact shape
+#: of the original pipe bug. ``None`` until the parent spawns us with the fd
+#: (``LOCAL_OPERATOR_EVAL_SCRUB_FD``); a worker started without it publishes
+#: nothing, leaving the parent's crash path with an empty set, which is the
+#: pre-R1 behaviour and still fails safe.
+_SCRUB_FD_ENV = "LOCAL_OPERATOR_EVAL_SCRUB_FD"
+_SCRUB_FD: "int | None" = None
+
+
+def _publish_secret_value(value: str) -> None:
+    """Write one newly retrieved value to the parent's scrub channel.
+
+    Called from the runtime ledger's ``register`` hook, so it fires on the
+    retrieval itself — before the cell that just received the value can write
+    it anywhere. Length-prefixed and NUL-terminated so the parent frames one
+    value per record across pipe-read boundaries. Best-effort: a closed or
+    absent fd must never turn a retrieval into a crash, so all failures are
+    swallowed; the parent reads what arrived and treats a short read as "no
+    values".
+    """
+    fd = _SCRUB_FD
+    if fd is None:
+        return
+    try:
+        data = value.encode("utf-8", errors="replace")
+        os.write(fd, str(len(data)).encode("ascii") + b"\x00" + data + b"\x00")
+    except BaseException:  # noqa: BLE001 — publication must never fault a cell
+        pass
+
+
+def _install_scrub_channel() -> None:
+    """Resolve the side-channel fd and register the publish hook.
+
+    Reads ``LOCAL_OPERATOR_EVAL_SCRUB_FD`` once. The fd is inherited from the
+    parent; it is made non-inheritable so a grandchild process cannot hold it
+    open and stall the parent's read at the crash path.
+    """
+    global _SCRUB_FD
+    raw = os.environ.pop(_SCRUB_FD_ENV, None)
+    if raw is None:
+        return
+    try:
+        fd = int(raw)
+    except ValueError:
+        return
+    try:
+        os.set_inheritable(fd, False)
+    except OSError:
+        return
+    _SCRUB_FD = fd
+    # Lazy: the runtime module is only present once the worker has imported it
+    # (on first secret use). Deferring the import to ``main()`` keeps the crypto
+    # stack off the startup path of a worker that never touches a secret — the
+    # same ``sys.modules`` deferral ``_scrub_secrets`` is built around. The hook
+    # is inert until then because registration is the only thing that triggers
+    # publication.
+    try:
+        import local_operator.secrets.runtime as runtime
+
+        runtime.set_publish_hook(_publish_secret_value)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
 # A worker can ask the parent to execute a harness tool, but cannot grant
 # itself one. The parent resolves only the current session's available or
 # explicitly discovered tools and repeats normal validation/approval. Keeping
@@ -435,7 +503,20 @@ def _scrub_secrets(text: str) -> str:
             "[output withheld: the secret redaction filter failed, and this worker "
             "has retrieved at least one secret value. Re-run the cell.]"
         )
-    return scrubbed if isinstance(scrubbed, str) else text
+    # R6: the scrubber's contract is "return a scrubbed string". Anything else
+    # (a broken store returning a non-str) is an unexpected failure, and the
+    # fail-closed rule above applies to it exactly as it does to a raise —
+    # publishing ``text`` unscrubbed here would be the leak the guard exists
+    # to stop.
+    return (
+        scrubbed
+        if isinstance(scrubbed, str)
+        else (
+            "[output withheld: the secret redaction filter returned an unexpected "
+            "result, and this worker has retrieved at least one secret value. "
+            "Re-run the cell.]"
+        )
+    )
 
 
 def _safe_repr(value: Any) -> str:
@@ -723,6 +804,7 @@ def main() -> None:
     the process. Either ending is normal from this side: the tool owns the
     lifecycle (idle reaping, LRU eviction, timeout kill)."""
     _enable_cwd_imports()
+    _install_scrub_channel()
     namespace: dict[str, Any] = {
         "__name__": "__eval__",
         "__doc__": NAMESPACE_DOC,
