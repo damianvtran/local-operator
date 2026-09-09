@@ -6333,7 +6333,16 @@ class OperatorApp(App[None]):
             mcp=McpStatus(
                 configured=len(mcp_servers),
                 connected=sum(1 for server in mcp_servers if server.status == "connected"),
-                failed=any(server.status == "failed" for server in mcp_servers),
+                # The SAME predicate as the owner's band (``_mcp_status``), and
+                # for the same reason: two surfaces reporting one session must
+                # not disagree. ``== "failed"`` only ever matched the projection's
+                # own placeholder, which ``_mcp_state`` overwrites with the
+                # manager's live status whenever a manager is present — so an
+                # auth-blocked server projected as ``auth-required`` and this
+                # band stayed calm while the owner's went red.
+                failed=any(
+                    server.status not in ("connected", "connecting") for server in mcp_servers
+                ),
             ),
         )
         # Refresh data, not the interaction. The picker may have opened against
@@ -11079,15 +11088,18 @@ class OperatorApp(App[None]):
             return McpStatus(
                 configured=len(configured),
                 connected=len(manager.get_connected_servers()),
-                # Anything not connected is a failure for the band's purposes.
-                # Tested against "connected" rather than "disconnected" because
-                # the status vocabulary grew an ``auth-required`` value: an
-                # equality test on the old string silently stops counting a
-                # server whose grant expired, which is the exact case the band
-                # exists to surface. ``connecting`` is momentary and settles
-                # into one of the terminal values on the next refresh.
+                # Every TERMINAL non-connected state is a failure, named as a
+                # negative rather than as equality with "disconnected": the
+                # status vocabulary grew ``auth-required``, and an equality test
+                # on the old string silently stops counting a server whose grant
+                # expired — exactly the case the band exists to surface.
+                # ``connecting`` is excluded because it is not terminal: the
+                # startup gate leaves slow servers there on every launch, and
+                # tinting it danger would make a red lamp the normal boot (see
+                # this method's docstring, which this predicate must agree with).
                 failed=any(
-                    manager.get_connection_status(name) != "connected" for name in configured
+                    manager.get_connection_status(name) not in ("connected", "connecting")
+                    for name in configured
                 ),
             )
         except Exception:

@@ -129,10 +129,12 @@ RECONNECT_BURST_LIMIT = 5
 #
 # Why 60 s: the thing being waited on is a HUMAN completing a browser login, so
 # a minute of latency is imperceptible against it, and the poll reads only
-# auth-blocked servers — a healthy fleet pays zero SQLite reads. At the
-# operator's real row count one marker read measured 135 us, which puts the
-# worst case (every server blocked, nine processes) at ~0.24 ms/s fleet-wide.
-# Exported so tests can shrink it without patching a private name.
+# auth-blocked servers — a healthy fleet pays zero SQLite reads. Measured at the
+# operator's real row count (16 ``mcp-oauth`` rows, 36 total): 78.8 us per
+# blocked server per tick, over TWO ``list_credentials`` calls — the storage
+# constructor snapshots ``updated_at`` and ``grant_marker`` reads the row once.
+# That puts the worst case (every server blocked, nine processes) at ~0.14 ms/s
+# fleet-wide. Exported so tests can shrink it without patching a private name.
 AUTH_REVALIDATE_INTERVAL_S = 60.0
 
 # Reconnect attempts are accounted in one sliding window per server
@@ -1126,7 +1128,10 @@ class McpManager:
         # passed. A timer-based retry would re-spend a refresh token the server
         # may have already rejected, across nine processes, which is precisely
         # the family-revoking storm ``GRANT_DEAD_AT_KEY`` exists to stop.
-        self._auth_grant_marker: dict[str, tuple[float, bool]] = {}
+        # ``None`` for a server whose store could not be read at block time:
+        # unknown is a state, not the value ``(0.0, False)``. See
+        # :meth:`_grant_marker`.
+        self._auth_grant_marker: dict[str, tuple[float, bool] | None] = {}
         # Backoff ladder position is separate from the breaker window (MCP-07):
         # a successful reconnect resets the ladder but keeps the window intact,
         # so a flapping server still trips the breaker.
@@ -1472,6 +1477,16 @@ class McpManager:
                 message = self._auth_failure_text(name, exc)
                 result.errors[name] = message
                 self._startup_failures[name] = message
+                # Block here too, not only in the AFTER-gate arm: the identical
+                # failure lands in one arm or the other purely by whether it beat
+                # the 250 ms gate, and without this the fast one is neither
+                # ``auth-required`` nor revalidatable. Fast is the COMMON case
+                # after the first failure, not the exotic one — a tombstoned
+                # grant short-circuits before any POST and endpoint discovery is
+                # cached process-wide, so every later ``/mcp reload`` and ``/new``
+                # fails warm (measured ~15 ms), and a stdio server with a missing
+                # command fails in microseconds.
+                self._block_on_auth(name)
                 logger.info("MCP server %r needs authorization: %s", name, exc)
                 waiter = self._connect_futures.pop(name, None)
                 _settle_future_error(waiter, exc)
@@ -2403,6 +2418,23 @@ class McpManager:
         # A successful (re)connect clears the auth-toast latch, so a grant that
         # expires AGAIN later gets its own toast instead of staying silent.
         self._auth_toasted.discard(conn.name)
+        # …and the AUTH BLOCK, for the same reason ``_fire_recovery`` lives
+        # here: this is the single choke point every route to a live connection
+        # passes through, and a server that is connected is by definition not
+        # held back from connecting. Clearing it only at the user-initiated
+        # sites was a defect — ``reload()`` heals a server without touching
+        # them, leaving it ``connected`` while still blocked, so its next
+        # ORDINARY disconnect was abandoned by the ``_schedule_reconnect``
+        # guard and never retried. ``revalidate_auth_blocked`` cannot rescue
+        # that: the grant is valid, so its marker never moves again. That is
+        # the same "state outliving its condition" this whole feature fixes.
+        self._clear_auth_block(conn.name)
+        # A connected server must stop being accused of the failure it
+        # recovered from: the startup accumulator feeds ``McpServerState.error``
+        # in the frontend projection, which no status check filters. The
+        # after-gate success arm pops it for exactly this reason; every other
+        # heal (reload, revalidation, a call-site retry) needs it too.
+        self._startup_failures.pop(conn.name, None)
         self._log_first_connect_security(conn)
         self._register_tools(conn.name, conn.tools)
         self._fire_recovery(conn.name)
@@ -2790,8 +2822,8 @@ class McpManager:
         """Whether auto-reconnect is held back by an unusable OAuth grant."""
         return name in self._auth_blocked
 
-    def _grant_marker(self, name: str) -> tuple[float, bool]:
-        """``(tokens_obtained_at, grant_is_dead)`` for a server's stored grant.
+    def _grant_marker(self, name: str) -> tuple[float, bool] | None:
+        """``(tokens_obtained_at, grant_is_dead)``, or ``None`` if unreadable.
 
         The identity of the grant this session gave up on. Two properties make
         it safe to retry against:
@@ -2811,32 +2843,40 @@ class McpManager:
           marker, so the block is re-taken against current truth); the single
           attempt that follows is bounded by the marker moving again.
 
-        Degrades to ``(0.0, False)`` on any store failure and never raises:
-        auth state is best-effort throughout this subsystem, and a poller that
-        raises into a dispose hook is worse than one that declines to heal.
-        """
-        try:
-            cfg = self._configs.get(name)
-            url = getattr(cfg, "url", None)
-            if not url:
-                # stdio servers carry no OAuth grant; a stable marker means the
-                # poll never retries them, which is correct.
-                return (0.0, False)
-            from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpTokenStorage
+        Returns ``None`` — never a sentinel TUPLE — when the store cannot be
+        read, and never raises: auth state is best-effort throughout this
+        subsystem, and a poller that raises into a dispose hook is worse than
+        one that declines to heal.
 
-            storage = McpTokenStorage(str(url), self._effective_auth_store())
-            row = storage._read_row()
-            data = row.data if row is not None and isinstance(row.data, dict) else {}
-            obtained = data.get(TOKENS_OBTAINED_AT_KEY)
-            obtained_at = (
-                float(obtained)
-                if isinstance(obtained, (int, float)) and not isinstance(obtained, bool)
-                else 0.0
-            )
-            return (obtained_at, storage.grant_is_dead())
+        The ``None`` matters as much as the value. A degraded read that returned
+        ``(0.0, False)`` would be a marker like any other, so a store failing on
+        alternating ticks would make the marker appear to oscillate
+        ``real -> (0.0, False) -> real`` and every tick would count as "a peer
+        re-authed" and spend a refresh token. That is §7 risk 1 — the
+        family-revoking storm — reached through the degrade path instead of
+        through a naive ``updated_at``. Unknown must be un-comparable, not a
+        value: :meth:`revalidate_auth_blocked` treats it as "stay blocked,
+        unchanged", and :meth:`_block_on_auth` refuses to overwrite a good
+        marker with it.
+        """
+        cfg = self._configs.get(name)
+        url = getattr(cfg, "url", None)
+        if not url:
+            # stdio servers carry no OAuth grant. A CONSTANT marker (not None)
+            # is right here: the answer is known and it never moves, so the poll
+            # never retries them — whereas None would mean "unreadable".
+            return (0.0, False)
+        try:
+            from local_operator.mcp.auth import McpTokenStorage
+
+            # One row read for both halves, through the storage's own public
+            # accessor rather than its privates: this is a read of what auth.py
+            # already writes, and a marker assembled out of two separate reads
+            # could straddle a write and describe no single instant.
+            return McpTokenStorage(str(url), self._effective_auth_store()).grant_marker()
         except Exception:  # noqa: BLE001 — revalidation is best-effort
             logger.debug("MCP grant marker read failed for %r", name, exc_info=True)
-            return (0.0, False)
+            return None
 
     def _block_on_auth(self, name: str) -> None:
         """Hold ``name`` back from auto-reconnect until its stored grant moves.
@@ -2844,9 +2884,18 @@ class McpManager:
         Called from every arm that gives up over authorization. Recording the
         marker AT BLOCK TIME is what lets ``revalidate_auth_blocked`` tell "the
         grant we already failed on" from "a grant somebody has since replaced".
+
+        An unreadable store (``None``) must not clobber a marker we already
+        hold: overwriting a known grant with "unknown" would make the NEXT
+        successful read compare unequal and buy a retry the grant never earned.
+        Keeping the old value means a transient failure costs nothing, and a
+        first block that cannot read the store simply stays unknown until one
+        can.
         """
         self._auth_blocked.add(name)
-        self._auth_grant_marker[name] = self._grant_marker(name)
+        marker = self._grant_marker(name)
+        if marker is not None or name not in self._auth_grant_marker:
+            self._auth_grant_marker[name] = marker
 
     def _clear_auth_block(self, name: str) -> None:
         """Drop the auth block and the marker it was taken against."""
@@ -2871,10 +2920,12 @@ class McpManager:
 
         * **Zero cost when healthy.** The early return means a fleet with
           nothing blocked performs no SQLite I/O at all; only blocked servers
-          are read, one marker each.
+          are read, one marker each (78.8 us over two ``list_credentials``
+          calls — see :data:`AUTH_REVALIDATE_INTERVAL_S`).
         * **One attempt per genuine grant change.** A server whose marker moved
           but still fails re-blocks on the NEW marker, so a broken grant costs
-          one connect per change rather than one per tick.
+          one connect per change rather than one per tick — and an UNREADABLE
+          marker buys nothing at all, because unknown is not movement.
         * **Never interactive.** ``_connect_server`` is called with the default
           ``interactive=False``: this path runs unattended in nine processes,
           and opening a browser from it would be a fleet of surprise auth
@@ -2887,8 +2938,28 @@ class McpManager:
         healed: list[str] = []
         for name in sorted(self._auth_blocked):
             marker = self._grant_marker(name)
-            if marker == self._auth_grant_marker.get(name):
-                continue  # same grant we already failed on: stay blocked
+            # ``None`` is an UNREADABLE store, not a changed grant, and it must
+            # not count as movement in EITHER direction. Treating a failed read
+            # as movement spends a refresh token on every tick a flaky store
+            # fails on; treating the recovery from one as movement does the same
+            # at half the rate, because an alternating store oscillates
+            # unknown/known forever. Both are the family-revoking storm of §7
+            # risk 1. No EVIDENCE of a new grant means stay blocked.
+            known = self._auth_grant_marker.get(name)
+            if marker is None or marker == known:
+                continue  # same grant we already failed on (or no news): stay blocked
+            if known is None:
+                # We could not read the store when we gave up, so we never knew
+                # which grant we failed on and this read is not evidence that it
+                # changed. Adopt it as the baseline and wait for the NEXT move.
+                # The cost of being wrong is bounded and one-sided: if a peer
+                # re-authed inside that unreadable window we miss this heal and
+                # catch the next one (or a manual ``/mcp reauth``), whereas
+                # guessing the other way spends a token nobody asked us to
+                # spend — and a store we cannot read is a broken machine, not
+                # ordinary contention.
+                self._auth_grant_marker[name] = marker
+                continue
             self._clear_auth_block(name)
             # A new grant deserves a fresh ladder: the old position describes
             # attempts against a grant that no longer exists.
@@ -2897,6 +2968,17 @@ class McpManager:
             if cfg is None or name in self._connections:
                 continue
             epoch = self._epoch
+            # Publish a waiter BEFORE the await, as ``_reconnect`` does: a real
+            # OAuth connect takes seconds, and without one the server reports
+            # ``disconnected`` for that whole window (a visible flicker on the
+            # way to healing) and a deferred execute parked on this server fails
+            # instead of riding the heal. Reuse any waiter already installed by
+            # ``_handle_disconnect`` rather than replacing it, or that parked
+            # execute is stranded on a future nobody settles (MCP-08).
+            future = self._connect_futures.get(name)
+            if future is None or future.done():
+                future = asyncio.get_running_loop().create_future()
+                self._connect_futures[name] = future
             try:
                 conn = await self._connect_server(name, cfg)
             except Exception as exc:  # noqa: BLE001 — any failure re-blocks
@@ -2905,6 +2987,10 @@ class McpManager:
                     name,
                     exc,
                 )
+                if not future.done():
+                    future.set_exception(exc)
+                    future.exception()  # mark retrieved; waiters still see the raise
+                self._connect_futures.pop(name, None)
                 self._block_on_auth(name)
                 continue
             # Re-check ownership AFTER the await, as every other reconnect path
@@ -2915,6 +3001,11 @@ class McpManager:
                 if conn.stack is not None:
                     with suppress(Exception):
                         await conn.stack.aclose()
+                # Settle the waiter published above rather than dropping it: a
+                # deferred execute parked on it must fail, not hang (MCP-08).
+                # ``disconnect_all`` already settles the futures it can see, but
+                # a reload that merely bumped the epoch does not.
+                self._abandon_reconnect(name, "MCP manager reloaded during revalidation")
                 continue
             # Route through _register_connection rather than assigning the
             # connection directly: it is the choke point that fires
@@ -2965,6 +3056,14 @@ class McpManager:
             # futile (auto-reconnect is non-interactive) but harmful: it re-spends
             # a refresh token the server may already have rejected. The recovery
             # is a new grant, which ``revalidate_auth_blocked`` watches for.
+            #
+            # It abandons rather than parking waiters, deliberately matching the
+            # breaker arm below: a revalidatable block invites the assumption
+            # that a deferred execute should WAIT for the heal, but the wait is
+            # unbounded — it ends when a human completes a browser login, which
+            # may be never — and MCP-08 requires a parked execute to get a real
+            # error instead of hanging. The tool call fails now and succeeds on
+            # the next one after the poller heals.
             self._abandon_reconnect(name, "auto-reconnect suspended (authorization required)")
             return
         if name in self._reconnect_suspended:
