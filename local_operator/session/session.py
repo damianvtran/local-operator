@@ -57,15 +57,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
-from local_operator.compaction.marker import (
-    build_compaction_marker,
-    render_compaction_marker,
-    replayed_user_message,
-)
 from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+)
+from local_operator.compaction.marker import (
+    build_compaction_marker,
+    render_compaction_marker,
+    replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE, ApprovalGate
