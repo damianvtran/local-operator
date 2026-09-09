@@ -104,6 +104,12 @@ from local_operator.evaluation.runner.secrets import (
 EXIT_OK = 0
 EXIT_EPISODE = 1
 EXIT_PREFLIGHT = 2
+
+# Slack between the wall budget and the cloud lease. Mirrors the provider's own
+# TTL_SLACK_SECONDS: the lease must outlast the wall by enough to cover boot,
+# scoring and cleanup, so an episode that runs its full budget still gets torn
+# down deliberately rather than reclaimed underneath itself.
+_LEASE_SLACK_SECONDS = 900
 # Diagnostic prefixes (``_diagnostic`` renders ``<TypeName>: ...``) that mean
 # a secret stopped the run before allocation; both are name-only by contract.
 _SECRET_DIAGNOSTICS = ("MissingSecret:", "UnusableSecret:")
@@ -582,7 +588,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-dir", type=Path, default=None, help="lop config dir")
     parser.add_argument("--max-steps", type=int, default=25)
     parser.add_argument("--max-usd", type=float, default=0.50, help="provider spend cap")
-    parser.add_argument("--max-wall-s", type=int, default=1800)
+    # OSWorld 2.0 bounds an episode by MODEL STEPS (500), not by time: the
+    # upstream loop is `step_idx < max_steps` and no timeout decorator is
+    # applied anywhere. A wall clock here is a runaway guard only, so it is
+    # sized so the step budget always binds first. The previous 1800 s
+    # default silently converted a 500-step budget into ~65-85 steps at
+    # observed pace and truncated 9 of 30 episodes mid-work; see
+    # docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md.
+    parser.add_argument("--max-wall-s", type=int, default=18000)
     parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
     parser.add_argument("--keep-recent-frames", type=int, default=3)
     parser.add_argument(
@@ -645,12 +658,45 @@ class _ScriptedFinish:
         return ModelDecision(action_batch=batch, route=self._route)
 
 
+def _ensure_lease_outlasts_wall(
+    infra_values: "tuple[ScopedInfraValue, ...]", args: argparse.Namespace
+) -> "tuple[ScopedInfraValue, ...]":
+    """Default the cloud lease to outlast the wall budget.
+
+    WHY. The wall budget is not carried on the adapter wire, so the provider's
+    ``ttl_seconds_for`` receives ``None`` and falls back to a fixed
+    ``DEFAULT_TTL_SECONDS`` (7200). While the wall default was 1800 that was
+    harmless -- the wall always fired first. Raising the wall to 18000 to stop
+    truncating episodes inverted the relationship: an episode past two hours
+    would die on a TERMINATED INSTANCE rather than at a budget boundary, which
+    is a far worse failure. It loses the episode instead of ending it, and it
+    reads as an infrastructure fault rather than a deliberate cap.
+
+    So the lease is derived from the wall here, where both numbers are known,
+    rather than left to a constant that cannot see either. An operator who
+    passes ``OSWORLD_TTL_SECONDS`` explicitly still wins; this only supplies a
+    default when they did not, and never shortens a lease they chose.
+    """
+
+    if any(value.name == "OSWORLD_TTL_SECONDS" for value in infra_values):
+        return infra_values
+    lease = int(args.max_wall_s) + _LEASE_SLACK_SECONDS
+    return infra_values + (
+        ScopedInfraValue(
+            name="OSWORLD_TTL_SECONDS",
+            value=str(lease),
+            purpose=args.infra_purpose,
+        ),
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
     try:
         infra_values = _parse_infra(args.infra, args.infra_purpose)
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
+    infra_values = _ensure_lease_outlasts_wall(infra_values, args)
     selector = AdapterSelector.model_validate(json.loads(args.selector.read_text()))
     provider, model = args.route
     route = _route_identity(provider, model)
