@@ -361,8 +361,16 @@ class _Body:
             row.append(f"  {line}", style=semantic_style("dim"))
             self.lines.append(row)
 
-    def header(self, title: str, meta: str = "", short: str = "") -> None:
+    def header(
+        self, title: str, meta: str = "", short: str = "", *, shorts: Sequence[str] = ()
+    ) -> None:
         """A section header, shedding its meta to ``short`` on a narrow frame.
+
+        ``shorts`` is the same widest-first, first-that-fits ladder ``kv`` uses
+        for ``notes`` and ``values``, and exists for a header whose short form
+        grows with its DIGITS rather than being fixed at authoring time. Pass it
+        instead of ``short`` when a narrower spelling is available; the last
+        rung is what the header degrades to and must be the irreducible fact.
 
         The threshold is a WIDTH FLOOR plus a fit check, not the floor alone:
         ``_NOTE_MIN`` was calibrated against the metas that existed when it was
@@ -370,10 +378,28 @@ class _Body:
         overflowed by a cell at exactly 60 columns while passing the floor.
         Measuring the string that will actually be drawn is what keeps a new
         meta from having to rediscover this by overflowing a frame.
+
+        The final ``truncate`` is the same backstop ``kv`` and ``marked``
+        already end with, and ``header`` was the only row builder without one.
+        The fit check picks BETWEEN ``meta`` and ``short`` but cannot make
+        ``short`` fit, so a short form that outgrows the ``_MIN_CARD_WIDTH``
+        floor had nothing to stop it: the container FOLDS rather than crops, so
+        it rendered as a second line starting at column 0 — the "one record
+        reads as two" fault these screens exist to remove. Cropping a header's
+        trailing meta is survivable; breaking the card's left margin is not.
         """
-        if meta and (self.width < _NOTE_MIN or cell_len(f"{title}   {meta}") + 2 > self.width):
-            meta = short
-        self.lines.append(section_header(title, meta))
+
+        def _fits(candidate: str) -> bool:
+            # ``+ 2`` for the ``▌ `` accent bar the header always carries; the
+            # same measurement the meta fit check above uses.
+            return cell_len(f"{title}   {candidate}") + 2 <= self.width
+
+        if meta and (self.width < _NOTE_MIN or not _fits(meta)):
+            rungs = tuple(shorts) or ((short,) if short else ())
+            meta = next((rung for rung in rungs if _fits(rung)), rungs[-1] if rungs else "")
+        row = section_header(title, meta)
+        row.truncate(self.width, overflow="crop")
+        self.lines.append(row)
 
     def to_text(self) -> Text:
         out = Text(style=semantic_style("fg"), overflow="fold")
@@ -827,9 +853,21 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     # screen's one loading word, reused rather than joined by a fourth
     # vocabulary (see ``_env_section``).
     own = UNKNOWN if unread else str(running)
+    # Widest-first rungs for the header's short form, empty unless a state has
+    # a narrower spelling to offer. Only the queued state needs one today: it
+    # is the only short form whose width grows with its digits.
+    shorts: tuple[str, ...] = ()
     if sessions is None or not sessions.available:
         meta = f"this session: {own} running · fleet checking…"
+        # The hedge sheds LAST, not first. The bare ``{own} running`` short
+        # form dropped ``fleet checking…`` entirely, so for the ~900 ms before
+        # the worker returns a narrow frame showed a number that is about to be
+        # revised upward as though it were settled — the same "unmeasured
+        # rendered as measured" fault the rest of this section exists to
+        # prevent. ``fleet …`` keeps the fact that a second half is still
+        # coming; only its wording is compressed.
         short = f"{own} running"
+        shorts = (short + " · fleet checking…", f"{own}r · fleet …", short)
     else:
         runtimes = _runtimes(sessions)
         # ``≥`` — and the reason it is not simply the total — is the whole of
@@ -875,7 +913,16 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # through an unmeasured term.
             queued = sessions.fleet_subagents_queued
             meta = f"{_plural(runtimes, 'runtime')} · none running · {queued} queued"
+            # Two rungs, because this short form is the first whose width grows
+            # with its DIGITS: a fleet-wide queued sum is not bounded by
+            # ``max_running``, so two digits are ordinary on a busy host and
+            # they pushed the one-rung form past the ``_MIN_CARD_WIDTH`` floor.
+            # ``0r`` is what sheds — it restates the ``0 running`` the reader
+            # can already infer from a queued-only header, whereas dropping a
+            # count would lose a measured fact. The ``truncate`` in ``header``
+            # is the backstop beneath both.
             short = f"{runtimes}rt · 0r · {queued}q"
+            shorts = (short, f"{runtimes}rt · {queued}q")
         else:
             # Every runtime reported, every one reported zero, and nothing is
             # waiting either. This is the one state in which the bare word is
@@ -885,7 +932,7 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # ``none`` and not ``0tj``: the bare-zero rule does not relax on a
             # narrow frame, and the word costs one cell more than the digit.
             short = f"{runtimes}rt · none"
-    body.header("Agents and subagents", meta, short)
+    body.header("Agents and subagents", meta, short, shorts=shorts)
     if sessions is not None and sessions.available:
         # The header's runtime count broken down. Both numbers name a live
         # pid — that is why the header adds them — and the split is what tells

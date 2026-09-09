@@ -1357,28 +1357,81 @@ def test_the_queued_clause_survives_every_width_it_is_needed_at() -> None:
         assert "3q" in header, (width, header)
 
 
-def test_no_line_overflows_at_any_width_with_the_longest_meta() -> None:
+@pytest.mark.parametrize(
+    ("runtimes", "queued"),
+    [
+        (5, 3),
+        # Two- and three-digit counts: this header's short form is the FIRST
+        # whose width grows with its digits, and pinning a single-digit fixture
+        # is exactly why the original guard could not see it overflow. A
+        # fleet-wide queued sum is not bounded by ``max_running``, so a host
+        # with several sessions past capacity reaches double digits normally.
+        (5, 12),
+        (5, 120),
+        (12, 1),
+        (12, 12),
+        (99, 999),
+    ],
+)
+def test_no_line_overflows_at_any_width_with_the_longest_meta(runtimes: int, queued: int) -> None:
     """The header shed is a fit check, not only a width floor.
 
     ``_NOTE_MIN`` was calibrated against the metas that existed when it was
     written; ``5 runtimes · none running · 3 queued`` is one cell longer and
     overflowed at exactly 60 columns while passing the floor.
+
+    The container FOLDS rather than crops, so an overflowing header renders as
+    a second line at column 0 — the card's left margin visibly broken, which is
+    the "one record reads as two" fault these screens exist to remove.
     """
     from rich.cells import cell_len
 
     sessions = SessionsInfo(
         available=True,
-        total=5,
-        live=5,
-        subagents_reporting=5,
+        total=runtimes,
+        live=runtimes,
+        subagents_reporting=runtimes,
         fleet_subagents_running=0,
-        fleet_subagents_queued=3,
+        fleet_subagents_queued=queued,
         fleet_trajectories=0,
     )
     snapshot = _snapshot(sessions=sessions)
     for width in range(38, 161):
         for line in _lines(snapshot, width=width):
             assert cell_len(line) <= max(38, width), (width, repr(line))
+
+
+def test_the_queued_header_keeps_both_counts_when_it_sheds() -> None:
+    """D14's shed must drop a RESTATEMENT, never a measured number.
+
+    ``0r`` is inferable from a queued-only header; the queued count is not
+    inferable from anything. So the narrow rung sheds ``0r`` and keeps both
+    figures rather than truncating one of them away.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=12,
+        live=12,
+        subagents_reporting=12,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=12,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    header = [line for line in _lines(snapshot, width=38) if "Agents and subagents" in line][0]
+    assert "12rt" in header and "12q" in header, header
+
+
+def test_the_loading_header_keeps_its_hedge_at_every_width() -> None:
+    """D15: a number about to be revised upward must not render as settled.
+
+    The fleet half arrives ~900 ms after the live half, and the bare short form
+    dropped ``fleet checking…`` entirely below 66 cells — showing ``0 running``
+    as though the probe had finished.
+    """
+    for width in range(38, 161):
+        header = [line for line in _lines(None, width=width) if "Agents and subagents" in line][0]
+        assert "checking…" in header or "fleet …" in header, (width, header)
 
 
 def test_the_export_refuses_a_total_on_the_same_terms_as_the_panel() -> None:

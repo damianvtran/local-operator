@@ -3,7 +3,7 @@
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
              fleet | fleet-mixed | fleet-unread
-             today-quiet | race | one | one-older | queued-only
+             today-quiet | race | one | one-older | queued-only | queued-many
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the
@@ -378,7 +378,7 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
             captured_at=CAPTURED_AT,
         )
 
-    if scenario == "queued-only":
+    if scenario in ("queued-only", "queued-many"):
         # D11: every runtime REPORTS, every one reports zero running, and
         # children are waiting on the capacity gate. ``fleet_trajectories``
         # excludes queued by design (a parked child spends nothing), so this is
@@ -392,7 +392,7 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
                 "Investigate request latency" if index == 0 else f"Session {index}",
                 is_self=index == 0,
                 subagents_running=0,
-                subagents_queued=3 if index == 0 else 0,
+                subagents_queued=(12 if scenario == "queued-many" else 3) if index == 0 else 0,
             )
             for index in range(5)
         )
@@ -403,7 +403,10 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
             subagents_reporting=len(lines),
             subagents_unreported=0,
             fleet_subagents_running=0,
-            fleet_subagents_queued=3,
+            # D14: a fleet-wide queued SUM is not bounded by ``max_running``,
+            # so two digits are ordinary on a busy host — and two digits are
+            # what pushed the header's short rung past the card floor.
+            fleet_subagents_queued=12 if scenario == "queued-many" else 3,
             fleet_session_trajectories=0,
             fleet_trajectories=0,
         )
@@ -415,7 +418,7 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
                 profiles=20,
                 teams=3,
                 running=0,
-                queued=3,
+                queued=12 if scenario == "queued-many" else 3,
                 settled=3,
                 max_running=4,
                 at_capacity=True,
