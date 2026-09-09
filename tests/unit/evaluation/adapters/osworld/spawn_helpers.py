@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -174,12 +175,59 @@ def write_workspace(
     return workspace_digest(str(workspace))
 
 
+@dataclass(frozen=True)
+class SpawnInterpreter:
+    """A copied interpreter with the real adapter wheel already installed.
+
+    The two fields are everything a selector needs from the interpreter half of
+    the build: the executable to spawn and the digest of the distribution
+    installed into it. Kept together because they must describe the SAME
+    install -- a digest paired with a different executable would pass the
+    selector's model validation and then fail the handshake with an error that
+    names neither.
+    """
+
+    executable: Path
+    package_digest: str
+
+
+def build_spawn_interpreter(root: Path, wheel: Path) -> SpawnInterpreter:
+    """Build the copied interpreter and install the wheel into it, once.
+
+    Split out of ``build_spawnable_adapter`` so a module can pay this cost a
+    single time instead of per test. It is BY FAR the expensive half: a
+    ``venv --copies`` clone is a real ~17.7 MB interpreter copy plus a pip
+    install, whereas the workspace half is a few small files. Six per-test
+    builds in ``test_spawn.py``, multiplied by every xdist worker that drew one
+    of those tests, was the bulk of the ~1.16 GB a full suite run left under
+    ``$TMPDIR/pytest-of-<user>``.
+
+    Sharing the result across tests is SAFE only because nothing writes to it
+    after this returns: the wheel is installed ``--no-compile`` and every
+    spawned worker runs under ``-B`` (see ``_WORKER_FLAGS`` and the
+    supervisor's spawn flags), so no worker drops ``__pycache__`` entries into
+    the shared site-packages -- which would not merely dirty it but ADD
+    unhashed RECORD rows and break ``distribution_digest`` for every later
+    test. A test that deliberately mutates the install must still build its
+    own; see ``test_spawn.test_helper_wheel_record_and_lazy_startup``.
+    """
+
+    # The copied venv has neither local_operator nor pydantic, and the worker
+    # imports both before it can answer a handshake; ``copied_interpreter``
+    # writes the .pth pointing at this interpreter's real roots and proves
+    # the copy can import through it before handing it back.
+    executable = copied_interpreter(root / "venv")
+    site = site_packages_of(executable)
+    return SpawnInterpreter(executable, install_adapter_into_site(site, wheel))
+
+
 def build_spawnable_adapter(
     tmp_path: Path,
     wheel: Path,
     tasks: dict[str, str],
     *,
     provider: dict[str, object] | None = None,
+    interpreter: SpawnInterpreter | None = None,
 ) -> AdapterSelector:
     """Install the real wheel into a real interpreter and pin a real workspace.
 
@@ -187,16 +235,20 @@ def build_spawnable_adapter(
     computed from the artifact actually on disk, so a selector built here fails
     the handshake if the wheel or the workspace differs by one byte — which is
     the property that makes the spawned tests evidence rather than decoration.
+
+    ``interpreter`` reuses an install from ``build_spawn_interpreter`` instead
+    of building a private one. The WORKSPACE is still built under ``tmp_path``
+    either way, because it is what varies per test (task corpus and provider
+    selection both feed ``workspace_digest``) and it is cheap; only the
+    interpreter is shareable. Left optional so callers that want a pristine
+    install -- or simply have no module-scoped fixture -- keep the original
+    one-call behaviour.
     """
 
-    # The copied venv has neither local_operator nor pydantic, and the worker
-    # imports both before it can answer a handshake; ``copied_interpreter``
-    # writes the .pth pointing at this interpreter's real roots and proves
-    # the copy can import through it before handing it back.
-    executable = copied_interpreter(tmp_path / "venv")
-    site = site_packages_of(executable)
-
-    package_digest = install_adapter_into_site(site, wheel)
+    if interpreter is None:
+        interpreter = build_spawn_interpreter(tmp_path, wheel)
+    executable = interpreter.executable
+    package_digest = interpreter.package_digest
     release_digest = release_digest_for(package_digest, tasks)
     workspace = tmp_path / "workspace"
     workspace_digest_value = write_workspace(workspace, tasks, release_digest, provider=provider)

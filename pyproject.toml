@@ -391,6 +391,34 @@ exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osw
 #   env -u NO_COLOR TERM=xterm-256color .venv/bin/python -m pytest tests/e2e -m e2e -n0
 addopts = "-n auto --dist worksteal -m \"not e2e\""
 testpaths = ["tests"]
+
+# `tmp_path` directories are deleted for tests that PASS; a failing test keeps
+# its directory, so debugging a failure is unaffected. pytest's default (`all`)
+# keeps everything and prunes only the last 3 NUMBERED run dirs, which has two
+# consequences here. A green full-suite run left 1185 MB under
+# `$TMPDIR/pytest-of-<user>` -- measured, and dominated by 47 copied
+# interpreters (~17.7 MB each) that the real-spawn tests build across the
+# `popen-gw*` workers. And the 3-dir pruning only ever runs at the START of a
+# LATER session, so a run dir left behind by a KILLED session is reclaimed only
+# if enough further sessions complete; interrupted agent sessions are routine
+# on this machine, so the directories accumulated to 36.5 GB across 68
+# abandoned run dirs and filled the disk to 98%.
+#
+# Measured effect of this setting plus the module-scoped interpreter fixture in
+# `tests/unit/evaluation/adapters/osworld/test_spawn.py`: a green full suite
+# now retains 1 MB rather than 1185 MB, with no wall-time cost (809.8s before
+# vs 800.7s after, and an interleaved A/B on the osworld subset measured 84.5s
+# vs 84.3s -- deleting directories costs I/O, but building six fewer venvs
+# saves more than it costs).
+#
+# Exact semantics, from `_pytest/tmpdir.py`: the fixture teardown removes the
+# directory only when the policy is `failed` AND the test passed (decided on
+# the `call` phase), and `pytest_sessionfinish` removes the whole basetemp when
+# the session exit status is 0 and no `--basetemp` was given. xdist workers ARE
+# given one (`workermanage.py` points each worker at a subdirectory of the
+# controller's basetemp), so per-worker cleanup comes from the fixture teardown
+# and the controller reclaims the rest at the end of a green session.
+tmp_path_retention_policy = "failed"
 markers = [
     # Applied by LOCATION in tests/e2e/conftest.py, so a module in that package
     # cannot forget it and silently rejoin the unit run.

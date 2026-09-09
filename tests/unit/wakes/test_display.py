@@ -19,6 +19,8 @@ from local_operator.wakes.display import format_wake_time
 
 @pytest.fixture(autouse=True)
 def local_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from local_operator.config_watch import _reset_for_tests
+
     if not hasattr(time, "tzset"):
         pytest.skip("Changing the process timezone requires tzset")
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -28,10 +30,26 @@ def local_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             monkeypatch.delenv(key)
     monkeypatch.setenv("TZ", "America/Los_Angeles")
     time.tzset()
+    # Drop the watcher this test's config dir may already have registered.
+    # Both parametrizations of ``test_settings_choice_persists_and_refreshes_panel``
+    # receive the SAME ``tmp_path``: pytest's ``_mk_tmp`` sanitises the node name
+    # and truncates it at 30 chars, so ``...panel[100]`` and ``...panel[60]`` share
+    # a stem, and under ``tmp_path_retention_policy = "failed"`` the passing case's
+    # directory is deleted so the numbered-dir allocator reuses index 0.
+    #
+    # The watcher registry in ``config_watch`` is a process-global keyed by that
+    # path, and ``settings_get`` fills its cache from whichever watcher answers
+    # for the current ``config_dir()``. Without this reset the second case reads
+    # the first case's ``display.time_format`` SNAPSHOT from a watcher whose
+    # directory no longer exists, and the 12h/24h assertion fails depending on
+    # execution order. Isolation here therefore rests on this reset rather than
+    # on the two cases having distinct directories.
+    _reset_for_tests()
     settings_reload()
     yield
     monkeypatch.undo()
     time.tzset()
+    _reset_for_tests()
     settings_reload()
 
 
