@@ -141,6 +141,15 @@ class SessionInteraction:
     gate_draft: tuple[tuple[Any, ...], Any] | None = field(default=None, repr=False)
     gate_view_generation: int = 0
     unsubscribe_frontend: Any = field(default=None, repr=False)
+    #: `time.monotonic()` when this source stopped being the displayed session,
+    #: or ``None`` while it is current (or has never been shown).
+    #:
+    #: Starts the idle clock the sidebar sweep reads — parking is what begins
+    #: an absence, and becoming current again is the only thing that ends one.
+    #: Deliberately NOT stamped by socket traffic, the band poll or the sidebar
+    #: refresh: those are the app talking to itself, and a clock they reset
+    #: never fires. See `app.SIDEBAR_IDLE_RELEASE_S`.
+    parked_at: float | None = field(default=None, repr=False)
 
     @property
     def unsent(self) -> list[SessionDraft]:

@@ -111,6 +111,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual TranscriptView.remove unmounts a widget; no filesystem path",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._retire_idle_sidebar_source",
+        "<path>.remove",
+        "Textual TranscriptView.remove unmounts a widget; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._prepare_sidebar_session",
         "<path>.remove",
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
