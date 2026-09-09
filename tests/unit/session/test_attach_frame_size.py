@@ -28,6 +28,7 @@ from local_operator.harness.types import ModelSpec, ToolResult, Usage
 from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
+    _DERIVED_STATE_LABELS,
     _MODEL_CATALOGUE_LINE_LIMIT,
     _SHAREABLE_STATE_FIELDS,
     LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
@@ -36,6 +37,7 @@ from local_operator.session.frontend_state import (
     LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS,
     MODEL_CATALOGUE_FLOOR_ROWS,
     USAGE_COMPONENT_CAP,
+    FrontendModelSpec,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -1915,3 +1917,222 @@ def test_a_lone_elided_marker_does_not_open_with_a_blank_line() -> None:
 
     assert rendered == LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
     assert not rendered.startswith("\n")
+
+
+def test_derived_state_labels_are_real_and_immutable() -> None:
+    """The copy-free LABEL list must name real properties returning fresh strings.
+
+    The sibling of ``test_shareable_state_fields_are_real_and_immutable`` for
+    ``read_label``, and it exists because that guard cannot see these: it is
+    driven off ``model_fields``, and a derived label is a PROPERTY, so a label
+    added to ``_DERIVED_STATE_LABELS`` is invisible to every assertion above.
+
+    Two properties are checked, and both are the safety argument rather than
+    tidiness. A name that is not a real property would pass the membership gate
+    and then raise ``AttributeError`` on a per-frame path — the exact shape
+    round 2 caught in the field allow-list (``conversation_name`` for
+    ``conversation_title``). And a property returning one of the state's OWN
+    objects would share it with none of the field allow-list's scrutiny, which
+    is precisely what keeping the specs off that list exists to prevent.
+    """
+    unknown = [
+        name for name in sorted(_DERIVED_STATE_LABELS) if not hasattr(FrontendSessionState, name)
+    ]
+    assert not unknown, (
+        f"copy-free label(s) that are not properties of FrontendSessionState: {unknown}. "
+        "`read_label` checks membership BEFORE `getattr`, so a name that is not real "
+        "passes the guard and then raises AttributeError on a per-frame path."
+    )
+
+    for name in sorted(_DERIVED_STATE_LABELS):
+        attribute = getattr(FrontendSessionState, name)
+        assert isinstance(attribute, property), (
+            f"{name!r} is not a derived property. `read_label` exists for values COMPUTED "
+            "per read; a stored field belongs in _SHAREABLE_STATE_FIELDS, where the "
+            "immutability guard can see it."
+        )
+
+    # A fresh value per read is what makes sharing safe here: the caller holds
+    # a string the property just built, never the spec it was built from.
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        selected_model=FrontendModelSpec(provider="openai", model_id="gpt-4o"),
+        effective_model=FrontendModelSpec(provider="anthropic", model_id="claude"),
+    )
+    store = FrontendStateStore(state)
+    for name in sorted(_DERIVED_STATE_LABELS):
+        value = store.read_label(name)
+        assert isinstance(value, str), f"{name!r} must return a str, got {type(value)!r}"
+
+
+def test_read_label_refuses_a_name_that_is_not_a_derived_label() -> None:
+    """The gate is enforced, not documented — including against real properties.
+
+    ``FrontendSessionState`` has other properties, and a future one could
+    return a mutable object. Membership rather than "is it a property" is what
+    keeps such a value off this path by default.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+
+    with pytest.raises(KeyError):
+        store.read_label("jobs")
+    with pytest.raises(KeyError):
+        store.read_label("selected_model")
+    with pytest.raises(KeyError):
+        store.read_label("not_a_property_at_all")
+
+
+def test_read_label_refuses_a_label_that_is_not_a_str() -> None:
+    """An allow-listed name whose value is not a `str` must FAIL, not stringify.
+
+    Review round 1 (MINOR): the boundary used to read
+    ``return str(getattr(...))``, so a label property whose return type drifted
+    — a tuple-shaped label rendering ``(a, b)`` — passed silently. The
+    coercion could never share state (``str()`` always builds fresh); what it
+    hid was the CONTRACT: a non-str is exactly the shape the allow-list's
+    closure test exists to catch, and the boundary is where a drift it missed
+    has to stop. Now a `TypeError`, the label sibling of ``read_field``'s
+    ``KeyError`` on a non-allowlisted name.
+
+    Reached by swapping the store's state for one whose label is not a str,
+    which exercises the boundary directly without mutating the pydantic model
+    class behind it.
+    """
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store._state = SimpleNamespace(model_label=("openai", "gpt-4o"))  # type: ignore[assignment]
+
+    with pytest.raises(TypeError):
+        store.read_label("model_label")
+
+    # The boundary still serves a genuine str from a genuine state.
+    store._state = FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        selected_model=FrontendModelSpec(provider="openai", model_id="gpt-4o"),
+    )
+    assert store.read_label("model_label") == "openai/gpt-4o"
+
+
+def _spec_state() -> FrontendSessionState:
+    """A state carrying both specs, a roster and a usage row."""
+    return FrontendSessionState(
+        session_id="s1",
+        epoch="e1",
+        conversation_title="a named conversation",
+        goal="ship it",
+        active_agent="coder",
+        active_team="lopdev",
+        history_generation=4,
+        selected_model=FrontendModelSpec(provider="openai", model_id="gpt-4o"),
+        effective_model=FrontendModelSpec(provider="anthropic", model_id="claude"),
+        last_usage=FrontendUsage(input_tokens=10, output_tokens=5),
+        jobs=[JobState(id="j1", type="task", status="running")],
+    )
+
+
+def _remote_with_state(tmp_path: Path, state: FrontendSessionState) -> RemoteSession:
+    """A viewer bound to a REAL store, with no socket.
+
+    The accessors under test read only the store, so a live connection would
+    add a fixture without adding coverage.
+    """
+    remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never)
+    remote._frontend_store = FrontendStateStore(state)
+    return remote
+
+
+def test_copy_free_accessors_return_what_the_clone_returned(tmp_path: Path) -> None:
+    """Converting an accessor to the copy-free path must not change its answer.
+
+    The whole value of the conversion is that it is invisible to callers: the
+    band paints the same string, the refresh compares the same epoch. Asserted
+    against ``frontend_state`` — the clone the accessors used to read — so this
+    is a direct equivalence rather than a restatement of the new code.
+    """
+    state = _spec_state()
+    remote = _remote_with_state(tmp_path, state)
+    snapshot = remote.frontend_state
+
+    assert remote.model_label == snapshot.model_label == "openai/gpt-4o"
+    assert remote.effective_model_label == snapshot.effective_model_label == "anthropic/claude"
+    assert remote.goal == snapshot.goal == "ship it"
+    assert remote.conversation_name == snapshot.conversation_title == "a named conversation"
+    assert remote.active_agent == snapshot.active_agent == "coder"
+    assert remote.active_team_name == snapshot.active_team == "lopdev"
+    assert remote.epoch == snapshot.epoch == "e1"
+    assert remote._read_state_field("history_generation") == snapshot.history_generation == 4
+
+
+def test_copy_free_accessors_cannot_corrupt_the_store(tmp_path: Path) -> None:
+    """A caller mutating a returned value must not reach canonical state.
+
+    This is the invariant the whole-state clone provided and the reason the
+    allow-list is a safety argument rather than a convenience list. Every
+    converted accessor returns either an immutable scalar or a freshly built
+    string, so the mutation a caller CAN perform is rebinding its own local
+    name — which is asserted here by re-reading the store afterwards.
+    """
+    remote = _remote_with_state(tmp_path, _spec_state())
+
+    label = remote.model_label
+    label += "/tampered"
+    effective = remote.effective_model_label
+    effective += "/tampered"
+    goal = remote.goal
+    goal += " and then some"
+
+    assert remote.model_label == "openai/gpt-4o"
+    assert remote.effective_model_label == "anthropic/claude"
+    assert remote.goal == "ship it"
+
+    # The specs themselves must never leave the store through a label read: a
+    # label that handed back the spec's own string would still be safe (str is
+    # immutable), but a label read must not be a route to the OBJECT.
+    store = remote._frontend_store
+    assert store is not None
+    canonical = store._state.selected_model
+    assert canonical is not None
+    assert canonical.model_id == "gpt-4o"
+
+
+def test_model_and_usage_accessors_still_deep_copy(tmp_path: Path) -> None:
+    """The accessors NOT converted must keep the clone that protects them.
+
+    ``model``/``effective_model`` hand out a non-frozen ``ModelSpec`` and
+    ``restored_usage`` a ``Usage`` the harness accumulates in place with ``+=``
+    (``harness/jobs.py``, ``harness/subagent.py``). Sharing either instance is
+    the invariant loss review round 2 (Q6/F4) rejected, so these must remain on
+    the copying path even though their sibling label accessors no longer are.
+
+    Asserted by MUTATING what they return and re-reading the store, which fails
+    on a shared instance and passes on a copy — the property itself rather than
+    the implementation detail that currently provides it.
+    """
+    remote = _remote_with_state(tmp_path, _spec_state())
+    store = remote._frontend_store
+    assert store is not None
+
+    spec = remote.model
+    spec.model_id = "tampered"
+    assert store._state.selected_model is not None
+    assert store._state.selected_model.model_id == "gpt-4o"
+    assert remote.model.model_id == "gpt-4o"
+
+    effective = remote.effective_model
+    effective.model_id = "tampered"
+    assert store._state.effective_model is not None
+    assert store._state.effective_model.model_id == "claude"
+
+    usage = remote.restored_usage()
+    assert usage is not None
+    usage.input_tokens += 1_000_000
+    canonical_usage = store._state.last_usage
+    assert canonical_usage is not None
+    assert canonical_usage.input_tokens == 10
+
+    # And the label accessors keep reporting canonical state after all of that,
+    # which is the pairing that matters: the fast path must not be a way to
+    # observe a corruption the slow path prevented.
+    assert remote.model_label == "openai/gpt-4o"
+    assert remote.effective_model_label == "anthropic/claude"

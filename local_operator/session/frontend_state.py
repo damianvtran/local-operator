@@ -184,6 +184,29 @@ JOB_TEXT_FLOOR_CHARS = 200
 #: `test_shareable_state_fields_are_real_and_immutable` asserts both properties
 #: against `model_fields`, so neither a renamed field nor a newly mutable type
 #: can silently re-enter this set.
+#: Derived properties :meth:`FrontendStateStore.read_label` may serve.
+#:
+#: SEPARATE FROM :data:`_SHAREABLE_STATE_FIELDS` because the safety argument is
+#: a different one, and conflating them would weaken both. That set admits
+#: FIELDS whose stored value is handed out directly, so its bar is deep
+#: immutability of the store's own object. These are PROPERTIES that build a
+#: new ``str`` on every read, so nothing of the store's is shared at all — the
+#: models they read (``selected_model``, ``effective_model``) stay inside and
+#: remain excluded from the field allow-list, which is what keeps review round
+#: 2's Q6/F4 invariant intact.
+#:
+#: Every entry must therefore return a FRESHLY CONSTRUCTED immutable value. A
+#: property that returned one of the state's own mutable objects would share it
+#: exactly as a field read would, with none of the field allow-list's scrutiny;
+#: ``test_derived_state_labels_are_real_and_immutable`` asserts the shape
+#: against the model so such a property cannot join this set unnoticed.
+_DERIVED_STATE_LABELS = frozenset(
+    {
+        "model_label",
+        "effective_model_label",
+    }
+)
+
 _SHAREABLE_STATE_FIELDS = frozenset(
     {
         "streaming",
@@ -2621,6 +2644,60 @@ class FrontendStateStore:
                 "so the caller cannot mutate the store's own instance"
             )
         return getattr(self._state, name)
+
+    def read_label(self, name: str) -> str:
+        """One DERIVED label of the state, WITHOUT cloning the whole state.
+
+        The sibling of :meth:`read_field` for values that are COMPUTED rather
+        than stored, and it exists because the allow-list cannot reach them.
+        ``model_label`` and ``effective_model_label`` are formatted from
+        ``selected_model``/``effective_model``, which are non-frozen models
+        deliberately kept OFF :data:`_SHAREABLE_STATE_FIELDS` (review round 2,
+        Q6/F4: sharing the store's spec let a caller rewrite canonical state).
+        So no widening of that set can serve these two, and widening it to try
+        would reintroduce exactly the invariant that was restored.
+
+        The safety argument is different from ``read_field``'s and stronger.
+        ``read_field`` shares the store's own object and relies on the value
+        being deeply immutable; this returns a str the property JUST BUILT, so
+        the model it was derived from never leaves the store at all. A caller
+        cannot reach the spec through the label under any mutation.
+
+        Restricted to :data:`_DERIVED_STATE_LABELS` for the same reason
+        ``read_field`` is restricted: an enforced membership test rather than a
+        documented convention, so a later property that happens to return a
+        mutable object cannot be served here by accident.
+
+        Measured, at a 120-job roster on a loaded host: the band's per-paint
+        label reads cost ~1.8 ms each through ``state`` (4,214 deepcopy calls
+        for a representative frame) against ~0.0003 ms here, and the cost grows
+        with everything the session accumulates — which is the mechanism behind
+        a TUI that degrades over a long session.
+        """
+        if name not in _DERIVED_STATE_LABELS:
+            raise KeyError(
+                f"{name!r} is not a copy-free derived label; read it through `state` "
+                "so the caller cannot reach the store's own instance"
+            )
+        # ENFORCED, not coerced, per the finding on review round 1: a `str()`
+        # here would silently stringify a label property whose return type
+        # drifted — a tuple-shaped label would render "(a, b)" and pass —
+        # masking the contract instead of upholding it. `str()` always builds
+        # a fresh string so it can never share state; the failure it hides is
+        # the CONTRACT one (a non-str is exactly the shape the allow-list's
+        # closure test exists to catch, and this is the boundary where a drift
+        # it missed must stop). `TypeError` at the boundary is the label
+        # sibling of `read_field`'s `KeyError` on a non-allowlisted name: the
+        # gate raises rather than papering over the input.
+        value = getattr(self._state, name)
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{name!r} is not a copy-free derived label: expected a freshly built "
+                f"str, got {type(value).__name__!r}. The value may be one of the "
+                "store's own objects rather than a derived label, so it must not "
+                "leave the store through this path."
+            )
+        return value
 
     @property
     def pending_gate(self) -> "PendingGateState | None":

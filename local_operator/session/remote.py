@@ -1442,7 +1442,7 @@ class RemoteSession:
         prevents a stale desktop popup from accidentally answering a newer gate
         while a reconnect or a multi-question ask advances in another window.
         """
-        pending = self.frontend_state.pending_gate
+        pending = self.pending_gate
         client = self._client
         if (
             pending is None
@@ -2576,14 +2576,15 @@ class RemoteSession:
                         self._client is not client
                         or self._disposed
                         or frontend.snapshot.session_id != self._session_id
-                        or frontend.epoch != self.frontend_state.epoch
+                        or frontend.epoch != self.epoch
                     ):
                         raise ConnectionError("history binding changed during refresh")
                     self._frontend_refresh_cut = (frontend.epoch, frontend.sequence)
                     self._install_frontend(frontend.snapshot, publish=True)
                     await self._load_frontend_history(frontend)
                     self._display_invalidated = (
-                        self.frontend_state.history_generation != self._loaded_history_generation
+                        self._read_state_field("history_generation")
+                        != self._loaded_history_generation
                     )
                     self._finish_sync()
                 except BaseException:
@@ -2853,7 +2854,11 @@ class RemoteSession:
         # snapshot, so nothing needs re-stamping. Deviation from the
         # design's "seed as today", proven by the reviewer's counterfactual.
         same_live_turn, self._same_live_turn = self._same_live_turn, False
-        if self.frontend_state.streaming and not same_live_turn:
+        # `streaming` is allow-listed; `generation` is NOT (only
+        # `history_generation` and `sequence` are), so it keeps the clone. The
+        # pair is not a torn read: nothing awaits between them, so both resolve
+        # against the same installed snapshot.
+        if self._read_state_field("streaming") and not same_live_turn:
             seeded.insert(0, AgentStartEvent(generation=self.frontend_state.generation))
         # Durable-before-live is the transcript's paint invariant. On
         # reconnect the buffer's head can hold the gap's HistoryDeltaEvent
@@ -4125,9 +4130,36 @@ class RemoteSession:
             raise RuntimeError("frontend state has not synchronized")
         return self._frontend_store.read_field(name)
 
+    def _read_state_label(self, name: str) -> str:
+        """One DERIVED label without the whole-state clone.
+
+        Separate from :meth:`_read_state_field` because the two answer
+        different questions. That one serves FIELDS, gated by an allow-list of
+        deeply immutable values. A label is not a field: it is computed from
+        `selected_model`/`effective_model`, which are non-frozen models the
+        allow-list deliberately excludes, so no widening of that set could
+        serve it — and none should be attempted, since sharing a spec is the
+        invariant loss review round 2 (Q6/F4) rejected.
+
+        What makes this safe is that the derived value is a freshly built
+        `str`: the spec never leaves the store, and a caller holding the label
+        cannot reach the object it was formatted from.
+        """
+        if self._frontend_store is None:
+            raise RuntimeError("frontend state has not synchronized")
+        return self._frontend_store.read_label(name)
+
     @property
     def model_label(self) -> str:
-        return self.frontend_state.model_label
+        # THE SPEC STAYS INSIDE THE STORE; ONLY ITS LABEL LEAVES.
+        # Not `_read_state_field`: `model_label` is a DERIVED property, not a
+        # field, and the field behind it (`selected_model`) is deliberately off
+        # `_SHAREABLE_STATE_FIELDS` because a `FrontendModelSpec` is a
+        # non-frozen model whose shared instance a caller could rewrite (review
+        # round 2, Q6/F4). The store formats the label from its own instance
+        # and hands back a fresh `str`, so the invariant `state`'s clone exists
+        # to protect is kept while the whole-state copy is not paid.
+        return self._read_state_label("model_label")
 
     @property
     def model(self) -> ModelSpec:
@@ -4151,7 +4183,18 @@ class RemoteSession:
 
     @property
     def effective_model_label(self) -> str:
-        return self.frontend_state.effective_model_label
+        # Per `model_label`: derived string out, spec object in. This one is on
+        # the hottest path of the two — `_effective_label` reads it on EVERY
+        # band paint and falls back to `model_label`, so the band was paying
+        # two whole-state clones per repaint.
+        #
+        # No torn read despite the fallback: the store's property resolves
+        # `effective_model or selected_model` against ONE `self._state`
+        # binding, exactly as `RemoteSession.effective_model` takes one
+        # snapshot for the same reason. That consistency is why the fallback
+        # lives on the state model rather than being reassembled from two reads
+        # here.
+        return self._read_state_label("effective_model_label")
 
     def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
         old = self.model
@@ -4167,7 +4210,8 @@ class RemoteSession:
 
     @property
     def goal(self) -> str:
-        return self.frontend_state.goal
+        # Allow-listed immutable scalar (`str`), read per frame by the band.
+        return self._read_state_field("goal")
 
     def set_goal(self, text: str) -> str:
         client = self._client
@@ -4182,7 +4226,10 @@ class RemoteSession:
 
     @property
     def conversation_name(self) -> str:
-        return self.frontend_state.conversation_title
+        # Allow-listed immutable scalar. Read on every band paint AND by the
+        # sidebar row for each session, so a clone here was multiplied by the
+        # roster rather than paid once.
+        return self._read_state_field("conversation_title")
 
     @property
     def conversation_name_state(self) -> ConversationName:
@@ -4516,7 +4563,9 @@ class RemoteSession:
             if message_id
             else ContinuationCommand.create(self._session_id, text, images_wire)
         )
-        epoch = self.frontend_state.epoch
+        # `self.epoch` is the copy-free read of the same field; this is the
+        # captured baseline the observer below compares each event against.
+        epoch = self.epoch
         admitted = False
         generation: int | None = None
         completed: asyncio.Future[AgentEndEvent] = asyncio.get_running_loop().create_future()
@@ -4526,7 +4575,9 @@ class RemoteSession:
             nonlocal admitted, generation
             if completed.done():
                 return
-            if self.frontend_state.epoch != epoch:
+            # Per EVENT, not per frame, and an active turn is the highest-rate
+            # path there is — this was a whole-state clone for one string.
+            if self.epoch != epoch:
                 completed.set_exception(ConnectionError("owner changed during loop iteration"))
                 return
             message = getattr(event, "message", None)
@@ -4806,11 +4857,15 @@ class RemoteSession:
 
     @property
     def active_agent(self) -> str:
-        return self.frontend_state.active_agent
+        # Allow-listed immutable scalar, read per frame by the band's
+        # active-profile segment and by `_poll_subagents` at 1 Hz.
+        return self._read_state_field("active_agent")
 
     @property
     def active_team_name(self) -> str:
-        return self.frontend_state.active_team
+        # Allow-listed immutable scalar; same per-frame band path as
+        # `active_agent`.
+        return self._read_state_field("active_team")
 
     def restored_usage(self) -> Usage | None:
         # Copying path: `Usage` is accumulated in place elsewhere in the
