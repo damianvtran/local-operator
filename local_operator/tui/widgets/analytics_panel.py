@@ -28,8 +28,8 @@ it is the right way to pin what the screen SAYS.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
+from dataclasses import dataclass, field
+from typing import Collection, Mapping, Protocol, Sequence
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -487,6 +487,10 @@ def build_report(
     monthly: list[UsagePeriod] | None = None,
     window_totals: UsagePeriod | None = None,
     metric: str = METRIC_COST,
+    expanded: "Collection[str] | None" = None,
+    cursor: str | None = None,
+    layout: ReportLayout | None = None,
+    forest: list["SessionNode"] | None = None,
 ) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
@@ -502,6 +506,30 @@ def build_report(
     the screen's ``t`` key flips it. They default to ``None``/``cost`` so a
     caller with no rollups (or a pre-rollup test) gets exactly the original
     report.
+
+    ``expanded`` is the set of session IDs whose subagent rows are shown. The
+    default — none — is what the user asked for: the operator's ledger renders
+    2,240 session rows fully expanded, of which 1,645 are subagents nobody
+    asked to see, and the cost is paid again on EVERY rebuild (a terminal resize
+    emits a storm of them, which is the "freezing" in the report).
+
+    ``cursor`` is the SESSION ID the keyboard is on — an id and not a row index,
+    for the same reason the expansion set is: expanding a row inserts rows above
+    every later index, so an index-keyed cursor would slide onto a different
+    session on the very keypress that is supposed to leave it where it is.
+    ``layout``, if given, receives which rows were painted and where, which the
+    interactive screen needs to scroll the cursor into view; recomputing that
+    outside this function would be a second, possibly disagreeing, notion of
+    which rows are on screen.
+
+    ``forest`` lets a caller that already has one pass it in rather than paying
+    to rebuild it. It measured 34 ms on the operator's ledger — irrelevant for a
+    one-shot report, and the dominant cost of a REPAINT once every arrow key
+    triggers one (0.25 s per press, which does not read as a cursor). The screen
+    holds the aggregate immutable for its lifetime, so the forest it caches
+    cannot go stale; a caller that passes a forest built from a different
+    aggregate would get a report describing neither, which is why this is not
+    derived from a mutable field.
     """
     width = max(40, width)
     fg = semantic_style("fg")
@@ -750,16 +778,17 @@ def build_report(
     # keeps this column summing to the headline total above it: rolling up while
     # still listing children at top level inflates the table by $8,077 (12.7%)
     # on the operator's ledger. See ``build_session_forest``.
-    forest = build_session_forest(
-        aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
-    )
+    if forest is None:
+        forest = build_session_forest(
+            aggregate.by_session, getattr(aggregate, "session_parents", {}) or {}
+        )
     # STRUCTURE FIRST, LABELS SECOND. The walk yields ``(session_id, depth,
     # subtree total)`` and nothing about how a row reads, because the label
     # budget below cannot be computed until the numbers that share the row are
     # known, and the numbers come from the forest. Composing labels inside the
     # walk (as the nesting change first did) forces them to be built against a
     # constant, which is exactly the defect the budgeting work removed.
-    structure = _forest_rows(forest)
+    structure = _forest_rows(forest, expanded)
 
     # The label budget is decided BEFORE the labels are composed, from the frame
     # this report is being rendered into (design review D2). Composing against a
@@ -790,9 +819,18 @@ def build_report(
     # rollup later.
     overhead = max(
         _row_overhead(list(aggregate.by_provider.items()), width),
-        _row_overhead([(sid, agg) for sid, _, agg in structure], width),
+        _row_overhead([(row.session_id, row.aggregate) for row in structure], width),
     )
     name_cap = max(_MIN_NAME_COL, min(_MAX_NAME_COL, width - overhead))
+
+    # The disclosure gutter exists only when SOMETHING can be expanded, and that
+    # test is stable across expansion: roots are always visible, so "a visible
+    # row has descendants" is the same question as "this forest has children at
+    # all". It has to be stable, or opening a row would add a gutter to every
+    # other row and slide the whole table sideways on one keypress.
+    disclosure = any(row.expandable for row in structure)
+    markers = {row.session_id: _disclosure_marker(row, present=disclosure) for row in structure}
+    suffixes = {row.session_id: _row_suffix(row) for row in structure}
 
     # Keyed by SESSION ID, never by the rendered label. Two sessions can render
     # the same string (identical names, or names agreeing within the budget),
@@ -801,9 +839,29 @@ def build_report(
     # screen entirely. On the operator's ledger that hid 46 sessions before
     # subagent naming existed and 355 after it, so the table is built as
     # (label, depth, aggregate) triples whose identity is the id.
-    session_labels = _forest_labels(structure, names, name_cap)
+    session_labels = _forest_labels(
+        [(row.session_id, row.depth, row.aggregate) for row in structure],
+        names,
+        name_cap,
+        # The marker and the ``+N`` count are printed inside the name column, so
+        # they are charged to the label's budget for the same reason the nesting
+        # prefix is: a label composed to the full budget and THEN given a prefix
+        # is over the column, and the paint takes the tail back off with no
+        # marker to say it did.
+        reserved={
+            row.session_id: cell_len(markers[row.session_id]) + cell_len(suffixes[row.session_id])
+            for row in structure
+        },
+    )
     session_rows = [
-        (_row_prefix(depth) + session_labels[sid], depth, agg) for sid, depth, agg in structure
+        (
+            _row_prefix(row.depth, markers[row.session_id])
+            + session_labels[row.session_id]
+            + suffixes[row.session_id],
+            row.depth,
+            row.aggregate,
+        )
+        for row in structure
     ]
     all_names = [n for n in aggregate.by_provider] + [label for label, _, _ in session_rows]
     if all_names:
@@ -821,8 +879,27 @@ def build_report(
         # Meta says the rollup happened, because a row whose figure exceeds its
         # own spend must say why — and it is also what tells a reader the
         # indented rows are already counted in the row above them.
-        meta = "totals include subagents" if any(depth for _, depth, _ in session_rows) else ""
-        lines.append(_session_section(session_rows, width, name_col, meta))
+        #
+        # Keyed off ``disclosure`` (does the forest HAVE children) rather than
+        # off the visible depths, because with the table collapsed there are no
+        # indented rows on screen and the rollup has still happened. Reading it
+        # off the paint would drop the one sentence that explains why a root's
+        # figure exceeds its own spend, precisely in the default state.
+        meta = "totals include subagents" if disclosure else ""
+        if layout is not None:
+            # The header is the block's first line; row ``i`` is one line below
+            # it. Counted from the blocks composed SO FAR, because ``_repaint``
+            # joins them with a single newline each — the same arithmetic the
+            # body's line numbering uses, derived once here rather than guessed
+            # by a caller counting sections it cannot see.
+            layout.session_rows = structure
+            layout.session_first_line = sum(block.plain.count("\n") + 1 for block in lines) + 1
+        cursor_index = None
+        if cursor is not None:
+            cursor_index = next(
+                (i for i, row in enumerate(structure) if row.session_id == cursor), None
+            )
+        lines.append(_session_section(session_rows, width, name_col, meta, cursor=cursor_index))
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
@@ -943,8 +1020,133 @@ def _tokens_col(groups: "Sequence[tuple[str, UsageAggregate]]") -> int:
 #: pushes the table past ``_WIDE_TABLE_MIN`` and costs everyone the cache column.
 _NEST_INDENT = 2
 
+#: Disclosure glyphs for a row whose subagent rows are hidden / shown. ``▸``/``▾``
+#: is the codebase's existing plain-fallback vocabulary (``glyphs.PLAIN_ICON_DEFAULT``
+#: is ``▸``) and both measure ONE cell, which the gutter arithmetic below relies
+#: on — a two-cell glyph would shift every numeric column by a cell, the exact
+#: class of defect ``_row_overhead`` exists to prevent.
+_DISCLOSURE_COLLAPSED = "▸"
+_DISCLOSURE_EXPANDED = "▾"
 
-def _row_prefix(depth: int) -> str:
+#: Cells the disclosure gutter costs a row: the glyph plus one space. Paid by
+#: EVERY row of the table once any row is expandable, so the names stay in one
+#: column — a table where expandable and childless rows start at different
+#: x-positions reads as ragged rather than as structured. It is not paid at all
+#: on a ledger with no subagents (see ``_disclosure_marker``), which is what
+#: keeps a flat table byte-identical to the one this screen has always shipped.
+_DISCLOSURE_CELLS = 2
+
+#: The row cursor. ``❯`` matches the command and session pickers (a caret rather
+#: than a reversed row: an inverted block reads as a selection the user MADE,
+#: not as the position they are on). It is painted into the two leading indent
+#: cells every row already spends, so a cursor costs the label budget nothing.
+_ROW_CURSOR = "❯"
+
+
+@dataclass(frozen=True)
+class SessionRow:
+    """One rendered row of the By-session table, before it has a label.
+
+    Identity is the SESSION ID all the way to the paint (never the rendered
+    label — two sessions can render the same string, and a label-keyed structure
+    silently drops all but one of them; that hid 355 sessions on the operator's
+    ledger). The screen keys its expansion state off ``session_id`` for the same
+    reason: a repaint at a different width recomposes every label, so anything
+    remembered by label would be forgotten by the next resize.
+
+    ``descendants`` is the size of the whole subtree under this row, not the
+    number of direct children. It is what the row advertises as the cost of
+    expanding, because the question the collapse creates is "how much is hidden
+    here" — and on the real ledger the two figures are equal for all but a
+    handful of rows (1,637 depth-1 nodes against 8 at depth 2).
+    """
+
+    session_id: str
+    depth: int
+    aggregate: "UsageAggregate"
+    descendants: int
+    expanded: bool
+
+    @property
+    def expandable(self) -> bool:
+        return bool(self.descendants)
+
+
+@dataclass
+class ReportLayout:
+    """What :func:`build_report` just painted, for a caller that must drive it.
+
+    A receiver rather than a return value because ``build_report`` returns the
+    rendered lines and three callers (two scripts and the plain-text tests) want
+    only those. The interactive screen needs one thing more — WHICH row is on
+    WHICH body line — so it can put a cursor on a row, scroll that row into
+    view, and map a mouse click back to the session it landed on. Recomputing
+    that outside the renderer would mean building the forest a second time
+    (31 ms on the operator's ledger) and, worse, would be a second definition of
+    which rows are visible that could disagree with the paint.
+    """
+
+    #: The visible rows, in paint order. Collapsed subtrees are simply absent.
+    session_rows: list[SessionRow] = field(default_factory=list)
+    #: Body line index of ``session_rows[0]``. The section header sits one line
+    #: above it, and row ``i`` is at ``session_first_line + i`` because every row
+    #: is composed ``no_wrap`` and truncated to the content box.
+    session_first_line: int = 0
+
+
+def _descendant_count(node: "SessionNode") -> int:
+    """Nodes beneath ``node``, at any depth. Bounded by the forest's own depth cap."""
+    return sum(1 + _descendant_count(child) for child in node.children)
+
+
+def _disclosure_marker(row: SessionRow, *, present: bool) -> str:
+    """The disclosure cell a row carries, or ``""`` when the table has no gutter.
+
+    ``present`` is false when NOTHING in the table can be expanded, and then no
+    row pays for the gutter. That is the same rule the hint line and the metric
+    toggle follow (design D5): a control that cannot act must not be advertised,
+    and a permanently blank two-cell column advertising an absent affordance is
+    the visual form of the same defect. It also means a ledger that never ran a
+    subagent renders exactly the table it rendered before this feature existed.
+
+    A childless row gets BLANK cells, never a glyph: it is not interactive, and
+    a glyph on it would promise a press that does nothing. 492 of the operator's
+    595 roots are childless, so this is the majority case, not an edge.
+    """
+    if not present:
+        return ""
+    if not row.expandable:
+        return " " * _DISCLOSURE_CELLS
+    return (_DISCLOSURE_EXPANDED if row.expanded else _DISCLOSURE_COLLAPSED) + " "
+
+
+def _row_suffix(row: SessionRow) -> str:
+    """The hidden-row count a row advertises after its name, or ``""``.
+
+    This is the information the collapse REMOVES, handed back in one cell-cheap
+    form: without it a user cannot tell an expensive leaf session from an
+    expensive session with ninety subagents under it, which is precisely the
+    distinction they opened the screen to make.
+
+    Shown in BOTH states, not just when collapsed. A suffix that disappeared on
+    expand would change the widest label in the table, ``name_col`` is sized to
+    that, and every numeric column would shift sideways on a keypress — a reflow
+    the reader sees as the table twitching. Its width is charged to the label
+    budget by :func:`_forest_labels`, exactly as the prefix is.
+
+    Spelled out ("+12 subagents") rather than a bare "+12", which costs about
+    ten cells of a 48-cell name column and is worth it: every other number on
+    this row is money, tokens or calls, so a bare ``+12`` beside them reads as a
+    quantity of the same kind. "subagents" is the word the section meta already
+    uses, so this borrows the table's own vocabulary rather than adding one.
+    """
+    if not row.expandable:
+        return ""
+    noun = "subagent" if row.descendants == 1 else "subagents"
+    return f" +{row.descendants} {noun}"
+
+
+def _row_prefix(depth: int, marker: str = "") -> str:
     """The indent-and-glyph a row at ``depth`` carries before its label.
 
     A child carries a ``└`` glyph, not just the indent and the dim style
@@ -955,6 +1157,13 @@ def _row_prefix(depth: int) -> str:
     surface section already uses ``└`` for exactly this, so this is the
     codebase's existing vocabulary rather than a new one.
 
+    ``marker`` is the disclosure cell (:func:`_disclosure_marker`) and it lands
+    AFTER the nesting indent, immediately before the name, rather than in a
+    fixed gutter at the far left. A disclosure glyph is a control attached to
+    one row's label; parked in a shared left gutter it would sit at the same
+    x-position for a root and its grandchild, so the column of glyphs would say
+    nothing about which of them a press would act on.
+
     Split out from the walk because the prefix is width the LABEL cannot also
     spend: it is prepended after condensing, so :func:`_forest_labels` has to
     subtract exactly this many cells from a nested row's budget. One function
@@ -962,17 +1171,29 @@ def _row_prefix(depth: int) -> str:
     cannot drift — the same rule ``_calls_col`` follows for the calls column.
     """
     if not depth:
-        return ""
-    return " " * ((depth - 1) * _NEST_INDENT) + "└ "
+        return marker
+    return " " * ((depth - 1) * _NEST_INDENT) + "└ " + marker
 
 
-def _forest_rows(forest: list["SessionNode"]) -> list[tuple[str, int, "UsageAggregate"]]:
-    """Flatten the session forest to ``(session_id, depth, aggregate)`` rows.
+def _forest_rows(
+    forest: list["SessionNode"],
+    expanded: "Collection[str] | None" = None,
+) -> list[SessionRow]:
+    """Flatten the session forest to the rows that are currently VISIBLE.
 
     Depth-first so a child sits directly under its parent, and each row carries
     the TREE total (own plus descendants) — the same figure its label is sorted
     by. A child row's dollars are therefore already counted in its parent's, and
-    the section meta says so; only the ROOT rows sum to the table total.
+    the section meta says so; only the ROOT rows sum to the table total. That
+    invariant is untouched by collapsing: a hidden child was never a row that
+    summed, and its parent's figure already contains it.
+
+    ``expanded`` is the set of session IDs whose children are shown; everything
+    else stops the walk at its own row. ``None`` means none — COLLAPSED is the
+    default, which is the whole point. The operator's ledger renders 2,240 rows
+    fully expanded against 595 collapsed, and the difference is a 0.65 s first
+    paint against 0.23 s plus a full rebuild on every one of the resize events a
+    terminal drag emits in a storm.
 
     Yields the session ID rather than a rendered label, because a label cannot
     be composed until the column budget is known and the budget is computed from
@@ -980,12 +1201,26 @@ def _forest_rows(forest: list["SessionNode"]) -> list[tuple[str, int, "UsageAggr
     paint, which is what stops two rows that read alike from collapsing into
     one; :func:`_forest_labels` turns these into display text.
     """
-    rows: list[tuple[str, int, "UsageAggregate"]] = []
+    open_ids = frozenset(expanded or ())
+    rows: list[SessionRow] = []
 
     def walk(node: "SessionNode", depth: int) -> None:
-        rows.append((node.session_id, depth, node.total))
-        for child in node.children:
-            walk(child, depth + 1)
+        is_open = node.session_id in open_ids
+        rows.append(
+            SessionRow(
+                session_id=node.session_id,
+                depth=depth,
+                aggregate=node.total,
+                descendants=_descendant_count(node),
+                expanded=is_open,
+            )
+        )
+        # A closed subtree is not walked at all. Skipping the RECURSION rather
+        # than filtering afterwards is what makes the collapsed report cheap:
+        # nothing under a closed row is measured, labelled, or composed.
+        if is_open:
+            for child in node.children:
+                walk(child, depth + 1)
 
     for root in forest:
         walk(root, 0)
@@ -996,6 +1231,7 @@ def _forest_labels(
     structure: "Sequence[tuple[str, int, UsageAggregate]]",
     names: Mapping[str, str],
     name_cap: int,
+    reserved: Mapping[str, int] | None = None,
 ) -> dict[str, str]:
     """Budgeted, collision-free display labels for every row, keyed by id.
 
@@ -1019,6 +1255,16 @@ def _forest_labels(
     the prefix first means the composed label plus its prefix is what
     ``name_cap`` promised, and the ellipsis lands where the reader can see it.
 
+    ``reserved`` extends that rule to everything else a row prints INSIDE the
+    name column — the disclosure marker and the ``+N`` hidden-row count — keyed
+    by session id because those two vary per ROW rather than per depth (an
+    expandable root and a childless one sit at the same depth and spend
+    different numbers of cells). Same reasoning as the prefix: whatever the row
+    prints beside its label is width the label cannot also have, and charging it
+    afterwards is what produced the unmarked mid-word cut this budgeting exists
+    to remove. When it is absent, only the prefix is charged, which is exactly
+    the behaviour every caller had before the disclosure column existed.
+
     Floored at ``_MIN_LABEL_CHARS`` by ``session_table_labels`` itself, so a
     pathologically deep tree on a narrow frame degrades to short labels rather
     than to empty ones.
@@ -1028,8 +1274,10 @@ def _forest_labels(
     # is decided against the width its members will really be composed at.
     by_budget: dict[int, dict[str, str]] = {}
     for sid, depth, _ in structure:
-        budget = name_cap - cell_len(_row_prefix(depth))
-        by_budget.setdefault(budget, {})[sid] = names.get(sid, "")
+        extra = cell_len(_row_prefix(depth))
+        if reserved is not None:
+            extra += reserved.get(sid, 0)
+        by_budget.setdefault(name_cap - extra, {})[sid] = names.get(sid, "")
     for budget, group in by_budget.items():
         labels.update(session_table_labels(group, budget))
     return labels
@@ -1040,6 +1288,8 @@ def _session_section(
     width: int,
     name_col: int,
     meta: str = "",
+    *,
+    cursor: int | None = None,
 ) -> Text:
     """The per-session table, pre-ordered and pre-indented by the forest walk.
 
@@ -1060,9 +1310,17 @@ def _session_section(
     cells and pushes ``% cache`` off the box). Sizing runs over the rows THIS
     table paints, which carry subtree totals, so it matches what
     ``build_report`` budgeted against.
+
+    ``cursor`` is the index in ``rows`` the keyboard is currently on, painted
+    into the two leading indent cells every row already spends — so the cursor
+    costs the label budget nothing and cannot shift a numeric column. ``None``
+    (the default, and what every non-interactive caller passes) paints no
+    cursor at all, which keeps the plain-text renderers and the scripts on the
+    same output they had before the row cursor existed.
     """
     fg = semantic_style("fg")
     dim = semantic_style("dim")
+    accent = semantic_style("accent")
     block = section_header("By session", meta)
     if not rows:
         block.append("\n  (none)", style=dim)
@@ -1073,18 +1331,26 @@ def _session_section(
     cost_col = max(len(format_cost(agg)) for _, agg in pairs)
     tokens_col = _tokens_col(pairs)
     calls_col = _calls_col(pairs)
-    for label, depth, agg in rows:
+    for index, (label, depth, agg) in enumerate(rows):
         block.append("\n")
         # A nested row is dimmed as well as indented: its dollars are already
         # inside the root above it, so it must not compete visually with the
         # rows that actually partition the total.
         style = fg if depth == 0 else dim
+        on_cursor = cursor is not None and index == cursor
+        if on_cursor:
+            block.append(f"{_ROW_CURSOR} ", style=accent)
+        else:
+            block.append("  ")
         # TRUNCATE as well as pad, in CELLS, exactly as ``_group_section`` does:
         # a bare ``{label:<{name_col}}`` pushes every numeric column right by
         # whatever the label overran, and the cost column is the one thing this
         # screen exists to let you scan straight down. Labels arrive budgeted
         # (prefix included), so this is a backstop rather than the mechanism.
-        block.append(f"  {truncate_cells(label, name_col):<{name_col}}", style=style)
+        block.append(
+            f"{truncate_cells(label, name_col):<{name_col}}",
+            style=accent if on_cursor else style,
+        )
         block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=style)
         block.append("   ")
         append_cost(block, agg, cost_col, style, dim)
@@ -1187,8 +1453,26 @@ class AnalyticsScreen(ModalScreen[None]):
         Binding("escape", "dismiss_screen", "Back", show=False),
         Binding("q", "dismiss_screen", "Back", show=False),
         Binding("t", "toggle_metric", "Cost/tokens", show=False),
-        Binding("up", "scroll_up", "Up", show=False),
-        Binding("down", "scroll_down", "Down", show=False),
+        # ``priority=True`` on the row keys, and it is load-bearing rather than
+        # defensive. Focus sits on the inner ``VerticalScroll``, which handles
+        # the arrows itself whenever it can still scroll — so a plain screen
+        # binding is reached only at the ends of the travel. That is why the
+        # ``action_scroll_up``/``down`` this replaces were effectively dead on
+        # any report tall enough to scroll, and why the cursor would otherwise
+        # move only on a short one (measured: it worked at 110x40, where the
+        # body fits, and never at 110x20, where it does not).
+        #
+        # Taking the arrows from the container is the deliberate half of the
+        # "one gesture owns the viewport" split: KEYS move the cursor and scroll
+        # it into view, while the WHEEL and the scrollbar still move the viewport
+        # alone and leave the cursor where it was.
+        Binding("up", "move_up", "Up", show=False, priority=True),
+        Binding("down", "move_down", "Down", show=False, priority=True),
+        Binding("enter", "toggle_row", "Expand/collapse", show=False, priority=True),
+        Binding("space", "toggle_row", "Expand/collapse", show=False, priority=True),
+        Binding("right", "expand_row", "Expand", show=False, priority=True),
+        Binding("left", "collapse_row", "Collapse", show=False, priority=True),
+        Binding("e", "toggle_all", "Expand/collapse all", show=False),
         Binding("pageup", "page_up", "Page up", show=False),
         Binding("pagedown", "page_down", "Page down", show=False),
         Binding("home", "scroll_home", "Top", show=False),
@@ -1218,6 +1502,36 @@ class AnalyticsScreen(ModalScreen[None]):
         #: Which metric the bar charts plot; ``t`` flips it. Cost by default
         #: (the historical view's stated purpose).
         self._metric = METRIC_COST
+        #: Session IDs whose subagent rows are shown. Empty by default: the
+        #: operator's ledger has 1,645 subagent rows against 595 roots, and
+        #: painting them all cost a 0.65 s first paint plus a full rebuild on
+        #: every resize event a terminal drag emits.
+        #:
+        #: Keyed by session ID and NEVER by the rendered label or the row index.
+        #: A label is recomposed at every width (two sessions can render the same
+        #: string; that silently dropped 355 sessions once), and an index moves
+        #: the moment any row above it expands.
+        self._expanded: set[str] = set()
+        #: Session ID the row cursor is on, or ``None`` before the first paint
+        #: has told us which rows exist. Same keying rule, same reasons.
+        self._cursor: str | None = None
+        #: What the last paint put where — the rows it drew and the body line the
+        #: first of them landed on. Written by ``build_report`` through the
+        #: ``ReportLayout`` receiver so cursor movement and scroll-to-cursor read
+        #: the SAME notion of visible rows the paint used, rather than a second
+        #: one derived alongside it that could disagree.
+        self._layout = ReportLayout()
+        #: Content-box width the body was last composed at. ``on_resize`` fires a
+        #: storm of events during a drag and each rebuild was 0.5-0.6 s on a real
+        #: ledger — the freeze in the user's report. Almost all of those events
+        #: leave ``_card_width()`` unchanged (the card is 90% of the terminal,
+        #: capped, and integer-floored, so several terminal widths map to one box
+        #: and the CAP makes every width past 156 identical), and a rebuild at an
+        #: unchanged width cannot produce different output. So the width is the
+        #: repaint's cache key.
+        self._painted_width: int | None = None
+        #: Lazily built by ``_forest()``; see there for why it is cached.
+        self._forest_cache: list["SessionNode"] | None = None
         self._title: Static
         self._body: Static
         self._scroll: VerticalScroll
@@ -1242,7 +1556,18 @@ class AnalyticsScreen(ModalScreen[None]):
         self.call_after_refresh(self._sync_hint)
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        self._repaint()
+        # NOT an unconditional rebuild. Dragging a terminal edge emits a burst of
+        # resize events, and rebuilding the whole report per event measured
+        # 0.5-0.6 s each against a real ledger — the "freezing" in the report,
+        # since the burst arrives faster than one rebuild finishes. ``_repaint``
+        # is a no-op when ``_card_width()`` is unchanged, and the card is a
+        # floored 90% of the terminal capped at 140, so many terminal widths map
+        # to one content box and every width past 156 maps to the same one.
+        #
+        # The HINT is still re-synced every time: it depends on whether the body
+        # overflows the viewport, which changes with HEIGHT, and height does not
+        # enter ``_card_width`` at all.
+        self._repaint(force=False)
         self.call_after_refresh(self._sync_hint)
 
     def _card_width(self) -> int:
@@ -1308,7 +1633,16 @@ class AnalyticsScreen(ModalScreen[None]):
         # follows). ``bool(series)`` is false for both ``None`` and ``[]``.
         if self._has_charts():
             hint.append(" · t cost/tokens", style=faint)
-        if scrollable:
+        # The expand keys are advertised only when a row can actually be
+        # expanded — the same D5 rule as the two hints above. A ledger that never
+        # ran a subagent has no expandable row, so ``enter`` and ``e`` would be
+        # dead controls, and the table it renders is the flat one this screen has
+        # always shown.
+        if self._expandable_rows():
+            hint.append(" · ↑↓ row · enter expand · e all", style=faint)
+        elif scrollable:
+            # ``↑↓`` still moves the cursor when rows exist, so it is described
+            # as "scroll" only where there is no cursor to move.
             hint.append(" · ↑↓ scroll", style=faint)
         return hint
 
@@ -1334,6 +1668,10 @@ class AnalyticsScreen(ModalScreen[None]):
         return bool(self._daily or self._monthly)
 
     def _report_lines(self) -> list[Text]:
+        # ``self._layout`` is the RECEIVER, refreshed by every render: the rows
+        # this paint drew and where it drew them. It must be written by the same
+        # call that composes the body or the cursor could point into a layout the
+        # screen is no longer showing.
         return build_report(
             self._aggregate,
             self._card_width(),
@@ -1341,11 +1679,42 @@ class AnalyticsScreen(ModalScreen[None]):
             monthly=self._monthly,
             window_totals=self._window_totals,
             metric=self._metric,
+            expanded=self._expanded,
+            cursor=self._cursor,
+            layout=self._layout,
+            # Every arrow key repaints, and rebuilding the forest each time was
+            # 34 ms of the ~0.25 s that made the cursor feel laggy rather than
+            # instant. Safe to share because the aggregate is a snapshot read on
+            # a worker thread before the screen was pushed and never mutates.
+            forest=self._forest(),
         )
 
-    def _repaint(self) -> None:
+    def _expandable_rows(self) -> bool:
+        """Whether the CURRENT paint has a row that can be expanded.
+
+        Read off the last layout rather than recomputed from the aggregate: this
+        gates a hint line, and a hint that describes a table other than the one
+        on screen is the defect the D5 rule exists to prevent. Before the first
+        paint the layout is empty and the answer is no, which is correct — no
+        rows are on screen to expand.
+        """
+        return any(row.expandable for row in self._layout.session_rows)
+
+    def _repaint(self, *, force: bool = True) -> None:
+        """Recompose the body, unless a width-driven repaint would change nothing.
+
+        ``force=False`` is the resize path (see ``on_resize``): a rebuild is
+        0.5-0.6 s on a real ledger and a terminal drag emits a burst of resize
+        events, so the ones that leave the content box unchanged must not each
+        pay for one. Every other caller changed the CONTENT (metric flipped, a
+        row expanded, the cursor moved) and forces, because the width is the same
+        by definition and only the content differs.
+        """
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
+            return
+        width = self._card_width()
+        if not force and width == self._painted_width:
             return
         combined = Text()
         for i, line in enumerate(self._report_lines()):
@@ -1353,6 +1722,7 @@ class AnalyticsScreen(ModalScreen[None]):
                 combined.append("\n")
             combined.append_text(line)
         body.update(combined)
+        self._painted_width = width
 
     def render_lines_for_test(self) -> list[str]:
         """The report as plain strings — what a user reads."""
@@ -1385,11 +1755,209 @@ class AnalyticsScreen(ModalScreen[None]):
         if title is not None and title.is_mounted:
             title.update(self._title_text())
 
-    def action_scroll_up(self) -> None:
-        self._scroll.scroll_up()
+    # -- the session-row cursor ----------------------------------------------
+    #
+    # ``↑↓`` used to scroll the container by a line. It now moves a row cursor
+    # and scrolls that row into view, which is the arrangement the codebase
+    # already settled on for every list that IS the page: the WHEEL and the
+    # scrollbar move the viewport and leave the cursor alone, while keys that
+    # move the CURSOR scroll it into view. Letting both drive the viewport from
+    # one gesture is what made ``/settings`` snap back to the top on a wheel
+    # notch at the bottom.
+    #
+    # ``pageup``/``pagedown``/``home``/``end`` deliberately stay pure VIEWPORT
+    # moves. This screen is mostly NOT a list — the totals, two charts and the
+    # input attribution sit above the table — so paging is how a reader travels
+    # between sections, and rebinding it to the cursor would strand them in the
+    # one section that has rows.
+    #
+    # Movement CLAMPS rather than wraps: this is a full-page surface several
+    # times its viewport, the documented exception (``/settings``,
+    # ``session_picker._move_to``). Wrapping from the last session back to the
+    # totals would throw the reader out of the section they were working in.
 
-    def action_scroll_down(self) -> None:
-        self._scroll.scroll_down()
+    def _visible_ids(self) -> list[str]:
+        return [row.session_id for row in self._layout.session_rows]
+
+    def _cursor_index(self) -> int | None:
+        """Where the cursor sits in the CURRENT paint, or ``None`` if nowhere.
+
+        The cursor is a session id, so it can legitimately be off-screen: the row
+        it names is inside a subtree that has since been collapsed. Callers treat
+        that as "no cursor" and re-home, rather than guessing an index.
+        """
+        if self._cursor is None:
+            return None
+        return next(
+            (
+                i
+                for i, row in enumerate(self._layout.session_rows)
+                if row.session_id == self._cursor
+            ),
+            None,
+        )
+
+    def _move_cursor(self, delta: int) -> None:
+        rows = self._layout.session_rows
+        if not rows:
+            return
+        index = self._cursor_index()
+        if index is None:
+            # First press, or the cursor's row was collapsed away. Land on the
+            # first row rather than jumping to wherever the delta points: the
+            # press should do something visible and predictable on its first try.
+            target = 0
+        else:
+            target = max(0, min(len(rows) - 1, index + delta))
+        self._cursor = rows[target].session_id
+        self._repaint()
+        self._scroll_cursor_into_view()
+
+    def _scroll_cursor_into_view(self) -> None:
+        """Put the cursor's body line inside the viewport, moving as little as possible.
+
+        The cursor is ALLOWED to be off screen — the wheel and the scrollbar move
+        the viewport without touching it — so a key that acts on the cursor has
+        to reveal it, or it writes to a row the reader cannot see and the frame
+        does not appear to change. Reveal-then-act, never an interlock that makes
+        the first press a no-op.
+        """
+        index = self._cursor_index()
+        if index is None:
+            return
+        scroll = getattr(self, "_scroll", None)
+        if scroll is None or not scroll.is_mounted:
+            return
+        line = self._layout.session_first_line + index
+        top = scroll.scroll_offset.y
+        height = scroll.size.height
+        if height <= 0:
+            return
+        # One row of slack at each edge so the cursor is never flush against the
+        # frame, where a reader cannot tell whether another row follows. The
+        # slack is dropped on a viewport too short to afford it (a 1-2 row body
+        # on a very short terminal): asking for context that does not fit makes
+        # the two branches fight and the cursor lands off screen, which is worse
+        # than no slack at all.
+        slack = 1 if height >= 3 else 0
+        if line < top + slack:
+            scroll.scroll_to(y=max(0, line - slack), animate=False)
+        elif line > top + height - 1 - slack:
+            scroll.scroll_to(y=max(0, line - height + 1 + slack), animate=False)
+
+    def action_move_up(self) -> None:
+        self._move_cursor(-1)
+
+    def action_move_down(self) -> None:
+        self._move_cursor(1)
+
+    def _set_expanded(self, session_id: str, open_: bool) -> None:
+        if open_:
+            self._expanded.add(session_id)
+        else:
+            self._expanded.discard(session_id)
+        self._repaint()
+        self._scroll_cursor_into_view()
+        # Expanding changes the body's height, so whether it overflows its
+        # viewport — and therefore whether the scroll hint is honest — can change
+        # with it. Deferred, because the new height is only known after the
+        # refresh that paints it.
+        self.call_after_refresh(self._sync_hint)
+
+    def _cursor_row(self) -> SessionRow | None:
+        index = self._cursor_index()
+        return None if index is None else self._layout.session_rows[index]
+
+    def action_toggle_row(self) -> None:
+        """Enter/space: open a closed row, close an open one.
+
+        With no cursor yet, the first press places it rather than toggling. The
+        user's report says "hits enter to expand that row", and there is no
+        "that row" until a cursor exists — toggling whatever happens to be first
+        would act on a row they never pointed at.
+        """
+        row = self._cursor_row()
+        if row is None:
+            self._move_cursor(0)
+            return
+        if not row.expandable:
+            return
+        self._set_expanded(row.session_id, not row.expanded)
+
+    def action_expand_row(self) -> None:
+        row = self._cursor_row()
+        if row is None:
+            self._move_cursor(0)
+            return
+        if row.expandable and not row.expanded:
+            self._set_expanded(row.session_id, True)
+
+    def action_collapse_row(self) -> None:
+        """Left: close this row, or step out to the parent of an already-closed one.
+
+        The step-out is what makes ``left`` usable inside a deep subtree — the
+        alternative is a key that does nothing on every row that is not itself an
+        open parent, which reads as broken rather than as restrained.
+        """
+        row = self._cursor_row()
+        if row is None:
+            self._move_cursor(0)
+            return
+        if row.expanded:
+            self._set_expanded(row.session_id, False)
+            return
+        if row.depth:
+            index = self._cursor_index()
+            rows = self._layout.session_rows
+            # The parent is the nearest row ABOVE this one at a shallower depth;
+            # the walk is depth-first, so scanning back is exact rather than a
+            # heuristic.
+            for candidate in range((index or 0) - 1, -1, -1):
+                if rows[candidate].depth < row.depth:
+                    self._cursor = rows[candidate].session_id
+                    self._repaint()
+                    self._scroll_cursor_into_view()
+                    return
+
+    def action_toggle_all(self) -> None:
+        """``e``: open every expandable row; press it again to close them all.
+
+        The test is "is EVERYTHING already open", not "is anything open". The
+        latter reads better as a safety rule — it makes the key an unconditional
+        way out of the expensive fully-expanded state — but it is wrong at the
+        keyboard: a reader who has opened one row and presses ``e`` meaning
+        "now show me all of it" gets everything HIDDEN instead, which is the
+        opposite of the request. Observed on the operator's ledger while
+        exercising the real screen.
+
+        Surprise is worse than slowness when the slowness is what was asked for.
+        Expanding all 2,240 rows measured 1.4 s and is one press to undo, so the
+        expensive state is reachable deliberately and never sticky.
+        """
+        expandable = {node.session_id for node in _iter_nodes(self._forest()) if node.has_children}
+        if expandable and expandable <= self._expanded:
+            self._expanded.clear()
+        else:
+            self._expanded = expandable
+        self._repaint()
+        self._scroll_cursor_into_view()
+        self.call_after_refresh(self._sync_hint)
+
+    def _forest(self) -> list["SessionNode"]:
+        """The full session forest, built once and cached.
+
+        ``build_report`` builds its own each paint (31 ms on the operator's
+        ledger), but ``expand all`` needs the ids of rows that are NOT currently
+        painted, so it cannot read them off the layout. Cached because the
+        aggregate is immutable for the life of the screen — it is a snapshot read
+        on a worker thread before the screen was pushed.
+        """
+        if self._forest_cache is None:
+            self._forest_cache = build_session_forest(
+                self._aggregate.by_session,
+                getattr(self._aggregate, "session_parents", {}) or {},
+            )
+        return self._forest_cache
 
     def action_page_up(self) -> None:
         self._scroll.scroll_page_up()
