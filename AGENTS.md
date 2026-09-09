@@ -58,6 +58,28 @@ against does not exist there. Applying it anyway halved CI parallelism (a
 4-vCPU runner resolved to 2 workers instead of 4), which is a regression paid on
 every PR. The memory budget and the 2-8 clamp still apply on CI.
 
+**One exception, and it is our own doing.** The bash tool sets `CI=1` on every
+agent-run command so CLIs behave non-interactively, which made every agent-run
+suite on a developer laptop look like a dedicated runner and take all 14 cores
+— disabling the share exactly where it was needed. The tool now also exports
+`LOCAL_OPERATOR_AGENT_SHELL=1`, and the hook denies on it, so `CI` still means
+"dedicated runner" for every real provider. Deliberately a denylist: an
+allowlist of provider variables (`GITHUB_ACTIONS` and friends) would silently
+halve parallelism on every provider nobody remembered to add, which is the
+regression above. If you are adding a new non-interactive variable to
+`NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
+
+**A memory reserve is also held back**, scaled per host (`min(3072, total / 8)`
+MB), because the budget otherwise claims a fraction of what *remains* and
+sibling suites converge toward zero free memory instead of toward a floor. Know
+its actual reach before tuning it: the shape is `min(share, available -
+reserve)`, so it binds only below **twice** itself (~6 GB free on a 36 GB box)
+and is invisible above that. It is a floor under one suite's appetite, not a
+cap on the fleet — six *simultaneous* suites are still not bounded by it, and
+the durable lever for that would be a cross-process budget, deliberately not
+built (see `harness/group_reaper.py` on wedged `flock` holders propagating a
+freeze between sessions).
+
 `--dist worksteal` is also in `addopts` — per-test
 durations here vary by orders of magnitude, and the default `load` scheduler
 pre-assigns chunks, leaving workers idle at the tail while one grinds through
