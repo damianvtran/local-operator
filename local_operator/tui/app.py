@@ -5459,27 +5459,48 @@ class OperatorApp(App[None]):
             self._set_sidebar_open(False)
         self._prefill_resume_before_reveal()
         self._show_sidebar_connection(source)
-        # `restore_revealed_anchor` USED TO RUN HERE, on a `call_after_refresh`
-        # AFTER reveal, to correct for "offscreen measurement is not final
-        # visible geometry for a wrapped viewport". It was measured to be a
-        # no-op and is now deleted; the in-prepare restore
-        # (`_prepare_sidebar_session`, both the cache-hit and the built-replay
-        # branch) is the one that positions the view, and it runs on the parked
-        # view where it is free.
-        #
-        # THE WRAPPED-CONTENT CASE WAS THE OPEN QUESTION AND IT WAS MEASURED,
-        # not assumed. A fixture whose blocks genuinely re-wrap (the same anchor
-        # block measures 3 rows at a 96-cell conversation column and 5 rows at a
-        # 63-cell one) was switched away from and back, with the parked and
-        # revealed geometry read on the SAME view object two lines apart at this
-        # commit seam. Parked and revealed agreed exactly — content width 63/63,
-        # scroll_y 44.0/44.0, anchor at y=42 h=5 both times — because the parked
-        # view is mounted into `#session-conversation`, the same container the
-        # visible view occupies: `_prepare_sidebar_session` pins only its
-        # HEIGHT, so it is already laid out at the revealed WIDTH. Re-running
-        # the restore at the revealed width moved the position by 0.0 rows in
-        # every arm. The correction was for a width difference that the park
-        # does not actually produce.
+        if not source.draft.following_tail and source.draft.scroll_anchor_id:
+            scroll_revision = source.scroll_revision
+            view = incoming.replay.view
+
+            def restore_revealed_anchor() -> None:
+                if (
+                    not self._is_current(source)
+                    or generation != self._sidebar_navigation.generation
+                    or self._transcript_view() is not view
+                ):
+                    return
+                if source.scroll_revision != scroll_revision:
+                    self._capture_sidebar_scroll(source)
+                    return
+                # Offscreen measurement is not final visible geometry for a
+                # wrapped viewport. Re-anchor after reveal, and let the normal
+                # painted-map gate verify the resulting frame, not a timer.
+                #
+                # THIS IS LOAD-BEARING FOR WRAPPED CONTENT AND IT WAS MEASURED,
+                # in both directions. The audit (§6.2) could not falsify it and
+                # asked for the settling experiment; a first pass on blocks that
+                # re-wrap from 3 rows to 5 found parked and revealed geometry
+                # identical and concluded this was dead code. That conclusion
+                # was WRONG, and deleting it wedged
+                # `tests/e2e/test_sidebar_display_e2e.py`'s `wrapped` case:
+                # the readiness gate refused 1156 consecutive frames with the
+                # anchor block absent from the painted map, and the switch
+                # timed out. The difference is how hard the content wraps — that
+                # fixture's rows are ~10 screen rows each, where the in-prepare
+                # restore's position no longer survives the reveal.
+                #
+                # So the honest statement is the one the original comment made:
+                # the parked measurement is not final. The gate is what proves
+                # the resulting frame, which is why this may run after reveal
+                # without re-introducing a geometry lie.
+                view.restore_navigation_anchor(
+                    source.draft.scroll_anchor_id,
+                    source.draft.scroll_anchor_part,
+                    source.draft.scroll_offset,
+                )
+
+            self.call_after_refresh(restore_revealed_anchor)
         ready = self._await_sidebar_frame(source, generation)
         if source.display_only:
             source.preview_scroll_revision = source.scroll_revision
