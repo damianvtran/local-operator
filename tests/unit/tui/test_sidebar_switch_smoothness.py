@@ -28,7 +28,6 @@ readiness gate are all production code.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from unittest.mock import patch
 
@@ -116,7 +115,7 @@ class _FrameRecorder:
 
     def __init__(self, app: OperatorApp) -> None:
         self.app = app
-        self.frames: list[dict] = []
+        self.frames: list[dict[str, object]] = []
         self.armed = False
         self.revealed = False
         self._real_display = app._display
@@ -129,8 +128,8 @@ class _FrameRecorder:
 
         app._display = display  # type: ignore[method-assign]
 
-    def _sample(self, renderable) -> dict:  # type: ignore[no-untyped-def]
-        sample: dict = {"layout": isinstance(renderable, LayoutUpdate)}
+    def _sample(self, renderable) -> dict[str, object]:  # type: ignore[no-untyped-def]
+        sample: dict[str, object] = {"layout": isinstance(renderable, LayoutUpdate)}
         try:
             sample["editor_height"] = int(self.app._editor().outer_size.height)
         except Exception:  # noqa: BLE001 - a mid-swap query can find nothing
@@ -146,11 +145,17 @@ class _FrameRecorder:
 
     @property
     def editor_heights(self) -> list[int]:
-        return [f["editor_height"] for f in self.frames if f.get("editor_height") is not None]
+        return [
+            int(height) for f in self.frames if isinstance(height := f.get("editor_height"), int)
+        ]
 
     @property
     def scroll_positions(self) -> list[float]:
-        return [f["scroll_y"] for f in self.frames if "scroll_y" in f]
+        return [
+            float(scroll)
+            for f in self.frames
+            if isinstance(scroll := f.get("scroll_y"), (int, float))
+        ]
 
 
 @pytest.mark.asyncio
@@ -282,8 +287,9 @@ async def test_no_history_rows_mount_into_the_visible_view() -> None:
                 pass
         return real_insert(self, index, blocks, **kwargs)
 
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote), patch.object(
-        TranscriptView, "insert_blocks", insert_blocks
+    with (
+        patch("local_operator.session.remote.RemoteSession", SidebarRemote),
+        patch.object(TranscriptView, "insert_blocks", insert_blocks),
     ):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
@@ -398,9 +404,9 @@ async def test_leaving_at_tail_clears_the_saved_anchor() -> None:
             app._capture_sidebar_scroll(source)
 
             assert source.draft.following_tail is True
-            assert source.draft.scroll_anchor_id == "", (
-                "a session left at the tail kept a stale scroll anchor"
-            )
+            assert (
+                source.draft.scroll_anchor_id == ""
+            ), "a session left at the tail kept a stale scroll anchor"
             assert source.draft.scroll_offset == 0
 
 
@@ -490,9 +496,9 @@ async def test_an_abandoned_transition_restores_the_draft_exactly_once() -> None
             for _ in range(10):
                 await pilot.pause()
 
-            assert editor.text == "half a sentence, and the rest", (
-                "the abandoned transition did not restore the draft exactly once"
-            )
+            assert (
+                editor.text == "half a sentence, and the rest"
+            ), "the abandoned transition did not restore the draft exactly once"
             assert app._sidebar_transition_from is None
             assert app._sidebar_transition_prefix == ""
 
@@ -534,9 +540,9 @@ async def test_a_click_burst_keeps_the_original_snapshot() -> None:
             for _ in range(10):
                 await pilot.pause()
 
-            assert outgoing.draft.text == "original draft", (
-                "a re-entrant click overwrote the frozen snapshot"
-            )
+            assert (
+                outgoing.draft.text == "original draft"
+            ), "a re-entrant click overwrote the frozen snapshot"
             assert app._sidebar_transition_prefix == "original draft"
             typed, _ = app._take_sidebar_transition_buffer()
             assert typed == " plus typing"

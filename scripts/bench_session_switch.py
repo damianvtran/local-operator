@@ -381,7 +381,10 @@ def _run_worker(args: argparse.Namespace) -> None:
         wall = (time.perf_counter() - wall0) * 1000
         cpu = (time.thread_time() - cpu0) * 1000
         settled = future is not None and future.done() and not future.cancelled()
-        ok = settled and future.exception() is None
+        # Narrowed for the type checker as well as for the reader: `settled`
+        # already implies a non-None future, but only the explicit test proves
+        # it at the call site.
+        ok = settled and future is not None and future.exception() is None
         if future is not None and not future.done():
             future.cancel()
 

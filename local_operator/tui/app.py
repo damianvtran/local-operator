@@ -4799,9 +4799,7 @@ class OperatorApp(App[None]):
             typed = text[len(prefix) :] if text.startswith(prefix) else ""
         frozen = set(self._sidebar_transition_attachments)
         return typed, {
-            index: marked
-            for index, marked in editor.attachments().items()
-            if index not in frozen
+            index: marked for index, marked in editor.attachments().items() if index not in frozen
         }
 
     def _abandon_sidebar_transition(self) -> None:
