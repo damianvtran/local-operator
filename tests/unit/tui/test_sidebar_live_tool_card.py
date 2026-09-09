@@ -381,3 +381,160 @@ async def test_a_call_from_a_turn_that_really_stopped_still_paints_interrupted(
 
         app._mark_pending_tool_rows([card], Running())
         assert card._state == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_repainted_row_is_owned_and_settles_when_the_turn_dies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third case: the repaint happens, and THEN liveness ends.
+
+    The pair above covers the two endings the call itself can have — the tool
+    returns, or the turn was already over before the switch. Neither covers the
+    ending that arrives from outside: the owner dies with the call outstanding,
+    *after* the row has been repainted live.
+
+    That case is the exact inverse of the bug this file exists for, and it is
+    reachable from ordinary causes rather than only from a killed runtime — a
+    dropped socket deliberately leaves ``_streaming`` True, so a switch during
+    recovery paints ``running`` correctly, and a recovery that then fails ends
+    the turn with the row already painted. The liveness predicate is only ever
+    asked at switch time; nothing re-asks it when the answer changes.
+
+    So the row's settle path cannot be the predicate. It is OWNERSHIP: a card
+    made live must be in the registry every turn-death path iterates, which is
+    what this pins. Asserted at the seam because that is where the invariant
+    lives — the pilot test above already proves the assembled path reaches it.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        card = ToolCard("live-call", PARKING_TOOL, {"job_id": "7a73c97ffc54"})
+        card.restore(state="interrupted")
+
+        class Running:
+            """A session whose turn is executing this call right now."""
+
+            def pending_display_tool_ids(self) -> set[str]:
+                return set()
+
+            def executing_display_tool_ids(self) -> set[str]:
+                return {"live-call"}
+
+        registry: dict[str, ToolCard] = {}
+        app._mark_pending_tool_rows([card], Running(), registry)
+        assert card._state == "running"
+        # The ownership claim itself, stated separately from its consequence:
+        # a repaint that stopped registering would fail HERE, naming the cause,
+        # rather than only at the stranded-row assertion below.
+        assert registry == {"live-call": card}, (
+            "the repainted row was not entered into the live registry, so no "
+            "turn-death path can reach it"
+        )
+
+        # MAJOR-2, on the same row: it must actually WEAR the live styling it
+        # claims, and must not still wear the replay's interrupted class — which
+        # `mark_done` does not remove, so it would otherwise survive into the
+        # settled row.
+        assert "tool-running" in card.classes
+        assert "tool-interrupted" not in card.classes
+        # MINOR-1: a row claiming to execute is not a settled row.
+        assert card.settled_rows() == 0
+
+        # And the consequence: the turn dies with the call outstanding. The
+        # app's own retirement is the path every turn-death site takes.
+        app._tool_cards = registry
+        retired = app._retire_live_tool_cards()
+        assert retired == 1, "the death path could not see the repainted row"
+        assert card._state == "interrupted", (
+            "a row repainted live is stranded ⋯ running after its owner died; "
+            "the frame shows a call executing beside a notice that says it stopped"
+        )
+        assert "tool-running" not in card.classes
+        assert card.settled_rows() == 1
+
+
+def test_a_row_adopted_mid_execution_settles_with_the_measured_interval() -> None:
+    """The settle leg of a clockless row, against #858's measured interval.
+
+    A row repainted live by ``_mark_pending_tool_rows`` has no ``_started`` —
+    deliberately, because the page painted it after the tool began — so it
+    cannot time itself. #858 (``77f1cc75f``) made the executor's own
+    ``duration_s`` survive into the persisted payload, which means a REPLAY of
+    such a call renders ``✓ 4.2s``. Before this, the same call settled LIVE to a
+    blank column: one call, two different receipts, decided only by whether the
+    viewer happened to be watching.
+
+    Pinned as the agreement between the two paths rather than as a literal, and
+    pinned as a FALLBACK: a card that timed its own execution must keep its own
+    reading, or this would silently replace every native row's clock with the
+    executor's.
+    """
+    measured = 4.25
+
+    adopted = ToolCard("adopted", PARKING_TOOL, {"job_id": "7a73c97ffc54"})
+    adopted.restore(state="interrupted")
+    adopted.restore(state="running")
+    assert adopted._started is None, "the adopted row must not invent a start time"
+    adopted.mark_done("done", None, measured_s=measured)
+    assert adopted._duration == measured
+
+    # The replay of the same call, through the path #858 fixed: same receipt.
+    replayed = ToolCard("replayed", PARKING_TOOL, {"job_id": "7a73c97ffc54"})
+    replayed.restore(state="success", result_text="done", duration_s=measured)
+    assert replayed._duration == adopted._duration
+
+    # A row with its OWN clock ignores the fallback — no double stamp.
+    native = ToolCard("native", PARKING_TOOL, {"job_id": "7a73c97ffc54"})
+    native._started = time.monotonic() - 30.0
+    native.mark_done("done", None, measured_s=measured)
+    assert native._duration is not None and native._duration > 29.0
+
+    # And a malformed interval off the wire degrades to the blank column
+    # instead of printing nonsense, the way every external duration must.
+    for bad in (float("nan"), -1.0, "4.2", True, None):
+        card = ToolCard(f"bad-{bad!r}", PARKING_TOOL, {})
+        card.restore(state="interrupted")
+        card.restore(state="running")
+        card.mark_done("done", None, measured_s=bad)  # type: ignore[arg-type]
+        assert card._duration is None, bad
+
+
+def test_a_clockless_running_row_reserves_the_settled_spine() -> None:
+    """D1/D3: the live row says it is alive, in the cells the outcome will use.
+
+    Two facts, and they are one fact: a replayed live row has no ``_started``
+    and must not invent one, so it has no clock — but "no clock" must not
+    become "no state", because this is the one row on screen actually consuming
+    time and the operator switched to it to ask exactly that. And the label's
+    WIDTH is what keeps the row still: the status column competes with the
+    summary for the same budget, so a label narrower than the settled spine
+    lets the summary grow while running and lose characters the instant the
+    tool returns — the text moving under the reader at narrow widths.
+
+    Pinned as an equality against the spine rather than against the literal
+    ``"running"``, so a future relabel that breaks the geometry fails here
+    instead of on a screenshot nobody re-captures.
+    """
+    from local_operator.tui.widgets.tool_card import (
+        DURATION_COL,
+        ICON_SUCCESS,
+        RUNNING_LABEL,
+        cell_len,
+    )
+
+    card = ToolCard("clockless", PARKING_TOOL, {"job_id": "7a73c97ffc54"})
+    card.restore(state="running")
+    assert card._started is None
+    assert [text for text, _style in card._status_runs()] == [RUNNING_LABEL]
+    assert cell_len(RUNNING_LABEL) == cell_len(f"{ICON_SUCCESS} ") + DURATION_COL
+
+    # Shed whole below the width that holds it, never truncated and never
+    # replaced by an outcome glyph that would claim the tool completed — the
+    # same ladder `waiting` uses one arm up.
+    assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL))] == [RUNNING_LABEL]
+    assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL) - 1)] == [""]

@@ -4295,7 +4295,14 @@ class OperatorApp(App[None]):
                         "Saved preview unavailable. Connect to load the conversation.", "note"
                     )
                 )
-            self._mark_pending_tool_rows(replay.blocks, session)
+            # Into the PRESENTATION's own registry, never `self._tool_cards`:
+            # this conversation is being painted offscreen and is not the
+            # visible one, and `_current_activity` derives the working line's
+            # label from the app's dictionary. `_apply_sidebar_presentation`
+            # promotes this dict to `self._tool_cards` when the switch commits,
+            # which is the moment these cards become the app's to retire.
+            prepared_live_cards: dict[str, ToolCard] = {}
+            self._mark_pending_tool_rows(replay.blocks, session, prepared_live_cards)
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
             # A screen overlay is excluded from flow/virtual bounds; parking it
@@ -4364,6 +4371,7 @@ class OperatorApp(App[None]):
                 source_token=source.token,
                 history_size=session.history_message_count,
                 working_fallback=DEFAULT_ACTIVITY,
+                tool_cards=prepared_live_cards,
                 welcome=welcome,
                 welcome_visible=welcome is not None,
             )
@@ -5351,7 +5359,11 @@ class OperatorApp(App[None]):
             # `_sync_fork_pending` reads `self._session`, which the line above
             # has just swapped.
             self._sync_fork_pending()
-            self._mark_pending_tool_rows(incoming.replay.view.blocks(), session)
+            # `self._tool_cards` IS the incoming presentation's dictionary by
+            # now (`_apply_sidebar_presentation` swapped it above), so this is
+            # the same registry the prepare path seeded — repainting after the
+            # commit tops it up rather than filling a second one.
+            self._mark_pending_tool_rows(incoming.replay.view.blocks(), session, self._tool_cards)
             history = session.display_history_window()
             total = session.history_message_count
             if total > incoming.history_size:
@@ -8010,7 +8022,9 @@ class OperatorApp(App[None]):
             notice.set_interactive(text != RESUME_START_NOTICE)
 
     @staticmethod
-    def _mark_pending_tool_rows(blocks: list[Any], session: Any) -> None:
+    def _mark_pending_tool_rows(
+        blocks: list[Any], session: Any, live_cards: dict[str, ToolCard] | None = None
+    ) -> None:
         """Repaint replayed rows whose calls have NOT finished.
 
         A replayed call row carries no result for two quite different reasons,
@@ -8031,6 +8045,34 @@ class OperatorApp(App[None]):
         band that said "working". Neither set is a guess: both are derived
         from the session's own tail scan, so a call that really did stop keeps
         its ``⊘``.
+
+        **``live_cards`` is what OWNS the row's terminal state, and passing it
+        is not optional for the ``running`` arm.** The rows here were mounted by
+        REPLAY, so they are in neither ``_tool_cards`` nor ``_composing_cards``
+        — and every turn-death path in this app settles cards by iterating
+        exactly those two dictionaries. A row repainted live and left out of
+        both is therefore unreachable by all of them: when the owner dies after
+        the switch rather than returning a result, the card stays ``running``
+        forever beside a transcript notice that says ``interrupted``. The
+        liveness predicate is only ever asked HERE, at switch time; nothing
+        re-asks it when the answer changes. So a card this method makes live is
+        entered into the caller's live registry, which puts it back under
+        ``_retire_live_tool_cards`` — the same dictionary
+        ``on_tool_ended``/``_painted_tool_card`` already settle it through on
+        the happy path, so registration adds an owner rather than a second
+        mechanism.
+
+        The registry is passed rather than read off ``self`` because the two
+        prepare-time callers are painting a presentation that is not yet the
+        app's: registering into ``self._tool_cards`` there would attribute
+        another conversation's live call to the visible one, and
+        ``_current_activity`` reads that dictionary for the band. Each caller
+        hands in the dictionary that travels with the transcript it is
+        painting.
+
+        A caller that passes nothing still gets the repaint (the state is
+        honest at the moment it is painted) but keeps the old exposure, which is
+        why the only caller that omits it is the test seam.
         """
         pending = getattr(session, "pending_display_tool_ids", None)
         call_ids: set[str] = set()
@@ -8058,13 +8100,22 @@ class OperatorApp(App[None]):
                     # — the same reason `subagent_view` restores a child's
                     # in-flight row this way.
                     block.restore(state="running")
+                    if live_cards is not None:
+                        # See the docstring: this is the row's ONLY settle path
+                        # when the turn dies instead of returning a result.
+                        live_cards[block.tool_call_id] = block
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         try:
             projected = project_settled_rows(self, history, bound=bound)
-            self._mark_pending_tool_rows(self._transcript_view().blocks(), self._session)
+            # The visible transcript, so the app's own registry is the right
+            # owner: a row this repaints live is one `_retire_live_tool_cards`
+            # must be able to settle when the turn dies.
+            self._mark_pending_tool_rows(
+                self._transcript_view().blocks(), self._session, self._tool_cards
+            )
             return projected
         finally:
             self._projection_message_id = ""
@@ -32346,6 +32397,15 @@ class OperatorApp(App[None]):
         those cards, so the NEXT turn opened by announcing ``running bash`` for
         a bash call that had died with the previous session.
 
+        The registry is the WHOLE of "still live", which is a claim the app has
+        to keep true at the other end too. A row repainted live by
+        :meth:`_mark_pending_tool_rows` was mounted by replay and so is in
+        neither dictionary by default; left out, it is invisible to this method
+        and to every other turn-death path, and the card stays ``running``
+        forever when the owner dies instead of returning a result. That is why
+        the repaint registers what it makes live — the invariant is stated at
+        both ends because neither site can enforce it alone.
+
         Deliberately UNCONDITIONAL: whatever is still live here has, by
         definition, no outcome on this surface, so there is nothing to be
         conditional on. What keeps that honest is upstream — the reconnect seed
@@ -32749,10 +32809,20 @@ class OperatorApp(App[None]):
         # the headline, so both features stay dark.
         result_text = event.result.text
         details = event.result.details
+        # The executor's MEASURED interval, handed to the card as a fallback for
+        # the row that cannot time itself. A card adopted mid-execution by
+        # `_mark_pending_tool_rows` has no `_started` — deliberately, because
+        # the page painted it after the tool began — so before this it settled
+        # to a blank column while a REPLAY of the same call read the interval
+        # off the persisted payload (#858) and printed `✓ 4.2s`. Same call, two
+        # different receipts, decided only by whether the viewer was watching.
+        # Not a second stamp: this is #858's own number, read where it already
+        # arrives, and a card with its own clock ignores it.
+        measured_s = getattr(event, "duration_s", None)
         if event.is_error:
-            card.mark_failed(_first_line(result_text), result_text, details)
+            card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:
-            card.mark_done(result_text, details)
+            card.mark_done(result_text, details, measured_s=measured_s)
         # A result that carries image blocks (a `read` of a PNG, a browser
         # screenshot) shows them under the card, so the user watches the same
         # pixels the model is about to reason over. After the card settles, so

@@ -231,6 +231,14 @@ NAME_GROWTH_MIN_ROW = 70
 #: of it lands in the same column whether the tool took 0.4s or 12.3s. Five
 #: cells covers every duration the format produces up to ``9999s``.
 DURATION_COL = 5
+#: What a live row with no clock puts in the status column (see
+#: ``_status_runs``). Its LENGTH is load-bearing, not just its wording: it is
+#: sized to the settled spine — ``<glyph> `` plus :data:`DURATION_COL` — so the
+#: status column reserves the same cells before and after the tool returns and
+#: the summary beside it is budgeted identically at both ends. A label of any
+#: other width makes the row reflow on settling at narrow widths. Any
+#: replacement must keep that equality; assert it rather than eyeballing it.
+RUNNING_LABEL = "running"
 #: Minimum summary budget before we drop the expand hint (D8 floor).
 _SUMMARY_FLOOR = 16
 #: Indent of the expanded output block, aligned under the tool name column.
@@ -1018,10 +1026,33 @@ class ToolCard(ExpandableActionBlock):
         self._refresh_row()
 
     # -- lifecycle ----------------------------------------------------------
-    def mark_done(self, result_text: str = "", details: dict[str, Any] | None = None) -> None:
-        """Record success with elapsed duration; the row goes quiet."""
+    def mark_done(
+        self,
+        result_text: str = "",
+        details: dict[str, Any] | None = None,
+        *,
+        measured_s: float | None = None,
+    ) -> None:
+        """Record success with elapsed duration; the row goes quiet.
+
+        ``measured_s`` is the executor's own interval, carried by
+        ``ToolExecutionEndEvent.duration_s``. It is a FALLBACK, not an
+        override: a card that timed its own execution keeps its own reading, so
+        the ordinary live row is unchanged. It exists for the row that CANNOT
+        time itself — one this viewer adopted mid-execution, whose ``_started``
+        is deliberately unset because the page painted it after the tool began
+        (see :meth:`restore`). Without it that row settled to a blank column
+        while a replay of the very same call read ``✓ 4.2s`` off the persisted
+        payload: the same call, two different receipts, decided by whether the
+        viewer happened to be watching.
+        """
         self._settle_live()
         self._duration = self._elapsed()
+        if self._duration is None:
+            # Through the same validator every externally-produced interval
+            # passes: the value crossed a socket, so a NaN or a negative must
+            # degrade to the blank column rather than print nonsense.
+            self._duration = parse_duration(measured_s)
         self._state = "success"
         self._absorb_result(result_text, details)
         self.remove_class("tool-running")
@@ -1031,13 +1062,24 @@ class ToolCard(ExpandableActionBlock):
         self.finalize()
 
     def mark_failed(
-        self, error: str, result_text: str = "", details: dict[str, Any] | None = None
+        self,
+        error: str,
+        result_text: str = "",
+        details: dict[str, Any] | None = None,
+        *,
+        measured_s: float | None = None,
     ) -> None:
         """Record failure with a ONE-line error message.
 
         ``result_text`` defaults to the error itself: a failed tool's full
         message is frequently a stack trace or a multi-line diagnostic, and
         that is exactly what the expansion exists to show.
+
+        ``measured_s`` is the same fallback :meth:`mark_done` documents, and is
+        accepted here for the same reason: a failing tool that this viewer
+        adopted mid-execution is as entitled to its measured interval as a
+        succeeding one, and the two settle paths must not disagree about which
+        rows can show a duration.
         """
         # `_settle_live`, not just a duration: `mark_failed` was the ONE settle
         # path that never stopped the clock. Harmless while only a composing
@@ -1046,6 +1088,8 @@ class ToolCard(ExpandableActionBlock):
         # tool would have left a 1 Hz timer repainting a finalized card.
         self._settle_live()
         self._duration = self._elapsed()
+        if self._duration is None:
+            self._duration = parse_duration(measured_s)
         self._state = "error"
         self._error = _strip_control_sequences(" ".join(error.split())) or "error"
         self._absorb_result(result_text or error, details)
@@ -1177,8 +1221,28 @@ class ToolCard(ExpandableActionBlock):
         # show the exact same receipt as the live card did.
         self._duration = max(0.0, duration_s) if duration_s is not None else None
         if state == "running":
-            # Still live: it keeps `tool-running`, it is not finalized, and the
-            # expansion still offers the command. Only the clock is withheld.
+            # Back to LIVE from wherever the card was, and asserted rather than
+            # assumed. This arm used to say "it keeps `tool-running`", which was
+            # true only of `subagent_view`'s caller — it restores a card it has
+            # just built. `OperatorApp._mark_pending_tool_rows` restores a
+            # REPLAYED row that `replay_tool_call` already put through
+            # `restore(state="interrupted")`, so "keeps" left the one row on
+            # screen actually executing wearing `tool-interrupted` and NOT
+            # `tool-running`: the only live row with no raised background, and
+            # the stale class then survived into the settled row, because
+            # `mark_done` removes `tool-running` and nothing else.
+            self.remove_class("tool-interrupted", "tool-error", "tool-success")
+            self.add_class("tool-running")
+            # Un-finalized for the same reason: a replayed row arrives frozen
+            # under the FINALIZED-BLOCK protocol, and a card claiming to execute
+            # must not also answer `settled_rows() == 1` — the transcript's
+            # spacing and scroll accounting read that number. `_refresh_row`
+            # bypassing finalization for its own repaint hid the disagreement
+            # rather than resolving it. Every settle path finalizes again, so
+            # the freeze comes back with the outcome.
+            self._finalized = False
+            # Only the clock stays withheld; the expansion still offers the
+            # command.
             self._refresh_row()
             return
         self.remove_class("tool-running")
@@ -2346,17 +2410,38 @@ class ToolCard(ExpandableActionBlock):
             # the column the ✓ beside it will use when it settles. The spine
             # holds and the row does not jump on settling.
             #
-            # A REPLAYED live row reports nothing at all. `subagent_view`
-            # rebuilds a child's trajectory into cards and leaves the
-            # outcome-less ones running, where `_started` is when the PAGE
-            # painted the row — so this counted up from zero and reset to zero
-            # every time an earlier entry changed. A clock started from the
-            # wrong zero is worse than no clock, and the settled rows on that
-            # same page already blank the column for exactly this reason.
+            dim = bindings.style("tool.status.running_duration")
+            # A REPLAYED live row has no CLOCK. `subagent_view` rebuilds a
+            # child's trajectory into cards and leaves the outcome-less ones
+            # running, and `_mark_pending_tool_rows` repaints a row the owner is
+            # still executing; in both, `_started` is when the PAGE painted the
+            # row — so a clock here counted up from zero and reset to zero every
+            # time an earlier entry changed. A clock started from the wrong zero
+            # is worse than no clock.
+            #
+            # "No clock" is NOT "no state", though, and returning `[]` made this
+            # the only row in the ladder with an empty status column — silent in
+            # the exact cell a reader checks to answer "is this thing alive?",
+            # which is the frame the paragraph above exists to prevent (a silent
+            # row and a stuck row are the same frame). It is sharpest here: a
+            # 30-minute `wait` is reached by a deliberate sidebar switch made to
+            # ask that very question. So say the state in words, the way
+            # `waiting` does one arm up — the honest, number-free statement the
+            # expansion already shows as `⋯ running`.
+            #
+            # Sized to the settled spine deliberately: "running" is exactly
+            # `<glyph> ` + DURATION_COL cells, so the row occupies the same
+            # cells before and after settling and the summary is budgeted
+            # identically at every width. A shorter label would let the summary
+            # grow while running and then LOSE characters at the instant the
+            # tool returned — the row rewriting itself under the reader's eye at
+            # narrow widths. Shed whole below the width that holds it, never
+            # truncated: a clipped `runn…` is noise, and an outcome glyph here
+            # would falsely claim the tool completed.
             elapsed = self._elapsed()
             if elapsed is None:
-                return []
-            dim = bindings.style("tool.status.running_duration")
+                text = RUNNING_LABEL if not cap or cap >= len(RUNNING_LABEL) else ""
+                return [(text, dim)]
             text = format_duration(max(0, int(elapsed)))
             return [("  ", dim), (text.rjust(DURATION_COL), dim)]
         core = self._outcome_runs(cap, terse=terse)

@@ -2623,13 +2623,18 @@ class RemoteSession:
         two outcomes for that: settled, or ``⊘ interrupted``. The call had not
         stopped; nobody had asked whether it was still going.
 
-        Gated on ``is_streaming`` and on the LATEST group only, so the answer
+        Gated on :attr:`is_streaming` and on the LATEST group only, so the answer
         is "this turn, right now" and never "some turn once left a call
         dangling". A turn that has ended reports nothing here and its
         unanswered rows stay interrupted, which for a turn that really died
         mid-flight is the truth.
         """
-        if not self._streaming:
+        # Through the PROPERTY the docstring names, not the private attribute.
+        # Same value today, and the rest of this file reads `_streaming`
+        # directly — but this predicate's contract is the documented gate, so a
+        # future `is_streaming` that stops being a bare passthrough must move
+        # this answer with it rather than silently leaving it behind.
+        if not self.is_streaming:
             return set()
         return self._unanswered_tail_call_ids()
 
