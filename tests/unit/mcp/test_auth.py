@@ -3490,3 +3490,167 @@ class TestDeadGrantTombstone:
         assert provider.context.current_tokens is not None
         assert provider.context.current_tokens.refresh_token is None
         assert provider.context.can_refresh_token() is False
+
+
+class TestAPeersReauthReachesABlockedSession:
+    """The defect this whole mechanism exists for, across REAL processes.
+
+    Storage is unified — every ``lop`` process on the machine shares
+    ``auth.db`` — but propagation was not: a session that blocked a server over
+    an auth failure never re-read the store, so completing ``/mcp reauth`` in
+    one session healed nothing anywhere else. Measured on the operator's
+    machine: sessions booted at 08:52 and 08:56 still reported ``notion
+    [disconnected]`` at 13:30, against a grant re-authed at 12:31 with eight
+    hours of life left, and one of them took a turn-ending incident from it.
+
+    A second CONNECTION in this process would not prove it. The claim is about
+    a second PROCESS, so the re-auth below runs in a real ``subprocess`` doing a
+    real ``McpTokenStorage.set_tokens`` against the same file, and the child's
+    return code and stderr are asserted — a child that dies of an import error
+    must fail loudly rather than pass as "no change detected".
+    """
+
+    URL = "https://peer.example/mcp"
+
+    #: What a completed ``/mcp reauth`` writes, run in a genuine second process.
+    _PEER_REAUTH_SRC = """
+import asyncio, sys
+sys.path.insert(0, sys.argv[1])
+from mcp.shared.auth import OAuthToken
+from local_operator.mcp.auth import McpTokenStorage
+from local_operator.providers.auth_store import AuthStore
+
+store = AuthStore(sys.argv[2])
+storage = McpTokenStorage(sys.argv[3], store)
+asyncio.run(
+    storage.set_tokens(
+        OAuthToken(
+            access_token="FRESH-FROM-PEER",
+            refresh_token="R2",
+            token_type="Bearer",
+            expires_in=28800,
+        )
+    )
+)
+store.close()
+print("PEER-REAUTH-OK")
+"""
+
+    @pytest.mark.asyncio
+    async def test_a_peers_reauth_reaches_a_blocked_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        import sys as _sys
+
+        from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+
+        from local_operator.mcp.auth import TOKENS_OBTAINED_AT_KEY, McpAuthRequiredError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+        from local_operator.mcp.manager import McpManager, ServerConnection
+        from local_operator.providers.auth_store import AuthStore
+
+        db_path = tmp_path / "auth.db"
+        store = AuthStore(str(db_path))
+        store.upsert_credential(
+            MCP_OAUTH_PROVIDER,
+            {
+                "project_id": self.URL,
+                "tokens": {
+                    "access_token": "STALE",
+                    "refresh_token": "R1",
+                    "token_type": "Bearer",
+                    "expires_in": 28800,
+                },
+                TOKENS_OBTAINED_AT_KEY: 1000.0,
+            },
+        )
+
+        manager = McpManager(str(tmp_path), auth_store=store)
+        cfg = MCPHttpServerConfig(url=self.URL, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["peer"] = cfg
+        manager._sources["peer"] = "global"
+        incidents: list[tuple[str, str]] = []
+        recoveries: list[tuple[str, int]] = []
+        manager.on_incident = lambda name, reason: incidents.append((name, reason))
+        manager.on_recovery = lambda name, count: recoveries.append((name, count))
+
+        class _Session:
+            """The ``McpSession`` protocol, no further than the heal needs it.
+
+            ``_register_connection`` only stores the session, but satisfying the
+            real protocol is what keeps this test asserting against the
+            manager's actual contract rather than against ``Any``.
+            """
+
+            async def list_tools(self, *, params: Any = None) -> ListToolsResult:
+                return ListToolsResult(tools=[], next_cursor=None)
+
+            async def call_tool(
+                self,
+                name: str,
+                arguments: dict[str, Any] | None = None,
+                read_timeout_seconds: float | None = None,
+            ) -> CallToolResult:
+                return CallToolResult(content=[TextContent(type="text", text="ok")], is_error=False)
+
+        reauthed = {"done": False}
+
+        async def connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            if not reauthed["done"]:
+                raise McpAuthRequiredError(self.URL)
+            return ServerConnection(
+                name=name,
+                config=cfg,
+                session=_Session(),
+                tools=[Tool(name="search", description="d", input_schema={"type": "object"})],
+            )
+
+        monkeypatch.setattr(manager, "_connect_server", connect)
+
+        try:
+            # 1. The session gives up through the real auth arm.
+            await manager._reconnect("peer", 0.0, manager._epoch)
+            assert manager.auth_blocked("peer") is True
+            assert manager.get_connection_status("peer") == "auth-required"
+            assert [name for name, _ in incidents] == ["peer"]
+
+            # 2. Ticks while the grant is untouched heal nothing (and must not
+            #    re-spend the refresh token that is already known bad).
+            for _ in range(3):
+                assert await manager.revalidate_auth_blocked() == []
+
+            # 3. A REAL second process completes the re-auth against the same
+            #    file. The manager below is never told; it only re-reads.
+            env = dict(os.environ)
+            env["LOCAL_OPERATOR_CONFIG_DIR"] = str(tmp_path)
+            repo_root = str(Path(__file__).resolve().parents[3])
+            proc = subprocess.run(
+                [
+                    _sys.executable,
+                    "-c",
+                    self._PEER_REAUTH_SRC,
+                    repo_root,
+                    str(db_path),
+                    self.URL,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+            assert proc.returncode == 0, (
+                "the peer re-auth process failed; "
+                f"rc={proc.returncode} stderr={proc.stderr[-2000:]!r}"
+            )
+            assert "PEER-REAUTH-OK" in proc.stdout, f"stdout={proc.stdout!r}"
+
+            # 4. One tick, and the blocked session heals off the peer's write.
+            reauthed["done"] = True
+            assert await manager.revalidate_auth_blocked() == ["peer"]
+            assert manager.get_connection_status("peer") == "connected"
+            # The model was told the server died, so it is told it came back.
+            assert recoveries == [("peer", 1)]
+        finally:
+            await manager.disconnect_all()
+            store.close()

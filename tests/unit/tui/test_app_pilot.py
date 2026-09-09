@@ -6039,6 +6039,12 @@ class FakeMcpManager:
         self._configs: dict[str, Any] = {}
         self.disconnects: list[str] = []
         self.connects: list[tuple[str, Any]] = []
+        #: Servers held back by an unusable OAuth grant, which the real manager
+        #: reports as ``auth-required`` rather than ``disconnected``.
+        self._auth_blocked: set[str] = set()
+        #: Servers still connecting past the startup gate — the state a slow
+        #: HTTP MCP server is in on every launch.
+        self._connecting: set[str] = set()
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -6047,7 +6053,11 @@ class FakeMcpManager:
         return sorted(self._connected)
 
     def get_connection_status(self, name: str) -> str:
-        return "connected" if name in self._connected else "disconnected"
+        if name in self._connected:
+            return "connected"
+        if name in self._connecting:
+            return "connecting"
+        return "auth-required" if name in self._auth_blocked else "disconnected"
 
     def get_server_config(self, name: str) -> Any:
         return self._configs.get(name)
@@ -12257,3 +12267,116 @@ async def test_a_never_active_only_sweep_does_not_announce(
         for _ in range(8):
             await pilot.pause()
         assert not [b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")]
+
+
+@pytest.mark.asyncio
+async def test_the_band_counts_an_auth_blocked_server_as_failed() -> None:
+    """A server whose grant expired must still turn the lamp.
+
+    The band asks "is anything not up", and it used to answer by comparing the
+    status against the literal ``"disconnected"``. When the manager gained
+    ``auth-required`` as a fourth value, that equality silently stopped counting
+    exactly the servers this segment exists to surface — a session would show a
+    calm two-of-two lamp while a server had been unusable for hours. The test is
+    the guard for the ``!= "connected"`` form.
+    """
+    manager = FakeMcpManager(["github", "notion"], ["github", "notion"])
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert app._mcp_status().failed is False
+
+        # notion's grant expires mid-session: not connected, not dead.
+        manager.drop("notion")
+        manager._auth_blocked.add("notion")
+        for _ in range(4):
+            await pilot.pause()
+        assert manager.get_connection_status("notion") == "auth-required"
+        status = app._mcp_status()
+        assert status.connected == 1
+        assert status.failed is True, "an auth-blocked server was not counted as failed"
+
+
+@pytest.mark.asyncio
+async def test_the_band_stays_calm_while_a_slow_server_is_still_connecting() -> None:
+    """Review round 1, major-2: `connecting` is not a failure.
+
+    The startup gate leaves slow HTTP servers `connecting` on EVERY launch, and
+    `mcp_semantic` maps `failed` straight to `danger` — so counting that state
+    would make a red lamp the normal boot, which is exactly the desensitisation
+    the lamp's alarm-or-nothing design argues against. `_mcp_status`'s own
+    docstring says so; the predicate has to agree with it.
+
+    The pairing matters: `auth-required` must count (a terminal state a user has
+    to act on) while `connecting` must not (momentary, settles on its own).
+    """
+    manager = FakeMcpManager(["github", "slow"], ["github"])
+    manager._connecting.add("slow")
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert manager.get_connection_status("slow") == "connecting"
+        assert app._mcp_status().failed is False, "a normal boot painted the lamp danger"
+
+        # The same server settling into a TERMINAL failure does count.
+        manager._connecting.discard("slow")
+        manager._auth_blocked.add("slow")
+        for _ in range(4):
+            await pilot.pause()
+        assert app._mcp_status().failed is True
+
+
+@pytest.mark.asyncio
+async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -> None:
+    """Review round 1, major-3: two surfaces reporting one session must agree.
+
+    The follower/remote band computes from the frontend-state projection, and
+    tested `status == "failed"` — a value `_mcp_state` only ever writes as a
+    PLACEHOLDER, and then overwrites with the manager's live status whenever a
+    manager is present. So an auth-blocked server projected as `auth-required`
+    and the follower's lamp stayed calm while the owner's went red for the same
+    state. Both predicates are now the same one, including the `connecting`
+    exemption, so a slow boot is calm on both surfaces too.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        McpServerState,
+    )
+    from local_operator.tui.widgets.status_line import McpStatus
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+
+        status_line = app._status
+        assert status_line is not None
+
+        def band_for(*servers: tuple[str, str]) -> McpStatus:
+            captured: list[McpStatus] = []
+            status_line.update = lambda **kw: (  # type: ignore[method-assign]
+                captured.append(kw["mcp"]) if "mcp" in kw else None
+            )
+            app._apply_frontend_state(
+                FrontendSessionState(
+                    session_id="sess",
+                    epoch="owner",
+                    mcp_servers=[
+                        McpServerState(name=name, status=status) for name, status in servers
+                    ],
+                )
+            )
+            assert captured, "the apply did not repaint the band"
+            return captured[-1]
+
+        # The state the owner paints danger for.
+        assert band_for(("github", "connected"), ("notion", "auth-required")).failed is True
+        # …and the state it deliberately leaves calm.
+        assert band_for(("github", "connected"), ("slow", "connecting")).failed is False
+        # The projection's own placeholder still counts when no manager exists.
+        assert band_for(("github", "failed")).failed is True
+        assert band_for(("github", "connected")).failed is False
