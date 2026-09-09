@@ -59,6 +59,7 @@ import traceback
 import unicodedata
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -69,6 +70,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -82,6 +84,8 @@ from local_operator.harness.subagent import (
     effort_tier_rejection,
 )
 from local_operator.harness.types import (
+    FAULT_INVALID_ARGUMENTS,
+    FAULT_KEY,
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
@@ -89,7 +93,9 @@ from local_operator.harness.types import (
     AskQuestion,
     BrowserSurface,
     BrowserSurfaceProtocol,
+    EnvironmentDependentRejectionError,
     ImageContent,
+    InvalidToolArgumentsError,
     TextContent,
     ToolContext,
     ToolResult,
@@ -984,6 +990,26 @@ def _error(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
     )
 
 
+def _invalid_arguments(tool_call_id: str, tool_name: str, message: str) -> ToolResult:
+    """An error result MARKED as the model's fault, not the machine's.
+
+    Same shape as :func:`_error`, plus the ``__fault`` marker that makes the
+    call count as ``invalid_arguments`` in the tool-call error rate. Use it
+    only where an argument is MALFORMED — see
+    :class:`~local_operator.harness.types.InvalidToolArgumentsError` for the
+    malformed-vs-unsatisfiable rule and why guessing wrong in the permissive
+    direction is the worse error. A missing file or a failed request is an
+    ordinary :func:`_error`.
+    """
+    return ToolResult(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        content=[TextContent(text=message)],
+        details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+        is_error=True,
+    )
+
+
 def _text(
     tool_call_id: str,
     tool_name: str,
@@ -1034,15 +1060,81 @@ def _image(
     )
 
 
+def _rejection_is_environmental(exc: ValidationError) -> bool:
+    """True when ANY sub-error was raised for a reason outside the arguments.
+
+    Reads the original exception pydantic preserves under ``ctx['error']``, so
+    the distinction is made from the raised TYPE and never from message text —
+    the same source-of-truth rule ``_classify_fault`` is built on.
+
+    ANY, not ALL: one environment-dependent rejection anywhere in the error
+    set makes the whole call environmental. A ``ValidationError`` reports
+    every failed field at once, so a mixed set cannot be split into two
+    verdicts on one call, and not billing the model is the better way to be
+    wrong — under-claiming leaves the figure incomplete, over-claiming
+    corrupts it.
+
+    That rule is only safe because the environmental branch is NARROW. While
+    ``_validate_effort_tier`` raised environmentally for every refusal, one
+    invented tier laundered a genuine ``extra="forbid"`` reported in the same
+    call — under-claiming in aggregate but actively erasing faults that were
+    correctly attributed. It now raises environmentally only for a value the
+    schema really advertised, so a laundering pair is not environmental under
+    either rule and ANY is the right choice for what remains.
+
+    **Two failure directions, only one of them safe.** The ANY rule above
+    fails toward ``execution``. The ``ctx`` read below fails the other way: a
+    validator raising a bare ``ValueError``, or a pydantic that stopped
+    populating ``ctx``, reads as a model fault. That is the over-claiming
+    direction, and it is not reachable today — ``exc.errors()`` defaults to
+    ``include_context=True`` and nothing in the tree overrides it — but it is
+    the honest description of the mechanism, so do not read the paragraph
+    above as a guarantee about this one.
+    """
+    for err in exc.errors():
+        if isinstance((err.get("ctx") or {}).get("error"), EnvironmentDependentRejectionError):
+            return True
+    return False
+
+
 def _validation_error(tool_call_id: str, tool_name: str, exc: ValidationError) -> ToolResult:
     """One ``invalid arguments:`` line per field — no traceback. The model can
-    correct its call from the message; the stack trace could not."""
+    correct its call from the message; the stack trace could not.
+
+    Marked as a model fault ONLY when the rejection is a pure function of the
+    arguments — ``extra="forbid"``, a type error, a constrained int, a
+    cross-field validator. Those are the model violating the tool's contract,
+    the same class the loop's ``validate_tool_arguments`` records, and they
+    land here rather than there because the params model is finer than the
+    advertised JSON-Schema type.
+
+    A validator that consults live config, the environment, the filesystem or
+    the clock is NOT in that set: it can refuse a value the advertised schema
+    itself offered, which is the world changing rather than the model erring.
+    Those raise ``EnvironmentDependentRejectionError`` and stay ``execution``.
+    Marking them would let a corrupt ``config.yml`` inflate a published
+    accuracy figure — see ``_validate_effort_tier``, the case that proved it.
+    """
     lines = [
         f"- {'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
         for err in exc.errors()
     ]
-    return _error(tool_call_id, tool_name, "invalid arguments:\n" + "\n".join(lines))
+    body = "invalid arguments:\n" + "\n".join(lines)
+    if _rejection_is_environmental(exc):
+        return _error(tool_call_id, tool_name, body)
+    return _invalid_arguments(tool_call_id, tool_name, body)
 
+
+#: Public name for :func:`_validation_error`, for callers OUTSIDE the ``tools``
+#: package. The underscore form is this module's own spelling and is shared
+#: freely within ``tools`` (``eval``, ``lsp``, ``agent_tool``, ``team_tool``),
+#: but ``web_fetch``/``web_search`` are separate packages: importing a private
+#: name across that boundary claims a privacy the tree does not honour and
+#: makes a refactor of this module's internals silently break them. They must
+#: share the helper — a fault class that differs by which tool the model
+#: picked is the defect this whole change exists to remove — so the sharing
+#: gets a supported name rather than being done through the back door.
+validation_error_result = _validation_error
 
 #: The shape every ``execute_*`` in this module has. It differs from
 #: ``ToolExecuteFn`` only in accepting ``context=None``, which the bare-tool
@@ -1155,6 +1247,19 @@ def _guard(tool_name: str) -> Callable[[ToolExecutor], ToolExecutor]:
         ) -> ToolResult:
             try:
                 return await fn(tool_call_id, args, signal, on_update, context)
+            except InvalidToolArgumentsError as exc:
+                # Handled BEFORE the catch-all, which would otherwise convert a
+                # deliberate argument-shape rejection into an unmarked
+                # "failed unexpectedly" traceback — losing the fault marker and
+                # recording a model fault as an execution error. This guard sits
+                # inside the tool, so the loop's identical branch never sees a
+                # raise from a guarded tool; both exist because unguarded tools
+                # (MCP bridges, hosts) reach the loop directly.
+                #
+                # No traceback: the model can correct a malformed argument from
+                # the message, and a stack trace of our own parser cannot help
+                # it — the same reasoning as ``_validation_error``.
+                return _invalid_arguments(tool_call_id, tool_name, f"invalid arguments: {exc}")
             except Exception:  # noqa: BLE001 — boundary: nothing may escape
                 return _error(
                     tool_call_id,
@@ -2223,15 +2328,33 @@ _LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
 
 
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
+    """Parse a ``'start-end'`` / ``'start-'`` range spec.
+
+    Raises :class:`InvalidToolArgumentsError` (a ``ValueError`` subclass, so
+    existing ``except ValueError`` callers are unaffected) because every
+    rejection here is a MALFORMED argument: the schema types ``range`` as a
+    plain string, so a value like ``'"270-330"'`` — the literal-quoted form a
+    model really emitted — passes validation and only fails at this parse.
+    Marking it here is what keeps it out of the execution bucket.
+
+    Callers deliberately catch the SUBCLASS rather than ``ValueError``: an
+    unrelated ``ValueError`` escaping this call is a bug in our own code, not
+    the model's mistake, and catching the broad type would credit it to the
+    model and inflate the benchmark. Narrow is the fail-safe direction — an
+    unexpected error falls through to the execution bucket, which merely
+    under-reports.
+    """
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
-        raise ValueError(f"invalid line range '{spec}' (expected 'start-end' or 'start-')")
+        raise InvalidToolArgumentsError(
+            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
+        )
     start = int(match.group(1))
     if start < 1:
-        raise ValueError(f"invalid line range '{spec}': start must be >= 1")
+        raise InvalidToolArgumentsError(f"invalid line range '{spec}': start must be >= 1")
     end = int(match.group(2)) if match.group(2) else None
     if end is not None and end < start:
-        raise ValueError(f"invalid line range '{spec}': end must be >= start")
+        raise InvalidToolArgumentsError(f"invalid line range '{spec}': end must be >= start")
     return start, end
 
 
@@ -2640,7 +2763,11 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     """
     ref = parse_handle(target)
     if ref is None:
-        return _error(
+        # Malformed, matching the regex branch in `_search_spill` below: the
+        # handle rides inside `path`, a plain schema string, so a value that
+        # is not a handle at all can only be caught here. A well-formed handle
+        # the store cannot serve is a different case and stays `execution`.
+        return _invalid_arguments(
             tool_call_id,
             "read",
             f"Malformed spill handle '{target}'. Expected "
@@ -2666,8 +2793,8 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if range_spec:
         try:
             start, end = _parse_line_range(range_spec)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
     result = store.read_lines(ref.handle, start, end)
     if result is None:
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
@@ -2721,8 +2848,12 @@ def _search_spill(
     try:
         found = store.search(ref.handle, ref.query, SPILL_SEARCH_MATCH_LIMIT)
     except re.error as exc:
-        return _error(tool_call_id, "read", f"invalid regex '{ref.query}': {exc}")
+        # Malformed, same as grep's pattern: the `?q=` fragment rides inside a
+        # URL string, so no schema can reject a bad regex before it parses.
+        return _invalid_arguments(tool_call_id, "read", f"invalid regex '{ref.query}': {exc}")
     if found is None:
+        # Unsatisfiable, not malformed — the handle parsed fine and the store
+        # could not serve it. Stays `execution`.
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     matches, total_matches, total_lines = found
     if range_spec:
@@ -2731,8 +2862,8 @@ def _search_spill(
         # whenever the matches fell outside the requested line window.
         try:
             start, end = _parse_line_range(range_spec)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
         matches = matches[start - 1 : end]
     details = {"url": f"{ref.handle}?q={ref.query}"}
     if not matches:
@@ -3143,8 +3274,8 @@ async def execute_read(
     if params.range:
         try:
             start, end = _parse_line_range(params.range)
-        except ValueError as exc:
-            return _error(tool_call_id, "read", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "read", str(exc))
         selected = lines[start - 1 : end]
         if not selected:
             return _text(
@@ -4391,11 +4522,16 @@ async def execute_grep(
     try:
         regex = re.compile(params.pattern, 0 if params.case else re.IGNORECASE)
     except re.error as exc:
-        return _error(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
+        # Malformed: `pattern` is typed `string`, so an unbalanced group passes
+        # schema validation and only fails here. The model could have known.
+        return _invalid_arguments(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
 
     cwd = _safe_cwd(context)
     target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
     if not target.exists():
+        # Deliberately NOT a model fault: a well-formed path that does not
+        # exist is unsatisfiable, not malformed, and the file may have vanished
+        # after the model planned the call. Stays `execution`.
         return _error(tool_call_id, "grep", f"Path does not exist: {target}")
 
     # Outside-workspace searches escalate to an approval prompt regardless
@@ -5244,6 +5380,12 @@ async def _wake_create(
     }
     outcome = build_wake_schedule(request, existing, now_ms)
     if "error" in outcome:
+        # `in`/`at`/`every`/`until` are plain strings in the schema, so an
+        # unparseable duration only fails here — the coarse-schema case this
+        # classification exists for. A full schedule table or a past time is
+        # well-formed and unsatisfiable, and stays an execution error.
+        if outcome["malformed"]:
+            return _invalid_arguments(tool_call_id, "wake", outcome["error"])
         return _error(tool_call_id, "wake", outcome["error"])
     schedule = outcome["schedule"]
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
@@ -8375,7 +8517,78 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 # never advertise tools that can only error.
 
 
-def _validate_effort_tier(value: str | None) -> str | None:
+#: Key under which the ``effort`` members a BUILD actually advertised are
+#: handed to ``model_validate`` as ``context=``, read back in the validator
+#: through ``ValidationInfo.context``.
+ADVERTISED_EFFORT_KEY = "advertised_effort"
+
+#: The advertised set for the tool currently executing, published by the
+#: builder's wrapper (:func:`_with_advertised_effort`) and read at the
+#: ``model_validate`` call.
+#:
+#: A ContextVar rather than a parameter because the executor signature is the
+#: fixed five-argument ``ToolExecutor`` contract, and rather than a module
+#: global because concurrent calls — a parent and its subagents run on one
+#: loop — must not see each other's snapshot; a ContextVar is copied per task.
+#:
+#: It cannot be recomputed at call time, which is the whole point: reading
+#: ``configured_effort_tiers()`` here would yield the CURRENT tiers, making
+#: "was advertised" collapse into "is valid now" and every refusal a model
+#: fault — losing exactly the operator-config case this PR fixed. Only the
+#: build side knows what the model was shown.
+#:
+#: ``None`` means no build published a snapshot (a direct call to the module
+#: level executor, e.g. from a test). That is treated as environmental, the
+#: under-claiming direction, because a call whose provenance is unknown must
+#: not be billed to the model. Production always publishes: every advertised
+#: ``task``/``agent`` tool is built through its builder.
+_ADVERTISED_EFFORT: ContextVar[frozenset[str] | None] = ContextVar(
+    "advertised_effort", default=None
+)
+
+
+def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) -> ToolExecutor:
+    """Publish what this build advertised for the duration of one call.
+
+    Wraps the builder's executor so the validator can tell an operator's
+    vanished tier from a value the model invented. Reset in a ``finally`` so a
+    raising tool cannot leak one tool's snapshot into the next call.
+    """
+    advertised = advertised_effort_members(parameters)
+
+    async def wrapper(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: AbortSignal | None = None,
+        on_update: Callable[[AgentToolUpdate], None] | None = None,
+        context: ToolContext | None = None,
+    ) -> ToolResult:
+        token = _ADVERTISED_EFFORT.set(advertised)
+        try:
+            return await executor(tool_call_id, args, signal, on_update, context)
+        finally:
+            _ADVERTISED_EFFORT.reset(token)
+
+    wrapper.__name__ = getattr(executor, "__name__", "execute")
+    wrapper.__qualname__ = wrapper.__name__
+    return wrapper
+
+
+def effort_validation_context() -> dict[str, Any]:
+    """Validation context carrying the advertised ``effort`` members."""
+    return {ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get()}
+
+
+def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
+    """What ``effort`` members the schema offered, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    members = context.get(ADVERTISED_EFFORT_KEY)
+    return frozenset(members) if isinstance(members, (set, frozenset, list, tuple)) else None
+
+
+def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None:
     """Refuse an ``effort`` the live config cannot honour, naming what can be.
 
     Shared by both ``task`` forms and the ``agent`` tool so the three fields
@@ -8384,13 +8597,44 @@ def _validate_effort_tier(value: str | None) -> str | None:
     agree except across a mid-session edit, and this is the side that must be
     right — an accepted-but-stale tier would reach the strict launch path and
     fail there with less context than the message here carries.
+
+    **The refusal splits into two fault classes, and only the build-time
+    record can tell them apart.** ``effort_tier_rejection`` says only "not
+    usable now"; whether that is the model's mistake depends on what the model
+    was shown:
+
+    - The value WAS in the advertised enum and is gone now — the operator
+      edited a tier away, or ``config.yml`` became unreadable (which
+      ``configured_effort_tiers`` reports as "no tiers" by design rather than
+      raising). The model picked from the menu it was given; billing it would
+      put an operator config error into a published accuracy figure.
+    - The value was NEVER advertised — including the common case where no
+      tiers are configured at all and ``_advertise_effort_tiers`` DELETES the
+      property, so ``effort`` is a field the schema does not contain. The
+      model invented it, which is the same kind of mistake as an
+      ``extra="forbid"`` key, and is a model fault.
+
+    Treating both as environmental also laundered any genuine violation
+    reported in the SAME call: one invented tier made the whole
+    ``ValidationError`` environmental and erased a co-reported
+    ``extra="forbid"``. Narrow branch, no laundering.
     """
     if value is None:
         return None
     rejection = effort_tier_rejection(value)
-    if rejection is not None:
-        raise ValueError(rejection)
-    return value
+    if rejection is None:
+        return value
+    advertised = _advertised_effort(info)
+    if advertised is None or value in advertised:
+        # ``None`` is "no build published a snapshot" — a direct call to the
+        # module-level executor, which production never makes (every
+        # advertised task/agent tool is built through its builder). Unknown
+        # provenance takes the environmental branch deliberately: a call whose
+        # schema cannot be established must not be billed to the model, which
+        # is the same under-claiming preference the rest of this boundary
+        # applies.
+        raise EnvironmentDependentRejectionError(rejection)
+    raise ValueError(rejection)
 
 
 def _advertise_effort_tiers(
@@ -8461,6 +8705,32 @@ def _advertise_effort_tiers(
             if isinstance(entry, dict):
                 patch(entry.get("properties"))
     return patched
+
+
+def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[str]:
+    """The ``effort`` members a BUILT schema offers, read back from the schema.
+
+    The tool's own parameters are the record of what the model was shown, so
+    the advertised set is recovered from them rather than tracked separately —
+    one source of truth, and it cannot fall out of step with what shipped. An
+    empty set is the meaningful answer for a session with no tiers configured:
+    ``_advertise_effort_tiers`` deletes the property outright, so any
+    ``effort`` the model sends is a field its schema does not contain.
+
+    Read at CALL time and handed to ``model_validate`` as validation context;
+    see :func:`_validate_effort_tier` for why the distinction decides a fault
+    class.
+    """
+    properties = (parameters or {}).get("properties")
+    if not isinstance(properties, dict):
+        return frozenset()
+    effort = properties.get("effort")
+    if not isinstance(effort, dict):
+        return frozenset()
+    for variant in effort.get("anyOf") or [effort]:
+        if isinstance(variant, dict) and isinstance(variant.get("enum"), list):
+            return frozenset(str(member) for member in variant["enum"])
+    return frozenset()
 
 
 def _effort_tier_field_description() -> str:
@@ -8542,8 +8812,8 @@ class TaskItem(BaseModel):
 
     @field_validator("effort")
     @classmethod
-    def _effort_is_configured(cls, value: str | None) -> str | None:
-        return _validate_effort_tier(value)
+    def _effort_is_configured(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validate_effort_tier(value, info)
 
 
 class TaskParams(BaseModel):
@@ -8574,8 +8844,8 @@ class TaskParams(BaseModel):
 
     @field_validator("effort")
     @classmethod
-    def _effort_is_configured(cls, value: str | None) -> str | None:
-        return _validate_effort_tier(value)
+    def _effort_is_configured(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validate_effort_tier(value, info)
 
     context: str = Field(
         default="",
@@ -9025,7 +9295,7 @@ async def execute_task(
     between children.
     """
     try:
-        params = TaskParams(**args)
+        params = TaskParams.model_validate(args, context=effort_validation_context())
     except ValidationError as exc:
         return _validation_error(tool_call_id, "task", exc)
 
@@ -9103,21 +9373,22 @@ async def execute_task(
 def build_task_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_launcher is None:
         return None
+    parameters = _advertise_effort_tiers(
+        TaskParams.model_json_schema(),
+        description=_effort_tier_field_description(),
+    )
     return AgentTool(
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
         description=_task_tool_description(),
-        parameters=_advertise_effort_tiers(
-            TaskParams.model_json_schema(),
-            description=_effort_tier_field_description(),
-        ),
+        parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=execute_task,
+        execute=_with_advertised_effort(execute_task, parameters),
     )
 
 
@@ -10050,8 +10321,8 @@ async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) 
     if params.range is not None:
         try:
             start, end = _parse_line_range(params.range)
-        except ValueError as exc:
-            return _error(tool_call_id, "hub", str(exc))
+        except InvalidToolArgumentsError as exc:
+            return _invalid_arguments(tool_call_id, "hub", str(exc))
     window = await comms.peek(ids[0], start=start, end=end, steps=params.steps)
     if window.error is not None:
         return _error(tool_call_id, "hub", f"{window.label} ({window.job_id}): {window.error}")
