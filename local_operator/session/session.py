@@ -703,16 +703,35 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             tool = str(details.get("tool") or "a tool")
             description = str(details.get("description") or "").strip()
             subject = f"{tool} ({description})" if description else tool
-            out.append(
-                _injected_user_message(
-                    (
-                        f"[system] The approval request for {subject} expired with "
-                        "nobody attached to this session and was denied automatically. "
-                        "This was a timeout, not a decision by the user."
-                    ),
-                    message.id,
+            # An `ask` is a QUESTION, and an unanswered question was not
+            # "denied" — the approval gate's vocabulary describes a refusal
+            # nobody issued, and a model told its question was denied re-plans
+            # around that phantom decision. `tui/app.py`'s parked-gate summary
+            # already branches here for the HUMAN (D12's copy note); this is
+            # the same row rendered for the model, and until #868 made the ask
+            # gate reachable it could only ever carry an approval.
+            #
+            # The ask arm ends the way ``ASK_UNANSWERED_TEXT`` does, on
+            # purpose: an expiry and a user pressing `esc` are both "no answer
+            # came back", so the two must leave the model in the same place
+            # rather than one nudging it to decide and the other implying it
+            # was refused.
+            kind = str(details.get("kind") or "approval").strip().lower()
+            if kind == "ask":
+                text = (
+                    f"[system] The question for {subject} was never answered: nobody "
+                    "was attached to this session and it expired. No decision was "
+                    "made — this was a timeout, not a choice by the user. Decide "
+                    "yourself (take your recommended option where you gave one), then "
+                    "say in one line what you assumed and carry on."
                 )
-            )
+            else:
+                text = (
+                    f"[system] The approval request for {subject} expired with "
+                    "nobody attached to this session and was denied automatically. "
+                    "This was a timeout, not a decision by the user."
+                )
+            out.append(_injected_user_message(text, message.id))
         elif message.custom_type in (
             "fork_boundary",
             WAKE_PROMPT_MESSAGE_TYPE,

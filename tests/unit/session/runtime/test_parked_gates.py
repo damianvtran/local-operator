@@ -279,6 +279,76 @@ def test_a_timed_out_gate_reaches_the_model_on_replay() -> None:
     assert "bash" in text
 
 
+def _rendered_timeout_text(kind: str) -> str:
+    """The MODEL-facing text for one expired gate of ``kind``."""
+    from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+    from local_operator.harness.types import CustomMessage, TextContent
+    from local_operator.session.session import _default_convert_to_llm
+
+    rendered = _default_convert_to_llm(
+        [
+            CustomMessage(
+                custom_type=GATE_TIMEOUT_CUSTOM_TYPE,
+                attribution="system",
+                details={
+                    "tool": "ask",
+                    "description": "Deploy to production or roll back?",
+                    "kind": kind,
+                    "waited_s": 86400.0,
+                },
+            )
+        ]
+    )
+    assert len(rendered) == 1
+    block = rendered[0].content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def test_an_expired_question_is_not_reported_to_the_model_as_a_denial() -> None:
+    """An unanswered ASK must not be phrased in the approval gate's vocabulary.
+
+    ``ask_gate`` records ``kind="ask"`` and ``tui/app.py``'s parked-gate summary
+    has always branched on it for the HUMAN ("then moved on", D12's copy note).
+    The model-facing renderer never grew that arm, so the two audiences read
+    opposite things off the SAME row: the human was told the agent moved on
+    while the model was told its question "was denied automatically" — inviting
+    it to re-plan around a refusal nobody issued.
+
+    It could not bite before #868, because the ask gate was unreachable and this
+    row only ever carried an approval. It lands hardest on the wake path that
+    change deliberately enables, which is the one most likely to expire with
+    nobody there.
+    """
+    ask = _rendered_timeout_text("ask")
+
+    # The denial vocabulary must be gone, not merely softened.
+    assert "denied" not in ask.lower(), f"an unanswered question was reported as denied: {ask}"
+    assert "approval request" not in ask.lower()
+    # It must still say WHAT went unanswered and that nothing was decided...
+    assert "Deploy to production or roll back?" in ask
+    assert "never answered" in ask and "No decision was made" in ask
+    # ...and leave the model where pressing `esc` leaves it, since both mean
+    # "no answer came back" (see ASK_UNANSWERED_TEXT).
+    assert "Decide yourself" in ask and "what you assumed" in ask
+
+
+def test_an_expired_approval_still_reads_as_the_automatic_denial_it_is() -> None:
+    """The other arm, so the ask branch cannot be widened over both.
+
+    An approval that expires genuinely WAS denied — the tool did not run — and
+    saying otherwise would understate a refusal the model must plan around.
+    """
+    approval = _rendered_timeout_text("approval")
+
+    assert "denied automatically" in approval
+    assert "not a decision by the user" in approval
+
+    # A row with no `kind` at all predates the field; it must keep reading as an
+    # approval rather than silently becoming a question.
+    assert _rendered_timeout_text("") == approval
+
+
 def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
     """Reachability is not "a terminal is attached".
 
