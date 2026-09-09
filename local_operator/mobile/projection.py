@@ -43,6 +43,7 @@ from local_operator.harness.rows import (
     gate_timeout_notice,
     is_harness_chrome,
     user_row_text,
+    wake_receipt_headline,
 )
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -678,11 +679,27 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # transcript as if the user had typed it.
                 details = message.details or {}
                 if not details.get("wake_catchup"):
+                    # Strip the model-facing envelope with the SAME helper the
+                    # TUI's WakeBlock uses. The raw payload is
+                    # '(alarm) Scheduled wake w-9 (1, every 6h) — cancel with
+                    # wake({op:"cancel",id:"w-9"})', which is markup addressed
+                    # to the model; painting it verbatim on a human surface is
+                    # the same defect as the leaked <parent-message> rows.
+                    raw = str(details.get("text", ""))
+                    headline = wake_receipt_headline(raw)
+                    _, _, body = raw.partition("\n\n")
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
                             kind="notice",
-                            text=_compact(str(details.get("text", "")), 400),
+                            # Headline plus the delivered prompt: the phone has
+                            # no expand affordance for a notice row, so the
+                            # prompt rides the same row rather than being
+                            # dropped (the TUI hides it behind an expansion).
+                            text=_compact(
+                                f"{headline} — {body.strip()}" if body.strip() else headline,
+                                400,
+                            ),
                             details={"notice_kind": "wake"},
                         )
                     )

@@ -75,8 +75,16 @@ def harness_chrome_prompts() -> tuple[str, ...]:
 
 
 def is_harness_chrome(text: str) -> bool:
-    """Whether this user-role text is harness chrome rather than the user's words."""
-    return text in harness_chrome_prompts()
+    """Whether this user-role text is harness chrome rather than the user's words.
+
+    Normalises before comparing because THE HOSTS DO NOT AGREE on what they
+    hand in: the TUI strips a message's text at the top of its replay loop,
+    the phone fold passes ``message.text`` verbatim. Leaving the strip to the
+    callers is the exact substrate this module exists to remove — one surface
+    would suppress a chrome prompt that the other painted as the user's own
+    words the moment a persisted prompt gained a trailing newline.
+    """
+    return text.strip() in harness_chrome_prompts()
 
 
 def typed_line_of(text: str) -> str | None:
@@ -108,8 +116,15 @@ def user_row_text(text: str) -> str:
     the two are the whole of the "what did the user really say" decision, and
     splitting them across hosts is how one surface got the skill rule and the
     other did not.
+
+    Strips for the same reason :func:`is_harness_chrome` does: the two hosts
+    normalise differently, so an envelope with surrounding whitespace would
+    resolve to a typed line on the TUI and to the whole SKILL.md body on the
+    phone. The fallback returns the stripped text so both surfaces paint one
+    row, not one padded and one not.
     """
-    return typed_line_of(text) or text
+    stripped = text.strip()
+    return typed_line_of(stripped) or stripped
 
 
 def gate_timeout_notice(details: dict[str, Any]) -> str:
@@ -163,6 +178,39 @@ def gate_timeout_notice(details: dict[str, Any]) -> str:
     return f"waited {waited_text} for approval with nobody attached, then denied it — {subject}"
 
 
+def wake_receipt_headline(text: str) -> str:
+    """The human-readable headline of a wake delivery.
+
+    A wake's persisted text is ``<envelope>\\n\\n<message>``, and the envelope
+    is MODEL-FACING markup: ``(alarm) Scheduled wake w-9 (1, every 6h) —
+    cancel with wake({op:"cancel",id:"w-9"})``. The cancel how-to is an
+    instruction for the model, and the ``(alarm)``/``Scheduled wake`` prefixes
+    restate what the row's own affordance already says — so what the user
+    wants from this line is WHICH wake fired, not how to stop it.
+
+    Extracted from ``WakeBlock._summary`` (which owned the only copy) because
+    the phone renders the same receipt: while this logic lived in a TUI widget
+    the phone had no way to reach it and showed the raw envelope verbatim —
+    model-facing markup on a human surface, the same class of defect as the
+    leaked ``<parent-message>`` rows this module exists to close.
+
+    Catch-up deliveries are deliberately NOT handled here: the phone fold
+    skips them entirely (they are user-attributed), so the folding summary
+    stays in the TUI widget where it has the block's ``catchup`` flag.
+    """
+    head, _, _ = text.partition("\n\n")
+    head = " ".join(head.split())  # collapse any envelope whitespace
+    head = head.split(" — cancel with wake(", 1)[0]
+    if head.startswith("(alarm) "):
+        head = head[len("(alarm) ") :]
+    # The surface's own wake affordance already says "wake"; repeating
+    # "Scheduled wake" in the headline is a caption where a label belongs.
+    prefix = "Scheduled wake "
+    if head.startswith(prefix):
+        head = head[len(prefix) :]
+    return head.strip()
+
+
 def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSeverity]:
     """A compaction that did NOT run, and the ink it deserves.
 
@@ -211,7 +259,16 @@ def assistant_stop_notice(
     ordinary case. Every surface must call this — the phone had no
     ``stop_reason`` branch whatsoever, so refusals, failed turns and
     interrupted turns were invisible on it.
+
+    ``text`` is stripped HERE rather than trusted from the caller. The TUI
+    strips before calling and the phone fold does not, so a whitespace-only
+    assistant turn with ``stop_reason="error"`` produced "turn failed" on the
+    TUI and SILENCE on the phone — D3 reopening inside the module built to
+    close it. The emptiness test below is the whole decision for the
+    error/aborted arms, so whose definition of "empty" wins cannot be a
+    per-host choice.
     """
+    text = text.strip()
     if stop_reason == "refusal":
         payload = provider_payload or {}
         # The fallback keeps the marker grammar (D3): every other refusal

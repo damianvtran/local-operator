@@ -762,23 +762,6 @@ def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
     return bool(text.strip())
 
 
-def _typed_line_of(text: str) -> str | None:
-    """The ``$skill`` line behind a persisted payload, or ``None``.
-
-    A thin lazy-import wrapper over
-    :func:`local_operator.skills.invoke.typed_line_of`, matching the contract
-    the rest of this module keeps with the skills subsystem: it is imported at
-    the point of use and every failure degrades to "not an invocation", so a
-    broken or absent skills package can never stop a transcript replaying.
-    """
-    try:
-        from local_operator.skills.invoke import typed_line_of
-
-        return typed_line_of(text)
-    except Exception:  # noqa: BLE001 — replay must never fail on this
-        return None
-
-
 #: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
 #: the session itself produced. Matched on the transport's own phrases rather
 #: than on the exception type: `ConnectionError` also carries the graceful
@@ -806,53 +789,6 @@ def _is_runtime_gone(error: BaseException) -> bool:
     if "stopped" in text or "reconnecting" in text:
         return False
     return any(marker in text for marker in _RUNTIME_GONE_MARKERS)
-
-
-def _gate_timeout_notice(details: dict[str, Any]) -> str:
-    """Say what expired, what it wanted, and that nobody chose it.
-
-    The distinction this line has to carry is denial-by-expiry versus
-    denial-by-decision: the user did not say no, they were not there. Naming
-    the tool matters for the same reason the picker's parked row wants it —
-    "a tool was denied" and "`bash rm -rf build/` was denied" are different
-    amounts of help when you are reconstructing what happened overnight.
-    """
-    tool = str(details.get("tool") or "a tool").strip()
-    description = str(details.get("description") or "").strip()
-    waited = details.get("waited_s")
-    # REPORT THE WAIT THAT HAPPENED. This used to floor at one hour
-    # (`max(1, waited // 3600)`), so a 30-second expiry — a live, reachable
-    # path when there is no registrant, or notifications are off and nothing
-    # is watching — rendered as "waited 1h" (round 3, D12). This row exists
-    # to preserve the difference between denied-by-decision and
-    # denied-by-absence, and a fabricated duration undermines the one number
-    # that has to be trustworthy. An absent or unreadable value says so
-    # rather than rounding up to an hour.
-    try:
-        seconds = float(waited) if waited is not None else 0.0
-    except (TypeError, ValueError):
-        seconds = 0.0
-    if seconds <= 0:
-        waited_text = "a while"
-    elif seconds < 60:
-        waited_text = f"{int(seconds)}s"
-    elif seconds < 3600:
-        waited_text = f"{int(seconds // 60)}m"
-    elif seconds < 86400:
-        waited_text = f"{int(seconds // 3600)}h"
-    else:
-        waited_text = f"{int(seconds // 86400)}d"
-    # An `ask` is a QUESTION, and an unanswered question was not "denied":
-    # describing it in the approval gate's vocabulary told the user something
-    # that did not happen (D12's copy note).
-    kind = str(details.get("kind") or "approval").strip().lower()
-    subject = f"{tool} · {description}" if description else tool
-    if kind == "ask":
-        return (
-            f"waited {waited_text} for an answer with nobody attached, "
-            f"then moved on — {subject}"
-        )
-    return f"waited {waited_text} for approval with nobody attached, then denied it — {subject}"
 
 
 #: How often the band re-counts running background jobs. Nothing emits an
@@ -13449,7 +13385,8 @@ class OperatorApp(App[None]):
         # §2.5's `text == sent` rule bought replay consistency for ordinary
         # prompts, and it does not reach this path: `$skill` already has a
         # display/sent split — `sent` is the rendered body, the row is the typed
-        # line, and `_typed_line_of` exists to keep a resumed row from becoming
+        # line, and `harness.rows.typed_line_of` exists to keep a resumed row
+        # from becoming
         # the whole SKILL.md. Expanding the row here made live and REPLAY
         # disagree for the paste case alone, because `render_invocation` records
         # the typed line in the payload's `invocation=` attribute and replay
