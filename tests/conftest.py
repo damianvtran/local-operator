@@ -26,7 +26,11 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import signal
+import time
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -352,3 +356,127 @@ def fresh_served_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     import local_operator.providers.failover as failover
 
     monkeypatch.setattr(failover, "_SERVED_SELECTORS", set())
+
+
+@pytest.fixture(autouse=True)
+def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> Iterator[None]:
+    """Kill any secret broker a test caused to start, and remove its runtime dir.
+
+    **Why this is suite-wide rather than in ``tests/unit/secrets`` (QA Q7).** It
+    began there, because retrieval lazily starts a daemon (design §13) and the
+    CLI tests drive real ``lop secret`` subprocesses — a full run of that one
+    directory left ~90 brokers alive, each holding a master key in memory and
+    idling for 30 minutes. But the TUI now registers itself as a session at
+    startup, so **TUI tests start brokers too**, and a fixture scoped to that
+    directory could not see them: a full-tree run leaked live brokers parented
+    to pytest workers plus their ``$TMPDIR/lop-secrets-<uid>-<digest>`` runtime
+    directories. On the shared machine this repo is worked on, with many
+    concurrent agent sessions, a leaked key-holding daemon is a resource an
+    agent inflicts on the operator rather than a harmless artifact — so the
+    sweep belongs where every test that CAN spawn one is covered, not where the
+    tests that obviously do live.
+
+    Scoped to this test's own config dirs, never a global sweep by process name:
+    another xdist worker — or the operator's own live session — may legitimately
+    be running a broker at that moment, and killing by name would take those
+    down too.
+
+    Teardown-only: each test gets fresh temporary directories, so there is
+    nothing to clean up beforehand.
+    """
+    yield
+
+    # The broker is a POSIX daemon (`client.py` imports `fcntl`, `peer.py`
+    # authenticates over a unix socket), so on Windows there is nothing to
+    # sweep and the import below would raise `ModuleNotFoundError` for every
+    # test in the run — which is exactly how the `filesystem-boundaries-windows`
+    # job caught this.
+    if os.name == "nt":
+        return
+
+    candidates = _secret_config_dirs(request, isolate_environment)
+    if not candidates:
+        return
+
+    # Imported in the teardown rather than at module scope: this conftest is
+    # loaded for every test session, and the secrets client drags in
+    # fcntl/socket machinery a run that touches no store never needs.
+    from local_operator.secrets import client
+    from local_operator.secrets.keys import secrets_dir
+    from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
+
+    for candidate in candidates:
+        # Only ask candidates that actually have a socket. A broker is a
+        # per-config-dir singleton, so this is the complete question, and it
+        # skips the connect attempt for the many directories that never held
+        # one.
+        #
+        # Every filesystem call here is defensive because THIS RUNS AS TEARDOWN
+        # FOR EVERY TEST, including tests that deliberately break the calls it
+        # makes: `test_unexpected_exception_becomes_error_result` monkeypatches
+        # `Path.exists` to raise, and monkeypatch has not unwound yet when an
+        # autouse fixture declared here tears down. A cleanup fixture that can
+        # fail a passing test is worse than the leak it prevents.
+        try:
+            if not socket_path(candidate).exists():
+                continue
+            status = client.broker_status(candidate)
+        except Exception:  # noqa: BLE001 - see above; cleanup never fails a test
+            continue
+        if status is None:
+            continue
+        pid = status.get("pid")
+        if not isinstance(pid, int):
+            continue
+        with suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and client.is_running(candidate):
+            time.sleep(0.05)
+
+    # The fallback runtime dir is derived from the SECRETS dir and is created
+    # for any config dir whose socket path would exceed sun_path — pytest's
+    # tmp_path is routinely ~145 bytes against a 103-byte limit, so here that is
+    # the common case rather than the exotic one. It is created even for a
+    # config dir whose store was never initialised, hence the unconditional
+    # removal. AFTER the broker is stopped, since the socket lives inside it.
+    for candidate in candidates:
+        # `Exception`, not `OSError`, for the reason above: a test may have
+        # replaced the path machinery this line depends on.
+        with suppress(Exception):
+            shutil.rmtree(_runtime_fallback_dir(secrets_dir(candidate)), ignore_errors=True)
+
+
+def _secret_config_dirs(request: pytest.FixtureRequest, home: Path) -> list[Path]:
+    """Every directory this test could have used as a config dir.
+
+    Derived from the test's temporary directories rather than read back from
+    ``LOCAL_OPERATOR_CONFIG_DIR``: ``monkeypatch`` has already undone the test's
+    ``setenv`` by the time an autouse fixture declared here tears down, so the
+    environment no longer names the directory the test actually used.
+
+    Every directory under ``tmp_path`` is a candidate, because enumerating the
+    known shapes does not hold. The suite uses ``tmp_path`` itself
+    (``test_logger_silence`` points the override straight at it),
+    ``tmp_path/config`` (the secrets conftest and ``test_cli``), and arbitrary
+    depths — ``test_a_deep_config_dir_still_gets_a_bindable_socket`` nests one
+    160 bytes down deliberately, and a hardcoded list silently missed it,
+    leaking one runtime dir per run.
+
+    Cheap because it only runs for a test that HAS a ``tmp_path``, and a test's
+    tmp_path holds a handful of entries; the ~16k tests that never touch a
+    store pay one ``getattr``.
+    """
+    candidates = [home / ".local-operator"]
+    tmp_path = getattr(request.node, "funcargs", {}).get("tmp_path")
+    if not isinstance(tmp_path, Path):
+        return candidates
+    # `Exception`, not `OSError`: this walk runs in the teardown of EVERY test,
+    # and a test that monkeypatched `Path.exists`/`is_dir` to raise has not had
+    # that undone yet. Discovering nothing is the right failure here — the
+    # sweep skips a directory, it does not fail the test that just passed.
+    with suppress(Exception):
+        if tmp_path.is_dir():
+            candidates.append(tmp_path)
+            candidates.extend(child for child in tmp_path.rglob("*") if child.is_dir())
+    return candidates

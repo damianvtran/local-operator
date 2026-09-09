@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -438,13 +440,32 @@ def test_child_command_flags_after_the_separator_are_preserved(cli) -> None:
     assert result.stdout == b"-n [key-value]", result.stderr
 
 
-def test_harden_and_unlock_report_the_missing_broker_honestly(cli) -> None:
-    """They must not pretend to succeed — see access.py's module docstring."""
-    for verb in ("harden", "unlock"):
-        result = cli(verb)
-        assert result.returncode == 2
-        assert b"needs the secret broker" in result.stderr
-        assert result.stdout == b""
+def test_unlock_refuses_a_store_that_is_not_hardened(cli) -> None:
+    """``unlock`` on a keyfile store has nothing to unlock, and says so.
+
+    Replaces PR 1's "the broker does not exist yet" assertion: the broker ships
+    here, so the honest failure is now about the store's TIER rather than about
+    a missing capability.
+    """
+    cli("set", "API_KEY", stdin=b"key-value\n")
+    result = cli("unlock")
+    assert result.returncode == 2
+    assert b"keyfile mode" in result.stderr
+    assert b"harden" in result.stderr
+    assert result.stdout == b""
+
+
+def test_harden_refuses_without_a_terminal_rather_than_reading_a_flag(cli) -> None:
+    """A passphrase never comes from argv; argv is readable by any same-uid process.
+
+    With stdin not a terminal ``getpass`` cannot prompt, and the CLI must fail
+    with that explanation instead of inventing a ``--passphrase`` flag.
+    """
+    cli("set", "API_KEY", stdin=b"key-value\n")
+    result = cli("harden", stdin=b"")
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert b"terminal" in result.stderr or b"passphrase" in result.stderr
 
 
 def test_secret_help_does_not_promise_a_vault(cli) -> None:
@@ -453,3 +474,264 @@ def test_secret_help_does_not_promise_a_vault(cli) -> None:
     text = helped.stdout.lower()
     for overclaim in (b"vault", b"unbreakable", b"military-grade", b"hacker-proof"):
         assert overclaim not in text
+
+
+def _typed_cli(config: Path, arguments: list[str], answers: list[str]) -> tuple[int, str]:
+    """Run ``lop secret ...`` on a real pty, typing ``answers`` at each prompt.
+
+    ``harden`` and ``unlock`` read through ``getpass``, which opens
+    ``/dev/tty``: without a pty they take the "no terminal" refusal branch and
+    the success path is never exercised. That is exactly why CI missed QA's Q2
+    — the only ``unlock`` test asserted the keyfile rejection, which returns
+    before the broker is contacted.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    environment.update(
+        HOME=str(config.parent / "home"),
+        LOCAL_OPERATOR_CONFIG_DIR=str(config),
+        PYTHONPATH=str(REPO_ROOT),
+        TERM="xterm-256color",
+    )
+    environment.pop("NO_COLOR", None)
+
+    pid, handle = pty.fork()
+    if pid == 0:  # pragma: no cover - the child execs immediately
+        os.environ.clear()
+        os.environ.update(environment)
+        os.execv(sys.executable, [sys.executable, "-m", "local_operator.cli", "secret", *arguments])
+    pending = list(answers)
+    captured = b""
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        try:
+            chunk = os.read(handle, 4096)
+        except OSError:  # the child closed the pty
+            break
+        if not chunk:
+            break
+        captured += chunk
+        # Answer as each prompt appears, and keep draining meanwhile: a pty
+        # buffer that fills while nobody reads blocks the child on write.
+        if pending and b"assphrase" in chunk:
+            os.write(handle, (pending.pop(0) + "\n").encode())
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status), captured.decode(errors="replace")
+
+
+def test_harden_restart_unlock_get_round_trip(cli) -> None:
+    """The passphrase tier must be enterable AND usable (QA Q2).
+
+    The tier the design nominates as load-bearing had never worked end to end
+    in either direction: `unlock` was dispatched behind the ancestry gate, so
+    it required descending from a registered session — while nothing in
+    shipping code registered one. After `harden` the correct passphrase was
+    refused and even `status` failed, with the plaintext key already deleted.
+
+    This drives the whole operator journey through the real CLI, including the
+    broker restart that stands in for a reboot, because every step in
+    isolation passed while the sequence did not.
+    """
+    config: Path = cli.config
+    passphrase = "journey-passphrase"
+
+    assert cli("set", "JOURNEY", stdin=b"journey-value\n").returncode == 0
+    assert cli("get", "JOURNEY").stdout == b"journey-value"
+
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+    assert "hardened" in output
+
+    try:
+        # A reboot, in effect: the unlocked key lives only in broker memory.
+        assert cli("broker", "restart").returncode == 0
+
+        # Before unlocking there is no key anywhere, so this must fail cleanly
+        # and print nothing on stdout.
+        locked = cli("get", "JOURNEY")
+        assert locked.returncode == 2
+        assert locked.stdout == b""
+
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        assert "Unlocked" in output
+
+        # And the store is reachable again from the operator's own terminal.
+        served = cli("get", "JOURNEY")
+        assert served.returncode == 0, served.stderr
+        assert served.stdout == b"journey-value"
+
+        status = cli("status")
+        assert status.returncode == 0, status.stderr
+        assert b"passphrase" in status.stdout
+
+        # **The whole lifecycle, not just `get` (QA Q9).** This test stopped at
+        # `get`, and that is precisely why the tier shipped unable to accept a
+        # NEW secret: `set` was the one verb passing `create=True`, which
+        # short-circuited the broker and hit the "no key on disk" refusal, so a
+        # hardened store was frozen at whatever it held when it was hardened —
+        # with no workaround, since `update` refuses unknown names. That is the
+        # harden-then-migrate sequence this tier exists for. One `set` after the
+        # unlock would have caught it, so every verb the operator needs after
+        # unlocking is exercised here rather than one.
+        added = cli("set", "JOURNEY_TWO", stdin=b"second-value\n")
+        assert added.returncode == 0, added.stderr
+        assert cli("get", "JOURNEY_TWO").stdout == b"second-value"
+
+        assert cli("update", "JOURNEY_TWO", stdin=b"updated-value\n").returncode == 0
+        assert cli("get", "JOURNEY_TWO").stdout == b"updated-value"
+
+        listed = cli("list")
+        assert listed.returncode == 0, listed.stderr
+        assert b"JOURNEY_TWO" in listed.stdout and b"JOURNEY" in listed.stdout
+
+        assert cli("rm", "JOURNEY_TWO", "--yes").returncode == 0
+        assert cli("get", "JOURNEY_TWO").returncode == 2
+        assert b"JOURNEY_TWO" not in cli("list").stdout
+
+        # **`rotate`, and then the whole store again after it (QA Q10).** The
+        # journey stopped short of the one verb that REPLACES the key, and that
+        # is exactly the verb that was not tier-aware: it installed a plaintext
+        # `master.key` while `unlock` kept unwrapping the old one, so a single
+        # rotation made every secret undecryptable AND silently undid the
+        # hardening, with `status` still reporting `passphrase`. Any verb that
+        # can run on a hardened store belongs in this sequence.
+        code, output = _typed_cli(config, ["rotate"], [passphrase, passphrase])
+        assert code == 0, output
+        assert "rotated 1 secret(s)" in output
+
+        # The tier's defining property (design §2.3) survives the rotation.
+        assert not (config / "secrets" / "master.key").exists(), "plaintext key after rotate"
+        assert (config / "secrets" / "master.key.wrapped").exists()
+
+        # A reboot after the rotation: the NEW key must be the one the wrapped
+        # file yields, which is what the pre-fix code got wrong.
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+
+        survived = cli("get", "JOURNEY")
+        assert survived.returncode == 0, survived.stderr
+        assert survived.stdout == b"journey-value"
+
+        status = cli("status")
+        assert b"passphrase" in status.stdout
+        assert b"WARNING" not in status.stdout
+    finally:
+        cli("broker", "stop")
+
+
+def test_rotate_on_a_hardened_store_keeps_every_secret(cli) -> None:
+    """QA Q10, as reported: one rotation, exit 0, and the store was destroyed.
+
+    The repro verbatim — set, harden, stop the broker (a reboot), unlock,
+    rotate — after which `get` returned "No secret named 'API_KEY'" and
+    `status` reported `secrets 0 / damaged 1`. Two assertions, because the bug
+    had two independent consequences and either one alone would have let it
+    ship: the value must survive, AND no plaintext master key may exist
+    afterwards. The second is the tier's whole claim (design §2.3) and it
+    failed silently — `key_mode` answered `passphrase` from the stale wrapped
+    file while the live key sat unwrapped beside the database.
+    """
+    config: Path = cli.config
+    passphrase = "rotate-passphrase"
+
+    assert cli("set", "API_KEY", stdin=b"hunter2").returncode == 0
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+
+    try:
+        assert cli("broker", "stop").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        assert cli("get", "API_KEY").stdout == b"hunter2"
+
+        code, output = _typed_cli(config, ["rotate"], [passphrase, passphrase])
+        assert code == 0, output
+
+        # Assertion 1: the data survives a rotation on a hardened store. The
+        # broker restart stands in for the reboot the operator would next do,
+        # and proves the WRAPPED file now yields the post-rotation key.
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        served = cli("get", "API_KEY")
+        assert served.returncode == 0, served.stderr
+        assert served.stdout == b"hunter2"
+
+        # Assertion 2: no plaintext master key on disk, ever, in this tier.
+        assert not (config / "secrets" / "master.key").exists()
+        assert cli("status").stdout.count(b"damaged") == 0
+    finally:
+        cli("broker", "stop")
+
+
+def test_harden_repairs_a_store_a_pre_fix_rotate_damaged(cli) -> None:
+    """An operator who already hit Q10 has a CLI way out (QA Q10, recovery).
+
+    The damaged state is a plaintext `master.key` beside a STALE
+    `master.key.wrapped`. Before this fix there was no exit: `unlock` still
+    returned 0 while decrypting nothing, and `harden` refused with "already
+    hardened" because it saw the stale wrapped file. `key_mode` now answers on
+    the file that decides the tier — a plaintext key means `keyfile` — so
+    `harden` reaches the store and re-wraps the LIVE key.
+
+    The damage is recreated through the real key primitives rather than by
+    hand-writing files, so this stays a test of the recovery path and not of
+    the fixture's idea of what the bug looked like.
+    """
+    config: Path = cli.config
+    passphrase = "repair-passphrase"
+
+    assert cli("set", "API_KEY", stdin=b"hunter2").returncode == 0
+    code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+    assert code == 0, output
+
+    try:
+        assert cli("broker", "stop").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+
+        damage = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from local_operator.secrets.access import open_store\n"
+            "from local_operator.secrets.crypto import generate_master_key\n"
+            "from local_operator.secrets.keys import stage_master_key\n"
+            "from local_operator.secrets.store import install_master_key_if_current\n"
+            "store = open_store(); key = generate_master_key()\n"
+            "stage_master_key(None, key)\n"
+            "store.rotate(key); install_master_key_if_current(key)\n" % str(REPO_ROOT)
+        )
+        environment = {
+            key: value for key, value in os.environ.items() if not key.startswith("CMUX_")
+        }
+        environment.update(
+            HOME=str(config.parent / "home"),
+            LOCAL_OPERATOR_CONFIG_DIR=str(config),
+            PYTHONPATH=str(REPO_ROOT),
+        )
+        broken = subprocess.run(
+            [sys.executable, "-c", damage], capture_output=True, env=environment, timeout=120
+        )
+        assert broken.returncode == 0, broken.stderr
+        assert (config / "secrets" / "master.key").exists(), "failed to recreate the damage"
+
+        # `status` must NAME the inconsistency rather than reporting a tier it
+        # is no longer providing.
+        status = cli("status")
+        assert status.returncode == 0, status.stderr
+        assert b"WARNING" in status.stdout
+        assert b"plaintext master key" in status.stdout
+
+        # And `harden` is the way out: it re-wraps the live key.
+        code, output = _typed_cli(config, ["harden"], [passphrase, passphrase])
+        assert code == 0, output
+        assert not (config / "secrets" / "master.key").exists()
+
+        assert cli("broker", "restart").returncode == 0
+        code, output = _typed_cli(config, ["unlock"], [passphrase])
+        assert code == 0, output
+        recovered = cli("get", "API_KEY")
+        assert recovered.returncode == 0, recovered.stderr
+        assert recovered.stdout == b"hunter2"
+    finally:
+        cli("broker", "stop")

@@ -6,6 +6,11 @@ WRITE path — the analytics backfill wrote 612 rows into the operator's real
 database from a run that looked sandboxed. This store writes to
 ``config_dir()/secrets``, so the fixture redirects ``HOME`` as well and the
 tests below assert the store landed under ``tmp_path`` rather than trusting it.
+
+The broker/runtime-dir sweep that used to live here now sits in
+``tests/conftest.py``: the TUI registers a session at startup, so tests well
+outside this directory spawn brokers too, and a fixture scoped here could not
+see them (QA Q7).
 """
 
 from __future__ import annotations

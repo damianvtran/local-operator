@@ -240,6 +240,13 @@ class VariableStore:
         # returned by ``get``/``read``.
         self._credentials: dict[str, str] = {}
         self._credential_meta: dict[str, SessionCredential] = {}
+        # Values to SCRUB but never to inject or advertise (design §6). A
+        # long-term secret a child fetched through the broker lands here so
+        # `redact` catches it in that child's output, while `credential_env`
+        # and `credential_names` stay untouched — registering a value for
+        # scrubbing must never make it readable or injectable, which is why
+        # this is a separate set rather than another entry in `_credentials`.
+        self._redactions: set[str] = set()
 
     # -- sources -----------------------------------------------------------
     def _project_file(self) -> dict[str, str]:
@@ -357,6 +364,30 @@ class VariableStore:
         """
         return dict(self._credentials)
 
+    def register_redaction(self, value: str) -> bool:
+        """Scrub ``value`` from future output without storing it as a credential.
+
+        The §6 sink for broker retrievals: a value a CHILD fetched (via
+        ``$(lop secret get X)``) never passes through this process, so the
+        session is told about it out of band and records it here before the
+        child is allowed to produce any output. Returns whether it was newly
+        registered.
+        """
+        trimmed = value.strip()
+        if not trimmed:
+            return False
+        if trimmed in self._redactions:
+            return False
+        self._redactions.add(trimmed)
+        return True
+
+    def redaction_values(self) -> list[str]:
+        """Every value to scrub: session credentials plus §6 registrations.
+
+        Values only, never names — the caller is a filter, not a reader.
+        """
+        return [*self._credentials.values(), *self._redactions]
+
     def redact(self, text: str) -> str:
-        """Replace every stored credential value in ``text`` with ``[redacted]``."""
-        return redact_secret_values(text, self._credentials)
+        """Replace every stored credential or registered value with ``[redacted]``."""
+        return redact_secret_values(text, self.redaction_values())
