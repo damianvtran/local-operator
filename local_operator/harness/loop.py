@@ -44,6 +44,8 @@ from local_operator.harness.intent import (
     scan_streaming_intent,
 )
 from local_operator.harness.types import (
+    FAULT_INVALID_ARGUMENTS,
+    FAULT_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -55,6 +57,7 @@ from local_operator.harness.types import (
     ChatRequest,
     Content,
     CustomMessage,
+    InvalidToolArgumentsError,
     LoopConfig,
     Message,
     MessageEndEvent,
@@ -146,9 +149,13 @@ SKIPPED_RESULT_TEXT = "Tool call skipped: interrupted by steering."
 # are the user's decision, our own bug, or the world failing. Only the first
 # three feed the tool-call validity figure — see ``analytics.model.MODEL_FAULTS``,
 # which owns that classification for the read side.
-FAULT_KEY = "__fault"
+#
+# ``FAULT_KEY`` and ``FAULT_INVALID_ARGUMENTS`` are re-exported from
+# ``harness.types`` rather than declared here: a tool BODY also needs to claim
+# the invalid-arguments class (see ``InvalidToolArgumentsError``), and tool
+# modules import ``harness.types`` while this module imports them indirectly.
+# Importing them keeps one spelling for the value the ledger stores.
 FAULT_UNKNOWN_TOOL = "unknown_tool"  # model named a tool that does not exist
-FAULT_INVALID_ARGUMENTS = "invalid_arguments"  # model violated the tool's schema
 FAULT_DUPLICATE_ID = "duplicate_id"  # model emitted one call id twice
 FAULT_DENIED = "denied"  # the user declined the call
 FAULT_GATE_FAILED = "gate_failed"  # our approval plumbing raised
@@ -2086,6 +2093,31 @@ class AgentLoop:
             return await tool.execute(call.id, item.args, signal, on_update, execution_context)
         except asyncio.CancelledError:
             raise
+        except InvalidToolArgumentsError as exc:
+            # An argument-SHAPE rejection raised from inside a tool body. This
+            # is the one exception class that carries its own fault
+            # classification, and this is the only place it is translated —
+            # the marker is set here, where the reason is known, rather than
+            # inferred later from the message text (``_classify_fault``).
+            #
+            # Why it needs its own branch: schema validation
+            # (``validate_tool_arguments``) can only check a JSON-Schema type,
+            # and a tool's real argument grammar is often finer. ``read``'s
+            # ``range`` is typed ``str | None``, so the literal-quoted
+            # ``'"270-330"'`` the model actually emitted passes validation and
+            # fails in the parser — landing in the generic handler below and
+            # being recorded as ``execution``, i.e. laundered out of the
+            # model-accuracy figure. Logged at DEBUG, not WARNING: unlike the
+            # handler below this is a MODEL mistake, not a harness defect, and
+            # it is already counted where it belongs.
+            logger.debug("tool %s rejected malformed arguments: %s", tool.name, exc)
+            return ToolResult(
+                tool_call_id=call.id,
+                tool_name=tool.name,
+                is_error=True,
+                content=[TextContent(text=f"invalid arguments: {exc}")],
+                details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
+            )
         except Exception as exc:
             logger.warning("tool %s raised", tool.name, exc_info=True)
             return ToolResult(
@@ -2680,6 +2712,14 @@ class AgentLoop:
         the reason is known where the result is built and nowhere else, and a
         reworded message must not silently reclassify a model fault as an
         execution error (or the reverse, which would inflate the benchmark).
+
+        A TOOL BODY is one such source. The fallback is right only for a call
+        whose arguments were usable, so a tool that rejects a malformed
+        argument its JSON-Schema type was too coarse to catch must say so —
+        by raising ``InvalidToolArgumentsError`` or returning a result already
+        carrying the marker. Without that, an argument-shape rejection is
+        indistinguishable here from a genuine execution failure and is
+        silently laundered into the execution bucket.
         """
         if not result.is_error:
             return ""

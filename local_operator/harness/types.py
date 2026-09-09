@@ -68,6 +68,89 @@ from local_operator.harness.wake import WakeSchedule
 # ---------------------------------------------------------------------------
 
 
+#: Key under which ``ToolResult.details`` carries WHY a call did not run
+#: cleanly. Declared HERE, and re-exported by ``harness.loop`` (which owns the
+#: rest of the vocabulary and all classification), because tool modules import
+#: this module and must not import the loop. One definition, two importers —
+#: so the ledger's spelling cannot drift between writer and classifier.
+FAULT_KEY = "__fault"
+
+#: The single fault class a TOOL BODY may assert about itself: the arguments
+#: the model emitted were MALFORMED. Lives here for the same layering reason;
+#: the value must stay a member of ``analytics.model.MODEL_FAULTS``, which is
+#: what a test pins.
+FAULT_INVALID_ARGUMENTS = "invalid_arguments"
+
+
+class InvalidToolArgumentsError(ValueError):
+    """The model emitted an argument this tool cannot parse.
+
+    Raise this — never a bare ``ValueError`` — when an argument's SHAPE is
+    wrong, and the executor records the call as ``invalid_arguments`` (a MODEL
+    fault, counted in the tool-call error rate) instead of ``execution``.
+
+    **MALFORMED, NOT MERELY UNSATISFIABLE. Read this before raising it.**
+    The test is whether the argument could ever have been valid, not whether
+    the call succeeded:
+
+    - Malformed — raise this. ``range='"270-330"'`` is not a line range in any
+      world; ``pattern='('`` is not a regex. The model could have known, from
+      the schema alone, that the value was wrong before sending it.
+    - Unsatisfiable — do NOT raise this; return an ordinary error result and
+      let it classify as ``execution``. A path that does not exist, an HTTP
+      500, a refused credential, a file that vanished between planning and
+      execution. The argument was well-formed; the world did not cooperate.
+      A missing file is the canonical case and is explicitly NOT a model fault
+      even though it arrives at the same handler.
+
+    Why the boundary is worth this much prose: ``invalid_arguments`` feeds
+    ``analytics.model.MODEL_FAULTS``, and therefore the published
+    ``validity`` / ``tool_call_error_rate`` benchmark figures. Marking an
+    unsatisfiable call as a model fault INFLATES the error rate, which is the
+    worse failure direction — under-reporting is merely incomplete, while
+    over-reporting corrupts the measurement. When a case is genuinely
+    ambiguous, leave it as ``execution``.
+
+    This exists because a JSON-Schema type is coarser than an argument's real
+    grammar. ``read``'s ``range`` is typed ``str | None``, so ``'"270-330"'``
+    passes ``validate_tool_arguments`` and fails in the tool body — arriving
+    at the generic handler indistinguishable from a genuine execution failure.
+    The class is known where the value is parsed and nowhere else, which is
+    exactly the principle ``AgentLoop._classify_fault`` is built on: the
+    marker is SET at the source, never text-matched out of a message
+    afterwards.
+    """
+
+
+class EnvironmentDependentRejectionError(ValueError):
+    """A validator refused a value for a reason OUTSIDE the arguments.
+
+    The escape hatch from :class:`InvalidToolArgumentsError`, for the case a
+    params model rejects a value by consulting live config, the environment,
+    the filesystem or the clock rather than by inspecting the argument's
+    shape. Such a rejection is NOT the model's fault: the value may be exactly
+    what the advertised schema offered, and the world moved underneath it.
+
+    The motivating case is ``effort``. Its enum is rendered into the schema at
+    tool-BUILD time from the configured tiers, but the validator re-checks the
+    tier against config at CALL time. Between the two, an operator can edit a
+    tier away — or ``config.yml`` can simply become unreadable, which
+    ``configured_effort_tiers`` deliberately reports as "no tiers" rather than
+    raising, precisely so a corrupt config costs a tier picker and not a
+    session. Without this class the model emits the one value its own schema
+    contained, gets refused, and is billed a model fault for the operator's
+    config — inflating the published benchmark in the direction
+    :class:`InvalidToolArgumentsError` calls the worse one.
+
+    Raise it from inside a pydantic validator; ``ValidationError.errors()``
+    preserves the original exception under ``ctx['error']``, which is how the
+    tool layer tells this apart from a static shape violation WITHOUT matching
+    on message text. Any rejection that is a pure function of the arguments
+    (``extra="forbid"``, a type error, a constrained int, a cross-field
+    validator) must NOT use this — those are genuine model faults.
+    """
+
+
 class RenderedStreamError(Exception):
     """A stream failure whose ``str()`` is the whole story for the user.
 
