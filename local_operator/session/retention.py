@@ -110,6 +110,19 @@ _SIDECAR_NAMES = frozenset(
 #: this constant.
 TRANSCRIPT_FILENAME = "transcript.jsonl"
 
+#: The desktop draft marker: a session the HTTP frontend created that has no
+#: transcript yet. Spelled here beside :data:`TRANSCRIPT_FILENAME` and for the
+#: same import-weight reason — this module is the lean home for on-disk names,
+#: and the two call sites that need it (``session.catalog``'s poll and
+#: ``server.utils.desktop_sessions``' writer) sit on opposite sides of the
+#: server/session layering, so neither can own the literal without one
+#: importing the other.
+#:
+#: A constant rather than three copies of the string: the catalog's poll probes
+#: for this file once per unlisted directory, so a rename that missed one site
+#: would not fail loudly — it would silently stop listing every desktop draft.
+DESKTOP_MARKER_NAME = "desktop.json"
+
 #: The files whose mtime IS "when the user last worked here": the transcript
 #: (every turn appends to it) and the peer-message spool (a note the user has
 #: not read yet is activity waiting for them). Nothing else counts — see
@@ -316,11 +329,39 @@ def session_activity(directory: Path) -> float | None:
     ``max_sessions`` or the recent-N guard, and is only ever a
     ``remove_empty`` candidate. Stdlib-only and import-light because the
     picker calls it per directory on every open.
+
+    A thin adapter over :func:`session_activity_path`, which holds the actual
+    rule. The two must never grow separate implementations — see that
+    function's note on why the clock is single-sourced.
+    """
+    return session_activity_path(os.fspath(directory))
+
+
+def session_activity_path(directory: str) -> float | None:
+    """:func:`session_activity` taking a plain path string. THE clock's body.
+
+    Identical rule, identical answer; only the argument type differs. It exists
+    because the sidebar's 2-second catalog poll calls this once per session
+    directory, and building two ``Path`` objects per candidate to stat two
+    fixed names is pure overhead there: profiling the poll against a
+    1,946-directory store attributed 1.21 s of a 6.47 s run to ``pathlib``
+    plumbing (``__fspath__``, ``__str__``, ``drive``, ``with_segments``) that
+    exists only to reach ``posix.stat``. ``os.stat(os.path.join(...))`` reaches
+    the same syscall with none of it.
+
+    **This is deliberately the ONLY body, with the ``Path`` form delegating to
+    it, rather than a faster copy for the hot caller.** The clock is shared
+    with ``session.cleanup`` precisely so the picker's "most recent" and the
+    retention policy's "most recent" are the same directories (see
+    :func:`session_activity`); a second implementation is exactly how those two
+    answers drift apart again, and the failure mode is the policy deleting rows
+    the picker is still showing (QA round 1 Q2, UX round 2 U11). Optimising the
+    call shape is safe; forking the rule is not.
     """
     newest: float | None = None
     for name in _ACTIVITY_FILES:
         try:
-            stamp = (directory / name).stat().st_mtime
+            stamp = os.stat(os.path.join(directory, name)).st_mtime
         except OSError:
             continue
         newest = stamp if newest is None else max(newest, stamp)
