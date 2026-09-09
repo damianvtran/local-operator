@@ -8702,13 +8702,14 @@ class Session:
             # tokens — 57% of a ~640k trigger — and every pass then reclaimed
             # nothing and immediately re-fired. Filtering injections shrinks it
             # but cannot bound it; N genuine turns still grow without limit.
-            # ``_advisor_floor_cap`` is reused rather than a new knob because
-            # this window is the same kind of quantity as the task floor it
-            # already bounds, and on the same local ruler.
+            # The bound is capacity-shaped rather than a multiple of
+            # ``keep_recent_tokens`` — see :meth:`_preserved_turns_cap` for why
+            # sharing ``_advisor_floor_cap``'s task term evicted real
+            # constraints on a small keep window.
             cap: Any = getattr(compaction_api, "cap_preserved_user_turns", None)
             preserved_turns_cap: int | None = None
             if callable(cap):
-                preserved_turns_cap = self._advisor_floor_cap(plan.settings)
+                preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(preserved_user_turns, cap=preserved_turns_cap)
                 preserved_user_turns = list(capped)
             first_kept_entry_id = kept[0].id
@@ -9999,6 +10000,62 @@ class Session:
             # ability to compact at all.
             return keep_recent
         return max(keep_recent, min(task_cap, capacity_cap))
+
+    def _preserved_turns_cap(self, settings: Any) -> int:
+        """Token bound on the block of verbatim user turns compaction carries.
+
+        Separate from :meth:`_advisor_floor_cap` despite bounding a
+        superficially similar window, because the two quantities are shaped
+        differently and sharing the formula produced a real regression.
+
+        ``_advisor_floor_cap``'s tight term is ``keep_recent_tokens *
+        _TASK_FLOOR_KEEP_MULTIPLE``, which is right for the TASK FLOOR: that
+        floor widens the recency window, so expressing it as a multiple of that
+        same window is a like-for-like comparison. The preserved block is not a
+        recency window. It is an accumulation across the whole SESSION, and its
+        natural scale is the context the session runs in, not the user's
+        verbatim-keep preference. Reusing the task multiple made the cap 200
+        tokens whenever ``keep_recent_tokens`` was 40 — smaller than a single
+        user turn — so the newest constraint became the only survivor and every
+        older one was evicted. Two existing advisor tests caught exactly that.
+
+        ``threshold // 4`` instead: a capacity-shaped bound, one step tighter
+        than the ``threshold // 2`` ceiling ``_advisor_floor_cap`` uses, since
+        the preserved block and the task floor can both be live at once and
+        together they must still leave a pass something to summarize. On the
+        session this fixes (a ~640k trigger) it resolves to 160,000 against the
+        362,780 the block actually reached, so the runaway is bounded to well
+        under half; on the shipped 1M-window default it is 150,000, and on a
+        128k model 25,600.
+
+        The ``max(keep_recent, ...)`` tail mirrors ``_advisor_floor_cap``'s for
+        the same reason: on a small window the capacity term can fall below the
+        verbatim window the user configured, and a preserved block narrower
+        than that would discard constraints inside the region they asked to
+        keep whole.
+
+        Failure degrades OPEN, the opposite of ``_advisor_floor_cap``. There a
+        missing capacity term means "do not widen"; here it would mean "evict
+        the user's constraints on a guess", so a settings or registry failure
+        returns :data:`~local_operator.compaction.cutpoint.DEFAULT_PRESERVED_TURN_CAP`
+        — still bounded, so the runaway cannot return, but never tighter than
+        the shipped default.
+        """
+        from local_operator.compaction.cutpoint import DEFAULT_PRESERVED_TURN_CAP
+
+        try:
+            keep_recent = max(0, int(settings.keep_recent_tokens))
+            from local_operator.compaction import api as compaction_api
+
+            capacity_cap = (
+                compaction_api.resolve_threshold_tokens(
+                    self.effective_model.context_window, settings
+                )
+                // 4
+            )
+        except Exception:  # noqa: BLE001 — a partial double must not evict
+            return DEFAULT_PRESERVED_TURN_CAP
+        return max(keep_recent, capacity_cap)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.

@@ -198,7 +198,7 @@ async def test_a_session_state_delivery_is_not_preserved_on_the_second_pass(tmp_
 
 
 @pytest.mark.asyncio
-async def test_repeated_injections_do_not_ratchet_the_preserved_block(tmp_path):
+async def test_repeated_injections_do_not_ratchet_the_preserved_block(tmp_path, monkeypatch):
     """The runaway itself: many passes, many injections, bounded block.
 
     The pre-fix shape is +1 preserved turn per pass with ZERO removed, forever.
@@ -207,10 +207,14 @@ async def test_repeated_injections_do_not_ratchet_the_preserved_block(tmp_path):
     do still accumulate up to the bound — that is the guarantee working, not a
     leak — and beyond it the oldest are evicted behind a cumulative notice.
 
-    ``keep_recent_tokens`` is 40 here, so the cap is a deliberately tiny 200
-    tokens and binds after a couple of rounds; a real session's is 100,000.
+    The cap is forced to a tiny value so it binds within a handful of short
+    synthetic turns; a real session's is ``threshold // 4`` (160,000 on the
+    ~640k trigger this fix was diagnosed against). Patching the cap rather
+    than inflating the turns keeps the test fast and keeps it testing the
+    eviction rule rather than the tokenizer.
     """
     session = make_session(tmp_path, ScriptedStream(["reply"] * 200))
+    monkeypatch.setattr(Session, "_preserved_turns_cap", lambda self, settings: 200)
     await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
     for index in range(3):
         await session.prompt(f"question {index} " + "detail " * 30)
@@ -236,6 +240,28 @@ async def test_repeated_injections_do_not_ratchet_the_preserved_block(tmp_path):
     assert len(notices) == 1
     assert "older user message(s)" in notices[0].text
     await session.dispose()
+
+
+def test_the_cap_is_capacity_shaped_not_a_keep_recent_multiple(tmp_path):
+    """The preserved block is a session-long accumulation, not a recency window.
+
+    Sizing it as ``keep_recent_tokens * _TASK_FLOOR_KEEP_MULTIPLE`` (the task
+    floor's term) made the bound 200 tokens on a 40-token keep window — less
+    than one user turn — so every constraint but the newest was evicted. Two
+    advisor round-trip tests caught it. The bound must stay large enough to
+    hold real constraints at a small keep window.
+    """
+    session = make_session(tmp_path, ScriptedStream(["reply"] * 4))
+    settings = CompactionSettings(keep_recent_tokens=KEEP_RECENT)
+
+    from local_operator.compaction.api import resolve_threshold_tokens
+
+    cap = session._preserved_turns_cap(settings)
+
+    assert cap >= 1_000, f"cap collapsed to {cap}: smaller than a single user turn"
+    # And it tracks CAPACITY, not the keep window.
+    threshold = resolve_threshold_tokens(TEXT_MODEL.context_window, settings)
+    assert cap == max(KEEP_RECENT, threshold // 4)
 
 
 def test_the_task_floor_does_not_anchor_on_an_injection():
