@@ -57,6 +57,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
+from local_operator.compaction.cutpoint import (
+    ELISION_GENUINE_COUNT_KEY,
+    ELISION_INJECTION_COUNT_KEY,
+    PRESERVED_TURN_ELISION_ID,
+    PRESERVED_TURN_ELISION_ID_PREFIX,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.compaction.marker import (
     build_compaction_marker,
     render_compaction_marker,
@@ -596,6 +603,24 @@ def _callable_accepts_one_positional(func: Callable[..., Any]) -> tuple[bool, bo
     return False, True
 
 
+def _injected_user_message(text: str, entry_id: str) -> Message:
+    """A user-role message minted from a harness aside, stamped as such.
+
+    The stamp is compaction's provenance signal. Once this function has run,
+    an injected delivery and an operator prompt are both a plain
+    ``Message(role="user")`` and no structural test can separate them — which
+    is precisely how a preserved-turn block on a real session came to be 160
+    injections against 11 genuine turns (see
+    :data:`~local_operator.compaction.cutpoint.RENDERED_INJECTION_KEY`).
+
+    It rides ``provider_payload``, which the wire builders never ship as
+    content, so this is invisible to the model and to every provider.
+    """
+    message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
+    message.provider_payload = {RENDERED_INJECTION_KEY: True}
+    return message
+
+
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     """Default transcript→LLM rendering.
 
@@ -614,6 +639,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     notice, the picker's parked row). It must never be dropped: an expiry that
     reads as a plain denial makes the next turn re-plan around a decision
     nobody made.
+
+    Every user-role message minted HERE from a ``CustomMessage`` is stamped
+    with :data:`RENDERED_INJECTION_KEY` (see :func:`_injected_user_message`).
+    That stamp is compaction's only reliable way to tell a harness injection
+    from an operator prompt once both are plain user messages, which is what
+    they both are the moment this function has run.
     """
     out: list[Message] = []
     # Only the NEWEST todo reminder survives the render. An earlier one asserts
@@ -659,13 +690,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # FAILURE reaches the model as a ``session_incident`` user turn, so
             # the recovery that supersedes it has to arrive on the same surface
             # or the model keeps believing the older, more emphatic claim.
-            out.append(
-                Message(
-                    role="user",
-                    content=[TextContent(text=message.details.get("text", ""))],
-                    id=message.id,
-                )
-            )
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
             # difference is the whole reason the row exists: without it the
@@ -679,18 +704,13 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             description = str(details.get("description") or "").strip()
             subject = f"{tool} ({description})" if description else tool
             out.append(
-                Message(
-                    role="user",
-                    content=[
-                        TextContent(
-                            text=(
-                                f"[system] The approval request for {subject} expired with "
-                                "nobody attached to this session and was denied automatically. "
-                                "This was a timeout, not a decision by the user."
-                            )
-                        )
-                    ],
-                    id=message.id,
+                _injected_user_message(
+                    (
+                        f"[system] The approval request for {subject} expired with "
+                        "nobody attached to this session and was denied automatically. "
+                        "This was a timeout, not a decision by the user."
+                    ),
+                    message.id,
                 )
             )
         elif message.custom_type in (
@@ -708,13 +728,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # cross-session transcript row but the model never does. Unlisted
             # custom types are dropped (bookkeeping), which is precisely the
             # trap a new aside type falls into.
-            out.append(
-                Message(
-                    role="user",
-                    content=[TextContent(text=message.details.get("text", ""))],
-                    id=message.id,
-                )
-            )
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE and index == newest_reminder:
             # The continuation guardrail's nudge (``Session._todo_continuation``)
             # reaches the model as a user turn or it does nothing at all: this
@@ -1009,10 +1023,33 @@ def _paired_prefix(messages: Sequence[AgentMessage], *, strict: bool = False) ->
     ]
 
 
+def _payload_count(payload: dict[str, Any], key: str) -> int:
+    """A non-negative int from a compaction payload, or 0.
+
+    Lenient because the field is absent on every record written before it
+    existed, and a malformed one must degrade to "nothing carried forward"
+    rather than break a pass.
+    """
+    value = payload.get(key)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
 def _is_persistable_message(message: AgentMessage) -> bool:
     """Whether ``message`` may be written to the transcript as a message entry.
 
-    Plain ``Message``s always may. A ``CustomMessage`` may only when its type is
+    The compaction elision notice is the one plain ``Message`` that may not.
+    It is synthesized into the live context from counts on the marker payload,
+    and replay synthesizes the same text from the same counts — so journalling
+    it writes a row that lands AFTER ``first_kept_entry_id``, inside the
+    replayed suffix, and the resumed context then holds it twice. That is
+    exactly what shipped in an earlier revision of this fix: live 2 rows vs
+    resumed 3, and because the persisted copy carried ``compaction_preserved``
+    it was skipped by ``find_cut_point`` and folded into the next pass's count,
+    which doubled the reported figure on every resume (6 -> 7,167 over ten
+    cycles). Excluded by id here AND kept out of the payload at the write site;
+    one guard failing silently is what produced the defect.
+
+    Plain ``Message``s otherwise always may. A ``CustomMessage`` may only when its type is
     in :data:`_PERSISTABLE_CUSTOM_TYPES` — todo reminders are ephemeral by
     design (a stored reminder replays as a user message the user never sent and
     goes on asserting that finished items are open), and a compaction summary
@@ -1037,7 +1074,7 @@ def _is_persistable_message(message: AgentMessage) -> bool:
         ):
             return False
         return message.custom_type in _PERSISTABLE_CUSTOM_TYPES
-    return True
+    return not message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
 
 
 def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, str], ...]:
@@ -8657,15 +8694,20 @@ class Session:
                 else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
             )
             # STRUCTURAL guarantee that a user turn is never paraphrased away.
-            # ``to_summarize`` is the RENDERED history, where a prior marker and
-            # every injected user-role delivery (wake/hub/incident/todo) already
-            # look like a plain user Message; the genuine prompts are the
-            # ``Message(role="user")`` entries in the LIVE context (injected
-            # content is a CustomMessage there), so their ids are the filter
-            # that keeps a previous summary from being carried forward verbatim.
             # The summarizer still ran over ``to_summarize`` above — the summary
             # may paraphrase the user, and that is fine BECAUSE the verbatim
             # copy rides alongside it and is what the model reads.
+            #
+            # The id set is a NARROWING filter, no longer the discriminator.
+            # It used to be justified by "an injected delivery is a
+            # CustomMessage in the live context, so it cannot be in this set" —
+            # which compaction's own output falsifies from the second pass on:
+            # the commit below rebuilds the context from the RENDERED history,
+            # so every injection in the kept window is a plain user Message
+            # here and therefore IS in the set. Provenance is now carried by
+            # the marker ``_injected_user_message`` stamps at render time and
+            # read by ``extract_preserved_user_turns``; this set only adds
+            # "and it is still in the live context at all".
             genuine_user_ids = {
                 message.id
                 for message in self._context.messages
@@ -8681,6 +8723,57 @@ class Session:
             if callable(extract):
                 extracted: Any = extract(to_summarize, genuine_user_ids)
                 preserved_user_turns = list(extracted)
+            # Bound the block. Preserved turns are skipped by ``find_cut_point``
+            # (they are already-compacted content), so without a cap the block
+            # only ever grows: on session 2f95e374dd22 it ratcheted to 362,780
+            # tokens — 57% of a ~640k trigger — and every pass then reclaimed
+            # nothing and immediately re-fired. Filtering injections shrinks it
+            # but cannot bound it; N genuine turns still grow without limit.
+            # The bound is capacity-shaped rather than a multiple of
+            # ``keep_recent_tokens`` — see :meth:`_preserved_turns_cap` for why
+            # sharing ``_advisor_floor_cap``'s task term evicted real
+            # constraints on a small keep window.
+            cap: Any = getattr(compaction_api, "cap_preserved_user_turns", None)
+            preserved_turns_cap: int | None = None
+            # Carried forward so the figure keeps describing everything ever
+            # dropped from this block. Read as NUMBERS — from the previous
+            # marker's payload, and from the notice actually present in the
+            # context — never re-parsed out of notice text: an earlier revision
+            # encoded the count in a synthetic turn's id, the persist path
+            # journalled it as an ordinary message, and each pass re-counted it
+            # (6 -> 7,167 over ten cycles).
+            #
+            # BOTH sources are required, and the second is the fix for a
+            # regression this method introduced. A READ-path heal computes drops
+            # that exist in no payload — it acts on records predating the fields
+            # — so seeding only from the previous marker discarded them: a resume
+            # reporting 160 shed injections was followed by a pass reporting
+            # nothing, silently retracting what the model had been told. The
+            # heal's counts ride the rendered notice's ``provider_payload``
+            # instead, and ``max`` reconciles the two so neither an unhealed
+            # marker nor a healed context can lower the figure.
+            previous = self._transcript.latest_entry("compaction")
+            previous_payload = previous.payload if previous is not None else {}
+            preserved_turns_dropped = _payload_count(previous_payload, "preserved_turns_dropped")
+            preserved_turns_shed = _payload_count(previous_payload, "preserved_turns_shed")
+            counts_of: Any = getattr(compaction_api, "elision_counts_of", None)
+            if callable(counts_of):
+                for message in self._context.messages:
+                    carried: Any = counts_of(message)
+                    carried_genuine, carried_shed = int(carried[0]), int(carried[1])
+                    preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
+                    preserved_turns_shed = max(preserved_turns_shed, carried_shed)
+            if callable(cap):
+                preserved_turns_cap = self._preserved_turns_cap(plan.settings)
+                capped: Any = cap(
+                    preserved_user_turns,
+                    cap=preserved_turns_cap,
+                    already_dropped_genuine=preserved_turns_dropped,
+                    already_dropped_injections=preserved_turns_shed,
+                )
+                preserved_user_turns = list(capped.turns)
+                preserved_turns_dropped = capped.genuine_dropped
+                preserved_turns_shed = capped.injections_dropped
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,
@@ -8688,6 +8781,14 @@ class Session:
                 plan.context_tokens,
                 preserve_data=preserve_data,
                 preserved_user_turns=preserved_user_turns,
+                # Recorded so REPLAY re-applies this pass's own bound instead
+                # of recomputing one it has no settings for — the live/resume
+                # byte-equivalence depends on both sides using this figure.
+                preserved_turns_cap=preserved_turns_cap,
+                # Structural, so replay renders the SAME notice from the same
+                # numbers rather than re-deriving them from content.
+                preserved_turns_dropped=preserved_turns_dropped,
+                preserved_turns_shed=preserved_turns_shed,
             )
             marker = build_compaction_marker(summary, preserve_data)
             # Rebuild the verbatim user turns as real user messages, reusing
@@ -8699,6 +8800,36 @@ class Session:
             # it as fresh history (see ``cutpoint._is_preserved_user_turn``);
             # it rides ``provider_payload``, which the wire builders never ship.
             preserved_messages = []
+            # The elision notice is synthesized HERE, from the counts, and is
+            # never one of ``preserved_user_turns``. When it was, the ordinary
+            # persist path journalled it (``_is_persistable_message`` admits
+            # every plain Message) AFTER ``first_kept_entry_id`` — inside the
+            # replayed suffix — while replay ALSO re-injected it from the
+            # payload, so live and resumed contexts diverged whenever the cap
+            # bound. It is excluded from persistence by id as well; two guards,
+            # because one failing silently is what produced that defect.
+            # Resolved off the module by NAME, like ``extract`` and ``cap``
+            # above: a partial test double that does not expose it degrades to
+            # "no notice" rather than crashing the whole pass. The real
+            # ``compaction.api`` always exports it.
+            notice_fn: Any = getattr(compaction_api, "elision_notice_text", None)
+            notice_text: str = ""
+            if callable(notice_fn):
+                notice_text = str(notice_fn(preserved_turns_dropped, preserved_turns_shed) or "")
+            if notice_text:
+                notice_content: list[Content] = [TextContent(text=notice_text)]
+                notice = _replayed_user_message(notice_content, PRESERVED_TURN_ELISION_ID)
+                # The counts ride the notice here too, not only on the replay
+                # path. The marker payload is the primary carrier for a LIVE
+                # pass, but a mid-turn pass reads the context back before any
+                # newer marker exists, so a notice without them would let the
+                # figure regress within a single session.
+                notice.provider_payload = {
+                    compaction_api.PRESERVED_USER_TURN_KEY: True,
+                    ELISION_GENUINE_COUNT_KEY: preserved_turns_dropped,
+                    ELISION_INJECTION_COUNT_KEY: preserved_turns_shed,
+                }
+                preserved_messages.append(notice)
             for turn in preserved_user_turns:
                 message = _replayed_user_message([TextContent(text=turn["text"])], turn["id"])
                 message.provider_payload = {compaction_api.PRESERVED_USER_TURN_KEY: True}
@@ -9965,6 +10096,76 @@ class Session:
             # ability to compact at all.
             return keep_recent
         return max(keep_recent, min(task_cap, capacity_cap))
+
+    def _preserved_turns_cap(self, settings: Any) -> int:
+        """Token bound on the block of verbatim user turns compaction carries.
+
+        Separate from :meth:`_advisor_floor_cap` despite bounding a
+        superficially similar window, because the two quantities are shaped
+        differently and sharing the formula produced a real regression.
+
+        ``_advisor_floor_cap``'s tight term is ``keep_recent_tokens *
+        _TASK_FLOOR_KEEP_MULTIPLE``, which is right for the TASK FLOOR: that
+        floor widens the recency window, so expressing it as a multiple of that
+        same window is a like-for-like comparison. The preserved block is not a
+        recency window. It is an accumulation across the whole SESSION, and its
+        natural scale is the context the session runs in, not the user's
+        verbatim-keep preference. Reusing the task multiple made the cap 200
+        tokens whenever ``keep_recent_tokens`` was 40 — smaller than a single
+        user turn — so the newest constraint became the only survivor and every
+        older one was evicted. Two existing advisor tests caught exactly that.
+
+        ``threshold // 4`` instead: a capacity-shaped bound, one step tighter
+        than the ``threshold // 2`` ceiling ``_advisor_floor_cap`` uses, since
+        the preserved block and the task floor can both be live at once and
+        together they must still leave a pass something to summarize. On the
+        session this fixes (a ~640k trigger) it resolves to 160,000 against the
+        362,780 the block actually reached, so the runaway is bounded to well
+        under half; on the shipped 1M-window default it is 150,000, and on a
+        128k model 25,600.
+
+        The ``max(keep_recent, ...)`` tail mirrors ``_advisor_floor_cap``'s for
+        the same reason: on a small window the capacity term can fall below the
+        verbatim window the user configured, and a preserved block narrower
+        than that would discard constraints inside the region they asked to
+        keep whole.
+
+        **Consequence: the bound is inert below ~32k, and that is accepted.**
+        On the shipped ``keep_recent_tokens`` of 20,000 the tail dominates
+        wherever ``threshold // 4`` is smaller, so the cap sits at or above the
+        whole trigger on small windows (8k window: trigger 6,553, cap 20,000 =
+        305%; 16k: 153%; 32k: 76%; 64k: 38%; 128k: 25%). The block is therefore
+        effectively unbounded on exactly the windows least able to absorb it.
+        Tightening it there is the worse trade: the cap would fall below the
+        verbatim window the operator configured and start evicting constraints
+        inside the region they explicitly asked to keep, and the runaway this
+        guards against is a LONG-SESSION accumulation that a small-window model
+        cannot reach in the first place (it compacts away long before the block
+        can grow). The write-path provenance filter, which is what actually
+        removes the injections, is unaffected by window size and still applies.
+
+        Failure degrades OPEN, the opposite of ``_advisor_floor_cap``. There a
+        missing capacity term means "do not widen"; here it would mean "evict
+        the user's constraints on a guess", so a settings or registry failure
+        returns :data:`~local_operator.compaction.cutpoint.DEFAULT_PRESERVED_TURN_CAP`
+        — still bounded, so the runaway cannot return, but never tighter than
+        the shipped default.
+        """
+        from local_operator.compaction.cutpoint import DEFAULT_PRESERVED_TURN_CAP
+
+        try:
+            keep_recent = max(0, int(settings.keep_recent_tokens))
+            from local_operator.compaction import api as compaction_api
+
+            capacity_cap = (
+                compaction_api.resolve_threshold_tokens(
+                    self.effective_model.context_window, settings
+                )
+                // 4
+            )
+        except Exception:  # noqa: BLE001 — a partial double must not evict
+            return DEFAULT_PRESERVED_TURN_CAP
+        return max(keep_recent, capacity_cap)
 
     def _wire_legal_snapshot(self) -> list[AgentMessage]:
         """A copy of the live message list that a provider will actually accept.

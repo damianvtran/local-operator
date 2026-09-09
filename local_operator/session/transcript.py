@@ -626,6 +626,9 @@ class Transcript:
         tokens_before: int,
         preserve_data: dict[str, Any] | None = None,
         preserved_user_turns: list[dict[str, str]] | None = None,
+        preserved_turns_cap: int | None = None,
+        preserved_turns_dropped: int = 0,
+        preserved_turns_shed: int = 0,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -645,6 +648,23 @@ class Transcript:
         contiguous-suffix replay (``first_kept_entry_id`` onward) alone would
         drop these turns on the next resume, since they sit BEFORE the cut in
         the transcript, so they have to ride the marker payload instead.
+
+        ``preserved_turns_cap`` records the token bound the WRITING pass
+        applied to that block. Replay re-applies the same figure rather than
+        recomputing one, which is what keeps a resumed context byte-identical
+        to the live context it resumed from: the cap depends on the session's
+        ``keep_recent_tokens`` and model window, neither of which replay can
+        see. A record written before this field existed replays under
+        ``DEFAULT_PRESERVED_TURN_CAP`` instead, so an already-poisoned session
+        heals on resume rather than carrying its unbounded block forward.
+
+        ``preserved_turns_dropped`` / ``preserved_turns_shed`` are the running
+        totals of GENUINE turns evicted and harness injections shed, kept apart
+        because they mean opposite things to the operator. Replay renders the
+        elision notice from these numbers rather than storing the notice as a
+        turn: when it WAS a stored turn, the persist path journalled it inside
+        the replayed suffix and each pass re-counted it, doubling the reported
+        figure on every resume.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -655,6 +675,15 @@ class Transcript:
             payload["preserve_data"] = preserve_data
         if preserved_user_turns:
             payload["preserved_user_turns"] = preserved_user_turns
+            if preserved_turns_cap is not None:
+                payload["preserved_turns_cap"] = preserved_turns_cap
+        # Recorded even with an empty block: the counts describe turns that are
+        # NO LONGER in it, so gating them on the block being non-empty would
+        # drop the elision record exactly when everything had been evicted.
+        if preserved_turns_dropped > 0:
+            payload["preserved_turns_dropped"] = preserved_turns_dropped
+        if preserved_turns_shed > 0:
+            payload["preserved_turns_shed"] = preserved_turns_shed
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(self, custom_type: str, details: dict[str, Any]) -> TranscriptEntry:
@@ -1266,6 +1295,30 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
     return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
 
 
+def _journal_injection_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
+    """Ids of message entries that were journalled from a harness aside.
+
+    The read path's provenance signal. On the WRITE path the renderer stamps
+    each injected message as it mints it, but a turn that only exists inside a
+    stored compaction payload has no rendered message to carry a stamp — so
+    provenance is recovered from the journal instead: a custom-kind message
+    entry records the ``custom_type`` it came from, which is exactly the fact
+    the stamp encodes. Verified against the real poisoned record: all 171
+    stored turns resolve, 160 to an injection type and 11 to genuine user
+    messages.
+
+    Deliberately NOT a text- or shape-based test. Inferring provenance from
+    what a message looks like after rendering is the original defect.
+    """
+    return {
+        entry.id
+        for entry in entries
+        if entry.type == ENTRY_MESSAGE
+        and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM
+        and entry.payload.get("custom_type")
+    }
+
+
 def replay_entries(
     entries: Sequence[TranscriptEntry],
     attachments: AttachmentStore | None,
@@ -1330,16 +1383,39 @@ def replay_entries(
             # dependency (the session imports compaction lazily for the same
             # reason). The flag marks these as already-compacted content so a
             # post-resume pass does not re-count them as fresh history.
-            from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+            from local_operator.compaction.cutpoint import (
+                preserved_turn_payload,
+                replay_preserved_turns,
+            )
+
+            # The READ path sheds and caps too, or a session already poisoned
+            # on disk stays poisoned across a restart no matter what the write
+            # path does — the stored block is re-injected verbatim, so the fix
+            # has to reach the replay as well.
+            #
+            # Provenance is resolved against the JOURNAL, not guessed from the
+            # text. An earlier revision skipped the filter here on the grounds
+            # that "a stored turn has no rendered message to read a marker
+            # off" and relied on the cap to evict injections "oldest-first,
+            # and they are the oldest". That was wrong twice: injections are
+            # typically the NEWEST (session_state arrives every turn), so
+            # age-based eviction preferentially dropped the operator's own
+            # constraints — and on the real fleet the cap reached only 12% of
+            # stored injections at all, because most poisoned blocks sit below
+            # the default. A stored turn does have an id, and the entry it
+            # names records the ``custom_type`` it was rendered from, which is
+            # a provenance lookup rather than a shape-based guess.
+            preserved_turns = replay_preserved_turns(
+                compaction.payload,
+                injection_ids=_journal_injection_ids(entries),
+            )
 
             for turn in preserved_turns:
-                if not isinstance(turn, dict):
-                    continue
                 message = Message.user(str(turn.get("text", "")))
                 turn_id = turn.get("id")
                 if isinstance(turn_id, str) and turn_id:
                     message.id = turn_id
-                message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+                message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
         first_kept_id = compaction.payload.get("first_kept_entry_id")
         # The first kept entry normally sits BEFORE the compaction marker
