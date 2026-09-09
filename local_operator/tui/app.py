@@ -286,7 +286,7 @@ from local_operator.tui.widgets.toast import (
     format_mcp_startup,
 )
 from local_operator.tui.widgets.todo_panel import TodoPanel
-from local_operator.tui.widgets.tool_card import ToolCard, clean_intent
+from local_operator.tui.widgets.tool_card import ToolCard, clean_intent, parse_duration
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
@@ -7855,12 +7855,34 @@ class OperatorApp(App[None]):
         ``_replay_tool_call`` — a call killed mid-execution persists as an
         error result whose text starts with ``aborted (``, which the live
         frame renders as ``interrupted``, not an error.
+
+        "Same derivation" includes the persisted ``duration_s``: this is the
+        SECOND settled-replay path (``replay_history`` picks between it and
+        ``replay_tool_call`` by whether a card is already painted), and a row
+        that reads blank here while a cold resume of the same transcript reads
+        ``7.2s`` is the live/replay gap reopened one file over. Both paths read
+        the same key off the same payload through the same parser.
         """
         result_text = getattr(result, "text", "") or ""
         payload = getattr(result, "provider_payload", None) or {}
-        details = payload.get("details") if isinstance(payload, dict) else None
+        is_dict = isinstance(payload, dict)
+        details = payload.get("details") if is_dict else None
+        # Validated, never trusted, and for the same reason as in
+        # `replay_tool_call`: the value arrives from a durable transcript
+        # another process may have written, so anything that is not a finite
+        # non-negative number degrades to the blank column rather than
+        # crashing the formatter or inventing a `0.0s`.
+        duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
         if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
-            card.restore(state="interrupted")
+            # Symmetric with `replay_tool_call`'s aborted arm, including its
+            # limits — see the long note there for the provenance. In short:
+            # the parenthesised text is `execute_bash`/`eval`'s own, built by
+            # `_error(...)`, which stamps no `duration_s`; the loop's
+            # `ABORTED_RESULT_TEXT` has no paren and takes the error arm. So
+            # this restore is inert on every producer known today and exists
+            # so the row stays faithful if one ever carries the interval.
+            # The dim `interrupted ⊘` presentation stays (design round 1, D1).
+            card.restore(state="interrupted", duration_s=duration_s)
             return
         if getattr(result, "is_error", False):
             card.restore(
@@ -7868,9 +7890,15 @@ class OperatorApp(App[None]):
                 result_text=result_text,
                 details=details,
                 error=_first_line(result_text),
+                duration_s=duration_s,
             )
         else:
-            card.restore(state="success", result_text=result_text, details=details)
+            card.restore(
+                state="success",
+                result_text=result_text,
+                details=details,
+                duration_s=duration_s,
+            )
         self._append_image_blocks(
             [
                 block
