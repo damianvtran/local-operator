@@ -3199,6 +3199,13 @@ class OperatorApp(App[None]):
         #: session id for the owner notices and empty for disk drift — see
         #: :meth:`_check_build_skew` for why the two differ.
         self._skew_notice_shown: set[tuple[str, str, str, str]] = set()
+        #: The build a self-refreshing runtime was on when it retired, plus how
+        #: to name its session, set by :meth:`_on_runtime_refreshed` and
+        #: consumed once by :meth:`_announce_refresh_completed` after the
+        #: successor binds. Held across that gap because the retiring stamp
+        #: only exists BEFORE the re-bind overwrites it, and the comparison it
+        #: is needed for can only be made after.
+        self._refreshed_from: tuple[Any, str, str] | None = None
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -12427,16 +12434,125 @@ class OperatorApp(App[None]):
         The latch is reset because it was set by the engage that bound the
         runtime that just left — without the reset the first keystroke after
         ``lop-update`` would pay, in the foreground, a cold start this could
-        have paid in the background. No notice is painted: the operator's bar
-        is "never see this message", the band's ``starting…`` state covers
-        the ~1 s the re-engage takes, and a line of prose for a background
-        housekeeping event is noise. After the bind ``_check_build_skew``
-        runs again and, with a fresh runtime, the owner stamp equals the disk
-        stamp and stays silent.
+        have paid in the background. The band's ``starting…`` state covers the
+        ~1 s the re-engage takes, so nothing here interrupts the user; the one
+        line that IS painted comes after the successor binds and names what
+        changed (:meth:`_announce_refresh_completed`).
+
+        The retiring build is captured HERE because this is the last moment it
+        exists: the facade still carries the stamp it read at dial, and the
+        bind that follows overwrites it with the successor's. Held on the app
+        rather than passed down because the re-engage is a background worker
+        whose completion is where the comparison can first be made.
         """
         logger.debug("runtime retired for a newer build; re-engaging")
+        session = self._session
+        version = str(getattr(session, "owner_version", "") or "")
+        if version:
+            from local_operator.update import BuildStamp
+
+            self._refreshed_from = (
+                BuildStamp(
+                    version=version,
+                    source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+                ),
+                _session_subject(session),
+                # WHICH session retired. The subject alone cannot answer this:
+                # two sessions share a title, and the title of one says nothing
+                # about the id of another. This id is the predicate
+                # ``_announce_refresh_completed`` gates the paint on, because a
+                # stamp captured for one session must never be named against
+                # another's runtime (review round 2, R2-1).
+                str(getattr(session, "session_id", "") or ""),
+            )
+        else:
+            # A runtime too old to say what it ran. There is no "from" side to
+            # name, and a half-stated change ("updated to X") reads as an
+            # update that came from nowhere, so this one stays silent.
+            self._refreshed_from = None
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
+
+    def _announce_refresh_completed(self) -> None:
+        """One line naming the version change a self-refresh just made.
+
+        The operator asked for this explicitly: an update that happens on its
+        own should still SAY it happened, in the idle window, once. Everything
+        else about the refresh stays invisible — this fires only after the
+        successor is bound, so the line describes a completed fact rather than
+        an intention.
+
+        Gated on the build ACTUALLY moving. The re-engage tail runs for every
+        engage reason, and a runtime that retired and came back on the same
+        build (a restart that was not an update, a successor that resolved the
+        same install) changed nothing the user could act on; announcing it
+        would turn ordinary re-engagement into a stream of notices.
+
+        ``note`` ink, matching the skew notice one screen away: nothing is
+        wrong and nothing is asked of the user, but this answers a question
+        they would otherwise ask ("why did my session restart?"), which is not
+        what the dim ``info`` receipt is for.
+
+        THE ARROW IS SOUND HERE ONLY WITH THE GUARD ABOVE. I argued the stamp
+        pair could never be mismatched once the cancel route cleared the slot
+        (round 1); round 2 falsified that with the sidebar-switch route, which
+        swaps the session through a different worker group the cancel never
+        touches. The construction claim is restored by the session-id
+        comparison, not by enumerating swap routes: a runtime retires only when
+        disk has moved and the successor is spawned from that install, so WITHIN
+        one session ``after`` is the disk build and ``before`` is one disk has
+        already replaced; the guard is what makes "within one session" true
+        rather than assumed (R2-1).
+        """
+        pending, self._refreshed_from = self._refreshed_from, None
+        if pending is None:
+            return
+        before, subject, refreshed_id = pending
+        session = self._session
+        # THE BELT, added after source-closing proved insufficient. The slot is
+        # cleared on every engage exit found, but the sidebar switch swaps
+        # ``self._session`` through the ``"session"`` worker group — NOT the
+        # ``"warm-engage"`` group the cancel clears — and neither
+        # ``_commit_sidebar_session`` nor ``_adopt_session`` touches this slot,
+        # so the in-flight worker's tail reached this paint against a DIFFERENT
+        # session. Auditing every present and future swap route is the fragile
+        # per-callsite reasoning this file warns against elsewhere; one
+        # comparison here closes the class. A pending stamp belongs to the
+        # session that retired — if what is bound now is not that session, this
+        # line would name one conversation against another's runtime, with the
+        # pair running backwards under the word "updated" (R2-1). An empty
+        # captured id cannot corroborate the pair, so it is silent too: the
+        # alternative is one wrong-named line per unidentifiable swap.
+        if refreshed_id != str(getattr(session, "session_id", "") or ""):
+            logger.debug(
+                "refresh announcement dropped: pending belongs to %s, %s is bound",
+                refreshed_id or "<unstamped>",
+                getattr(session, "session_id", "") or "<none>",
+            )
+            return
+        version = str(getattr(session, "owner_version", "") or "")
+        if not version:
+            return
+        from local_operator.update import BuildStamp
+
+        after = BuildStamp(
+            version=version,
+            source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+        )
+        if after == before:
+            return
+        # BARE ARROW, not a parenthetical. The parenthetical form splits the
+        # version pair across rows at 6 of 19 name lengths at both 80 and 100
+        # columns \u2014 including length 0, the unnamed-session default \u2014 which is
+        # the same wrap the sibling notice's docstring above already records
+        # fixing. "updated" plus a forward arrow carries the direction, so the
+        # clause it replaced was filler beside the pair it introduced, and
+        # actively misleading on a same-version rebuild where both stamps read
+        # alike (design review round 1, D1/D2/D3).
+        self._system_notice(
+            f"{subject} updated {_build_change(before, after)}.",
+            "note",
+        )
 
     def _start_runtime_engage(self, *, reason: str) -> None:
         """Engage a runtime for a cold viewer, at most once per binding."""
@@ -12445,6 +12561,9 @@ class OperatorApp(App[None]):
         session = self._session
         ensure = getattr(session, "_ensure_bound", None)
         if not callable(ensure) or not getattr(session, "is_cold", False):
+            # Nothing will bind, so drop any pending refresh announcement for
+            # the same reason as the two skips below: it has no "to" side.
+            self._refreshed_from = None
             return
         # BEFORE the spawn, which is the moment the disk build matters: the
         # runtime is started from ``sys.executable``, resolved fresh, so a
@@ -12463,6 +12582,10 @@ class OperatorApp(App[None]):
             # `/model` rebuild the session, which adopts and engages again
             # with a real provider in place.
             logger.debug("%s engage skipped: no provider/model configured", reason)
+            # No successor is coming, so a pending refresh announcement has no
+            # "to" side and must not survive to be answered by some later,
+            # unrelated engage against a different session.
+            self._refreshed_from = None
             return
         self._warm_engage_started = True
         self._set_starting(True)
@@ -12484,6 +12607,9 @@ class OperatorApp(App[None]):
                 # to retry.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                # Same reason as the skip above: nothing bound, so there is no
+                # change to name and the pending stamp must not outlive it.
+                self._refreshed_from = None
                 return
             finally:
                 self._set_starting(False)
@@ -12496,6 +12622,13 @@ class OperatorApp(App[None]):
             # binding to it without spawning, i.e. an ordinary first prompt
             # against a stale runtime (review round 1, R1-4).
             self._check_build_skew(reason=f"{reason}-bound")
+            # A pending self-refresh resolves HERE and nowhere else: this is
+            # the first moment the successor's stamp is readable, which is
+            # what makes the announcement a statement of fact rather than of
+            # intent. Unconditional because the pending slot is only ever set
+            # by the refresh path and is cleared on read, so an ordinary
+            # engage finds nothing and says nothing.
+            self._announce_refresh_completed()
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -12752,6 +12885,15 @@ class OperatorApp(App[None]):
         """
         self.workers.cancel_group(self, "warm-engage")
         self._set_starting(False)
+        # THE FOURTH EXIT. Cancelling the group kills the worker before its
+        # tail, so neither the `except` clear nor `_announce_refresh_completed`
+        # runs and a pending refresh stamp would survive the swap \u2014 to be
+        # answered by the NEXT session's ordinary engage, naming the session the
+        # user just left against an unrelated runtime's build, with the pair
+        # running backwards under the word "updated" (review round 1 R1-2 /
+        # QA Q-2). The three clears inside `_start_runtime_engage` enumerate the
+        # exits it can see; this is the one that happens from outside it.
+        self._refreshed_from = None
 
     async def _retire_unused_runtime(self, session: Any) -> None:
         """Hand back a runtime this viewer started but never used.
@@ -21086,7 +21228,18 @@ class OperatorApp(App[None]):
         * **owner skew** \u2014 the runtime this session is bound to reports a
           different build than this window, or reports none at all (which
           means it predates the field, and is therefore older by
-          construction). The remedy is the RUNTIME's, never the user's: an
+          construction). A difference does not by itself say which side is
+          behind, and getting that backwards is what made this branch report
+          an upgrade as a downgrade. :func:`_owner_is_not_behind_this_window`
+          decides it on two terms — the owner IS the build on disk, or its
+          version parses strictly newer than this window's — and either one
+          means the WINDOW is the stale side, disk drift above has already
+          said so, and this branch stays completely silent. Both terms are
+          load-bearing: equality alone described only a two-build host and
+          left the reversed sentence intact whenever window, runtime and disk
+          were three different builds (review round 1 R1-1 / QA Q-1).
+          Only a runtime that neither term clears is genuinely stale, and its
+          remedy is the RUNTIME's, never the user's: an
           idle stale runtime is asked to retire now (``request_refresh``, the
           belt for the reaper's own self-refresh) and this viewer re-engages
           a fresh one on its ``retiring`` frame with no notice at all. Every
@@ -21189,12 +21342,34 @@ class OperatorApp(App[None]):
         # fixed, and leaves ``/stop`` ambiguous about which session it acts on
         # (design review round 1, D1). The title is what the user named and can
         # see; "this session" survives only as the fallback for an unnamed one.
-        title = str(getattr(session, "conversation_name", "") or "").strip()
-        subject = f"\u201c{title}\u201d" if title else "this session"
+        subject = _session_subject(session)
         from local_operator.update import BuildStamp
 
         owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
         if owner is not None and owner == loaded:
+            return
+        # WHICH SIDE IS STALE? A difference alone does not say, and this branch
+        # used to assume the runtime always was. On this host the opposite is
+        # the routine shape: a window keeps the build it imported at launch
+        # forever, ``lop-update`` runs several times a day, and a runtime
+        # spawned AFTER it resolves ``sys.executable`` fresh — so the runtime
+        # is the NEWER side. Assuming otherwise asked a perfectly current
+        # runtime to retire (it answered ``kept:``, because ITS comparison is
+        # against disk and found no change), read that as "staying on the old
+        # build", and painted ``newer → older`` promising a switch to a
+        # version it was already running.
+        if owner is not None and _owner_is_not_behind_this_window(owner, loaded, on_disk):
+            # The RUNTIME is current and the WINDOW is the stale side. Say
+            # nothing and ask for nothing: notice A above has already reported
+            # that the install moved and named ``/reload`` as the remedy, so a
+            # second line about the same fact pointing the other way is the
+            # defect, not the diagnosis.
+            logger.debug(
+                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                reason,
+                owner.label(),
+                loaded.label(),
+            )
             return
         # Stale owner, and what the user is told depends on what the RUNTIME
         # does about it, not on what this viewer guessed.
@@ -21265,6 +21440,61 @@ class OperatorApp(App[None]):
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
                     "will switch to the new version when it is next idle.",
+                    scope,
+                    notice_kind="note",
+                )
+                return
+            if not _skew_direction_is_knowable(owner, loaded, on_disk):
+                # Same version, different refs, and disk is a THIRD ref \u2014 three
+                # rebuilds of one release, which no ordering can rank. The
+                # arrow copy below would assert an order we cannot derive, and
+                # asserting one anyway is exactly how the reversed sentence
+                # shipped. The copy therefore drops the arrow but keeps every
+                # other rule of the family:
+                #  - ONE debounce kind as the directed branch. The pair is ONE
+                #    fact in one session; two kinds meant a disk move between
+                #    two checks painted the directed C\u2032 and then the undirected
+                #    variant withdrawing the direction the first had asserted
+                #    (review round 2, R2-2).
+                #  - The COLLAPSED pair. ``_skew_direction_is_knowable`` can only
+                #    return False after its versions-differ term has failed, so
+                #    this line is reachable only when the versions are EQUAL
+                #    \u2014 full labels would restate the version twice and bury the
+                #    seven characters that actually differ, the exact defect D3
+                #    removed from the refresh note (design round 2, D2-2).
+                #  - A visible pivot. The comma form read as apposition and the
+                #    eye had to re-parse which stamp belonged to which side;
+                #    "vs" restores the assignment the sibling's arrow supplies
+                #    (design round 2, D2-3). It asserts opposition, not order.
+                # The remedy is identical either way, since the runtime's own
+                # reaper compares itself against disk and acts on the answer
+                # (QA round 1, Q-1 all-refs sub-case).
+                announce(
+                    "owner",
+                    owner.label(),
+                    loaded.label(),
+                    # Collapsed by hand when the versions are EQUAL (the
+                    # dominant route here, since equal-and-parsing fails
+                    # term 1 of the predicate by definition) \u2014
+                    # ``0.51.30, bbbbbbb vs this window\u2019s aaaaaaa``. An
+                    # UNPARSEABLE pair (``0.51.31rc1``) has no collapse and no
+                    # short ref, so it keeps the full labels; ``label()`` never
+                    # raises on either shape. The "vs" pivot replaces the arrow
+                    # (a claim of order) with opposition, which is all this
+                    # line can support (design round 2, D2-2/D2-3).
+                    (
+                        f"{subject} is running {owner.version}, "
+                        f"{owner.source_ref[:7]} vs this window\u2019s "
+                        f"{loaded.source_ref[:7]} \u2014 it will "
+                        "switch to the version on disk when it is next idle."
+                        if owner.version
+                        and owner.version == loaded.version
+                        and owner.source_ref
+                        and loaded.source_ref
+                        else f"{subject} is running {owner.label()} vs this window "
+                        f"{loaded.label()} \u2014 it will switch to the version on "
+                        "disk when it is next idle."
+                    ),
                     scope,
                     notice_kind="note",
                 )
@@ -32528,6 +32758,130 @@ def _build_change(before: Any, after: Any) -> str:
     if same_version and before.source_ref and after.source_ref:
         return f"{before.version}, {before.source_ref[:7]} \u2192 {after.source_ref[:7]}"
     return f"{before.label()} \u2192 {after.label()}"
+
+
+def _session_subject(session: Any) -> str:
+    """How a build notice NAMES the session it is about.
+
+    The title the user chose and can see, quoted; ``this session`` only when
+    there is none. Shared by every build notice so two of them on one screen
+    cannot name the same conversation two different ways: with a deictic
+    subject in both, two stale sessions in one terminal render as two
+    byte-identical paragraphs, which reads as the app printing one line twice
+    (design review round 1, D1).
+    """
+    # GUARDED, not merely defaulted. On a real ``RemoteSession`` this property
+    # reads ``frontend_state``, which RAISES ``RuntimeError`` until the first
+    # sync completes (``session/remote.py``) \u2014 and the refresh callback calls
+    # this BEFORE it re-engages, so a raise there costs the eager re-engage
+    # this feature exists to provide and leaves the viewer cold until the next
+    # keystroke. ``_go_cold``'s guard swallows the exception, which makes the
+    # loss silent rather than loud (review round 1, R1-3). A notice's subject
+    # is never worth degrading behaviour for: an unnamed fallback is correct
+    # and complete on its own.
+    try:
+        title = str(getattr(session, "conversation_name", "") or "").strip()
+    except Exception:  # noqa: BLE001 \u2014 see above; a title read must not cost a re-engage
+        return "this session"
+    return f"\u201c{title}\u201d" if title else "this session"
+
+
+def _owner_is_not_behind_this_window(owner: Any, loaded: Any, on_disk: Any) -> bool:
+    """Whether the bound runtime is at least as new as this window.
+
+    The discriminator for build skew: it decides whether the RUNTIME or the
+    WINDOW is the stale side, which a bare ``owner != loaded`` cannot say and
+    which the notice used to guess wrong.
+
+    TWO INDEPENDENT TERMS, either of which is sufficient. Neither subsumes the
+    other, and dropping either one reopens a defect that has already shipped:
+
+    1. **The owner is the build on disk.** Disk is what a process started right
+       now would run, so it is the fixed reference the two long-lived
+       populations here — a window frozen at the build it imported, and a
+       runtime spawned at some later moment — can both be measured against. An
+       owner equal to it is by definition not stale.
+    2. **The owner's version parses strictly newer than this window's.** Needed
+       because term 1 is an equality, and equality answers only the two-build
+       host. With three builds alive — window ``0.51.29``, runtime ``0.51.30``,
+       disk ``0.52.0``, all of which existed on the author's machine at once —
+       the runtime is newer than the window yet unequal to disk, so term 1
+       alone falls through and paints the very ``newer → older`` sentence this
+       function exists to prevent (review round 1 R1-1 / QA Q-1). A runtime
+       lives across updates precisely because it refuses to retire while busy,
+       so this is the steady state of a host that updates often, not a corner.
+
+    **Do not collapse the two into a version comparison.** This host's headline
+    drift is a same-version rebuild: ``lop-update`` builds from ``main`` while
+    ``pyproject.toml`` still names the last released version, so the two builds
+    are ``0.51.30@aaaaaaa`` and ``0.51.30@bbbbbbb`` and NO ordering of version
+    numbers can tell them apart. Term 1 resolves that exactly, because the
+    recorded ref is part of the ``BuildStamp``. Term 2 is what covers the case
+    term 1 cannot see; term 1 is what covers the case term 2 cannot see.
+
+    Returns False — meaning "say something" — when neither term holds. That
+    includes the genuinely stale runtime (the notice is correct and wanted) and
+    the undiagnosable pair: same version, three different refs, no ordering
+    possible. Silence there would regress the predecessor's R1-1, so the caller
+    still speaks, in copy that does not claim a direction it cannot know.
+    """
+    if on_disk is not None and owner == on_disk:
+        return True
+    from local_operator.update import parse_version
+
+    owner_parsed = parse_version(owner.version)
+    loaded_parsed = parse_version(loaded.version)
+    if owner_parsed is None or loaded_parsed is None:
+        return False
+    return owner_parsed > loaded_parsed
+
+
+def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
+    """Whether we can say WHICH of two differing builds is older.
+
+    Three ways to know, mirroring the discriminator above:
+
+    * the versions differ AND both parse, so ordering ranks them;
+    * the refs are equal, so there is only one build to talk about;
+    * disk is readable and IS one of the two — whichever side equals the build
+      on disk is the newer one, which is the whole reason the same-version
+      rebuild is resolvable at all.
+
+    False leaves only the shapes where nothing can rank them: one version,
+    three distinct refs — window, runtime and disk each on a different
+    ``main`` build of ``0.51.30`` — that same pair with disk unreadable, and a
+    version string that does not parse. The caller still paints there, because
+    an undiagnosable skew is worth one advisory line, but it must not use the
+    arrow: an arrow asserts an order, and asserting one we have not derived is
+    precisely how the reversed sentence shipped (QA round 1, Q-1 all-refs
+    sub-case).
+
+    The first term gates on PARSE, not on string inequality. ``0.51.31rc1`` !=
+    ``0.51.30`` as a string, but ``parse_version`` returns None for the rc
+    form, so the sibling predicate refuses to rank the pair while this one
+    would have claimed it could — the two must agree on what "rankable"
+    means, or an unparseable pair takes the arrow branch asserting an order
+    neither term derived (review round 2, R2-3).
+    """
+    from local_operator.update import parse_version
+
+    owner_parsed = parse_version(owner.version)
+    loaded_parsed = parse_version(loaded.version)
+    # An unparseable side whose string DIFFERS from the other is unrankable
+    # outright: ``0.51.31rc1`` vs ``0.51.30`` can be compared only by ordering,
+    # and ordering is unavailable, so neither the arrow's order nor an
+    # implicit "they differ" is derivable. (An unparseable side with the SAME
+    # string is either one build — equal refs, the next term — or a
+    # same-version ref drift, which disk can rank below.) Without this early
+    # exit the equal-ref term promoted an unparseable rc to rankable (R2-3,
+    # second shape).
+    if owner.version != loaded.version and (owner_parsed is None or loaded_parsed is None):
+        return False
+    if owner_parsed is not None and loaded_parsed is not None and owner_parsed != loaded_parsed:
+        return True
+    if owner.source_ref == loaded.source_ref:
+        return True
+    return on_disk is not None and on_disk in (owner, loaded)
 
 
 def _model_spec(session) -> Any | None:
