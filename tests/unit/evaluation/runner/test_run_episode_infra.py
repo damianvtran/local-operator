@@ -95,3 +95,38 @@ def test_actual_cli_rejects_invalid_infra_before_reading_selector(capsys, tmp_pa
     assert output.err.startswith("--infra expects")
     assert "secret-canary" not in output.err and "Traceback" not in output.err
     assert not (tmp_path / "must-not-exist").exists()
+
+
+def test_the_cloud_lease_is_derived_to_outlast_the_wall_budget() -> None:
+    """A raised wall must not be reclaimed by a shorter fixed lease.
+
+    The wall budget is not carried on the adapter wire, so the provider's
+    ``ttl_seconds_for`` sees ``None`` and falls back to a fixed 7200 s. While
+    the wall default was 1800 that was harmless. Raising it to 18000 -- so the
+    500-step budget can actually be reached -- inverted the relationship, and
+    an episode past two hours would die on a TERMINATED INSTANCE rather than
+    at a budget boundary: it loses the episode instead of ending it, and reads
+    as an infrastructure fault rather than a deliberate cap.
+    """
+
+    import argparse
+
+    args = argparse.Namespace(max_wall_s=18000, infra_purpose="benchmark_compute")
+    values = run_episode._ensure_lease_outlasts_wall((), args)
+
+    lease = [v for v in values if v.name == "OSWORLD_TTL_SECONDS"]
+    assert len(lease) == 1
+    assert int(lease[0].value) > args.max_wall_s
+
+
+def test_an_explicit_lease_override_is_never_overwritten() -> None:
+    """The operator's own ``OSWORLD_TTL_SECONDS`` wins, however short."""
+
+    import argparse
+
+    args = argparse.Namespace(max_wall_s=18000, infra_purpose="benchmark_compute")
+    given = run_episode._parse_infra(["OSWORLD_TTL_SECONDS=99"], "benchmark_compute")
+
+    values = run_episode._ensure_lease_outlasts_wall(given, args)
+
+    assert [v.value for v in values if v.name == "OSWORLD_TTL_SECONDS"] == ["99"]

@@ -870,7 +870,7 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | `--route` | required | `<provider>/<model>`; the paid episode used `openrouter/deepseek/deepseek-v4-flash-vision-exp` |
 | `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50 |
 | `--max-usd` | 0.50 | hard provider spend cap |
-| `--max-wall-s` | 1800 | wall clock; **not** propagated to the TTL lease (§2) |
+| `--max-wall-s` | 18000 | runaway guard only; the 500-step budget binds first. The TTL lease is derived from it (`_ensure_lease_outlasts_wall`), see BUDGETS_AND_LATENCY.md |
 | `--max-cycle-usd` | none | per-cycle cost-rate guard |
 | `--keep-recent-frames` | 3 | frame retention |
 | `--benchmark-release` | `osworld-v2-2026.08.08` | |
@@ -1085,6 +1085,11 @@ $PY ~/local-operator/scripts/run_episode.py \
     --max-steps 25 --max-usd 0.50 --max-wall-s 1800 --keep-recent-frames 3 \
     | tee "$RUN/outcome.json"
 ```
+
+This is a SMOKE command: 25 steps, $0.50, and a matching short wall and lease.
+A scored run uses the standard 500-step budget and the 18000 s default wall,
+and lets the lease derive from it -- see `BUDGETS_AND_LATENCY.md`. Do not copy
+these caps into a run whose numbers you intend to report.
 
 Exit 0 means `completed`; 1 is any other terminal state; 2 is a missing or
 unusable secret (named on stderr, value never printed) or a volatile run root.

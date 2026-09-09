@@ -48,20 +48,35 @@ Under every selection the episodes that ran out of time score roughly half of
 those that finished. The truncated ones were still working when they were cut
 off — 2–6 actions per batch, zero errors, compaction running normally.
 
-One caveat on attribution: these episodes are recorded with
-`truncation_reason=budget-cap`, not a wall-specific reason, so "hit the wall"
-is inferred from elapsed time against the 2400 s ceiling rather than read
-directly from the journal.
+Two caveats on attribution, both of which a reader needs in order to
+reproduce the table rather than conclude it is wrong:
+
+- The grouping rule is **elapsed >= 2280 s**, i.e. within 5% of the 2400 s
+  ceiling, not elapsed >= 2400 s. The margin matters: `task_098` finished at
+  2331 s, under the ceiling but plainly pressed against it, and it belongs
+  with the truncated group. Using the ceiling itself gives 8/18 and
+  9.7% vs 29.7% -- the same conclusion, different decimals.
+- These episodes are recorded with `truncation_reason=budget-cap`, not a
+  wall-specific reason. No episode carries a reason naming the wall, so "hit
+  the wall" is inferred from elapsed time, not read from the journal.
 
 ### What the limits are now
 
 `--max-wall-s` now defaults to **18000** (5 h) in `scripts/run_episode.py` and
 exists only as a runaway guard; it is sized so the 500-step budget always binds
-first. The batch script passes `OSWORLD_TTL_SECONDS=18900` — the wall plus
-900 s of slack — because
+first.
+
+The cloud lease is now **derived from the wall** in `run_episode.py`
+(`_ensure_lease_outlasts_wall`, wall + 900 s) rather than left to the
+provider's fixed fallback. This is load-bearing: raising the wall alone would
+have inverted the previous ordering, because
 `providers/aws.py` falls back to `DEFAULT_TTL_SECONDS = 7200` when no TTL is
-supplied (the wall budget is not carried on the adapter wire), and an instance
-reclaimed at 2 h kills an episode that the harness would have let run.
+supplied — the wall budget is not carried on the adapter wire. With an 1800 s
+wall that fallback was harmless; with an 18000 s wall an episode past two
+hours would die on a TERMINATED INSTANCE rather than at a budget boundary,
+which loses the episode instead of ending it and reads as an infrastructure
+fault rather than a deliberate cap. An explicit `OSWORLD_TTL_SECONDS` still
+wins.
 
 **Any wall-truncated episode is a deviation from the standard.** The runner
 records `truncation_reason`; a non-zero wall-truncation rate belongs in any
