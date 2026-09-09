@@ -1374,6 +1374,56 @@ RETAINED_PRESENTATIONS = 12
 #: rows the eye lands on — without turning every poll into a prepare storm.
 PREWARM_PER_REFRESH = 2
 
+#: How long a parked sidebar source may keep its runtime attachment.
+#:
+#: THE TWO SIDEBAR CACHES ARE DIFFERENT RESOURCES, and conflating them is the
+#: defect this constant exists to close. `RETAINED_PRESENTATIONS` bounds parked
+#: WIDGETS (~1.5–2.4 MiB each); a parked source additionally pins a whole
+#: runtime CHILD PROCESS, because its attach socket makes the runtime's
+#: `attach_clients()` return 1, which is term 3 of `process._should_exit`. So a
+#: widget LRU sized for a rendering working set silently became a process
+#: working set: one reporting host held 15 attach sockets and 15 runtime
+#: children (~1.9 GB RSS) after merely CLICKING THROUGH conversations, idle for
+#: half an hour, with every genuine retention term false.
+#:
+#: Deleting the LRU clause from `_sidebar_source_releasable` would fix the leak
+#: in one line and was the design note's recommendation, but it reintroduces
+#: exactly the switch-back jitter `RETAINED_PRESENTATIONS` was raised 4→12 to
+#: remove (measured at that constant: 246 ms loop-CPU per cold switch against
+#: 59–65 ms on a hit). A TIME BOUND keeps both properties: the alternating
+#: working set the constant was tuned for is untouched, because a source the
+#: user returns to within the window never released anything, and only a
+#: conversation genuinely abandoned pays a cold rebuild it was going to pay
+#: anyway.
+#:
+#: Five minutes is a human-attention figure, not a tuned one: long enough that
+#: reading a long transcript, taking a call, or stepping away briefly and
+#: coming back is still a cache hit, short enough that a glance costs at most
+#: one idle runtime for one window rather than for the life of the process.
+#:
+#: NOT env-tunable. It trades memory against one switch's latency, both of
+#: which this code can already observe, so a knob would only let a user turn
+#: the leak back on while making every bug report ask "what did you set it
+#: to". Tests inject their own value by patching this module attribute; the
+#: sweep reads it per tick for exactly that reason.
+SIDEBAR_IDLE_RELEASE_S = 300.0
+#: How often the idle sweep runs. Coarse on purpose: the deadline is five
+#: minutes, so a tick that lands up to 15 s late is invisible, and this walks a
+#: dict bounded by the presentation LRU plus prewarm on the event loop.
+SIDEBAR_IDLE_SWEEP_S = 15.0
+#: How long the viewer waits for a runtime to answer the "you are unused, take
+#: yourself down" offer before giving up and disposing the socket anyway.
+#:
+#: The offer is a socket round trip whose caller cannot proceed until it
+#: returns, because `dispose()` closes the socket the ask travels over. The
+#: `AttachClient` default (`ACK_TIMEOUT_S = 15`) is sized for a healthy peer; a
+#: WEDGED runtime would hold every closing source's socket for that long, which
+#: is the case where letting go promptly matters most. A timeout is simply
+#: another "kept" — the runtime's own residency drain collects it seconds later
+#: — so the short bound costs nothing but an occasional deferred collection.
+#: `mobile/daemon.py` bounds the identical call at the same 3 s.
+RETIRE_OFFER_TIMEOUT_S = 3.0
+
 #: The chord that lifts the aside's full text to the clipboard.
 #:
 #: `omp`, the reference implementation this surface is modelled on, ships copy
@@ -4071,6 +4121,15 @@ class OperatorApp(App[None]):
             if source.draft.approve_all is None:
                 source.draft.approve_all = self._approvals_default_auto
             source.preparations = 1
+            # A newly leased source starts its clock at birth. Prewarm leases
+            # sources the user never visits, and those are parked by
+            # construction — they are never the displayed session, so the swap
+            # path that normally stamps `parked_at` never runs for them. Left
+            # unstamped they would have no deadline at all and would pin a
+            # runtime for the life of the process, which is the original leak
+            # wearing a different hat. The commit path clears this the moment
+            # one does become current.
+            source.parked_at = time.monotonic()
             remote.suspend_viewer_gates()
             self._interactions[id(remote)] = source
             self._sidebar_sources[session_id] = source
@@ -4627,6 +4686,20 @@ class OperatorApp(App[None]):
         remote fact about a read-only projection, it is unbounded, and each
         one costs a deep state copy per owner delta forever. Local retention
         — our own workers, an unsent gate answer — still wins in both.
+        ``reason="expired"`` is the idle sweep, for which see
+        :meth:`_sweep_idle_sidebar_sources`; it is `"idle"` plus permission to
+        release a source the presentation LRU is still holding.
+
+        RELEASING A SOURCE CANNOT KILL LIVE WORK, and that is why this
+        predicate does not try to enumerate what "live" means. It disposes a
+        VIEWER — a socket and a subscription — never a session. The runtime
+        alone decides its own exit, and its `_should_exit`/`is_busy()` already
+        refuse while a turn, compaction, subagent, background job, queued
+        prompt or parked gate is live, and keep a runtime whose wake is due
+        inside `WARM_WINDOW_S`. Duplicating any of that here would be a second,
+        staler answer to a question the runtime already answers correctly. The
+        clauses below exist for the opposite concern: not "is the RUNTIME
+        busy", but "is this VIEWER still doing something for the user".
         """
         from local_operator.session.remote import RemoteSession
 
@@ -4642,8 +4715,132 @@ class OperatorApp(App[None]):
             and not getattr(source.session, "has_pending_gate_reply", False)
             and source.session is not None
             and source.session is not self._fork_source_session
-            and source.session.session_id not in self._sidebar_presentations
+            # The presentation LRU pins the SOURCE only while the parked
+            # presentation could still be revealed cheaply — see
+            # SIDEBAR_IDLE_RELEASE_S for why a widget cache must not own a
+            # process indefinitely. The sweep and the close drain have both
+            # already decided the widgets are forfeit, so they pass a reason
+            # that lifts this clause; every other caller keeps it.
+            and (
+                reason in {"closed", "expired"}
+                or source.session.session_id not in self._sidebar_presentations
+            )
         )
+
+    def _sweep_idle_sidebar_sources(self) -> None:
+        """Release parked viewers nobody has looked at for a while.
+
+        WHY THE CLOCK IS ON THIS SIDE OF THE SEAM. The runtime cannot time its
+        own viewers out: an attached-but-idle TUI sends no periodic op, so
+        `_ClientConn.last_seen` never moves for it and there is no evidence to
+        age. Worse, both actions a runtime could take on such a conclusion are
+        wrong. Announcing `retiring` reaches `_on_runtime_refreshed`, which
+        re-engages eagerly and unconditionally — an exit→spawn→idle→exit
+        treadmill strictly worse than the leak it fixes. A bare EOF is worse
+        still: a sidebar source connects without a `surface`, so it cannot go
+        cold, and owner-death recovery redials forever against a takeover that
+        raises by construction. The viewer closing its OWN socket is the only
+        initiator with no such failure mode — it needs no frame, no wire op and
+        no protocol change, and the runtime keeps full authority over its exit
+        through the existing residency drain.
+
+        Never raises: a Textual interval that throws stops repeating, which
+        would silently disable reaping for the life of the process. Every probe
+        failing closed keeps the source, matching the rest of this module — a
+        wrong keep costs one idle runtime for one more window, a wrong release
+        costs a cold rebuild the user can see.
+
+        FAIL-CLOSED IS PER SOURCE, NOT PER TICK, and the distinction is the
+        whole value of the guard. `_sidebar_sources` iterates in insertion
+        order, so a single raising probe wrapped at loop scope abandons the
+        same suffix of the map on every subsequent tick — the sweep is the only
+        reaper, so those sources leak permanently, which is precisely the bug
+        this method exists to fix. The per-source `try` below bounds a bad
+        probe to its own source; the outer one only still exists because the
+        timer contract above is absolute (see its comment).
+
+        Instrumenting this? `set_interval` at `on_mount` captures the BOUND
+        method, so patching `OperatorApp._sweep_idle_sidebar_sources` after
+        startup silently measures nothing while the real sweep keeps running.
+        Observe the effect (a parked source released) rather than the call.
+        """
+        try:
+            # Both constants are re-read per tick on purpose: tests inject a
+            # compressed window by patching the module attribute, and hoisting
+            # either into a local or binding it at `on_mount` would make those
+            # tests pass against a five-minute wait they never reach.
+            deadline = SIDEBAR_IDLE_RELEASE_S
+            now = time.monotonic()
+            for source in list(self._sidebar_sources.values()):
+                # Per source, so one bad probe costs only itself. Anything that
+                # raises here is a keep for THIS source on THIS tick; the next
+                # tick retries it, and its neighbours are never touched.
+                try:
+                    parked_at = source.parked_at
+                    if parked_at is None or now - parked_at < deadline:
+                        continue
+                    if not self._sidebar_source_releasable(source, reason="expired"):
+                        continue
+                    session_id = str(getattr(source.session, "session_id", ""))
+                    # Evict the presentation WITH the source rather than leaving
+                    # it to age out. A released source mints a fresh
+                    # `SessionInteraction` on re-lease and therefore a fresh
+                    # `token`, which `_sidebar_presentation_current` compares —
+                    # so a presentation kept past its source can never hit
+                    # again. It is dead weight that would be rebuilt anyway, and
+                    # holding it would also keep this source in the
+                    # prewarm-ineligible set.
+                    presentation = self._sidebar_presentations.pop(session_id, None)
+                    # Suppress speculative re-preparation of what we just
+                    # dropped. `_sidebar_prewarm_refused` reads this map, and
+                    # prewarm's candidate filter otherwise selects exactly the
+                    # sessions with no retained presentation — i.e. the ones the
+                    # sweep just released — turning a 5-minute reap into a
+                    # 2-second respawn treadmill.
+                    #
+                    # THIS STAMP IS SPECULATIVE-SUPPRESSION, NOT A `retainable()`
+                    # REFUSAL, even though it reuses that stamp's shape. It is
+                    # written before the release worker runs and stands whatever
+                    # the release returns, so a release the predicate later
+                    # refuses (a click landing in the window bumps
+                    # `preparations`) leaves a source suppressed that was never
+                    # refused. That is deliberate and it must stay synchronous:
+                    # the release path awaits — the draft spill, then the retire
+                    # offer — while the source is still in `_sidebar_sources`
+                    # with its presentation already popped, which is exactly the
+                    # prewarm candidate shape, so stamping after the release
+                    # returns would open a multi-second window for the 2 s poll
+                    # to re-lease what this tick just dropped. The cost is
+                    # bounded and self-healing: only speculation is suppressed,
+                    # the next tick retries the release, `_admit_sidebar_
+                    # presentation` clears the stamp on admission, and closing
+                    # the sidebar clears the whole map.
+                    self._sidebar_unretainable[session_id] = self._sidebar_refusal_stamp(source)
+                    self.run_worker(
+                        self._retire_idle_sidebar_source(source, presentation),
+                        group="sidebar-idle-release",
+                    )
+                except Exception:  # noqa: BLE001 — a bad source costs only itself
+                    logger.debug("idle sidebar sweep skipped a source", exc_info=True)
+        except Exception:  # noqa: BLE001 — a throwing interval stops repeating
+            logger.debug("idle sidebar sweep failed", exc_info=True)
+
+    async def _retire_idle_sidebar_source(
+        self, source: SessionInteraction, presentation: SessionPresentation | None
+    ) -> None:
+        """Unmount an expired source's widgets, then drop its viewer.
+
+        Split from the sweep because removal and disposal both await, and the
+        sweep runs on a timer that must not block the loop. The predicate is
+        re-checked inside `_release_sidebar_source`, which is what makes this
+        safe against a click that lands while the worker is queued.
+        """
+        try:
+            if presentation is not None and presentation.replay.view.is_mounted:
+                await asyncio.shield(presentation.replay.view.remove())
+            await self._release_sidebar_source(source, reason="expired")
+        except Exception:  # noqa: BLE001 — reaping is best-effort, never fatal
+            logger.debug("idle sidebar release failed", exc_info=True)
 
     async def _release_sidebar_source(
         self, source: SessionInteraction, *, reason: str = "idle"
@@ -4676,6 +4873,20 @@ class OperatorApp(App[None]):
             self._sidebar_sources.pop(session.session_id, None)
         if self._interactions.get(id(session)) is source:
             self._interactions.pop(id(session), None)
+        # Offer an untouched runtime back before dropping the socket. The three
+        # existing callers of this op all abandon the CURRENT session
+        # (`/resume` twice, unmount); no sidebar path did, so a user who
+        # clicked onto an empty "Untitled conversation" and clicked away left a
+        # pristine runtime that only the residency drain could collect.
+        #
+        # WHETHER IT IS REALLY EMPTY STAYS THE RUNTIME'S ANSWER, never a
+        # viewer-side guess at emptiness: only the runtime can see an armed
+        # wake, a peer message that just arrived, or a second viewer attached.
+        # The op already refuses on all three and on any probe failure, and its
+        # failure mode is "the runtime stays up and the drain gets it seconds
+        # later" — so this only makes the empty case immediate, and can never
+        # end a session someone still wants.
+        await self._retire_unused_runtime(session)
         await session.dispose()
 
     @staticmethod
@@ -4884,6 +5095,15 @@ class OperatorApp(App[None]):
             ):
                 self._sidebar_presentations[previous.session_id] = outgoing_presentation
                 outgoing_presentation = None
+        # Start the outgoing source's idle clock, and stop the incoming one's.
+        # This is the single place the two transitions happen together, and
+        # attention is the only thing either stamp records: `outgoing` has just
+        # stopped being on screen, `source` has just become the session the
+        # user is looking at. A source that is current has no deadline at all,
+        # which is what makes "the displayed conversation is never reaped" a
+        # structural property rather than a clause someone must remember.
+        outgoing.parked_at = time.monotonic()
+        source.parked_at = None
         self._park_sidebar_aside(outgoing)
         if isinstance(previous, RemoteSession):
             self._suspend_sidebar_gates(outgoing)
@@ -5848,6 +6068,12 @@ class OperatorApp(App[None]):
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
+        # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
+        # registered with `pause=True` and is paused whenever the sidebar is
+        # closed, so hanging the reap off it would mean a user who closes the
+        # sidebar — the state the leak was reported from — stops reaping
+        # entirely and keeps every runtime they ever clicked.
+        self.set_interval(SIDEBAR_IDLE_SWEEP_S, self._sweep_idle_sidebar_sources)
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -5926,6 +6152,11 @@ class OperatorApp(App[None]):
                 else self._approvals_default_auto
             )
         self._interaction = source
+        # Adoption is the other way a source becomes current (boot, `/resume`,
+        # takeover), and the displayed session must never carry a deadline —
+        # a source leased by prewarm and later adopted would otherwise keep the
+        # stamp it was born with and be swept while on screen.
+        source.parked_at = None
         self._watch_source_frontend(source)
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):
@@ -12950,6 +13181,15 @@ class OperatorApp(App[None]):
         mid-swap, where an exception would be noise the user cannot act on and
         a notice would land on a surface that is going away. A failure leaves
         the runtime up, which the residency drain resolves seconds later.
+
+        BOUNDED AT 3 s because the offer crosses the socket, and the caller
+        cannot let go until it returns — `dispose()` closes the very socket the
+        ask travels over, so the wait is unavoidable in ordering. The
+        `AttachClient` default is `ACK_TIMEOUT_S = 15`, which against a WEDGED
+        runtime would hold each source's socket open for fifteen seconds in
+        exactly the case where letting go promptly matters most. A timeout is
+        just another "kept", and the residency drain collects it seconds later;
+        `mobile/daemon.py` bounds the identical call the same way.
         """
         if session is None:
             return
@@ -12957,7 +13197,10 @@ class OperatorApp(App[None]):
         if not callable(retire):
             return
         try:
-            detail = await cast(Callable[[], Awaitable[str]], retire)()
+            detail = await asyncio.wait_for(
+                cast(Callable[[], Awaitable[str]], retire)(),
+                timeout=RETIRE_OFFER_TIMEOUT_S,
+            )
             logger.debug("unused runtime offer: %s", detail)
         except Exception:  # noqa: BLE001 — teardown must not fail over this
             logger.debug("could not offer the unused runtime back", exc_info=True)
