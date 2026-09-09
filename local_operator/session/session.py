@@ -5253,6 +5253,12 @@ class Session:
         a child session is built without this handler and so never advertises a
         question it could only block on.
 
+        That paragraph described the DESIGN while the builder carried a second
+        ``has_ui`` clause that contradicted it, which is how #868 hid: the
+        detached runtime behind every interactive session builds with the flag
+        off and installs this hook anyway, so the tool was withheld from the
+        default path. The builder now matches this text; do not re-add the flag.
+
         Which is why the inventory is REBUILT here and not only in ``__init__``.
         The constructor's capability merge runs before any front end can install
         this hook (the TUI resolves its session in a worker and installs it in

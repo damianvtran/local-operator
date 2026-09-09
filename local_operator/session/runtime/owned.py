@@ -149,6 +149,24 @@ def _already_bounded(images: Any) -> bool:
     return not isinstance(images[0], Mapping)
 
 
+def _question_prose(question: Any) -> str:
+    """The human-readable prose of an ask, for surfaces that ANNOUNCE it.
+
+    One function rather than two ``getattr`` calls because the two call sites
+    below drifted together: both read a ``text`` attribute
+    :class:`~local_operator.harness.types.AskQuestion` does not have and, with
+    ``extra="forbid"``, cannot ever be given. Naming the read once means a
+    future rename of the model's field breaks in one place instead of silently
+    degrading to the fallback in several.
+
+    ``getattr`` rather than ``question.question`` because this seam is also
+    handed the phone's decoded projections, which are duck-typed rather than
+    the pydantic model. The fallback is deliberately a sentence a human can
+    read on a notification banner, matching ``ask_pending_request``'s.
+    """
+    return str(getattr(question, "question", "") or "the agent is asking")
+
+
 @dataclass
 class _PromptCommand:
     command_id: str
@@ -451,13 +469,21 @@ class OwnedSessionHandle(SessionHandle):
                     )
                 )
                 self._notify()
-                self._announce_pending("ask", getattr(question, "text", "") or "question", "")
+                # ``question``, not ``text``: :class:`AskQuestion` has no ``text``
+                # field and sets ``extra="forbid"``, so it can never grow one — the
+                # old read always fell through to the literal "question" and the
+                # desktop notification, the ``lop sessions`` pending state and the
+                # timeout row REPLAYED TO THE MODEL all named nothing. It survived
+                # because this whole gate was unreachable until #868: both its
+                # hosts build ``has_ui=False``, which the removed ``build_ask_tool``
+                # clause vetoed, so the body never ran. ``ask_pending_request``
+                # (mobile/types.py) reads the right field, which is why the phone
+                # card rendered correctly while these two did not.
+                self._announce_pending("ask", _question_prose(question), "")
                 try:
                     answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
                 except TimeoutError:
-                    await self._record_gate_timeout(
-                        "ask", getattr(question, "text", "") or "question", kind="ask"
-                    )
+                    await self._record_gate_timeout("ask", _question_prose(question), kind="ask")
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.

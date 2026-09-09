@@ -10754,19 +10754,33 @@ def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> 
 def build_ask_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: the tool exists only where a human can answer it.
 
-    Gated on the HOOK, not on ``has_ui``: a subagent inherits ``has_ui`` from
-    its parent and has no human at its keyboard, so gating on the flag alone
-    would let a delegated child mount a question on the parent's screen — for
-    work the person watching it never asked about — and block on it. A child
-    session is built without an ask handler, which makes the hook's absence the
-    honest signal for every unanswerable case at once: server, exec mode,
-    scheduler runs and subagents.
+    Gated on the HOOK ALONE, and not additionally on ``has_ui``: a subagent
+    inherits ``has_ui`` from its parent and has no human at its keyboard, so
+    gating on the flag would let a delegated child mount a question on the
+    parent's screen — for work the person watching it never asked about — and
+    block on it. A child session is built without an ask handler, which makes
+    the hook's absence the honest signal for every unanswerable case at once:
+    server, exec mode, scheduler runs and subagents.
 
-    ``has_ui`` is still required, and not as a duplicate of that check: a host
-    declaring no UI is asserting it cannot mount a prompt, and a tool must
-    believe that over a handler somebody left installed.
+    ``has_ui`` was a second clause here until #868, and it was the accident
+    rather than the design (the ``set_ask_handler`` docstring already described
+    the hook-only rule this now implements). The flag means "this host drives a
+    rich frontend state store", NOT "a human is present": ``spawn_owned_session``
+    — the detached runtime every interactive ``lop`` session has booted through
+    since 0.45.0 — constructs with ``has_ui=False`` and *then* installs a real
+    ask gate, so the flag vetoed the tool on the default path while a person sat
+    at the terminal ready to answer. ``ask`` reached no model there at all.
+
+    Flipping that construction to ``has_ui=True`` instead is not available:
+    ``session_factory`` keys the RemoteSession takeover branch on
+    ``has_ui and resume_id is not None`` and ``spawn_owned_session`` passes
+    ``resume``, so the daemon's writer path would divert into follower takeover.
+
+    ``exec --control`` gains the tool under this rule, which is correct rather
+    than a leak: it opts into the gate explicitly (``install_gates=supervised``)
+    and ``runtime/server.py`` serves an ``ask_answer`` op for the supervisor.
     """
-    if context.ask_user is None or not context.has_ui:
+    if context.ask_user is None:
         return None
     return AgentTool(
         name="ask",

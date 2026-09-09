@@ -590,6 +590,82 @@ async def test_ask_gate_projects_secret_flag_without_the_value() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_parked_ask_names_the_question_it_is_waiting_on() -> None:
+    """The announcement surfaces must carry the QUESTION, not a placeholder.
+
+    Regression origin (#868): both announcing reads in ``ask_gate`` asked for a
+    ``text`` attribute :class:`AskQuestion` does not have — and, with
+    ``extra="forbid"``, can never be given — so both always fell through to the
+    literal string ``"question"``. The parked-gate desktop notification, the
+    ``pending`` state ``lop sessions`` reads, and the timeout row REPLAYED TO
+    THE MODEL therefore all named nothing at all.
+
+    It stayed invisible because this entire gate was unreachable: both of its
+    hosts build ``has_ui=False``, which the ``build_ask_tool`` clause removed in
+    the same change vetoed, so ``ask`` was never advertised and the body never
+    ran. Fixing that gate is what makes this reachable, which is why the two
+    land together.
+
+    Both reads are asserted, and so is ``ask_pending_request`` on the SAME
+    question. That pairing is the point: the projection seam was always correct,
+    so a card that renders the prose while these two do not is what proves a
+    wrong-attribute bug rather than a question nobody supplied.
+    """
+    handle, session = make_handle(auto_approve=False)
+
+    appended: list[Any] = []
+
+    class _Transcript:
+        async def append_message(self, message):  # noqa: ANN001
+            appended.append(message)
+
+    setattr(session, "transcript", _Transcript())
+
+    prose = "Deploy to production or roll back?"
+    question = AskQuestion(
+        id="deploy",
+        question=prose,
+        options=[AskOption(label="Deploy"), AskOption(label="Roll back")],
+    )
+
+    # 1. The live announcement: what the notification and the record's pending
+    #    state are handed while the gate is parked.
+    asked = asyncio.ensure_future(handle._ask_gate([question]))
+    await asyncio.sleep(0)
+
+    assert handle._parked_announcement is not None
+    kind, title, _detail = handle._parked_announcement
+    assert kind == "ask"
+    assert title == prose, f"the parked ask announced {title!r} instead of the question"
+
+    # 2. The projection seam, on the same question. Correct before this fix and
+    #    after it — which is what localises the defect to the two reads above.
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    assert pending.title == prose
+
+    pending_request_id = pending.request_id
+    await handle.ask_answer(pending_request_id, "Deploy")
+    assert await asyncio.wait_for(asked, 1) == {"deploy": ["Deploy"]}
+
+    # 3. The timeout row, which is the read the MODEL sees on replay. Driven
+    #    through the REAL gate rather than by calling ``_record_gate_timeout``
+    #    directly: the defect was in what the gate PASSES that recorder, so a
+    #    direct call would assert the argument this test supplied itself.
+    handle._gate_timeout_s = lambda: 0.01  # type: ignore[method-assign]
+    timed_out = await asyncio.wait_for(handle._ask_gate([question]), 2)
+
+    assert timed_out is None, "an unanswered ask must settle to None, not hang"
+    assert appended, "the expiry was not recorded at all"
+    row = appended[0]
+    assert row.details["kind"] == "ask"
+    assert row.details["description"] == prose, (
+        "the timeout row replayed to the model named "
+        f"{row.details['description']!r} instead of the question"
+    )
+
+
+@pytest.mark.asyncio
 async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     """U1: an owned multi-question ask projects and resolves question by
     question — answering Q1 advances to Q2 rather than settling the whole set,
