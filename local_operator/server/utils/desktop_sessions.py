@@ -38,6 +38,7 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.remote import RemoteSession
+from local_operator.session.retention import DESKTOP_MARKER_NAME
 from local_operator.session.transcript import read_transcript_page
 
 logger = logging.getLogger(__name__)
@@ -518,7 +519,7 @@ class DesktopSessions:
                     )
             # An explicitly created desktop draft needs an identity after an
             # HTTP restart, unlike the TUI's uncommitted welcome-screen draft.
-            marker = path / "desktop.json"
+            marker = path / DESKTOP_MARKER_NAME
             marker.write_text(json.dumps({"version": 1, "cwd": str(directory)}))
             marker.chmod(0o600)
 
@@ -577,7 +578,7 @@ class DesktopSessions:
                 def locate() -> str:
                     if not path.is_dir() or not is_user_session(path):
                         raise KeyError("Unknown session")
-                    marker = path / "desktop.json"
+                    marker = path / DESKTOP_MARKER_NAME
                     if marker.exists():
                         return str(json.loads(marker.read_text())["cwd"])
                     # The cold facade restores cwd from the durable canonical
