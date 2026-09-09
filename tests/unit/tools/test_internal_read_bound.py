@@ -266,13 +266,8 @@ async def test_the_outline_covers_every_line_past_the_head(tmp_path: Path) -> No
     ]
     assert spans, "the outline indexed nothing"
 
-    # Derive the head's extent by MATCHING its last line back to the source
-    # rather than by counting rendered lines. A count has to subtract the
-    # banner and its blank line, which is exactly the kind of off-by-one that
-    # reports a phantom one-line gap and hides a real one.
-    head_body = shaped.split("\n\n[... ", 1)[0].split("\n\n", 1)[1]
-    head_lines = len(head_body.splitlines())
-    assert doc.splitlines()[:head_lines] == head_body.splitlines()
+    head_lines = _head_line_count(shaped, doc)
+    assert head_lines, "the head reproduced none of the source"
     assert spans[0][0] <= head_lines + 1, "a gap sits between the head and the first span"
     assert spans[-1][1] == len(doc.splitlines()), "the outline stops short of EOF"
 
@@ -296,6 +291,27 @@ async def test_kill_switch_restores_unbounded_passthrough(tmp_path: Path) -> Non
         assert _text_of(await _call(context, {"path": "skill://fixture-skill"})) == doc
     finally:
         del os.environ[builtin.INTERNAL_READ_LIMIT_ENV]
+
+
+def _head_line_count(shaped: str, source: str) -> int:
+    """How many leading SOURCE lines the shaped head reproduces.
+
+    Derived by matching the head against the document rather than by parsing
+    the result's framing. Both framing-based derivations are unreliable for the
+    same reason: the head is emitted as ``{banner}\n\n{head_text}\n\n[...``,
+    so when ``head_text`` itself ends in a blank line — the normal markdown case
+    at a heading boundary — the blank and the separator are indistinguishable,
+    and ``splitlines()`` drops the trailing empty string either way. Splitting
+    on ``"]\n\n"`` instead of ``"\n\n"`` does not help; the ambiguity is at the
+    END of the head, not at its start. Counting short makes
+    ``spans[0] <= head_lines + 1`` fail against correct product code.
+    """
+    lines = source.splitlines()
+    head = shaped.split("\n\n[... ", 1)[0]
+    for count in range(len(lines), -1, -1):
+        if head.endswith("\n".join(lines[:count])):
+            return count
+    return 0
 
 
 def _true_extent(lines: list[str], start: int) -> int:
@@ -381,6 +397,55 @@ async def test_no_heading_is_collected_from_inside_a_fenced_block(tmp_path: Path
         ), f"{phantom!r} was indexed as a heading"
 
 
+def test_a_nested_fence_does_not_reopen_indexing_inside_the_outer_block() -> None:
+    """A ``` inside a ````markdown block must not close it.
+
+    Fence tracking used to be a bare parity toggle, so the inner delimiter
+    flipped it, indexing resumed inside the block, and a heading-shaped line
+    there became a phantom — which does not merely add a junk entry but
+    truncates the advertised span of the section containing it, the exact R1
+    failure this scan exists to prevent. Live exposure: the msd skill wraps a
+    nested ``` at 817-822 inside a ````markdown block at 812-826, so an
+    unindented ``# ...`` there cut ``### Comment format`` from 763-855 to
+    763-817 — the section holding the review-gate comment template.
+    """
+    doc = "# A\n\n````markdown\n```\n# phantom?\n```\n````\n\n## B\n\nprose\n"
+
+    headings = builtin._collect_headings(doc.splitlines())
+
+    assert [h.text for h in headings] == ["A", "B"], "a fenced line was indexed"
+    # The span matters as much as the absence: a phantom would have cut A to 1-4.
+    assert (headings[0].start, headings[0].end) == (1, 8)
+
+
+def test_a_fence_closes_only_on_its_own_delimiter_character_and_length() -> None:
+    """CommonMark: a closer matches the opener's character and is at least as
+    long. ``~~~`` must not close a ``` block, and a shorter run must not close
+    a longer opener — both would resume indexing inside the block."""
+    mismatched_char = "# A\n\n```sh\n# hidden\n~~~\n\n## B\n\nprose\n"
+    assert [h.text for h in builtin._collect_headings(mismatched_char.splitlines())] == ["A"]
+
+    shorter_closer = "# A\n\n````\n# hidden\n```\n# also hidden\n````\n\n## B\n"
+    assert [h.text for h in builtin._collect_headings(shorter_closer.splitlines())] == ["A", "B"]
+
+    # A longer run DOES close, and an info string marks an opener, never a closer.
+    longer_closer = "# A\n\n```\n# hidden\n`````\n\n## B\n"
+    assert [h.text for h in builtin._collect_headings(longer_closer.splitlines())] == ["A", "B"]
+
+
+def test_an_unclosed_fence_still_leaves_its_lines_reachable() -> None:
+    """The fail-safe direction, kept deliberately: an unclosed fence drops the
+    rest of the document from the INDEX, but the enclosing section's end is
+    ``total``, so those lines stay reachable through its advertised range.
+    Losing an index entry is recoverable; a truncated span is not."""
+    lines = ["# A", "", "## Real", "", "```sh"] + [f"swallowed {i}" for i in range(20)]
+
+    headings = builtin._collect_headings(lines)
+
+    assert [h.text for h in headings] == ["A", "Real"]
+    assert headings[-1].end == len(lines), "swallowed lines became unreachable"
+
+
 @pytest.mark.asyncio
 async def test_a_crlf_document_indexes_every_heading_with_resolvable_spans(
     tmp_path: Path,
@@ -440,12 +505,8 @@ async def test_a_long_frontmatter_leaves_no_orphaned_lines(tmp_path: Path) -> No
     result = await _call(context, {"path": "guide://frontmatter"})
     shaped = _text_of(result)
 
-    # Same discipline as the coverage test: match the head back to the source
-    # instead of counting rendered lines, so a banner-shape change cannot make
-    # this assertion quietly wrong in either direction.
-    head_body = shaped.split("\n\n[... ", 1)[0].split("\n\n", 1)[1]
-    head_lines = len(head_body.splitlines())
-    assert body.splitlines()[:head_lines] == head_body.splitlines()
+    head_lines = _head_line_count(shaped, body)
+    assert head_lines, "the head reproduced none of the source"
     spans = [
         int(line.rsplit("[lines ", 1)[1].rstrip("]").split("-")[0])
         for line in shaped.splitlines()

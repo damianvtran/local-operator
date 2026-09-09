@@ -58,7 +58,7 @@ import time
 import traceback
 import unicodedata
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -2278,6 +2278,13 @@ _HEADING_RE = re.compile(r"^(#{1,3}) +(\S.*?)\s*$")
 #: still toggles.
 _FENCE_PREFIXES = ("```", "~~~")
 
+#: An opening or closing code fence: at least three backticks or tildes,
+#: optionally indented. The run length and the character are both captured
+#: because CommonMark closes a fence only on the SAME character at the SAME
+#: length or longer — a parity toggle that ignores them lets a nested ``` close
+#: an enclosing ````markdown block, and lets ``~~~`` close a ``` block.
+_FENCE_RE = re.compile(r"^(?P<fence>(?P<char>`|~)(?P=char){2,})(?P<info>.*)$")
+
 
 def _internal_read_limit() -> int:
     """The shaping threshold in force, honouring the kill switch.
@@ -2309,7 +2316,7 @@ class _Heading(NamedTuple):
     end: int
 
 
-def _collect_headings(lines: list[str]) -> list[_Heading]:
+def _collect_headings(lines: Sequence[str]) -> list[_Heading]:
     """Every depth-1..3 heading OUTSIDE a fenced code block, with its span.
 
     Scans line by line rather than running the pattern over the whole document,
@@ -2333,21 +2340,42 @@ def _collect_headings(lines: list[str]) -> list[_Heading]:
     """
     total = len(lines)
     found: list[tuple[int, str, int]] = []
-    in_fence = False
+    # The OPEN fence's delimiter, or None outside a fence. Tracking the
+    # character and length rather than a bare parity bit is what makes nesting
+    # safe: these documents embed fenced examples inside ````markdown blocks,
+    # so a toggle would treat the inner ``` as a close, resume indexing inside
+    # the block and reintroduce the phantom-heading defect this scan exists to
+    # prevent — and a phantom does not merely add a junk entry, it truncates
+    # the advertised span of the section containing it. Live example: the msd
+    # skill's ````markdown block at 812-826 wraps a nested ``` at 817-822, and
+    # an unindented `# ...` inside it would cut `### Comment format` from
+    # 763-855 to 763-817, hiding the review-gate comment template.
+    open_fence: str | None = None
     for index, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith(_FENCE_PREFIXES):
+        match = _FENCE_RE.match(line.lstrip())
+        if match:
+            delimiter = match.group("fence")
+            if open_fence is None:
+                # An info string ("```sh", "````markdown") is allowed on an
+                # opener only, so a line carrying one can never be a closer.
+                open_fence = delimiter
+                continue
+            # CommonMark: a closer matches the opener's character and is at
+            # least as long, and carries no info string.
+            if delimiter[0] == open_fence[0] and len(delimiter) >= len(open_fence):
+                if not match.group("info").strip():
+                    open_fence = None
+                    continue
+            # Otherwise it is ordinary content inside the open fence.
+        if open_fence is not None:
             # An unclosed fence keeps everything after it out of the index,
             # which is the safe direction: a phantom corrupts a real section's
             # span, while a missed heading only costs one index entry and the
-            # enclosing section still covers those lines.
-            in_fence = not in_fence
+            # enclosing section still covers those lines (its end is ``total``).
             continue
-        if in_fence:
-            continue
-        match = _HEADING_RE.match(line)
-        if match:
-            found.append((len(match.group(1)), match.group(2), index + 1))
+        heading = _HEADING_RE.match(line)
+        if heading:
+            found.append((len(heading.group(1)), heading.group(2), index + 1))
     return [
         _Heading(depth, text, start, (found[i + 1][2] - 1) if i + 1 < len(found) else total)
         for i, (depth, text, start) in enumerate(found)
