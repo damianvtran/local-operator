@@ -58,7 +58,7 @@ import time
 import traceback
 import unicodedata
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1473,15 +1473,36 @@ class _PipeRedactor:
     enough undecided text for the longest injected credential, and never cut
     through a complete match. UTF-8 decoding is incremental for the same
     reason. Retained output and live job tails receive the same safe bytes.
+
+    Accepts a credential MAP (the historic caller) or a plain sequence of
+    values. The sequence form is what carries §6 registrations — values a child
+    fetched through ``lop secret get``, which have a name nowhere in this
+    process, so there is no map to put them in.
     """
 
-    def __init__(self, credentials: dict[str, str]) -> None:
-        self.secrets = sorted(
-            {value for value in credentials.values() if value}, key=len, reverse=True
-        )
-        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+    def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+        values = credentials.values() if isinstance(credentials, dict) else list(credentials)
+        self._set(values)
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def _set(self, values: Iterable[str]) -> None:
+        self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
+        self.lookbehind = max((len(value) for value in self.secrets), default=1) - 1
+
+    def refresh(self, values: Sequence[str]) -> None:
+        """Adopt a newly-widened value set mid-stream.
+
+        A ``$(lop secret get X)`` value is registered with the session DURING
+        the command, so a redactor built once at spawn would not know about it.
+        Re-read per chunk, which is what makes a value that arrives at the same
+        moment as the bytes it must scrub still get scrubbed.
+
+        The lookbehind can only GROW here, never shrink below what is already
+        held back: ``pending`` is untouched, so a longer new secret straddling
+        this chunk boundary is still resolved on the next feed.
+        """
+        self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
@@ -1522,6 +1543,61 @@ def _bash_progress_line(
     return "running"
 
 
+def _stream_redaction_values(store: Any, credential_env: dict[str, str]) -> list[str]:
+    """Every value the live pipe filter must scrub, not just the injected ones.
+
+    **The hole this closes.** ``_PipeRedactor`` used to be built from the
+    injected credential map alone. That map holds the secrets this process
+    PUT INTO the child's environment — but a child that runs
+    ``$(lop secret get NAME)`` fetches a value this process never injected and
+    never saw. The store learns about it out of band (design §6 case 2: the
+    broker notifies the session and waits for the ack BEFORE answering the
+    child), and ``redact_tool_result`` and ``_redact_tool_text`` both read that
+    registration through ``VariableStore.redact``. The pipe filter did not, so
+    the value was scrubbed from the finished tool result and PAINTED LIVE in
+    the streaming card and in ``jobs(op='peek')`` while the command ran.
+
+    **``redaction_values`` is consumed defensively, and its absence FAILS
+    CLOSED.** The method ships with the broker PR; this code must compose with
+    a tree where it is present and one where it is not, which is why it is read
+    with ``getattr`` — the same convention ``credential_env`` above uses. But
+    "absent" must not degrade to "stream unfiltered": the seam being missing is
+    exactly the condition under which a broker-announced value would be
+    invisible to this filter. So when the store advertises a redaction sink at
+    all and it cannot be read, this returns the sentinel
+    :data:`_REDACTION_SEAM_BROKEN` and the caller refuses to stream rather than
+    publishing bytes it cannot vouch for. A store with no sink whatsoever (a
+    third-party embedder's minimal variable store, or a pre-broker tree) has no
+    long-term retrievals to announce and keeps today's behaviour — the injected
+    credentials, which is the complete set of secrets in play there.
+    """
+    values = [str(value) for value in credential_env.values() if value]
+    reader = getattr(store, "redaction_values", None)
+    if not callable(reader):
+        return values
+    try:
+        registered = reader()
+    except Exception:
+        logger.warning("redaction sink unreadable; refusing to stream", exc_info=True)
+        return _REDACTION_SEAM_BROKEN
+    if not isinstance(registered, (list, tuple, set)):
+        logger.warning("redaction sink returned %s; refusing to stream", type(registered).__name__)
+        return _REDACTION_SEAM_BROKEN
+    values.extend(str(value) for value in registered if value)
+    # `redaction_values` already includes the injected credentials once the
+    # broker seam is present, so the two sources overlap. De-duplicated because
+    # `_PipeRedactor` sizes its held-back lookbehind from this list and scans it
+    # per chunk; duplicates cost work on every read for no added coverage.
+    # Order-preserving so the longest-first sort downstream stays deterministic.
+    return list(dict.fromkeys(values))
+
+
+#: Sentinel meaning "the redaction sink exists but could not be read". Not an
+#: empty list, because an empty list is the legitimate "nothing to scrub yet"
+#: answer and must keep streaming; this one stops it.
+_REDACTION_SEAM_BROKEN: list[str] = ["\x00redaction-seam-broken\x00"]
+
+
 def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     """Strip stored session-credential values out of tool output.
 
@@ -1530,13 +1606,28 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     (bash stream updates, background-job peek, the abort receipt). A command
     that ``echo``s ``$GITHUB_TOKEN`` would otherwise paint the secret while
     the command is still running.
+
+    Reads ``VariableStore.redact``, which the broker PR widens to cover
+    registered long-term retrievals as well as injected session credentials, so
+    this surface picks up ``$(lop secret get NAME)`` values with no change here.
     """
     store = context.variables if context is not None else None
     redact = getattr(store, "redact", None)
-    if callable(redact):
+    if not callable(redact):
+        return text
+    try:
         redacted = redact(text)
-        return redacted if isinstance(redacted, str) else text
-    return text
+    except Exception:
+        # FAIL CLOSED, and do not propagate. `redact` reads the store's
+        # redaction sink, so a sink that raises means this text cannot be
+        # vouched for — returning it is the leak. Letting the exception escape
+        # is not the answer either: this helper is called from the streaming
+        # emit path and from the background-job mirror, where an exception
+        # turns a redaction fault into a crashed bash tool and loses the
+        # command's result along with its output.
+        logger.warning("redaction failed; withholding this text", exc_info=True)
+        return "[output withheld: this session's secret redaction sink could not be read]"
+    return redacted if isinstance(redacted, str) else text
 
 
 def _bash_output_summary(stdout: str, stderr: str) -> str:
@@ -1789,26 +1880,63 @@ async def execute_bash(
             _redact_tool_text(chunk.decode("utf-8", errors="replace"), context),
         )
 
+    injected = extra if isinstance(extra, dict) else {}
+
     async def _pump(stream: asyncio.StreamReader | None, sink: _BashOutput) -> None:
         # Both pipes were requested at spawn, so neither is ever None here;
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
-        redactor = _PipeRedactor(extra if isinstance(extra, dict) else {})
+        redactor = _PipeRedactor(_stream_redaction_values(store, injected))
+        withheld = False
         try:
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
                     break
+                if withheld:
+                    # KEEP DRAINING AFTER A FAILURE, discarding. Stopping the
+                    # read instead would fill the pipe buffer and block the
+                    # child forever on its next write — turning a redaction
+                    # fault into a hung command, which is a worse outcome than
+                    # the one being guarded against and is not what failing
+                    # closed means.
+                    continue
+                # RE-READ PER CHUNK. A `$(lop secret get X)` value is
+                # registered with the session while this command runs, so a set
+                # captured once before the loop would miss the very value this
+                # filter exists to catch. Cheap: a list copy of a handful of
+                # strings per 64 KB read.
+                values = _stream_redaction_values(store, injected)
+                if values is _REDACTION_SEAM_BROKEN:
+                    # FAIL CLOSED. The sink that knows about broker-announced
+                    # values cannot be read, so these bytes cannot be vouched
+                    # for. Publishing them is the leak; withholding them costs
+                    # the live view only — the command still runs to completion,
+                    # and its final result goes through `redact_tool_result`,
+                    # which is a separate path reading the store directly.
+                    withheld = True
+                    notice = (
+                        b"[live output withheld: this session's secret redaction "
+                        b"sink could not be read]\n"
+                    )
+                    sink.append(notice)
+                    _mirror(notice)
+                    continue
+                redactor.refresh(values)
                 safe = redactor.feed(chunk)
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
-            safe = redactor.feed(b"", final=True)
-            sink.append(safe)
-            _mirror(safe)
+            # The held-back tail is published only if the stream was never
+            # withheld; flushing it after a fault would emit exactly the bytes
+            # the fault said could not be vouched for.
+            if not withheld:
+                safe = redactor.feed(b"", final=True)
+                sink.append(safe)
+                _mirror(safe)
 
     # Hold the tasks ourselves so the readers are never abandoned mid-run.
     stdout_task = asyncio.create_task(_pump(process.stdout, stdout_chunks))
@@ -10717,6 +10845,16 @@ def _report_secret_answers(
         key = getattr(credential, "key", None)
         if getattr(result, "ok", False) and isinstance(key, str):
             reported[question.id] = [key]
+            if question.persist:
+                # §5.4's persist route, reached from `ask` as well as from
+                # `/credential`, so the two ways a credential arrives share one
+                # promotion path rather than two that drift. Reported into the
+                # SAME answer slot the key name occupies, because the model
+                # needs to know whether the secret it just asked for will still
+                # be there tomorrow — a silent failure here would have it plan
+                # around a durable secret that is actually session-only.
+                promotion = _promote_credential(store, key, question.question)
+                reported[question.id] = [key, promotion]
             # Announce only on a successful store, and only the KEY: the
             # announcement is journaled into the live context and sent to the
             # provider, so the value must never ride it.
@@ -10734,6 +10872,25 @@ def _report_secret_answers(
     for key, value in answers.items():
         reported.setdefault(key, list(value))
     return reported
+
+
+def _promote_credential(store: Any, key: str, description: str) -> str:
+    """Promote a just-stored session credential; return a model-safe sentence.
+
+    Never raises and never returns a value. The credential is already in the
+    session store by the time this runs, so a promotion failure must degrade to
+    "it is session-only" rather than losing the secret the user just pasted —
+    and must SAY so, because the model's plan depends on which it was.
+
+    Imported lazily: the crypto stack stays off the path of every `ask` that
+    does not persist, which is nearly all of them. The never-raises guard lives
+    in :func:`promote_session_credential_guarded` so the ``/credential
+    --persist`` and viewer paths share the same robustness level (R4) rather
+    than this path carrying a second one.
+    """
+    from local_operator.secrets.promote import promote_session_credential_guarded
+
+    return promote_session_credential_guarded(store, key, description=description).message
 
 
 def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> str:
@@ -10798,7 +10955,9 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
             "answers the questions back to back rather than once per turn. "
             "If you need a credential, password, or API key, set secret=true on that "
             "question (options empty, id is the env-var name). The value is stored in "
-            "session memory and injected into bash; you will only ever see the key name."
+            "session memory and injected into bash; you will only ever see the key name. "
+            "Add persist=true when that credential will be needed again after this "
+            "session, and it is also saved to the operator's encrypted long-term store."
         ),
         parameters=AskParams.model_json_schema(),
         # read tier: asking a question changes nothing. Gating it behind the

@@ -211,6 +211,7 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
         ensure_broker,
         fetch_master_key,
     )
+    from local_operator.secrets.errors import BrokerIncompatible
 
     try:
         if ensure_broker(base):
@@ -221,6 +222,18 @@ def master_key_for(base: Path | None = None, *, create: bool = False) -> bytes:
                 "be started, so there is no key to decrypt it with. Start one with "
                 "`lop secret broker start`, then `lop secret unlock`."
             )
+    except BrokerIncompatible:
+        # **A stale broker is fatal for VALUES, not for METADATA (Q4).**
+        # `retrieve_secret` lets this propagate, because serving a value from
+        # the local decrypt while a live broker sits there unable to publish
+        # the §6 notice is the Q3 defect. This function is the other kind of
+        # caller: `__contains__`, `__iter__` and `lop secret list` open the
+        # store to read RECORD METADATA, hand out no bytes, and owe no notice —
+        # so failing them would take the store's read-only surfaces down over a
+        # skew that costs them nothing. In the hardened tier there is no key on
+        # disk to fall back to, so it stays fatal there.
+        if hardened:
+            raise
     except BrokerLocked:
         # A locked store has no unwrapped key ANYWHERE, so there is nothing to
         # fall back to and pretending otherwise would just fail later and less
@@ -281,3 +294,100 @@ def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore
     :func:`load_master_key`.
     """
     return SecretStore(master_key_for(base, create=create), base=base)
+
+
+def retrieve_secret(name: str, base: Path | None = None) -> bytes:
+    """One secret's VALUE, announced to the owning session first (design §6).
+
+    **Why this exists rather than a bare ``open_store().get()`` (QA Q3).** The
+    broker's ``retrieve`` op is what makes the §6 redaction notice fire: it
+    tells the session that owns this peer to scrub the value and WAITS for the
+    ack before answering, so a value taken through ``$(lop secret get NAME)``
+    cannot reach a model-visible channel ahead of the filter that redacts it.
+    Decrypting locally is functionally identical to the caller and silently
+    skips that notification — which is exactly what happened: the documented
+    ``$(lop secret get NAME)`` path painted the credential raw in the live
+    stream, in ``jobs(op='peek')`` and in the tool result, because the notifier
+    and its consumer were never connected. Every value-returning surface routes
+    through HERE so there is ONE announcement path rather than one per caller.
+
+    **The fallback is the same shape, and the same trade, as
+    :func:`master_key_for`'s (see below).** A retrieval must not become
+    impossible because no daemon is running: ``lop secret get`` typed in a
+    plain terminal, from a script, or on the keyfile tier has no session to
+    notify and frequently no broker at all. An availability failure therefore
+    degrades to the local decrypt — UNNOTIFIED, never blocked. That is the
+    round-2 invariant applied to this path: degrade to unnotified, never to a
+    blocked or failed retrieval.
+
+    **The fallback is keyed on REACHABILITY, not on the refusal.** This is the
+    one place the shape deliberately departs from :func:`master_key_for`, and
+    the asymmetry is the whole safety property. Falling back after a *live*
+    broker refused would serve, unnotified, precisely the value that broker had
+    just decided could not be kept out of the operator's transcript — the
+    fail-closed rule (review R3) inverted. So only an UNREACHABLE broker
+    (:class:`BrokerUnavailable`, or one that will not start) drops to the local
+    decrypt; a broker that answered and said no is believed. That covers the
+    ``unredactable`` denial, which is exactly "the owning session never
+    acknowledged", without needing a new exception class on the wire.
+
+    A broker left running across a runtime update answers with a
+    protocol-version refusal, and that raises (:class:`BrokerIncompatible`)
+    instead of quietly reading the key file — it is LIVE, so the reachability
+    rule above puts it on the believed side of the line. Round 4 found this
+    docstring describing behaviour the code did not have: the refusal reached
+    ``is_running`` as a bare ``SecretStoreError``, which reported ``False``,
+    and control fell to the unnotified local decrypt — a full reproduction of
+    Q3, arming itself at the first protocol bump, i.e. exactly at a runtime
+    update. The class exists so the two cases stay distinguishable.
+
+    **How the ``unredactable`` denial is actually covered.** An earlier version
+    of this docstring claimed the ``BrokerDenied`` clause below believed it.
+    The property holds — the reviewer drove all five refusal codes and no
+    ``unredactable`` reply serves a value — but by a different route:
+    ``unredactable`` is raised STRUCTURALLY inside the broker's retrieve
+    handler and never reaches that clause at all, arriving instead as a bare
+    :class:`SecretStoreError` that this function does not catch, so it
+    propagates. Right property, wrong mechanism, now stated as it is.
+
+    **``BrokerDenied`` in the keyfile tier is the documented exception.** §8
+    concedes the broker is not the boundary there — the master key is on disk
+    beside the store, so a refused caller reads it directly anyway, and the
+    operator's own terminal has no lop session among its ancestors and is
+    denied by construction. Making that fatal would break the store's primary
+    surface while buying nothing. In the hardened tier the denial stands.
+
+    **The error taxonomy is identical on both paths (R11/Q5).** A store failure
+    raises the same class whichever side served it — the broker names the class
+    on the wire and :func:`local_operator.secrets.errors.error_for_kind`
+    rebuilds it — so a caller translating :class:`SecretNotFound` into a
+    ``KeyError`` behaves the same with a broker live and with none running.
+    Routing this through the broker while the classes still collapsed to
+    ``SecretStoreError`` is what broke ``secrets.get(name, default)``.
+    """
+    # Imported inside the function, matching `master_key_for` above: this
+    # module is on the path of every `lop secret` verb, and the client drags in
+    # socket/fcntl machinery the write verbs never need.
+    from local_operator.secrets.client import BrokerDenied, ensure_broker, retrieve
+
+    hardened = key_mode(base) == "passphrase"
+    try:
+        if ensure_broker(base):
+            return retrieve(name, base)
+        # No broker could be started. In the hardened tier there is no
+        # unwrapped key on disk to fall back to, so let the local path raise
+        # its own accurate message rather than inventing one here.
+    except BrokerUnavailable:
+        # Reached one moment, gone the next. Availability, not policy: §13
+        # keeps the store usable rather than making a daemon a hard dependency.
+        if hardened:
+            raise
+    except BrokerDenied:
+        if hardened:
+            raise
+    return open_store(base).get(name, session_id=session_id())
+
+
+# `BrokerIncompatible` is deliberately absent from the clauses above: it is a
+# LIVE broker, so the reachability rule believes it and it propagates to the
+# caller carrying the daemon's own restart advice.

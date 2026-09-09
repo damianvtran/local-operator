@@ -95,7 +95,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #: Measured on the full 24-tool surface (see ``real_tool_surface``); on
 #: ``origin/main`` with this same script the figure was 31,100.
-BUDGET_BILLED_TOKENS = 26_500
+#:
+#: RAISED 26,500 -> 27,250 for the 25th tool, ``secret`` (design §5.2), with the
+#: numbers rather than a wave of the hand: ``origin/main`` measured 26,492 (8
+#: tokens of headroom — the ceiling was already at its limit), and the tool as
+#: first written cost 828 billed tokens. That is what the ladder means by
+#: "measure it": the schema was then cut to **556** by moving the rationale out
+#: of the field descriptions and into ``guide://credentials``, which is read on
+#: demand and costs nothing until it is. Verbs were NOT split into separate
+#: tools for the same reason — six schemas instead of one.
+#:
+#: The remaining 556 is the price of the capability and is paid only where it
+#: is usable: ``build_secret_tool`` is a createIf factory that returns ``None``
+#: when the store modules will not import, so a session that cannot reach a
+#: store carries no schema for it. R7: the branch measures 27,201, which is
+#: main's 26,492 + ~709 — the tool's 556 plus ~150 from the ask ``persist``
+#: schema growth, the registry inventory line and the guide's own row, so the
+#: arithmetic closes without re-measuring. Headroom at 27,250 is 49 tokens
+#: (~0.2% — tighter than the ~2% this comment's sibling describes, in the safe
+#: direction), and the next context reduction tightens it.
+BUDGET_BILLED_TOKENS = 27_250
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

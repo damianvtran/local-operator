@@ -763,6 +763,14 @@ class AskQuestion(BaseModel):
             "session memory under this question's id and only the key name is returned."
         ),
     )
+    persist: bool = Field(
+        default=False,
+        description=(
+            "With secret=true, ALSO save the answer to the operator's encrypted "
+            "long-term store so it outlives this session. Set it when the credential "
+            "will be needed again later; leave it off for a one-off."
+        ),
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> "AskQuestion":
@@ -785,6 +793,11 @@ class AskQuestion(BaseModel):
                     "(letters, digits, underscores)"
                 )
             return self
+        if self.persist:
+            # `persist` is meaningless without a secret to persist, and a model
+            # that set it on an ordinary question has misunderstood something
+            # worth correcting rather than ignoring silently.
+            raise ValueError("persist only applies to a secret question")
         if len(self.options) < 2:
             raise ValueError("at least two answers to pick from")
         if self.recommended is not None and not 0 <= self.recommended < len(self.options):

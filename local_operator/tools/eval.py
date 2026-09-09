@@ -148,11 +148,30 @@ class _Kernel:
         process: asyncio.subprocess.Process,
         *,
         windows_job: int | None = None,
+        scrub_read: int | None = None,
     ) -> None:
         self.process = process
         # On Windows, closing this Job Object is the process-tree equivalent of
         # POSIX killpg. It is assigned before any user code can run.
         self.windows_job = windows_job
+        # R1: read end of the pipe the worker publishes its retrieved-secret
+        # values on. Held open for the kernel's life so a crash mid-cell still
+        # has the full set; closed when the kernel is retired. ``None`` on a
+        # platform where the side channel could not be set up — the crash path
+        # then scrubs nothing, which is the pre-R1 behaviour and still safe.
+        self.scrub_read = scrub_read
+        # R9: the pipe is drained on the NORMAL path (after every exchange),
+        # not only on the crash path. A pipe nothing reads is a fixed 64 KiB
+        # CUMULATIVE budget on everything the worker will ever publish, and
+        # the worker publishes from inside the retrieval; draining routinely
+        # is what keeps that budget per-exchange instead of per-kernel.
+        # Values accumulate here because a drain consumes them from the pipe,
+        # so the crash path can no longer be the only reader of the full set.
+        self.scrub_values: list[str] = []
+        # Bytes of a record split across two reads. A drain can land
+        # mid-record; the remainder is carried to the next one rather than
+        # discarded, which would lose that value's scrub entry entirely.
+        self.scrub_partial: bytes = b""
         self.last_used = time.monotonic()
         self.generation = uuid.uuid4().hex
 
@@ -425,6 +444,13 @@ async def _close_kernel(kernel: _Kernel) -> None:
     transport = getattr(process, "_transport", None)
     if transport is not None:
         transport.close()
+    # R1: release the scrub channel's read end with the kernel. The worker is
+    # reaped above, so no more values can arrive; leaving the fd open would
+    # leak one descriptor per retired kernel for the parent's lifetime.
+    if kernel.scrub_read is not None:
+        with contextlib.suppress(OSError):
+            os.close(kernel.scrub_read)
+        kernel.scrub_read = None
 
 
 def _retire(kernel: _Kernel) -> None:
@@ -500,6 +526,40 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     # bare interpreter when no branded image could be planted.
     from local_operator import procname
 
+    # R1: a dedicated pipe the worker publishes its retrieved-secret values on,
+    # so the parent can scrub the worker's REAL fd-2 tail on a crash. The
+    # parent owns the read end for the kernel's life; the write end is handed
+    # to the worker through the environment (``LOCAL_OPERATOR_EVAL_SCRUB_FD``)
+    # and is inheritable only for this one spawn. Setup is best-effort: a
+    # platform without ``os.pipe`` semantics leaves the channel absent and the
+    # crash path scrubs nothing — the pre-fix behaviour, still safe.
+    scrub_read: int | None = None
+    scrub_write: int | None = None
+    try:
+        scrub_read, scrub_write = os.pipe()
+        os.set_inheritable(scrub_write, True)
+        # Non-blocking once, at setup, rather than per drain: the drain now
+        # runs after every exchange (R9) and a mode change per call is both
+        # wasted syscalls and a window where a failure would leave the parent
+        # reading a blocking fd inside the response path.
+        os.set_blocking(scrub_read, False)
+        env = dict(os.environ)
+        env["LOCAL_OPERATOR_EVAL_SCRUB_FD"] = str(scrub_write)
+        spawn_options["env"] = env
+        # ``close_fds=False`` so the worker inherits the scrub-write fd; every
+        # other fd the parent holds is already non-inheritable (PEP 446), so
+        # this widens inheritance by exactly one fd and no more.
+        spawn_options["close_fds"] = False
+    except (AttributeError, OSError):
+        if scrub_read is not None:
+            with contextlib.suppress(OSError):
+                os.close(scrub_read)
+            scrub_read = None
+        if scrub_write is not None:
+            with contextlib.suppress(OSError):
+                os.close(scrub_write)
+            scrub_write = None
+
     link = procname.ensure_branded_interpreter()
     argv0 = sys.executable
     if link is not None:
@@ -539,11 +599,27 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
             if transport is not None:
                 transport.close()
             raise
-    return _Kernel(process, windows_job=windows_job)
+    # The write end must not stay open in the parent once the child holds it:
+    # the crash path drains the pipe to collect the values, and an open parent
+    # write end would leave the buffer unbounded rather than drained-once.
+    if scrub_write is not None:
+        with contextlib.suppress(OSError):
+            os.close(scrub_write)
+    return _Kernel(process, windows_job=windows_job, scrub_read=scrub_read)
 
 
 async def _read_crash_stderr(kernel: _Kernel) -> str:
-    """Best-effort stderr tail from a worker that stopped answering."""
+    """Best-effort stderr tail from a worker that stopped answering.
+
+    R1: the tail is the worker's REAL fd 2, which the in-worker ``sys.stderr``
+    redirect never touches — user code (``os.write(2, ...)``, or an inherited
+    -stderr subprocess like the guide's own ``curl -v`` with a token in the
+    Authorization header) writes straight past the ledger, and a later crash
+    surfaces it raw. The values to scrub live in the worker's in-process
+    ledger, so the worker publishes each one to this process on the kernel's
+    scrub pipe at the moment of retrieval; the tail is redacted with exactly
+    that set — the SAME source as every other channel, not a second ledger.
+    """
     stream = kernel.process.stderr
     if stream is None:
         return ""
@@ -551,7 +627,73 @@ async def _read_crash_stderr(kernel: _Kernel) -> str:
         raw = await asyncio.wait_for(stream.read(), timeout=1.0)
     except (TimeoutError, ConnectionResetError):
         return ""
-    return raw.decode("utf-8", errors="replace")
+    text = raw.decode("utf-8", errors="replace")
+    values = _drain_scrub_channel(kernel)
+    if not values:
+        return text
+    # Longest first so a value that is a prefix of another cannot leak the
+    # longer one's remainder (the runtime ledger's own ordering contract).
+    for value in sorted(values, key=len, reverse=True):
+        if value:
+            text = text.replace(value, "[redacted]")
+    return text
+
+
+def _drain_scrub_channel(kernel: _Kernel) -> list[str]:
+    """Drain the scrub pipe into the kernel's set and return it.
+
+    The pipe is framed as ``<len>\x00<bytes>\x00`` per value (see the worker's
+    ``_publish_secret_value``). A crashed worker has closed its write end, so
+    draining reads whatever it buffered; a kernel that never retrieved a secret
+    yields ``[]``. A worker spawned without the channel (``scrub_read is
+    None``) drains to ``[]``, which is the safe pre-R1 behaviour.
+
+    R9: this is called after EVERY exchange, not only on the crash path, so it
+    is incremental — each call consumes what is in the pipe now, and values
+    accumulate on the kernel. Draining is what bounds the worker's publication
+    budget: the worker's write is non-blocking and DROPS a record onto a full
+    pipe, so a pipe left unread turns ordinary secret use into an unscrubbed
+    crash tail (and, before the worker's write was made non-blocking, into a
+    wedged retrieval). A partial trailing record is CARRIED to the next drain
+    rather than dropped, because with routine draining a split record is the
+    normal case rather than a sign of damage.
+    """
+    fd = kernel.scrub_read
+    if fd is None:
+        return kernel.scrub_values
+    buf = kernel.scrub_partial
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+    except OSError:
+        pass
+    i = 0
+    while i < len(buf):
+        sep = buf.find(b"\x00", i)
+        if sep < 0:
+            break
+        try:
+            length = int(buf[i:sep])
+        except ValueError:
+            # Framing damage: the rest of the buffer cannot be parsed against
+            # a length that is not a number. Drop it rather than resynchronise
+            # onto bytes that could split one value into scrub-resistant
+            # fragments; values already recovered stay valid.
+            i = len(buf)
+            break
+        end = sep + 1 + length
+        if end + 1 > len(buf):
+            break
+        kernel.scrub_values.append(buf[sep + 1 : end].decode("utf-8", errors="replace"))
+        i = end + 1  # skip the trailing NUL
+    kernel.scrub_partial = buf[i:]
+    return kernel.scrub_values
 
 
 async def _exchange(
@@ -666,10 +808,20 @@ async def _exchange(
         channel = response.get("stream")
         if channel:
             # A progress frame, not the answer: publish it and keep reading.
+            # R9: drain here too. A long-running cell that retrieves inside a
+            # loop while streaming would otherwise fill the pipe without ever
+            # reaching the per-response drain below, which is exactly the
+            # cumulative-budget shape this fix exists to remove.
+            _drain_scrub_channel(kernel)
             if on_stream is not None:
                 with contextlib.suppress(Exception):
                     on_stream(str(channel), str(response.get("text") or ""))
             continue
+        # R9: the pipe is drained on the healthy path, before returning. The
+        # worker publishes from inside `register`, which runs BEFORE the value
+        # reaches the cell, so an undrained pipe costs the crash-tail scrub
+        # (records are dropped) rather than merely delaying it.
+        _drain_scrub_channel(kernel)
         return response
 
 

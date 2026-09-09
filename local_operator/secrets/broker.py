@@ -480,11 +480,19 @@ class SecretBroker:
 
         version = request.get("version")
         if version != PROTOCOL_VERSION:
+            # **The pid rides on the refusal, and it is load-bearing (Q4).**
+            # The advice is "restart the broker", and restarting means stopping
+            # THIS daemon — but a version-skewed client cannot ask `status` for
+            # the pid, because `status` fails this very gate first. Without the
+            # pid here the only actionable message the operator can be given is
+            # one they cannot act on, so it is answered as part of the refusal.
             self._reply_error(
                 connection,
                 "version",
                 f"this broker speaks protocol {PROTOCOL_VERSION}, the caller speaks "
                 f"{version!r}. Restart the broker after updating: lop secret broker restart",
+                pid=os.getpid(),
+                protocol=PROTOCOL_VERSION,
             )
             return False
 
@@ -1034,7 +1042,13 @@ class SecretBroker:
                 name, session_id=session.session_id if session else None
             )
         except SecretStoreError as exc:
-            self._reply_error(connection, "store", str(exc))
+            # **The class name rides along (R11/Q5).** `"store"` alone erased
+            # the difference between "no such secret" and "this record is
+            # corrupt", and a caller that must distinguish them — the eval
+            # `Mapping`, which owes a `KeyError` for a miss — could not. The
+            # code stays for wire compatibility; `kind` is what carries the
+            # taxonomy across the seam.
+            self._reply_error(connection, "store", str(exc), kind=type(exc).__name__)
             return
 
         # Notify BEFORE replying, and fail closed when the notice is not
@@ -1142,9 +1156,19 @@ class SecretBroker:
     def _audit_denial(self, identity: ProcessIdentity, operation: Any, reason: str) -> None:
         self._audit(identity, f"deny:{operation}", "deny")
 
-    def _reply_error(self, connection: socket.socket, code: str, message: str) -> None:
+    def _reply_error(
+        self, connection: socket.socket, code: str, message: str, **extra: Any
+    ) -> None:
+        """Refuse one request. ``extra`` carries fields a caller must act on.
+
+        Kept open-ended rather than growing a parameter per code: the two live
+        uses (``kind`` on a store failure, ``pid``/``protocol`` on a version
+        refusal) are both "the caller cannot recover without this", and a
+        reader unaware of a field ignores it, so adding one is backward
+        compatible on the wire.
+        """
         try:
-            send_frame(connection, {"ok": False, "code": code, "error": message})
+            send_frame(connection, {"ok": False, "code": code, "error": message, **extra})
         except (OSError, ProtocolError):  # pragma: no cover - peer already gone
             pass
 

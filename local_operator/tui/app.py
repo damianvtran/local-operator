@@ -28247,6 +28247,18 @@ class OperatorApp(App[None]):
             self._journal_credential_change(parsed.key, action="forgot")
             notice(format_credential_forget(removed, parsed.key))
             return
+        if parsed.action == "persist":
+            # §5.4's promotion route: the credential STAYS in session memory
+            # (every bash command in flight still reads it) and is additionally
+            # written to the encrypted long-term store. Synchronous because the
+            # write is a few ms of local SQLite and the operator is waiting at
+            # the composer to hear whether their secret is durable now.
+            from local_operator.secrets.promote import (
+                promote_session_credential_guarded,
+            )
+
+            notice(promote_session_credential_guarded(store, parsed.key).message)
+            return
         if parsed.action == "forget-all":
             # Snapshot the names BEFORE the clear: clear_credentials() empties
             # the store, so iterating credential_names() after it reads an
@@ -28374,6 +28386,17 @@ class OperatorApp(App[None]):
             if _refused(answer):
                 return
             self._notice(format_credential_forget_all(int(answer.get("count") or 0)))
+            return
+        if parsed.action == "persist":
+            # Runs on the OWNER, like every other verb here: the session store
+            # holding the value is the owner's, and so is the config dir the
+            # long-term store lives in. A viewer promoting into its OWN store
+            # would write the secret to the wrong machine's disk.
+            answer = await route("persist", parsed.key)
+            if _refused(answer):
+                return
+            kind: NoticeKind = "info" if answer.get("promoted") else "warning"
+            self._notice(str(answer.get("message") or ""), kind)
             return
         value = await self._request_login_key(
             parsed.key, secret=True, sole_path=True, credential=True
