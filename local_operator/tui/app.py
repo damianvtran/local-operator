@@ -23480,6 +23480,21 @@ class OperatorApp(App[None]):
                     "warning",
                 )
             else:
+                # NO give-up-specific arm here, and that is deliberate — see
+                # `RECOVERY_GIVE_UP_S` in `session/remote.py`. A viewer that
+                # gave up on a
+                # live-but-silent owner is cold with a callable `_ensure_bound`,
+                # which is exactly the shape `_needs_runtime_first` diverts into
+                # `_bind_then_dispatch`, so a typed `/model p/id` never reaches
+                # this ladder from that state at all. An arm added here would be
+                # unreachable code carrying user-facing copy — and worse than
+                # unreachable, because `_bind_then_dispatch` does not merely
+                # print a better sentence, it RETRIES THE BIND against the same
+                # live record and reports the outcome ("could not reach this
+                # session's runtime in time — it is still running; try that
+                # again in a moment"). Diverting a give-up facade away from that
+                # path to print a nicer string would trade the repair for copy
+                # (review round 1 R1, design round 1 D1).
                 self._system_notice(
                     "no runtime is running for this session; "
                     "send a message to start one, then run /model again",
