@@ -64,11 +64,20 @@ def _counted() -> Iterator[collections.Counter[str]]:
     nothing else in the process pays for them.
 
     ``os.stat`` is patched on the ``os`` module, which is what application code
-    calls. ``pathlib`` reaches the C ``posix.stat`` directly and is therefore
-    NOT counted here — deliberately: a pathlib-mediated stat that this harness
-    cannot see would understate the BEFORE number and flatter the change, so
-    the modules under test call ``os.stat`` explicitly on the hot path and the
-    remaining pathlib traffic is reported by ``--profile`` instead.
+    calls. ``pathlib`` traffic IS counted too, on the supported interpreters:
+    ``Path.stat``/``Path.resolve``/``Path.glob`` delegate through ``os.*``
+    rather than reaching the C ``posix`` module directly, verified on the
+    pinned 3.12 (``Path.stat()`` -> one counted ``stat``; ``Path.resolve()`` ->
+    9 counted ``lstat``; ``Path.glob("*/x")`` -> a counted ``scandir``). That
+    is why the old ``glob("*/desktop.json")`` shows up here as 1,946 scandirs
+    at all — an uncounted implementation would have reported zero.
+    ``--profile`` still attributes calls to their call site, which the raw
+    totals cannot.
+
+    An earlier version of this docstring claimed the opposite (pathlib
+    uncounted, therefore the BEFORE number understated). It was wrong, and the
+    correction moves in the safe direction: the published BEFORE figures are
+    MORE complete than claimed, not less, so no number in the PR shrinks.
     """
     counts: collections.Counter[str] = collections.Counter()
     originals = {name: getattr(os, name) for name in ("stat", "lstat", "scandir", "open")}

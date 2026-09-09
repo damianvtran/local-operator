@@ -509,7 +509,10 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
 
     from local_operator.resume import _recent_sessions_with_origin
     from local_operator.session.attention import AttentionStore, conversation_identity
-    from local_operator.session.retention import TRANSCRIPT_FILENAME
+    from local_operator.session.retention import (
+        DESKTOP_MARKER_NAME,
+        TRANSCRIPT_FILENAME,
+    )
 
     candidates = _recent_sessions_with_origin(directory)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
@@ -551,7 +554,7 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
                     # the entry already proves it is a directory, so asking
                     # first would spend a stat per entry to learn what this one
                     # tells us for free. The common answer here is ENOENT.
-                    marker_mtime = os.stat(os.path.join(entry.path, "desktop.json")).st_mtime
+                    marker_mtime = os.stat(os.path.join(entry.path, DESKTOP_MARKER_NAME)).st_mtime
                     # A marker is a draft fallback, never a competing source of
                     # historical title/mtime for a transcript that fell beyond a
                     # previous page bound.

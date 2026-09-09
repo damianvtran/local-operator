@@ -110,6 +110,19 @@ _SIDECAR_NAMES = frozenset(
 #: this constant.
 TRANSCRIPT_FILENAME = "transcript.jsonl"
 
+#: The desktop draft marker: a session the HTTP frontend created that has no
+#: transcript yet. Spelled here beside :data:`TRANSCRIPT_FILENAME` and for the
+#: same import-weight reason — this module is the lean home for on-disk names,
+#: and the two call sites that need it (``session.catalog``'s poll and
+#: ``server.utils.desktop_sessions``' writer) sit on opposite sides of the
+#: server/session layering, so neither can own the literal without one
+#: importing the other.
+#:
+#: A constant rather than three copies of the string: the catalog's poll probes
+#: for this file once per unlisted directory, so a rename that missed one site
+#: would not fail loudly — it would silently stop listing every desktop draft.
+DESKTOP_MARKER_NAME = "desktop.json"
+
 #: The files whose mtime IS "when the user last worked here": the transcript
 #: (every turn appends to it) and the peer-message spool (a note the user has
 #: not read yet is activity waiting for them). Nothing else counts — see

@@ -1,14 +1,22 @@
 """The sidebar catalog poll's cost, and the contract that cost may not buy.
 
 The sidebar re-runs ``load_catalog`` every 2 seconds while it is open. That
-scan used to cost ``O(every session directory ever created)`` rather than
-``O(the user's own sessions)``: it asked "when was this last active" — two
-stats — for every directory in the store before asking the far more selective
-question "is this session even user-visible", and it located an unrelated
-marker file with a ``glob`` whose wildcard is a directory component, which
-opens and enumerates every session directory. On the reporting machine (1,946
-directories, 92% of them subagent sessions the picker never lists) one poll
-issued 9,773 syscalls and cost 126 ms, permanently, per TUI process.
+scan asked "when was this last active" — two stats — for every directory in
+the store before asking the far more selective question "is this session even
+user-visible", and it located an unrelated marker file with a ``glob`` whose
+wildcard is a directory component, which opens and enumerates every session
+directory. On the reporting machine (1,946 directories, 92% of them subagent
+sessions the picker never lists) one poll issued 9,773 syscalls and cost
+126 ms, permanently, per TUI process.
+
+What changed is the CONSTANT, and these tests are named for that. The poll
+went from ~5.8 to ~2.2 syscalls per directory (9,773 -> 4,350 on that store,
+126 ms -> 25 ms), but it is still ``O(every session directory ever created)``
+— two unconditional per-directory stats remain, the origin marker here and the
+desktop marker in ``load_catalog``. The store growing large enough still
+degrades the poll; it re-reaches the old cost at roughly 8,000 directories.
+Reaching ``O(the user's own sessions)`` needs an index or a persistent memo,
+which this change deliberately does not attempt.
 
 The fix is entirely a reordering and a call-shape change: no caching, no new
 source of truth, and above all **no second ranking clock**. These tests pin
@@ -264,9 +272,19 @@ class TestTheListingIsUnchanged:
 # ---------------------------------------------------------------------------
 
 
-class TestThePollCostScalesWithTheUsersSessions:
-    """The defect was that the poll scaled with the whole store. These pin the
-    shape of the cost, not a wall-clock number: timings on a loaded machine
+class TestThePollsPerDirectoryCostIsBounded:
+    """These pin the PER-DIRECTORY cost, which is what this change reduces —
+    not the scaling, which it does not change.
+
+    The poll remains O(total session directories): the origin-marker stat runs
+    for every entry and ``load_catalog``'s desktop-marker probe for every
+    unlisted one. What the reordering buys is the constant — a hidden directory
+    costs one stat where it cost three. Name these tests for that bound, so a
+    later reader does not take a green suite as proof the store no longer
+    matters; measured flat at ~2.0-2.2 syscalls/dir from 150 to 4,050
+    directories in agent review / QA round 1.
+
+    Asserted as syscall counts, not wall-clock: timings on a loaded machine
     measure contention, syscall counts measure the algorithm."""
 
     def test_a_hidden_session_costs_one_stat_not_three(self, tmp_path: Path) -> None:
@@ -299,13 +317,15 @@ class TestThePollCostScalesWithTheUsersSessions:
         # registry and attention stores read. Emphatically not one per session.
         assert counter.counts["scandir"] < 10
 
-    def test_hidden_sessions_do_not_change_what_a_poll_costs_per_row(self, tmp_path: Path) -> None:
-        """The scaling property itself: adding 200 subagent directories must
-        not multiply the poll's cost the way it used to.
+    def test_a_hidden_session_adds_one_stat_not_three(self, tmp_path: Path) -> None:
+        """Each added subagent directory costs ONE stat, down from three.
 
-        Asserted as a RATIO against a measured baseline rather than an absolute
-        ceiling, so the test says "cost tracks the user's sessions" instead of
-        encoding one machine's number."""
+        This is deliberately NOT "hidden sessions are free": the bound below is
+        linear in the directories added (200 dirs -> <=200 stats), because that
+        is the property that actually ships. It fails on the previous
+        implementation, which paid three. Asserted as a DELTA against a
+        measured baseline rather than an absolute ceiling, so it pins the
+        per-directory slope instead of encoding one machine's number."""
         for index in range(10):
             _session(tmp_path, f"{index:012x}", stamp=1000.0 + index)
         _recent_sessions_with_origin(tmp_path)

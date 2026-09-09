@@ -111,6 +111,17 @@ USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
 #: * ABSENCE is never cached. Unmarked already means user and is the cheap path,
 #:   and a directory the backfill stamps later must be re-read, not answered
 #:   from a stale "no marker" fact.
+#: * A MARKED-BUT-INACTIVE directory IS cached — an abandoned subagent
+#:   directory that never wrote a transcript or spool. It was not before the
+#:   gate reorder, which reached the activity check first and dropped such a
+#:   row (with its cache entry) on the way. This is intended, not a leak: the
+#:   set tracks which markers EXIST ON DISK, the verdict is a fact about the
+#:   marker rather than about the directory's activity, and retaining it avoids
+#:   re-reading those markers on every scan. Boundedness is unaffected — the
+#:   file is rewritten to exactly the names seen in the current scan, so a
+#:   disposed directory still drops out. Measured impact on the reporting
+#:   machine at the time of the change: 0 of 1,986 directories affected
+#:   (agent review round 1, R3).
 ORIGIN_CACHE_NAME = "origin-verdicts.json"
 
 #: Bumped when the cache's shape or key changes, so an older file is discarded
@@ -1133,11 +1144,20 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     concurrently) is skipped rather than raising out of an error path whose whole
     job is to be helpful.
 
-    The traversal is ``os.scandir``-based over the store. Each directory costs
-    ONE ``stat`` (the origin marker) plus, only for the sessions that survive
-    that gate, the activity stats — see the gate-order note in
-    :func:`_recent_sessions_with_origin`, which is where the per-directory cost
-    is actually decided. The store is scanned once rather than each directory
+    The traversal is ``os.scandir``-based over the store. Within THIS function
+    each directory costs ONE ``stat`` (the origin marker) plus, only for the
+    sessions that survive that gate, the activity stats — see the gate-order
+    note in :func:`_recent_sessions_with_origin`, which is where the
+    per-directory cost is actually decided.
+
+    That "one stat per directory" is this function's floor, NOT the sidebar
+    poll's: :func:`~local_operator.session.catalog.load_catalog` pays a second
+    unconditional stat per directory probing for the desktop draft marker
+    (measured at 0.99/dir, QA round 1 Q2), so a poll costs ~2.0-2.2 syscalls
+    per directory in total and remains linear in the whole store. Anyone
+    optimising this path next should count both sites, not this one alone.
+
+    The store is scanned once rather than each directory
     being scanned individually: the latter is what the origin design proposed,
     and it measures ~2x WORSE (1986 ms vs 1127 ms over 31,700 dirs) because it
     stats every entry in every directory to learn two filenames. Do not "fix"
@@ -1207,9 +1227,20 @@ def _recent_sessions_with_origin(
             # reporting machine 1,785 of 1,946 directories (92%) are subagent
             # sessions that this scan discards. Asking the activity question
             # first spent two stats on each of them to rank a row that was
-            # then thrown away — the scan's dominant cost, and the reason the
-            # 2-second sidebar poll scaled with every session ever created
-            # rather than with the user's own.
+            # then thrown away — the scan's dominant cost.
+            #
+            # What this buys, stated precisely: a hidden directory drops from
+            # three stats to one, so the 2-second poll pays a ~2.2x smaller
+            # CONSTANT per directory. It does NOT change the scaling. The poll
+            # is still O(total session directories) — this stat runs for every
+            # entry, and ``load_catalog``'s desktop-marker probe runs for every
+            # unlisted one (~2.0-2.2 syscalls/dir combined, measured flat from
+            # 150 to 4,050 directories in agent review / QA round 1). A store
+            # that grows large enough re-reaches today's cost at roughly 8,000
+            # directories. Making the poll genuinely track the user's own
+            # sessions needs an index or a persistent per-directory memo, which
+            # is a separate change — do not read this reordering as having
+            # solved it.
             #
             # Ordering it this way costs nothing when the gate does NOT fire:
             # the marker stat below has to happen for a user session anyway, so
