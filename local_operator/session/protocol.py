@@ -468,13 +468,17 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     takeover, report which build the owner is running.
 
     **Why this is declared.** These members exist only on ``RemoteSession``,
-    and the TUI reaches all of them through ``getattr(session, "name", None)``
-    duck-probes rather than through a type. That is 40 undeclared members on
-    the object the entire front end is written against: a rename on the facade
-    or a typo in a probe string is invisible to pyright and surfaces as a
-    silently missing capability at runtime, which is exactly how ``/info``
-    reported zero subagents for a session that had several (see
-    ``RemoteSession.subagent_comms``).
+    and its hosts reached all of them through ``getattr(session, "name", None)``
+    duck-probes rather than through a type \u2014 roughly forty undeclared members
+    at the time of writing, on the object the entire front end is written
+    against. The exact figure is not maintained here: it is derived by
+    ``tests/unit/session/test_viewer_protocol.py``, which recomputes the
+    viewer-only set from the classes on every run, and quoting a constant in a
+    file whose point is that the number is derived is how the constant becomes
+    wrong. A rename on the facade or a typo in a probe string is invisible to
+    pyright and surfaces as a silently missing capability at runtime, which is
+    exactly how ``/info`` reported zero subagents for a session that had
+    several (see ``RemoteSession.subagent_comms``).
 
     **Why it is a separate protocol and not more of SessionProtocol.** Owners
     genuinely do not have these members and should not be forced to grow
@@ -501,17 +505,37 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     # --- what kind of viewer this is --------------------------------------
     @property
     def is_cold(self) -> bool:
-        """Whether this viewer is bound to no runtime at all.
+        """Whether NO synchronised runtime is reachable through this viewer.
 
-        A cold viewer has a session id and a transcript but nothing executing:
-        `lop` launched, the user opened the picker, nothing has been typed. It
-        is NOT "the runtime is unreachable" \u2014 there is no runtime to reach.
+        True in two distinct situations, and callers depend on it covering
+        BOTH:
+
+        * never bound \u2014 a session id and a transcript but nothing executing:
+          `lop` launched, the user opened the picker, nothing typed;
+        * bound and now unreachable \u2014 the socket dropped, the owner died, or
+          the facade is redialing a replacement.
+
+        The implementation is "no client, or not connected, or not ready for
+        events", so the second case is deliberate rather than incidental.
+        ``app.py:23470`` states the dependency outright ("``is_cold`` is a
+        superset of the drop: it is also true while the facade is redialing an
+        owner that died"), and narrowing it to "never bound" would silently
+        re-open the #625 shape at that site.
+
+        So it does NOT distinguish never-bound from lost. A caller needing
+        that reads ``degraded_reason`` or ``runtime_pid``; a caller asking
+        "is a turn reachable right now" wants exactly this.
         """
         ...
 
     @property
     def runtime_pid(self) -> int | None:
-        """Pid of the runtime this viewer is attached to; ``None`` while cold."""
+        """Pid of the runtime this viewer is attached to.
+
+        ``None`` whenever ``is_cold`` is true \u2014 including after a runtime this
+        viewer WAS attached to died, since the disconnect hook clears it. It
+        is "no runtime reachable now", not "never had one".
+        """
         ...
 
     @property
@@ -542,6 +566,35 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         A viewer must not answer from its own machine's catalogue: the runtime
         may hold different credentials and therefore offer different models.
+        """
+        ...
+
+    async def attach_existing(self) -> bool:
+        """Bind to an owner if one is already live, without starting one.
+
+        The desktop host calls this on a cold viewer so that serving a history
+        read never promotes a reader into an executor: losing the owner must
+        not move execution into the HTTP worker.
+        """
+        ...
+
+    async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+        """Renew this viewer's desktop attach lease.
+
+        Desktop-surface viewers only; the host recomputes visibility and
+        notifiability from its live subscribers and pushes the result so a
+        bare proxy socket is not mistaken for a watching human.
+        """
+        ...
+
+    @property
+    def supports_completion_ack(self) -> bool:
+        """Whether the attached owner can acknowledge completion attention.
+
+        Read by the DESKTOP host rather than the TUI: it decides whether the
+        phone portal is told completion-attention is supported. An owner too
+        old to carry the ack answers ``False``, which is why the host pairs
+        this with ``is_cold`` instead of reading absence as a capability.
         """
         ...
 
@@ -693,6 +746,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     async def detach_viewer_gates(self, *, preserve_answers: bool = False) -> None:
         """Settle open gates because this viewer is leaving for good."""
+        ...
+
+    def preserve_viewer_gate_reply(self) -> None:
+        """Latch an answer the user committed before its bridge is scheduled.
+
+        Called synchronously by the UI as it settles a gate's future: waiting
+        for the wire send loses answers when a reload lands on the same tick.
+        """
+        ...
+
+    @property
+    def has_pending_gate_reply(self) -> bool:
+        """Whether a latched answer is still in flight to the owner.
+
+        The sidebar reads this to avoid tearing down a source whose committed
+        reply has not reached the runtime yet. Probed as a 3-arg ``getattr``
+        defaulting to ``False`` before this declaration, so a rename on the
+        facade silently stopped protecting the reply rather than failing.
+        """
         ...
 
     # --- owner-lifecycle callbacks -----------------------------------------
