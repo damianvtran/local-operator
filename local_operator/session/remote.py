@@ -306,6 +306,19 @@ _BIND_RETRY_DELAY_CAP_S = 0.5
 #: actually known.
 _SYNC_UNRESPONSIVE_REASON = "the runtime is not responding"
 
+#: Duck-checked attribute a surface reads to learn that a ``prompt()`` which
+#: RAISED had already reached the owner. It is a positive assertion, set only
+#: for failures raised past the ACK boundary inside :meth:`RemoteSession.prompt`
+#: (see the delivery-boundary note there): everything else — the whole cold
+#: bind, the owner-ready wait, the connected check, and the send's own
+#: pre-receipt raises — leaves it ABSENT, which every reader must treat as
+#: "not delivered" so the user's text comes back (incident ``dea45f5bdae2``:
+#: data preservation used to be gated on matching transport prose and a busy
+#: owner's ``RuntimeUnresponsiveError`` matched none of it). Named as a
+#: constant so the writer (here) and the reader (the TUI's restore gate)
+#: cannot drift apart on a string.
+_PROMPT_DELIVERED_ATTR = "prompt_delivered"
+
 
 class RuntimeUnresponsiveError(ConnectionError):
     """The socket was alive and the owner did not produce the canonical sync.
@@ -4612,7 +4625,31 @@ class RemoteSession:
             if message_id
             else ContinuationCommand.create(self._session_id, text, images_wire)
         )
-        await client.send_command(command, streaming=self._streaming)
+        # DELIVERY BOUNDARY. The line below is the only place in this method
+        # that can establish a prompt reached the session: it returns once the
+        # owner has ACKed the command, and everything that can raise before it
+        # — the cold-to-attached bind above (the seam every failure of the
+        # ``dea45f5bdae2`` incident class came from), the owner-ready wait, the
+        # connected check — happens off the wire. Failures therefore leave
+        # here UNMARKED (``_PROMPT_DELIVERED_ATTR`` absent), which surfaces
+        # read as "not delivered": restore the text. That default is
+        # fail-safe by design — a restore the frame did not need costs one
+        # keystroke, a restore it needed and did not get costs the message —
+        # and a resent duplicate is refused by the owner's ``command_id``
+        # admission, so ambiguity resolves toward the user's data.
+        #
+        # Code added AFTER this call must mark its exceptions with
+        # ``_PROMPT_DELIVERED_ATTR`` (a raise there belongs to a prompt the
+        # session already owns); the marker must NEVER be added to this
+        # ``except`` — an "owner connection lost" raised while the ACK was
+        # still pending means the frame's fate is unknown, and unknown reads
+        # as not delivered. Matching failure text instead of this attribute is
+        # the shape of the defect this boundary exists to end.
+        try:
+            await client.send_command(command, streaming=self._streaming)
+        except Exception:
+            logger.debug("prompt failed before the owner acknowledged it", exc_info=True)
+            raise
 
     async def seed_history(self, messages: list[Message]) -> None:
         if self.history_message_count:

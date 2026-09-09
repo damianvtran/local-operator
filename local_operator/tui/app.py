@@ -309,6 +309,7 @@ from local_operator.tui.widgets.usage_panel import (
 from local_operator.tui.widgets.wake_panel import WakePanel
 from local_operator.tui.widgets.welcome import (
     MODEL_PENDING,
+    MODEL_UNBOUND,
     WelcomeView,
     session_welcome_info,
 )
@@ -784,6 +785,13 @@ def _typed_line_of(text: str) -> str | None:
 #: than on the exception type: `ConnectionError` also carries the graceful
 #: "reconnecting"/"stopped" refusals, which have their own copy and must not
 #: be rewritten as a crash (round 3, U10).
+#:
+#: SCOPE — these markers gate SIDE EFFECTS only (``_go_cold()`` in the prompt
+#: failure handler: dropping a live binding must stay conservative). They
+#: deliberately do NOT gate the user's data: restoration is decided by the
+#: fail-safe delivery boundary in the same handler, and re-merging the two
+#: questions here is how a busy runtime's reworded prose once ate a typed
+#: message (``dea45f5bdae2``). Do not add restore decisions to this tuple.
 _RUNTIME_GONE_MARKERS = (
     "socket unreachable",
     "closed the connection",
@@ -2452,6 +2460,14 @@ class OperatorApp(App[None]):
         #: the warning still the only account of why it cannot answer
         #: (see :meth:`_reset_band_for_swap`).
         self._splash_notice: str | None = None
+        #: A foreground runtime engage failed while the facade was still cold.
+        #: Same lifetime as `_splash_notice` but a different question: that row
+        #: is WHAT the failure said, this is the splash's model-row WORD
+        #: (`not connected` instead of the `connecting…` sentinel, which would
+        #: keep promising progress after the attempt ended — the stuck-splash
+        #: half of the ``dea45f5bdae2`` incident). Cleared wherever the notice
+        #: is cleared, and on any later successful bind.
+        self._splash_unbound = False
         #: PyPI version strictly newer than this install, filled by the
         #: one-shot mount worker. ``None`` until then AND when current —
         #: the splash does not reserve the row.
@@ -4021,6 +4037,7 @@ class OperatorApp(App[None]):
                         session,
                         self._providers,
                         notice=self._splash_notice,
+                        unbound=self._splash_unbound,
                         setup=self._setup_state,
                         update_available=self._update_available,
                     )
@@ -5445,6 +5462,7 @@ class OperatorApp(App[None]):
                             self._session,
                             self._providers,
                             notice=self._splash_notice,
+                            unbound=self._splash_unbound,
                             setup=self._setup_state,
                             update_available=self._update_available,
                         )
@@ -8381,6 +8399,9 @@ class OperatorApp(App[None]):
             # returning watched the only explanation of why it cannot answer
             # disappear on its own.
             self._splash_notice = None
+            # The unbound word describes the same dead attempt and would keep
+            # the splash saying `not connected` over the replacement session.
+            self._splash_unbound = False
         # The TOAST goes on both legs, unlike the notice it was raised for. They
         # are different objects with different lifetimes, as `_announce_on_splash`
         # says: "The toast is the interruption; the splash row is what is still
@@ -12073,6 +12094,12 @@ class OperatorApp(App[None]):
                 return
             finally:
                 self._set_starting(False)
+            # A successful background bind retires any ``not connected`` the
+            # last foreground failure left on the splash: the state that word
+            # described is over. The label itself will be overwritten by the
+            # adopted owner state; the flag is cleared so a still-empty label
+            # cannot keep rendering the failed-attempt word.
+            self._splash_unbound = False
             # AFTER a successful bind, which is the only moment the OWNER's
             # build is knowable: the pre-spawn check above runs while the
             # facade is still cold, so its C branch always returns at the
@@ -12178,6 +12205,43 @@ class OperatorApp(App[None]):
             )
         )
 
+    def _cold_bind_failed(self, sentence: str) -> None:
+        """Record a failed foreground engage on the splash it is still covering.
+
+        A cold viewer's splash is what the user is looking at when a bind
+        fails, and its model row's ``connecting…`` sentinel promises progress
+        that has just ended — the band beside it has already stopped saying
+        ``starting…``, so the splash is the one surface still claiming work
+        in flight. This is the same confusion the setup state fixed once
+        already (``welcome.MODEL_SETUP``'s note: a word that says "wait" when
+        the truth is "act"), recurring in a second state.
+
+        Reuses the splash's existing ``notice`` row for the sentence the
+        transcript notice chose and flips one flag for the model row's word
+        (``not connected``, see ``welcome.MODEL_UNBOUND``) — no new state
+        machine, because the state is exactly "the last foreground engage
+        failed and the viewer is still cold".
+
+        Scoped to the cold facade: once a conversation has content the splash
+        is retired and this becomes a guarded no-op, so the flag can never
+        describe a bound session. The SILENT background engage
+        (``_start_runtime_engage``) deliberately does NOT call this — a
+        speculative warm-up the user never asked about must stay quiet; the
+        next keystroke or command reports a real failure through here.
+        """
+        session = self._session
+        if not getattr(session, "is_cold", False):
+            return
+        self._splash_unbound = True
+        self._splash_notice = sentence
+        # The band takes the same word for the same state, per the rule the
+        # setup state established: two surfaces answering "what state is
+        # this" with different words is a shipped defect, not a style choice.
+        if self._status is not None:
+            self._status.update(model_label=MODEL_UNBOUND)
+        if self._welcome is not None:
+            self._welcome.refresh_info()
+
     def _bind_then_dispatch(
         self, text: str, attachments: Mapping[int, Marked] | None = None
     ) -> None:
@@ -12262,6 +12326,7 @@ class OperatorApp(App[None]):
                 # and stay a warning.
                 if getattr(error, "actionable", False):
                     self._system_notice(str(error), "warning")
+                    self._cold_bind_failed(str(error))
                 elif getattr(error, "runtime_alive", False):
                     # Past tense for the ATTEMPT, present for the RUNTIME. At
                     # the moment this paints the retry is over — all three
@@ -12285,12 +12350,17 @@ class OperatorApp(App[None]):
                         "still running; try that again in a moment",
                         "note",
                     )
+                    self._cold_bind_failed(
+                        "could not reach this session's runtime in time — it is "
+                        "still running; try that again in a moment"
+                    )
                 else:
                     # Everything else keeps the reason it was given. The old
                     # copy at least relayed `{error}`; dropping it for a
                     # reassurance would regress this change's own goal of
                     # honest failure strings.
                     self._system_notice(str(error), "warning")
+                    self._cold_bind_failed(str(error))
                 return
             finally:
                 self._set_starting(False)
@@ -12307,7 +12377,13 @@ class OperatorApp(App[None]):
                     "no runtime is running for this session; send a message to start one",
                     "warning",
                 )
+                self._cold_bind_failed(
+                    "no runtime is running for this session; send a message to start one"
+                )
                 return
+            # The bind resolved, so the splash must stop describing the last
+            # failed attempt (if there was one) as the current state.
+            self._splash_unbound = False
             # The bind resolved, so ``owner_version`` now holds the runtime's
             # own stamp: this is the first moment the owner-skew comparison
             # has anything to compare. Before the command runs, because a
@@ -15019,6 +15095,7 @@ class OperatorApp(App[None]):
                 self._session,
                 self._providers,
                 notice=self._splash_notice,
+                unbound=self._splash_unbound,
                 setup=self._setup_state,
                 update_available=self._update_available,
             )
@@ -17561,6 +17638,37 @@ class OperatorApp(App[None]):
                 raise
             except Exception as error:  # surface, never crash the app
                 error_text = str(error)
+                # RESTORE FIRST, THEN CHOOSE WORDS. Data preservation must not
+                # depend on classifying the failure: the incident that
+                # motivated this (``dea45f5bdae2``, 2026-09-08) was a real
+                # `ConnectionError` — `RuntimeUnresponsiveError`, a busy owner
+                # outlasting the bind's sync envelope — whose text matched none
+                # of `_RUNTIME_GONE_MARKERS`, so this ladder fell through to
+                # the generic arm and the typed message was dropped behind a
+                # transient-looking notice. The gate is DELIBERATELY fail-safe:
+                # every failed prompt restores unless delivery is positively
+                # known (`_PROMPT_DELIVERED_ATTR`, set only past the ACK
+                # boundary in `RemoteSession.prompt`), because a spurious
+                # restore costs one ctrl+a while a missed one costs the whole
+                # message, and a resent duplicate is refused server-side by
+                # `command_id` admission. Do NOT turn this back into a match on
+                # failure prose — that allowlist shape is the defect this
+                # replaced, and it rots the same way every time a transport
+                # message is reworded.
+                # Local import per the file's lazy-import rule: `session.remote`
+                # pulls the provider graph, which the TUI keeps off its boot
+                # path. The constant (not a literal) so the seam cannot drift
+                # from the writer's side of the contract.
+                from local_operator.session.remote import _PROMPT_DELIVERED_ATTR
+
+                restored = not getattr(error, _PROMPT_DELIVERED_ATTR, False)
+                if restored:
+                    # `accepted` rides along so a collapsed paste restores as
+                    # the CHIP line with its original attachment map, not the
+                    # expanded payload (the hazard `_submit_prompt` records
+                    # above) — dropping it here would silently downgrade every
+                    # image-bearing restore.
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
                 # the dropped text and the way back are exactly what the user
@@ -17582,20 +17690,38 @@ class OperatorApp(App[None]):
                     # are the transport's vocabulary, and the lost text is the
                     # part that actually costs the user something.
                     #
-                    # The text goes back in the composer so it can be sent
-                    # again with one keystroke, and the viewer drops its
-                    # binding so the NEXT send engages a fresh runtime rather
-                    # than dialling a socket that is never coming back.
-                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    # The restore itself now happens above, unconditionally;
+                    # this arm keeps the SIDE EFFECT the markers are still the
+                    # right gate for — dropping the binding, so the NEXT send
+                    # engages a fresh runtime rather than dialling a socket
+                    # that is never coming back. `_go_cold()` must stay
+                    # marker-gated and conservative: firing it for a merely
+                    # BUSY runtime would throw away a live binding.
                     go_cold = getattr(session, "_go_cold", None)
                     if callable(go_cold):
                         go_cold()
-                    self._notice_for(
-                        source,
-                        "this session's runtime stopped — your message is back in the "
-                        "composer; send it again to start a new one",
-                        "warning",
-                    )
+                    line = "this session's runtime stopped"
+                    if restored:
+                        line += (
+                            " — your message is back in the composer; "
+                            "send it again to start a new one"
+                        )
+                    self._notice_for(source, line, "warning")
+                elif getattr(error, "runtime_alive", False):
+                    # The busy-runtime outcome, which the SLASH path
+                    # (`_bind_then_dispatch`) already branches on via this same
+                    # structured attribute — the typed-prompt path never
+                    # learned it, and that asymmetry is exactly what the
+                    # incident took. Copy discipline matches the slash path's
+                    # pinned sentence: past tense for the ATTEMPT, present for
+                    # the RUNTIME, no present participle promising progress no
+                    # one is making (design round 1, D1) — with the restore
+                    # fact in place of its "try that again" ask, because here
+                    # there IS a message sitting in the composer to find.
+                    line = "could not reach this session's runtime in time — " "it is still running"
+                    if restored:
+                        line += "; your message is back in the composer"
+                    self._notice_for(source, line, "note")
                 else:
                     # THROUGH the same helper the `agent_end` path uses. This
                     # branch printed a bare `str(error)` while the event path
@@ -17603,7 +17729,13 @@ class OperatorApp(App[None]):
                     # and the other did not purely by route — and this is the
                     # route the reported incident took, because an MCP auth
                     # failure is what makes `prompt()` raise.
-                    self._notice_for(source, self._with_recovery_hint(str(error)), "error")
+                    hint = self._with_recovery_hint(str(error))
+                    if restored:
+                        # The failure must not read as "sent": the composer now
+                        # holds the text, and saying so is the only signal a
+                        # dropped prompt ever gives the user.
+                        hint = f"{hint} — your message is back in the composer"
+                    self._notice_for(source, hint, "error")
                 # A prompt that failed never announced itself, so its echo
                 # entry has no event coming. Left standing it would swallow
                 # the next identical prompt's event; `_discard_user_echo` is
