@@ -208,7 +208,12 @@ class SecretsMapping(Mapping[str, SecretValue]):
         self._base = base
 
     def _open(self) -> Any:
-        """Open the store through the broker seam.
+        """Open the store for the metadata-only reads.
+
+        Kept for ``__contains__``/``__iter__``/``__len__``, which answer from
+        record metadata and never touch a value — so they need no announcement
+        and must not pay for a broker round trip. Value reads go through
+        :meth:`_retrieve` instead.
 
         Imported here and not at module scope: this module is imported into
         every eval worker namespace, and the storage stack behind
@@ -219,13 +224,26 @@ class SecretsMapping(Mapping[str, SecretValue]):
 
         return open_store(self._base)
 
+    def _retrieve(self, name: str) -> bytes:
+        """Fetch one value through the broker seam.
+
+        Uses the same announcement seam as ``lop secret get`` (QA Q3) so an
+        eval retrieval is announced to the owning session exactly as a bash
+        child's is. The in-process ledger below still registers the value
+        independently — that is what covers this worker's own stdout — but the
+        two are no longer the SAME mechanism, and a value fetched here is now
+        redacted from the session's channels too.
+        """
+        from local_operator.secrets.access import retrieve_secret
+
+        return retrieve_secret(name, self._base)
+
     def __getitem__(self, name: str) -> SecretValue:
-        from local_operator.secrets.access import session_id
         from local_operator.secrets.errors import SecretNotFound
 
         key = str(name)
         try:
-            raw = self._open().get(key, session_id=session_id())
+            raw = self._retrieve(key)
         except SecretNotFound as exc:
             # A KeyError, because this is a Mapping and `secrets.get(...)` and
             # `"X" in secrets` are built on __getitem__ raising it. The store's

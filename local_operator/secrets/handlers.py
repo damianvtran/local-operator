@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from local_operator.secrets.access import open_store, session_id
+from local_operator.secrets.access import open_store, retrieve_secret, session_id
 from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
 from local_operator.secrets.store import SecretRecord
@@ -243,8 +243,15 @@ def _get(args: argparse.Namespace) -> int:
     ``$( )`` stripping the newline we add is luck, not contract, in every other
     consumer (a Python ``subprocess.check_output``, a here-string, a file
     redirect).
+
+    Routed through :func:`~local_operator.secrets.access.retrieve_secret` so
+    the §6 notice fires BEFORE these bytes exist here (QA Q3). This verb is the
+    headline path — ``$(lop secret get NAME)`` is what the credentials guide
+    tells agents to write — so it is the one that most needs the value already
+    registered for redaction by the time it can be printed. Nothing about the
+    stdout contract changes: same bytes, no trailing newline.
     """
-    value = open_store().get(args.name, session_id=session_id())
+    value = retrieve_secret(args.name)
     sys.stdout.buffer.write(value)
     sys.stdout.buffer.flush()
     return 0
@@ -747,7 +754,9 @@ def _file(args: argparse.Namespace) -> int:
         _err("usage: lop secret file NAME [--env-var VAR] -- COMMAND...")
         return 2
 
-    value = open_store().get(args.name, session_id=session_id())
+    # Same announcement seam as `_get`: the plaintext is about to be written
+    # to a path the child reads, so the session must already be scrubbing it.
+    value = retrieve_secret(args.name)
     directory = Path(tempfile.mkdtemp(prefix="lop-secret-"))
     os.chmod(directory, DIR_MODE)
     target = directory / args.name.replace(os.sep, "_")
@@ -790,13 +799,16 @@ def _run(args: argparse.Namespace) -> int:
         _err("lop secret run: name at least one secret with --secret NAME")
         return 2
 
-    store = open_store()
     environment = os.environ.copy()
     for specification in args.secret:
         name, _, variable = specification.partition("=")
-        environment[variable or name] = store.get(name, session_id=session_id()).decode(
-            "utf-8", errors="strict"
-        )
+        # Through the announcement seam, per secret. These values go into a
+        # child's environment, which any same-uid process can read while it
+        # runs, so they need the redaction notice at least as much as `_get`'s
+        # do. One store handle is no longer reused across the loop: each
+        # retrieval is its own broker round trip, which is also what makes the
+        # audit trail record them individually.
+        environment[variable or name] = retrieve_secret(name).decode("utf-8", errors="strict")
     return subprocess.run(command, env=environment, check=False).returncode
 
 

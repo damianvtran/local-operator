@@ -281,3 +281,74 @@ def open_store(base: Path | None = None, *, create: bool = False) -> SecretStore
     :func:`load_master_key`.
     """
     return SecretStore(master_key_for(base, create=create), base=base)
+
+
+def retrieve_secret(name: str, base: Path | None = None) -> bytes:
+    """One secret's VALUE, announced to the owning session first (design §6).
+
+    **Why this exists rather than a bare ``open_store().get()`` (QA Q3).** The
+    broker's ``retrieve`` op is what makes the §6 redaction notice fire: it
+    tells the session that owns this peer to scrub the value and WAITS for the
+    ack before answering, so a value taken through ``$(lop secret get NAME)``
+    cannot reach a model-visible channel ahead of the filter that redacts it.
+    Decrypting locally is functionally identical to the caller and silently
+    skips that notification — which is exactly what happened: the documented
+    ``$(lop secret get NAME)`` path painted the credential raw in the live
+    stream, in ``jobs(op='peek')`` and in the tool result, because the notifier
+    and its consumer were never connected. Every value-returning surface routes
+    through HERE so there is ONE announcement path rather than one per caller.
+
+    **The fallback is the same shape, and the same trade, as
+    :func:`master_key_for`'s (see below).** A retrieval must not become
+    impossible because no daemon is running: ``lop secret get`` typed in a
+    plain terminal, from a script, or on the keyfile tier has no session to
+    notify and frequently no broker at all. An availability failure therefore
+    degrades to the local decrypt — UNNOTIFIED, never blocked. That is the
+    round-2 invariant applied to this path: degrade to unnotified, never to a
+    blocked or failed retrieval.
+
+    **The fallback is keyed on REACHABILITY, not on the refusal.** This is the
+    one place the shape deliberately departs from :func:`master_key_for`, and
+    the asymmetry is the whole safety property. Falling back after a *live*
+    broker refused would serve, unnotified, precisely the value that broker had
+    just decided could not be kept out of the operator's transcript — the
+    fail-closed rule (review R3) inverted. So only an UNREACHABLE broker
+    (:class:`BrokerUnavailable`, or one that will not start) drops to the local
+    decrypt; a broker that answered and said no is believed. That covers the
+    ``unredactable`` denial, which is exactly "the owning session never
+    acknowledged", without needing a new exception class on the wire.
+
+    The residual cost is named rather than hidden: a broker left running across
+    a runtime update answers with a protocol-version refusal, and this raises
+    instead of quietly reading the key file. That surfaces the daemon's own
+    actionable message (``lop secret broker restart``) rather than silently
+    resuming unnotified retrievals, which is the safer of the two failures.
+
+    **``BrokerDenied`` in the keyfile tier is the documented exception.** §8
+    concedes the broker is not the boundary there — the master key is on disk
+    beside the store, so a refused caller reads it directly anyway, and the
+    operator's own terminal has no lop session among its ancestors and is
+    denied by construction. Making that fatal would break the store's primary
+    surface while buying nothing. In the hardened tier the denial stands.
+    """
+    # Imported inside the function, matching `master_key_for` above: this
+    # module is on the path of every `lop secret` verb, and the client drags in
+    # socket/fcntl machinery the write verbs never need.
+    from local_operator.secrets.client import BrokerDenied, ensure_broker, retrieve
+
+    hardened = key_mode(base) == "passphrase"
+    try:
+        if ensure_broker(base):
+            return retrieve(name, base)
+        # No broker could be started. In the hardened tier there is no
+        # unwrapped key on disk to fall back to, so let the local path raise
+        # its own accurate message rather than inventing one here.
+    except BrokerUnavailable:
+        # Reached one moment, gone the next. Availability, not policy: §13
+        # keeps the store usable rather than making a daemon a hard dependency.
+        if hardened:
+            raise
+    except BrokerDenied:
+        if hardened:
+            raise
+    return open_store(base).get(name, session_id=session_id())

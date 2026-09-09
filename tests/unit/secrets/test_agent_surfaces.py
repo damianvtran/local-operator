@@ -951,3 +951,105 @@ async def test_list_on_a_machine_with_no_store_is_not_an_error(isolated: Path) -
     result = await _call("list")
     assert not result.is_error, result.text
     assert "No secrets are stored" in result.text
+
+
+# --------------------------------------------------------------------------
+# The production read path, end to end (QA Q3)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin",) and not sys.platform.startswith("linux"),
+    reason="the broker is implemented for macOS and Linux",
+)
+@pytest.mark.asyncio
+async def test_a_real_bash_child_running_lop_secret_get_is_redacted_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole §6 chain with NOTHING mocked — the seam Q3 found open.
+
+    Every other redaction test here supplies one side of the chain: the store
+    subclass above stands in for the broker's notice, and the broker PR's own
+    tests stand in for this consumer. Each passed while the two were never
+    connected, because each mocked the other's half — so this asserts across
+    the join instead. A real broker, a real registered session answering
+    notices, and a real `bash` child running the documented
+    `$(lop secret get NAME)` from the credentials guide.
+
+    Then it checks the three channels a model can actually read: the live
+    stream the TUI paints, the `jobs(op='peek')` buffer, and the finished tool
+    result. Before the fix the child was served by a LOCAL decrypt that never
+    told the session anything, so `redaction_values()` stayed empty and the
+    credential was painted verbatim in all three.
+    """
+    pytest.importorskip("local_operator.secrets.client")
+
+    from local_operator.secrets.broker import SecretBroker
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.keys import key_path, write_private_file
+    from local_operator.secrets.session import register_session
+    from local_operator.secrets.store import SecretStore
+
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    secret = "Q3-REAL-BROKER-9f4c1a2e"
+    key = generate_master_key()
+    store_on_disk = SecretStore(key, base=root)
+    store_on_disk.initialize()
+    store_on_disk.set("Q3_TOKEN", secret.encode(), description="q3")
+    write_private_file(key_path(root), key)
+
+    broker = SecretBroker(root, key_provider=lambda: key, idle_shutdown_s=0)
+    broker.start()
+
+    variables = BrokerAwareStore()
+
+    def on_secret(_name: str, value: bytes) -> None:
+        # Returns None: `register_session` types the callback as `-> None`, and
+        # `register_redaction` answers bool, so the result is deliberately
+        # dropped rather than returned.
+        variables.register_redaction(value.decode())
+
+    registration = register_session(on_secret, session_id="q3-e2e", base=root)
+    assert registration is not None, "no session registered; the seam is untestable"
+
+    from local_operator.harness.jobs import AsyncJobManager
+
+    manager = AsyncJobManager()
+    context = ToolContext(cwd=str(tmp_path), variables=variables, jobs=manager, session_id="q3-e2e")
+    # The child must import the tree UNDER TEST, not whatever `lop` happens to
+    # be installed on this machine — without this the subprocess silently
+    # exercises the released runtime and the assertion below reports on the
+    # wrong code. Derived from the package location rather than hardcoded so it
+    # follows the worktree.
+    import local_operator
+
+    tree = str(Path(local_operator.__file__).resolve().parent.parent)
+    cli = f"{shlex.quote(sys.executable)} -m local_operator.cli secret get Q3_TOKEN"
+    # The documented path, verbatim from guide://credentials, in a real shell.
+    command = (
+        f"export PYTHONPATH={shlex.quote(tree)}; "
+        f"{cli} > /dev/null; sleep 0.2; "
+        f'printf %s "$({cli})"'
+    )
+    try:
+        result = await builtin.execute_bash(
+            "q3", {"command": command}, AbortSignal(), None, context
+        )
+    finally:
+        registration.close()
+        broker.stop(timeout=5)
+
+    # The session was actually told — this is the notifier/consumer join.
+    assert secret in variables.redaction_values(), (
+        "the session was never notified of a value its own child retrieved; "
+        "the redaction notifier and its consumer are not wired together"
+    )
+    assert secret not in result.text, "the credential reached the model-visible tool result"
+    assert "[redacted]" in result.text

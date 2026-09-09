@@ -96,6 +96,25 @@ session).
 To promote a credential the user already handed to this session, they run
 `/credential --persist NAME`.
 
+**Storing a multi-line secret: use `--from-file`, not stdin.** `lop secret set`
+and `lop secret update` read stdin and strip ONE trailing newline, because
+`echo` and every heredoc add one and `echo hunter2` means five characters, not
+six. That is right for a token on a single line and silently wrong for anything
+that legitimately ends in a newline — a PEM private key, a service-account
+JSON, an SSH key. Piping one in costs it its final byte, and the value comes
+back one byte short with no error at any point; you find out when the key fails
+to verify, far from the cause.
+
+```bash
+lop secret set DEPLOY_KEY --from-file ./deploy_key.pem   # exact bytes, newline kept
+printf %s "$TOKEN" | lop secret set API_TOKEN            # single-line: stdin is fine
+```
+
+`--from-file` reads the file's exact bytes and strips nothing. It does not
+remove the file, so delete the plaintext afterwards. Verify a round trip with
+`lop secret get NAME | shasum -a 256` against the original when the value has
+to be byte-exact.
+
 ## What you must never do
 
 - **Never echo, print, or log a secret**, in any surface — bash output, an eval
