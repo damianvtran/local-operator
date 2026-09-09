@@ -30,7 +30,7 @@ import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from local_operator.secrets import audit
 from local_operator.secrets.crypto import (
@@ -313,9 +313,30 @@ def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
     anything, so the install proceeds unconditionally; that is the same
     "cannot tell, do not guess" fallback :func:`recorded_key_fingerprint` uses.
     """
+    return install_key_of_record_if_current(key, base, lambda: replace_master_key(base, key))
+
+
+def install_key_of_record_if_current(
+    key: bytes, base: Path | None, install: Callable[[], None]
+) -> bool:
+    """The compare-and-swap above, over whichever file IS the key of record.
+
+    Both at-rest tiers need the identical guard and differ only in what
+    installing MEANS — ``master.key`` in the keyfile tier,
+    ``master.key.wrapped`` in the hardened one — so the guard lives here once
+    and the tier supplies ``install``. Not having it in both places is what
+    produced QA Q10's concurrency exposure: the hardened rotation path had no
+    compare-and-swap at all, and every argument in
+    :func:`install_master_key_if_current`'s docstring about a superseded
+    rotation clobbering the winner's key applies to it word for word.
+
+    ``install`` runs INSIDE the write lock this transaction holds, so it must
+    do nothing but move the key into place — no prompting, no database access,
+    no work that could block, since every other writer waits behind it.
+    """
     path = store_path(base)
     if not path.exists():
-        replace_master_key(base, key)
+        install()
         return True
 
     with closing(_connect(path)) as connection:
@@ -325,7 +346,7 @@ def install_master_key_if_current(key: bytes, base: Path | None = None) -> bool:
             if recorded is not None and recorded != key_fingerprint(key):
                 # Superseded. Refusing is what keeps the winner's key installed.
                 return False
-            replace_master_key(base, key)
+            install()
             return True
         finally:
             # Read-only throughout: the transaction exists solely to hold the
@@ -381,6 +402,18 @@ class SecretStore:
         return self._path.exists()
 
     def _restrict_modes(self) -> None:
+        """Tighten the mode on the database and its WAL sidecars.
+
+        ``FileNotFoundError`` is caught rather than pre-checked because the
+        ``-wal`` and ``-shm`` files are TRANSIENT: SQLite creates and removes
+        them as connections come and go, so an ``exists()`` test followed by a
+        ``chmod`` is a race the broker made reachable — it opens the store from
+        its own process to append audit rows, concurrently with the session
+        that is writing. Observed as an intermittent ``FileNotFoundError`` on
+        ``store.db-wal`` during a full-suite run. A file that vanished needs no
+        mode applied, so the correct handling is to move on rather than to
+        widen the pre-check, which cannot close the window.
+        """
         for candidate in (
             self._path,
             self._path.with_name(self._path.name + "-wal"),
@@ -930,6 +963,45 @@ class SecretStore:
                 raise
         self._master_key = new_master_key
         return moved
+
+    def record_broker_event(
+        self,
+        *,
+        event: str,
+        outcome: str,
+        pid: int | None = None,
+        exe: str | None = None,
+        session_id: str | None = None,
+        secret_id: str | None = None,
+    ) -> None:
+        """Append a broker decision to the chain (design §12).
+
+        The broker is the only component that knows the peer's pid and
+        executable path, so authorization outcomes — including DENIALS, which
+        are the entries an operator most wants after an incident — can only be
+        recorded from there. Kept separate from the verb methods because it
+        describes an access decision rather than a change to a record: nothing
+        here touches the ``secrets`` table.
+        """
+        if not self.exists():
+            return
+        with closing(self._open(for_write=True)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                audit.append(
+                    connection,
+                    event=event,
+                    ts=time.time(),
+                    outcome=outcome,
+                    secret_id=secret_id,
+                    session_id=session_id,
+                    pid=pid,
+                    exe=exe,
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
 
     def audit_entries(self, limit: int | None = None) -> list[audit.AuditEntry]:
         """Recent audit entries, oldest first."""

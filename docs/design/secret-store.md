@@ -140,6 +140,76 @@ runs as a child of some process that is itself a descendant of a lop session,
 inherits that ancestry and is allowed. Ancestry authenticates *lineage*, not
 *intent*. See §9.
 
+> **Amended during PR 2 (review round 1): becoming a session must itself be
+> authenticated, and `register` was not.** The decision procedure above assumes
+> the set of registered sessions is trustworthy. As first implemented it was
+> not: `register` was dispatched *before* the authorization gate, and because
+> the ancestry walk yields the peer as the first element of its own chain, any
+> process that registered itself became its own authorizing ancestor.
+> Reproduced from a double-forked `setsid` process reparented to launchd —
+> the shape this section marks DENIED — against an *unlocked passphrase-tier*
+> broker: one 60-byte frame yielded both the plaintext secret and the 32-byte
+> master key. Two fixes, each sufficient alone and both kept:
+>
+> 1. **`register` presents a ticket** — 32 bytes from the CSPRNG in the 0700
+>    secrets directory, compared with `compare_digest`. Note honestly what this
+>    is worth per tier: in `keyfile` mode the ticket sits beside `master.key`,
+>    so it stops nobody who could not already decrypt the store, and §8 says so.
+>    In `passphrase` mode the ticket is the only thing on disk, and holding it
+>    grants standing to *ask* — not to decrypt.
+> 2. **A peer is never its own authorizing ancestor.** A registered session is
+>    authorized *as itself*, with its connect-time pin verified; an
+>    unregistered peer gains nothing from heading its own chain.
+>
+> **No process-shape check was available as an alternative, and this was
+> measured rather than assumed.** The obvious repairs — require the registrant
+> to be a session leader, to have a controlling tty, to have a particular ppid
+> — all fail against a same-uid attacker, which is the entire threat model
+> here: a detached script reparents to launchd (`ppid=1`, exactly like a real
+> detached session), calls `setsid()` to lead its own session, and can allocate
+> its own pty with `pty.fork()`. Code-signature verification is unavailable
+> (`csops` denied, above). A secret the attacker must *read from a 0700
+> directory* is the only discriminator this design has.
+>
+> **In `passphrase` mode the ticket alone is deliberately not enough.** An
+> attacker that can reach the socket can read the ticket file too, so
+> registering there additionally requires lineage from a live session or from
+> the terminal that proved knowledge of the passphrase by unlocking the broker
+> (see §13's amendment). Caught by an adversarial test written for this fix,
+> not by review — the first version of the fix was ticket-only and the detached
+> attacker still walked in.
+
+> **Amended during PR 2 (implementation).** Three corrections, each from
+> executed measurement rather than review:
+>
+> 1. **The walk must include pid 1, not stop above it.** Spike 9's loop is
+>    `while pid > 1`, which never examines pid 1 itself. That is invisible on
+>    this machine, where no session is pid 1, and wrong inside a container
+>    where a session frequently *is* pid 1 — measured in Docker, where a
+>    legitimate descendant was DENIED until the bound was corrected.
+> 2. **Ancestors are pinned by `p_uniqueid`, not by `pidversion`.** The audit
+>    token's `pidversion` is only readable for the *connecting* peer; the
+>    kernel exposes no way to read it for an arbitrary ancestor. Measured
+>    instead: `proc_pidinfo(PROC_PIDUNIQIDENTIFIERINFO)` yields a monotonic,
+>    never-recycled 64-bit `p_uniqueid` for any pid, plus `p_puniqueid` — the
+>    parent's — which lets each hop of the walk VERIFY it links to the process
+>    it is about to examine rather than trusting a bare ppid. `pidversion` is
+>    still pinned for the peer itself; start time remains the Linux fallback.
+> 3. **Linux gets full ancestry authentication, not a fail-closed stub.** §14
+>    anticipated `SO_PEERCRED` yielding a pid and left the rest open. Measured
+>    in Docker: `SO_PEERCRED` plus `/proc/<pid>/stat` (ppid and field-22 start
+>    ticks) reproduces both spike-9 outcomes exactly — agent grandchild
+>    ALLOWED, detached `setsid` script DENIED. So Linux is a peer platform
+>    here. Only genuinely unsupported platforms fail closed, and they do so by
+>    refusing everyone rather than degrading open.
+>
+> A fourth correction is about the socket rather than the walk: macOS
+> `sockaddr_un.sun_path` is 104 bytes and `bind()` fails past it (measured: 103
+> binds, 104 fails). The default config dir yields a 49-byte path, but
+> `LOCAL_OPERATOR_CONFIG_DIR` is operator-controlled, so the socket relocates
+> to a short private `TMPDIR` directory when the natural path does not fit.
+> Only the rendezvous point moves; the key, database and audit log stay put.
+
 ### 2.2 (b) Capability tokens in the environment — **rejected on evidence**
 
 Spike 2, the measurement that decides it:
@@ -509,6 +579,34 @@ replying to the retrieving child**. That makes the ordering an invariant rather
 than a hope, at the cost of one extra round trip on retrieval (sub-millisecond
 on a unix socket). Take that cost.
 
+> **Amended during PR 2 (implementation): the invariant only became one when it
+> started failing CLOSED.** As first written the broker waited 2 s for the ack
+> and then **served the value anyway**, which made the word "invariant" false —
+> a session that never acked (a wedged UI, or an attacker who simply chose not
+> to ack) got the value into the transcript with nothing downstream able to
+> scrub it, since the whole premise of this section is that a `$( )` value
+> passes through no filter. Measured: `CHILD GOT VALUE … after 2.00s WITHOUT
+> the session ever acking`.
+>
+> A descendant's retrieval is now **denied** when the owning session does not
+> acknowledge within the timeout, with an error naming the wedged session. The
+> availability objection that motivated serving-anyway is real but much
+> narrower than it looks, and is answered by scope rather than by weakening the
+> rule:
+>
+> - A session retrieving **its own** value never waits for an ack — that is
+>   case (1) above, where the value lands in the session's own memory and it
+>   registers the redaction directly. Requiring an ack from the process blocked
+>   on the reply would deadlock the operator's own terminal, so it is excluded
+>   by construction, not by timeout.
+> - `lop secret get` typed at a prompt has no owning session, so there is no
+>   notice to wait for and nothing to deny.
+>
+> What remains deniable is exactly the case the ordering exists for: an agent's
+> child fetching a secret through a session that has stopped answering. A
+> failed command there is recoverable and visible; a leaked credential in a
+> transcript is neither.
+
 **(3) Value in a subprocess the filter never sees at all** — e.g. the agent
 pipes it to a file, or a background job started before registration. Not
 solvable in general, and the guidance (§10) must say so: `lop secret get` is
@@ -552,22 +650,72 @@ and an attacker sampling the filesystem during that window finds it.
 
 Measured against today's plaintext `~/.minerva/credentials/.env` (58 keys).
 
+> **Corrected during PR 2 (implementation), and this correction matters more
+> than the rest of the table.** Two cells previously read "**Stopped**" for the
+> default tier. Both were false, and a reviewer and QA independently *measured*
+> them false: a detached `setsid` script is denied at the socket and then
+> **served anyway** from the key file, `rc=0`, value on stdout. The rule that
+> residual risk is never overclaimed applies to this table above all, because
+> it is the comparison an operator reads to choose a tier.
+>
+> Stated plainly, replacing the two claims: **the default `keyfile` tier
+> enforces no ancestry at all.** A denial there is a fallback, not a refusal —
+> `access.py` reads the key file instead, deliberately (see §13's amendment),
+> because a caller the broker just refused could read that file directly and
+> refusing would only break the operator's own terminal. The broker's
+> contribution in that tier is the audit trail and the §6 redaction notice,
+> **not access control**. `lop secret harden` is the only tier where the
+> ancestry boundary is load-bearing.
+>
+> **Corrected again in PR-2 review round 4, and this is the more general
+> lesson.** Because the hardened tier is the only one where the gate is real,
+> *deciding which tier is in force is itself a security decision* — and it was
+> being made by the same predicate `status` uses to print the mode line. That
+> predicate answers on what is ABSENT from disk, which is right for honesty and
+> wrong for authorization: absence, and presence, are attacker-controlled. Any
+> same-uid process could write 32 random bytes to `master.key`, and the broker
+> would conclude it was in the keyfile tier and stop requiring lineage —
+> measured 3/3 from a detached `setsid` process at ppid=1 against a genuinely
+> hardened, unlocked store, which then registered and was served the unwrapped
+> master key out of broker memory and decrypted every record. The planted key
+> was junk, so this was never key theft; it was a **lie told to a predicate that
+> only observed**.
+>
+> The rule that replaces it: **a display answer may observe, an authorization
+> answer must validate.** The two are now separate functions — `key_mode()`
+> reports the tier honestly (a store carrying both files says `keyfile`, so
+> `status` warns and `harden` repairs it), while `key_of_record_is_plaintext()`
+> decides the gate by checking the installed key against the fingerprint the
+> database records for itself. That fingerprint is public by design and cannot
+> be forged without the key it names, so a plant fails it and the store is
+> correctly still treated as hardened. Both behaviours are pinned by tests, and
+> the authorization one is mutation-tested: restoring the existence check turns
+> it red.
+
 | Attacker behaviour | Today | Encrypted DB + key file (default) | Broker + passphrase (opt-in) |
 |---|---|---|---|
 | `grep -r` / "find .env files" opportunistic malware | **Loses everything** | **Stopped** — ciphertext, names blind-indexed | **Stopped** |
 | Script reading a known key file path | n/a | **Not stopped** — reads key + DB, decrypts | **Stopped** — key is not on disk unwrapped |
-| Script camping on the socket | n/a | **Stopped** — 0600 enforced (spike 7), ancestry check (spike 9) | **Stopped** |
-| Detached script (`setsid`, reparented to launchd) | Loses everything | **Stopped** at the socket | **Stopped** |
+| Script camping on the socket | n/a | **Not stopped** — 0600 excludes other *uids* (spike 7), but a same-uid denial falls back to the key file | **Stopped** — denial is enforced; no key on disk to fall back to |
+| Detached script (`setsid`, reparented to launchd) | Loses everything | **Not stopped** — denied at the socket, then served from the key file (measured: `rc=0`, value on stdout) | **Stopped** — denied at the socket and there is no fallback (measured) |
 | Script dumping the broker's memory | n/a | Needs `task_for_pid` → **denied, rc=5**; `lldb` → **SecurityAgent prompt** (spikes 3, 5) | Same |
-| Script that runs `lop secret get` itself | n/a | **Not stopped** (§9) | **Not stopped** |
+| Script that self-registers as a session over the socket | n/a | **Not stopped** — but irrelevant, it can read the key file anyway | **Stopped** — `register` needs the 0700 ticket *and*, in this tier, lineage from an unlocked terminal or a live session (PR-2 review R1), and *which tier applies* is decided by validating the installed key against the store's fingerprint rather than by observing that a file exists (R4-1) |
+| Script that runs `lop secret get` itself | n/a | **Not stopped** (§9) | **Not stopped** while unlocked (§9.1, §9.4) |
 | Script that rewrites the lop code it can write (`~/.local/bin/lop` is 0755 **writable**, spike 10) | n/a | **Not stopped** | **Not stopped** |
 | Attacker with a backup copy of the store only | n/a | Stopped if the key file was not in the backup | **Stopped** |
 
 The honest summary: **the default mode's real win is against opportunistic and
 automated theft, which is the overwhelming majority of what "clicked a bad link"
-produces.** The passphrase mode is what converts "targeted attacker wins" into
-"targeted attacker must run code that impersonates a lop session while the
-broker is unlocked, or trip a visible authorization prompt".
+produces** — it turns 58 plaintext keys at a predictable path into ciphertext
+with blind-indexed names. What it does **not** do is stop a script that looks
+for the key file, and it does not stop one at the socket either.
+
+The passphrase mode is what converts "targeted attacker wins" into "targeted
+attacker must run code that impersonates a lop session *while the broker is
+unlocked*, or trip a visible authorization prompt". Between reboot and the
+first `lop secret unlock`, an attacker with the whole disk gets nothing *from
+this store* — whatever plaintext `.env` files have not been migrated yet are
+of course still readable (review R11).
 
 ---
 
@@ -597,10 +745,34 @@ against the following, and no design confined to one macOS user account can.**
    Protected by the same `task_for_pid` boundary as the broker — meaningful, but
    it is the same single control.
 
-4. **The unlock window in passphrase mode.** Once you unlock after a reboot, the
-   broker serves silently until it exits. An attacker active during that window
-   is in case 1. The passphrase protects the store **at rest**, not while you
-   are using it.
+4. **The terminal you unlock in is authorized for as long as it lives.**
+   `lop secret unlock` records the shell it was typed in as an authorizing
+   ancestor, because without it the operator's own `lop secret get` — which has
+   no lop session above it — would be denied and the tier would be unusable.
+   The consequence is wider than case 1 and is a *different* mechanism than
+   case 1 describes: a process in that terminal does not need to run `lop` at
+   all, it can speak to the broker socket directly and be authorized on lineage
+   alone. Measured, not inferred:
+
+   - **Served**, for the shell's whole life: direct children, subshells, `( )`,
+     grandchildren, `xargs` and `nohup` children, a `make` invocation running an
+     unrelated Makefile, and a *later, unrelated* command run in that terminal
+     long after the unlock. Anything you run there can read every secret.
+   - **Denied**: any other terminal, a fresh shell started after the granting
+     shell exits, and anything that detaches (a `setsid` child orphans to
+     launchd and leaves the lineage).
+
+   The grant is in memory only, is pinned to the shell's process identity so a
+   recycled pid inherits nothing, and dies with the shell or with the broker —
+   `lop secret broker stop`/`restart` revokes it, and there is no separate
+   relock verb. A session that registered itself *inside* the granted terminal
+   is revoked with that terminal too, so the grant cannot be promoted into
+   something that outlives the shell (QA Q8).
+
+   So: once you unlock after a reboot the broker serves silently until it
+   exits, and the practical boundary during that window is **the terminal**,
+   not the process. Treat an unlocked terminal as holding the whole store. The
+   passphrase protects the store **at rest**, not while you are using it.
 
 5. **A file secret during its command.** §7 writes plaintext to a 0700 dir for
    the duration of one command. An attacker sampling the filesystem in that
@@ -624,8 +796,9 @@ against the following, and no design confined to one macOS user account can.**
 the automated "scan the disk for credentials" malware that a bad link actually
 drops, and makes a targeted attacker either impersonate lop or trip a macOS
 password prompt — but anything running as you that is willing to run `lop`
-itself can still read them, so it is a large and worthwhile increase in cost,
-not a guarantee.*
+itself can still read them, and in the hardened tier anything at all running in
+a terminal you have unlocked can read them, so it is a large and worthwhile
+increase in cost, not a guarantee.*
 
 That is a real improvement over 58 plaintext keys at a predictable path. It is
 not a vault, and it should not be described as one.
@@ -766,6 +939,133 @@ lifeline — it is consulted per retrieval. So:
   starts locked and says so. Note `AGENTS.md`'s #401 lesson — a blocking `flock`
   deadlocked the event loop — so this lock must be non-blocking-with-retry off
   the event loop, and the e2e stage should cover broker-down boot.
+
+> **Amended during PR 2 (implementation).** What a broker outage costs depends
+> on the tier, and the two must not be conflated:
+>
+> - In `keyfile` mode the master key is on disk beside the store, so a caller
+>   the broker would refuse can read it directly — §8's own table says as much
+>   ("Script reading a known key file path: **Not stopped**"). Failing a
+>   retrieval on a broker outage or an ancestry DENIAL would therefore add no
+>   security whatsoever while breaking the store's primary surface: the
+>   operator's own `lop secret get`, typed in their own terminal, has no lop
+>   session among its ancestors and is denied by construction. This mode
+>   therefore falls back to the key file, and the broker's contribution is the
+>   audit trail and the §6 redaction notice rather than access control.
+> - In `passphrase` mode there is no unwrapped key on disk to fall back to, so
+>   a denial is enforced and an unreachable broker is a hard, clearly-worded
+>   failure. This is the tier in which the ancestry boundary is load-bearing.
+>
+> Verified by execution in both tiers: a detached `setsid` script is denied
+> against an unlocked hardened store, and a SIGKILLed broker leaves an
+> in-flight retrieval with `BrokerUnavailable` in ~5 ms rather than a hang, a
+> stale value, or a wrong one.
+
+> **Amended again during PR 2 (QA round 1): the hardened tier could not be
+> entered, and the fix is the unlock grant.** Two defects compounded. `unlock`
+> was dispatched *behind* the ancestry gate, so unlocking required already
+> descending from a registered session — while **nothing in shipping code ever
+> registered one** (only tests did). After `harden` the correct passphrase was
+> refused and even `status` failed, with the plaintext key already deleted. The
+> tier had therefore never worked end to end in either direction: unreachable
+> for its owner, and bypassable by anyone else (§2.1's amendment).
+>
+> Three changes, which have to land together:
+>
+> - **`unlock` is authenticated by the passphrase, so it is dispatched before
+>   the ancestry gate.** The passphrase is a stronger credential than ancestry
+>   and the only one never written to disk in any form. Wrong guesses are
+>   audited and cost a geometric backoff (0.25 s → 8 s), since this verb is now
+>   reachable without lineage and scrypt's ~180 ms alone is a thin defence
+>   against an online oracle.
+> - **Interactive sessions register themselves** (`local_operator/secrets/
+>   session.py`, wired into `run_tui`). Without this, authenticating `register`
+>   would have converted the bypass into a permanent lockout. Closing the
+>   channel deregisters, which is what revokes descendants promptly.
+> - **Unlocking grants the operator's terminal standing for this boot.** `lop
+>   secret get` typed at a prompt has no lop session among its ancestors and is
+>   denied by construction — in `keyfile` mode the key-file fallback hides
+>   that, but in `passphrase` mode there is no fallback, so the operator's own
+>   store stayed unreachable even after a successful unlock. The parent of the
+>   process that proved knowledge of the passphrase — the shell it was typed
+>   into — is recorded as an authorizing ancestor, pinned by identity like any
+>   session. The detached attacker does not descend from that shell and remains
+>   denied, verified as real processes against an unlocked broker.
+>
+> **The residual risk IS widened, and §9.4 now says so.** An earlier draft of
+> this note claimed it was not — that the grant was covered by §9.1's "a script
+> that runs `lop` itself". That is wrong and the correction matters: a process
+> in the granted terminal does not have to run `lop`, it can speak to the
+> socket directly and be authorized on lineage alone. The honest statement is
+> that anything running in an unlocked terminal — including build tools invoked
+> there — can read every secret for as long as that shell lives. It stays
+> strictly narrower than the ancestry-free access it replaces, and the detached
+> attacker remains denied.
+>
+> The grant is bounded by the terminal's LIFETIME, which required a fix rather
+> than only a doc change (QA Q8): a process inside the granted terminal may
+> register itself as a session, and a registered session is an independent
+> authorizing entry, so killing the shell used to leave the self-registered
+> squatter serving secrets for the broker's whole life. A session admitted
+> *because* it descended from a granted terminal now records that terminal, and
+> is revoked when the terminal dies; standing is inherited down a chain of such
+> registrations, so one sweep removes the whole chain rather than the first hop.
+>
+> Verified end to end through the real CLI with the passphrase typed at a pty:
+> `set` → `get` → `harden` → broker restart (a reboot) → `get` refused, 0 bytes
+> on stdout → `unlock` → `get` serves the value → `status` reports
+> `passphrase`.
+
+> **Amended again during PR 2 (QA round 3): the key of record is TIER-SPECIFIC,
+> and `rotate` did not know it.** §3's rotation paragraph says the new key is
+> generated, every record re-sealed, and the new key installed — without ever
+> saying WHICH FILE "installed" means, and the implementation resolved that
+> ambiguity the same way in both tiers: it wrote the plaintext `master.key`.
+> On a hardened store the key of record is `master.key.wrapped`, so a single
+> `lop secret rotate` re-sealed the database under a new key while `unlock`
+> kept unwrapping the old one. Every secret became undecryptable, exit code 0,
+> `status` reporting `secrets 0 / damaged 1`.
+>
+> The second consequence is the worse one and is the reason this is recorded
+> here rather than only in a commit message. `key_mode()` answered
+> `passphrase` on the mere presence of the wrapped file, so the store kept
+> reporting the hardened tier while the live master key sat UNWRAPPED on disk
+> beside the database — the exact property §2.3 sells this tier on, silently
+> not provided. A tier is defined by what is ABSENT from disk, so it is now
+> decided by looking for the plaintext key: a store carrying both files
+> reports `keyfile`, which is the truth, and `status` names the inconsistency
+> outright.
+>
+> That honest answer is also the recovery path. `harden` refuses a store
+> already in `passphrase` mode, so under the old answer an operator whose
+> rotation had produced this state had no CLI way out at all; with it, `harden`
+> sees a tier it can act on and re-wraps the live key. No `--force` flag was
+> added — the condition it would guard is precisely "this store is not hardened
+> right now", which is what the verb already means.
+>
+> Three structural consequences, so the class is closed rather than the
+> instance:
+>
+> - **One choke point.** `install_key_of_record_if_current` holds the
+>   compare-and-swap both tiers need and takes the install as a callback, so
+>   the hardened path cannot acquire the concurrency exposure the keyfile path
+>   was fixed for in round 1. `assert_key_of_record_invariant` is a
+>   post-condition on every key install: no plaintext `master.key` in the
+>   hardened tier, ever.
+> - **Hardened rotation stages WRAPPED.** Staging the raw key would have put a
+>   plaintext master key on disk for the duration of every rotation — the same
+>   defeat of §2.3, in a narrower window. Recovery from the commit-to-install
+>   crash window therefore moves to `unlock`, the only moment the passphrase
+>   exists; the keyfile tier keeps its unattended repair.
+> - **The broker validates its cached key on every use.** Found by the same
+>   sweep: the broker holds the key for a whole boot while `rotate` runs in
+>   another process, and nothing invalidated it. Because the blind index is
+>   derived from the master key, a stale key does not fail loudly — every
+>   lookup returned "No secret named X", so an intact store read as empty.
+>
+> Verified through the real CLI at a pty: `set` → `harden` → broker stop (a
+> reboot) → `unlock` → `rotate` → no plaintext `master.key` on disk → broker
+> restart → `unlock` → `get` returns the original value.
 - A `launchd` agent (`com.damian.lop-secretd.plist`) is the tidier long-term
   answer, but it is **out of scope for these PRs**: it changes machine state
   outside the repo, and the flock-guarded lazy start is sufficient and testable.
