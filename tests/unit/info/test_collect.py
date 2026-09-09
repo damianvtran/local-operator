@@ -892,3 +892,59 @@ def test_no_session_at_all_is_not_reported_as_a_failed_roster() -> None:
     live = collect_live(None)
     assert live.roster_unread is False
     assert live.errors == ()
+
+
+def test_a_wrong_typed_count_is_unreported_not_a_lost_section() -> None:
+    """Q1 — one corrupt record used to blank the ENTIRE sessions block.
+
+    ``SessionRecord.from_json`` filters keys and calls the constructor with no
+    type validation, so these two fields — the first this module does
+    ARITHMETIC on — are whatever the writer put in the file. A ``str`` or
+    ``list`` raised ``TypeError`` inside the roll-up, and ``_safe`` guards whole
+    SECTIONS, so a single bad record cost the session table, both fleet rows and
+    the lower-bound caveat on the screen that exists for an already-broken host.
+    ``main`` listed the same record fine, so it was a regression, not a limit.
+
+    An unusable value is not a measurement: it is reported as ``None``, which
+    the caveat already knows how to describe.
+    """
+    # Deliberately ill-typed: the whole point is a record this process did not
+    # write, so the annotations are bypassed exactly as a bad JSON file does.
+    bad_values: list[Any] = ["2", [2], {"n": 2}, object()]
+    for bad in bad_values:
+        records = [
+            (_Record(pid=1, subagents_running=2, subagents_queued=0), "live"),
+            (_Record(pid=2, subagents_running=bad, subagents_queued=bad), "live"),
+        ]
+        info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+        assert info.available is True, f"{bad!r} must not cost the section"
+        assert info.total == 2 and info.live == 2
+        assert info.lines[1].subagents_running is None
+        assert info.subagents_reporting == 1
+        assert info.subagents_unreported == 1, "the bad record folds into the caveat"
+        assert info.fleet_subagents_running == 2, "only the good record contributes"
+
+
+def test_a_numerically_plausible_but_wrong_count_is_also_unreported() -> None:
+    """Q1's quieter half: these never raised, they printed as fact.
+
+    A float rendered ``4.5 total — 1 sessions + 3.5 subagents`` and a negative
+    rendered ``-1 subagents``. Both are worse than the crash, because nothing
+    signals that the number is not a measurement. ``bool`` is checked
+    explicitly: it is an ``int`` subclass, so ``True`` would otherwise be
+    counted as one subagent.
+    """
+    bad_values: list[Any] = [3.5, -1, True, False]
+    for bad in bad_values:
+        records = [(_Record(pid=1, subagents_running=bad, subagents_queued=bad), "live")]
+        info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+        assert info.lines[0].subagents_running is None, f"{bad!r} is not a count"
+        assert info.subagents_unreported == 1
+        assert info.fleet_subagents_running == 0
+        assert isinstance(info.fleet_trajectories, int)
+
+    # A genuine zero still reports, which is the distinction being protected.
+    good = [(_Record(pid=1, subagents_running=0, subagents_queued=0), "live")]
+    ok = collect_sessions(scan=_scan(good), usage=_usage({}), now=0.0)
+    assert ok.lines[0].subagents_running == 0
+    assert ok.subagents_reporting == 1 and ok.subagents_unreported == 0

@@ -3,6 +3,7 @@
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
              fleet | fleet-mixed | fleet-unread
+             today-quiet | race | one | one-older
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the
@@ -291,6 +292,87 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
                     SubagentLine(job_id="j5", label="designer", status="failed", depth=0),
                     SubagentLine(job_id="j6", label="architect", status="completed", depth=0),
                 ),
+            ),
+            env=_env(),
+            captured_at=CAPTURED_AT,
+        )
+
+    if scenario in ("today-quiet", "race", "one", "one-older"):
+        # The states design round 1 captured. ``today-quiet``/``race`` are this
+        # host's ACTUAL default until the whole fleet restarts: nothing
+        # publishes the new fields, so the fleet half is entirely unmeasured
+        # while this session's own tree may well be running (D1/D2).
+        older = scenario in ("today-quiet", "race", "one-older")
+        single = scenario in ("one", "one-older")
+        count = 1 if scenario == "one" else 2 if scenario == "one-older" else 11
+        rows = []
+        for index in range(count):
+            pid = 4243 + index
+            reports = not older or (scenario == "one-older" and index == 0)
+            rows.append(
+                _session_line(
+                    pid,
+                    "Investigate request latency" if index == 0 else f"Session {index}",
+                    is_self=index == 0,
+                    busy=scenario == "one",
+                    # A runtime that predates the fields publishes NEITHER key,
+                    # which is ``None`` and not ``0`` — the whole distinction
+                    # these frames exist to show.
+                    subagents_running=0 if reports else None,
+                    subagents_queued=0 if reports else None,
+                )
+            )
+        lines = tuple(rows)
+        reporting = [line for line in lines if line.subagents_running is not None]
+        busy = sum(1 for line in lines if line.busy)
+        running = sum(line.subagents_running or 0 for line in reporting)
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=len(lines),
+            busy=busy,
+            subagents_reporting=len(reporting),
+            subagents_unreported=len(lines) - len(reporting),
+            fleet_subagents_running=running,
+            fleet_session_trajectories=busy,
+            fleet_trajectories=busy + running,
+        )
+        # ``race``: the own roster reads fine and shows running children while
+        # the own record has not published busy yet (event publish + 15 s
+        # floor). This is the frame where the old header said "none running"
+        # over a visible running tree.
+        tree = (
+            (
+                SubagentLine(
+                    job_id="j1",
+                    label="reviewer",
+                    status="running",
+                    depth=0,
+                    agent_role="reviewer",
+                ),
+                SubagentLine(
+                    job_id="j2", label="scout", status="running", depth=1, agent_role="scout"
+                ),
+                SubagentLine(job_id="j3", label="coder", status="running", depth=0),
+                SubagentLine(job_id="j4", label="qa-tester", status="queued", depth=0),
+            )
+            if scenario == "race"
+            else ()
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                tree=tree,
+                running=3 if scenario == "race" else 0,
+                queued=1 if scenario == "race" else 0,
+                settled=7 if scenario == "race" else 0,
+                max_running=4,
+                max_depth=2 if scenario == "race" else 0,
+                cross_session_known=not older and not single,
             ),
             env=_env(),
             captured_at=CAPTURED_AT,

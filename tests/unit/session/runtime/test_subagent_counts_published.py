@@ -54,7 +54,16 @@ async def _rig(directory: Path) -> tuple[Any, OwnedSessionHandle, RuntimeServer]
 
 
 class _Node:
-    """One roster entry, in the shape ``SubagentComms.nodes()`` returns."""
+    """One roster entry, in the shape ``SubagentComms.nodes()`` returns.
+
+    A SHAPE stub for the wiring tests below (dedupe, floor/transition
+    agreement) and nothing more. It cannot prove the FILTER is right, because
+    it sets ``status`` from the same vocabulary the filter tests against — an
+    assertion against itself. Review round 1 (R1) found exactly that: the real
+    ``node()`` derived a status from a disjoint vocabulary and the tally was a
+    hard 0 while every test here stayed green. The real-object test at the
+    bottom of this file is the one that pins the filter.
+    """
 
     def __init__(self, job_id: str, status: str, parent_job_id: str | None = None) -> None:
         self.job_id = job_id
@@ -250,3 +259,89 @@ async def test_the_tui_handle_answers_the_same_probe(tmp_path: Path) -> None:
 
     handle._session = _not_started  # type: ignore[method-assign]
     assert handle.subagent_counts() == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_the_probe_counts_a_REAL_SubagentComms_roster(tmp_path: Path) -> None:
+    """THE R1 REGRESSION. The stub above cannot catch this; only the real object can.
+
+    ``subagent_counts`` filters ``comms.nodes()`` on
+    ``RUNNING_SUBAGENT_STATUSES = {running, starting, pausing}``, but
+    ``SubagentComms.node()`` used to derive status privately as
+    ``paused | <outcome> | cancelled | gone`` — a vocabulary with an EMPTY
+    intersection with the filter. A live running child was reported ``gone``,
+    so every owner runtime published a *measured* ``0``: it landed in
+    ``reporting``, suppressed the lower-bound caveat, and made the header
+    assert "none running" over a roster full of live children. Strictly worse
+    than the bug the feature exists to fix, and invisible to a stub that sets
+    ``status`` from the counting vocabulary itself.
+
+    ``node()`` now derives status through ``_describe`` — the same collapse
+    ``roster()`` uses — so the node and the roster cannot disagree about the
+    same child. This test asserts the COUNT against a real registry, and the
+    node/roster agreement that keeps it true.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from tests.unit.harness.test_comms import FakeChild, FakeJobs, FakeParent
+
+    session, handle, _ = await _rig(tmp_path / "s")
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+
+    # Distinct session dirs: ``attach`` folds a record whose dir matches a
+    # settled one, which would silently collapse the roster under test.
+    running_dir = tmp_path / "running"
+    running_dir.mkdir()
+    settled_dir = tmp_path / "settled"
+    settled_dir.mkdir()
+
+    jobs.add("j1", status="running")
+    comms.record_launch("j1", "reviewer", prompt="review")
+    comms.attach("j1", FakeChild(), running_dir)  # type: ignore[arg-type]
+
+    # Queued: the job row still says ``running`` and the split lives in the
+    # separate ``queued`` flag, which is exactly the distinction R2 covers.
+    jobs.add("j2", status="running")
+    jobs.jobs["j2"].queued = True
+    comms.record_launch("j2", "qa-tester", prompt="qa")
+
+    jobs.add("j3", status="running")
+    comms.record_launch("j3", "coder", prompt="code")
+    comms.attach("j3", FakeChild(), settled_dir)  # type: ignore[arg-type]
+    comms.record_outcome("j3", "completed")
+
+    _with_roster(session, comms)
+
+    statuses = {node.job_id: node.status for node in comms.nodes()}
+    assert statuses == {"j1": "running", "j2": "queued", "j3": "completed"}, statuses
+    assert statuses == {
+        row.job_id: row.status for row in comms.roster()
+    }, "node() and roster() must agree; two derivations of one fact is how they drift"
+    assert handle.subagent_counts() == (1, 1), "a live child is not 'gone'"
+
+
+@pytest.mark.asyncio
+async def test_a_real_roster_reaches_the_record_as_a_nonzero_count(tmp_path: Path) -> None:
+    """End to end on the owner path: real registry -> probe -> published record.
+
+    R1's damage was not the count in isolation, it was that a fabricated
+    *measured* zero reaches ``SessionRecord`` and is then indistinguishable
+    from a runtime that genuinely has no children — which is precisely the
+    distinction the whole feature is built on.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from tests.unit.harness.test_comms import FakeChild, FakeJobs, FakeParent
+
+    session, handle, server = await _rig(tmp_path / "s")
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    jobs.add("j1", status="running")
+    comms.record_launch("j1", "reviewer", prompt="review")
+    comms.attach("j1", FakeChild(), child_dir)  # type: ignore[arg-type]
+    _with_roster(session, comms)
+
+    handle._publish_busy()
+    assert server._subagents_running == 1, "the record must carry the live child"
+    assert server._subagents_queued == 0

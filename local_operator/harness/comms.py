@@ -774,11 +774,24 @@ class SubagentComms:
             launch_prompts=launch_prompts,
             attempt_aliases=tuple(record.attempt_aliases),
             live=record.child is not None,
-            status=(
-                "paused"
-                if record.paused
-                else record.outcome or ("cancelled" if record.settled else "gone")
-            ),
+            # Derived through ``_describe`` — the SAME collapse ``roster()``
+            # uses — rather than re-deriving it here. The local derivation this
+            # replaces read only the durable record (``paused``, ``outcome``,
+            # ``settled``) and never the job row, so it could not name a state
+            # that only the row knows: a live child got ``"gone"``, and a
+            # queued one got ``"gone"`` as well. That is outside the range this
+            # field's own docstring documents, and every consumer that filters
+            # on ``running``/``queued`` — ``/info``'s fleet tally, its tree
+            # sort, the glyph table — silently matched nothing and reported a
+            # confident zero over a roster full of live children.
+            #
+            # ``_describe`` is one dict lookup on the job manager plus the same
+            # branch ladder, so the cost is a `jobs.get` per node; the
+            # precedence it encodes (paused > recorded outcome > job row) is
+            # exactly the precedence this field wants, and having one
+            # derivation means the roster and the node can no longer disagree
+            # about the same child.
+            status=self._describe(record, time.time()).status,
             result_text=record.result_text or "",
             error_text=record.error_text or "",
         )

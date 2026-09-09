@@ -290,11 +290,22 @@ def build_export(snapshot: InfoSnapshot) -> str:
             f"  runtimes          {sessions.live + sessions.wedged} total — "
             f"{sessions.live} live · {sessions.wedged} wedged"
         )
-        lines.append(
-            f"  trajectories      {sessions.fleet_trajectories} total — "
-            f"{sessions.fleet_session_trajectories} sessions + "
-            f"{sessions.fleet_subagents_running} subagents"
-        )
+        # Same rule as the screen: the sum runs over runtimes that REPORTED, so
+        # when some did not the total is a floor, and when none did there is no
+        # total at all. This text is what lands in a bug report, where a
+        # fabricated zero is hardest to challenge after the fact.
+        if not sessions.subagents_reporting and sessions.subagents_unreported:
+            lines.append(
+                f"  trajectories      — ({sessions.subagents_unreported} of "
+                f"{sessions.live + sessions.wedged} runtimes did not report)"
+            )
+        else:
+            bound = ">=" if sessions.subagents_unreported else ""
+            lines.append(
+                f"  trajectories      {bound}{sessions.fleet_trajectories} total — "
+                f"{sessions.fleet_session_trajectories} sessions + "
+                f"{sessions.fleet_subagents_running} subagents"
+            )
     lines.append(f"  profiles          {agents.profiles}")
     lines.append(f"  teams             {agents.teams}")
     if agents.roster_unread:
@@ -328,9 +339,29 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if sessions.available and sessions.subagents_unreported:
         # "lower bound", not a total: the sum above excluded every session that
         # did not report, and a bug report must not present it as complete.
+        #
+        # Inflected, like the panel's copy: this text is pasted into an issue
+        # verbatim, and "1 sessions run ... and do not report" reads as a
+        # template nobody finished rather than as a measurement.
+        one = sessions.subagents_unreported == 1
         lines.append(
-            f"  ({sessions.subagents_unreported} sessions run an older build and do not "
-            "report subagents — lower bound)"
+            f"  ({sessions.subagents_unreported} session{'' if one else 's'} "
+            f"{'runs' if one else 'run'} an older build and "
+            f"{'does' if one else 'do'} not report subagents — lower bound)"
+        )
+    if sessions.available and sessions.wedged:
+        # PARITY with the panel, which has said this since the counts landed.
+        # The totals above deliberately include wedged runtimes — a quiet pid
+        # can still have children working — so their contribution is as of
+        # their last heartbeat, and an export that omitted the disclosure would
+        # present stale counts as current in the one artifact that outlives the
+        # screen.
+        one = sessions.wedged == 1
+        lines.append(
+            f"  ({sessions.wedged} session{'' if one else 's'} "
+            f"{'is' if one else 'are'} wedged; "
+            f"{'its' if one else 'their'} counts are as of "
+            f"{'its' if one else 'their'} last heartbeat)"
         )
 
     lines += [

@@ -255,6 +255,38 @@ def collect_process(
     )
 
 
+def _reported_count(value: Any) -> int | None:
+    """A published subagent count, or ``None`` when the record did not report one.
+
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put
+    in the file. That is fine for the strings and bools already read here, which
+    only ever get formatted, but these two are the first record fields this
+    module does ARITHMETIC on, and arithmetic is where a foreign value stops
+    being cosmetic:
+
+    * a ``str`` or ``list`` raises ``TypeError`` inside the roll-up. ``_safe``
+      guards whole SECTIONS, so one bad record cost the entire sessions block —
+      no table, no runtimes row, and no lower-bound caveat — on a screen whose
+      whole purpose is describing a host that is already broken. Before these
+      fields existed there was no arithmetic here and the same record listed
+      normally, so that was a regression rather than a new limitation.
+    * a merely-numeric wrong value does not raise at all, which is worse: a
+      float printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative
+      printed ``-1 subagents``, both as measured fact.
+
+    Anything that is not a non-negative ``int`` is therefore treated as NOT
+    REPORTED rather than sanitised into a number. That is this screen's own
+    contract applied one layer out: an unusable value is not a measurement, and
+    calling it ``None`` folds it into the lower-bound caveat, which already
+    exists to say the total is missing terms. ``bool`` is excluded explicitly —
+    it is an ``int`` subclass, so ``True`` would otherwise count as one subagent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def collect_sessions(
     root: Path | None = None,
     *,
@@ -319,13 +351,13 @@ def collect_sessions(
                 # Same getattr defaulting as the live-state fields above.
                 version=getattr(rec, "version", "") or "",
                 source_ref=getattr(rec, "source_ref", "") or "",
-                # NOT coerced to 0. Same getattr defaulting as the fields
-                # above, but the default is ``None`` and stays ``None``: a
-                # runtime predating these fields has not told us it has no
-                # subagents, and ``or 0`` here would silently turn every
-                # older peer into a confident zero in the fleet total.
-                subagents_running=getattr(rec, "subagents_running", None),
-                subagents_queued=getattr(rec, "subagents_queued", None),
+                # NOT coerced to 0 — see ``_reported_count``. The default is
+                # ``None`` and stays ``None``: a runtime predating these fields
+                # has not told us it has no subagents, and ``or 0`` here would
+                # silently turn every older peer into a confident zero in the
+                # fleet total.
+                subagents_running=_reported_count(getattr(rec, "subagents_running", None)),
+                subagents_queued=_reported_count(getattr(rec, "subagents_queued", None)),
                 is_self=self_pid is not None and rec.pid == self_pid,
             )
         )

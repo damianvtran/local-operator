@@ -2317,8 +2317,24 @@ class SnapshotSubagentComms:
             # That is a wrong number that passes a "the tree appears now"
             # check, which is why the projection carries them even though the
             # hierarchy navigation this facade was built for never asked.
-            status=job.status,
-            live=job.status in RUNNING_SUBAGENT_STATUSES,
+            #
+            # ``queued`` has to be folded IN rather than read alongside: a
+            # queued child's ``JobState.status`` is still ``"running"`` and the
+            # distinction lives in the separate ``queued`` flag, so projecting
+            # the raw status counts a child that has not started as one that is
+            # spending tokens. The owner reconstructs the same split in
+            # ``SubagentComms._describe``; this is that derivation, on the
+            # follower's side of the wire, so a follower and an owner looking
+            # at the same child agree on its word.
+            status=_snapshot_status(job),
+            # Derived from the RESULTING status, not from the raw one, so a
+            # queued child is never stamped live. Note this ``live`` means
+            # "counts as a running trajectory", which on the owner is
+            # ``record.child is not None`` (child attached) — the two coincide
+            # for every state either side can report, but they are not the same
+            # question, and a future divergence belongs in one of these two
+            # comments rather than being discovered from a wrong total.
+            live=_snapshot_status(job) in RUNNING_SUBAGENT_STATUSES,
             # Launch-row reconciliation, read off the node by
             # ``_refresh_subagent_view`` exactly as it is on an owner. Defaulted
             # rather than conditional: an older owner sends neither field, and
@@ -2551,6 +2567,25 @@ def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> boo
         _DERIVED_OWNERSHIP.pop(next(iter(_DERIVED_OWNERSHIP)))
     _DERIVED_OWNERSHIP[key] = verdict
     return verdict
+
+
+def _snapshot_status(job: JobState) -> str:
+    """The projected job's status in the ROSTER vocabulary a follower renders.
+
+    ``JobState.status`` is the job manager's word, and it does not distinguish a
+    child parked behind the capacity gate from one that is spending tokens:
+    both carry ``"running"``, with the difference held in the separate
+    ``queued`` flag. Every "what is running" surface wants them apart — a queued
+    child is delegated, not working — so the split is reconstructed here exactly
+    as the owner reconstructs it in ``SubagentComms._describe``.
+
+    Kept as a named function rather than an inline expression because it is the
+    follower's half of a derivation whose two halves must agree; a reader
+    changing one needs to be able to find the other.
+    """
+    if job.queued and job.status == "running":
+        return "queued"
+    return job.status
 
 
 def _snapshot_session_dir(job: JobState) -> Path | None:
