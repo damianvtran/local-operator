@@ -22,7 +22,8 @@ the moment the context was growing fastest. See :func:`_snap_to_valid_cut`.
 
 from __future__ import annotations
 
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Container, Sequence
 
 from local_operator.harness.types import AgentMessage, CustomMessage, Message
 
@@ -34,6 +35,8 @@ __all__ = [
     "extract_preserved_user_turns",
     "task_boundary_floor",
     "cap_preserved_user_turns",
+    "CappedPreservedTurns",
+    "elision_notice_text",
 ]
 
 
@@ -72,16 +75,34 @@ PRESERVED_USER_TURN_KEY = "compaction_preserved"
 #: instead of inferring it from what it currently looks like.
 RENDERED_INJECTION_KEY = "harness_injected"
 
-#: Id prefix of the synthetic turn :func:`cap_preserved_user_turns` substitutes
-#: for an evicted prefix. Prefixed rather than opaque so a LATER pass can
-#: recognise its own earlier notice and replace it instead of stacking a second
-#: one beside it — the block is re-capped every pass, and without this the
-#: notices themselves would become the ratchet they exist to report.
+#: Id of the synthetic turn that reports an elision. Stable rather than
+#: count-suffixed: the count is carried STRUCTURALLY beside the block (see
+#: :class:`CappedPreservedTurns` and the ``preserved_turns_dropped`` payload
+#: field), never parsed back out of a string.
 #:
-#: It is deliberately not a transcript entry id: no entry was ever written for
-#: it. Nothing resolves preserved-turn ids against the journal (only
-#: ``first_kept_entry_id`` is looked up), so a synthetic id is safe here.
-PRESERVED_TURN_ELISION_ID_PREFIX = "compaction-elision-"
+#: **This turn must never reach ``Session._context.messages``.** An earlier
+#: revision minted it there as an ordinary ``Message`` and asserted here that
+#: "no entry was ever written for it". Both halves were false in the assembled
+#: system: ``_is_persistable_message`` returns True for every plain ``Message``,
+#: so the next turn boundary journalled it AFTER ``first_kept_entry_id`` —
+#: inside the replayed suffix — while ``replay_entries`` re-injected it from the
+#: marker payload as well. Live and resumed contexts diverged (2 rows vs 3)
+#: whenever the cap bound, and because the journalled copy carried
+#: ``compaction_preserved`` it was skipped by ``find_cut_point`` and folded into
+#: the NEXT count: measured doubling every resume, 6 -> 7,167 over ten cycles,
+#: a 231x overstatement in the one message whose job is to tell the model the
+#: truth about what it lost.
+#:
+#: So the notice is synthesized at RENDER time on both paths from the counts
+#: below, and is excluded from persistence by id (see
+#: ``_is_persistable_message``). Two independent guards, because one of them
+#: failing silently is what produced the defect.
+PRESERVED_TURN_ELISION_ID = "compaction-elision"
+
+#: Retained so a transcript written by the previous revision still parses: its
+#: notices were journalled with ``compaction-elision-<count>`` ids, and the read
+#: path has to recognise and drop them rather than replay them as user turns.
+PRESERVED_TURN_ELISION_ID_PREFIX = "compaction-elision"
 
 #: Preserved-block cap applied on the READ path to a record written BEFORE the
 #: cap existed. Records written since carry the cap the pass actually used
@@ -524,7 +545,129 @@ def extract_preserved_user_turns(
     return preserved
 
 
-def cap_preserved_user_turns(turns: Sequence[dict[str, str]], *, cap: int) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class CappedPreservedTurns:
+    """The preserved block after bounding, with the elision counted separately.
+
+    The counts are STRUCTURAL rather than encoded into a synthetic turn's id.
+    An earlier revision carried them in the id string, which the caller then
+    minted as a live ``Message``; the persist path journalled that message and
+    replay re-injected it from the payload as well, so the count was parsed
+    back out of a turn that existed twice and each pass added it to the next.
+    Measured: the reported figure doubled on every resume (6 -> 7,167 over ten
+    cycles, 231x overstatement). A number that must stay true across a
+    round trip belongs in a field, not in a string that is also content.
+
+    ``genuine_dropped`` is tracked apart from ``injections_dropped`` because
+    the two mean opposite things to the operator. Shedding a harness injection
+    reclaims context and loses nothing they wrote. Evicting a genuine turn
+    drops something they DID write, and the notice says so in as many words —
+    they should never have to infer that from a total.
+    """
+
+    turns: list[dict[str, str]]
+    genuine_dropped: int = 0
+    injections_dropped: int = 0
+
+    @property
+    def total_dropped(self) -> int:
+        return self.genuine_dropped + self.injections_dropped
+
+
+def elision_notice_text(genuine_dropped: int, injections_dropped: int) -> str | None:
+    """The notice rendered in place of an elided prefix, or ``None``.
+
+    Synthesized at RENDER time on both the live and the replay path, from the
+    counts, so it is never itself a stored turn that can be re-read as history.
+
+    The two causes are phrased differently on purpose. A shed injection is
+    bookkeeping the model does not need to act on; an evicted GENUINE turn is
+    the operator's own words leaving the context, and the whole point of a
+    visible elision is that the model asks rather than concluding the
+    instruction was never given.
+    """
+    if genuine_dropped <= 0 and injections_dropped <= 0:
+        return None
+    parts: list[str] = []
+    if genuine_dropped > 0:
+        parts.append(
+            f"{genuine_dropped} older user message(s) you wrote were dropped here to "
+            "bound the context. They are still in the session transcript but are no "
+            "longer in the model's context. If an earlier instruction seems to be "
+            "missing, ask rather than assuming it was never given."
+        )
+    if injections_dropped > 0:
+        parts.append(
+            f"{injections_dropped} harness-injected message(s) (session state, "
+            "subagent and peer deliveries) were also dropped; these were not "
+            "authored by the user."
+        )
+    return "[" + " ".join(parts) + "]"
+
+
+def replay_preserved_turns(
+    payload: dict[str, object],
+    injection_ids: Container[str] | None = None,
+) -> list[dict[str, str]]:
+    """The preserved block a REPLAY should inject, from a compaction payload.
+
+    One function for what were three hand-kept copies (``build_llm_history``,
+    ``mobile.durable._compaction_prefix``, and the fold's rebuild). The review
+    called that out: logic that "must agree message for message" and is
+    duplicated is where a fix lands in two places out of three. The notice is
+    synthesized here too, so no caller can accidentally reintroduce it as a
+    stored turn.
+
+    ``injection_ids`` is resolved by the caller against the JOURNAL — a stored
+    turn has no rendered message to read a provenance stamp off, but it does
+    have an id, and the entry that id names records its ``custom_type``. That
+    is a provenance lookup, not the shape-based guess the write path rejects.
+
+    Records written before the cap existed carry no ``preserved_turns_cap``;
+    they are healed under :data:`DEFAULT_PRESERVED_TURN_CAP`. Records written
+    since replay under the figure their own pass used, which is what keeps a
+    resumed context byte-identical to the live one it resumed from.
+    """
+    stored = payload.get("preserved_user_turns") or ()
+    if not isinstance(stored, (list, tuple)):
+        return []
+    turns = [turn for turn in stored if isinstance(turn, dict)]
+    if not turns:
+        return []
+    raw_cap = payload.get("preserved_turns_cap")
+    cap = int(raw_cap) if isinstance(raw_cap, int) else DEFAULT_PRESERVED_TURN_CAP
+    capped = cap_preserved_user_turns(
+        turns,
+        cap=cap,
+        already_dropped_genuine=_payload_int(payload, "preserved_turns_dropped"),
+        already_dropped_injections=_payload_int(payload, "preserved_turns_shed"),
+        injection_ids=injection_ids,
+    )
+    notice = elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+    if notice is None:
+        return list(capped.turns)
+    return [{"id": PRESERVED_TURN_ELISION_ID, "text": notice}, *capped.turns]
+
+
+def _payload_int(payload: dict[str, object], key: str) -> int:
+    """A non-negative int from a compaction payload, or 0.
+
+    Lenient because the field is absent on every record written before it
+    existed, and a malformed one must degrade to "nothing carried forward"
+    rather than break a resume.
+    """
+    value = payload.get(key)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def cap_preserved_user_turns(
+    turns: Sequence[dict[str, str]],
+    *,
+    cap: int,
+    already_dropped_genuine: int = 0,
+    already_dropped_injections: int = 0,
+    injection_ids: Container[str] | None = None,
+) -> CappedPreservedTurns:
     """Bound the preserved block to ``cap`` tokens, dropping OLDEST first.
 
     Without a bound the block is a monotonic ratchet.
@@ -542,50 +685,67 @@ def cap_preserved_user_turns(turns: Sequence[dict[str, str]], *, cap: int) -> li
     This is the same argument :func:`task_boundary_floor` makes for its own
     ``cap`` being "mandatory and load-bearing" — an unbounded preserve window
     turns "protect the task" into "never compact" — and it is answered the same
-    way, with the same cap vocabulary (``Session._advisor_floor_cap``, itself
-    ``keep_recent_tokens * _TASK_FLOOR_KEEP_MULTIPLE`` bounded by a capacity
-    ceiling) rather than a parallel knob nobody would keep in step.
+    way, with the same cap vocabulary (``Session._preserved_turns_cap``) rather
+    than a parallel knob nobody would keep in step.
 
-    **Oldest-first**, because the recent constraints are the live ones: a rule
-    stated ten tasks ago is far more likely to be spent than the one stated on
-    the current task, and the newest turn is the one the model is answering.
+    ``injection_ids`` names turns the caller has identified as harness
+    injections by PROVENANCE. They are shed FIRST, before any age-based
+    eviction, and the reason is a correctness one rather than a preference: an
+    earlier revision relied on oldest-first eviction to remove them, asserting
+    they were "the oldest". They are typically the NEWEST — ``session_state``
+    arrives every turn — so age-based eviction preferentially dropped the
+    operator's genuine constraints and kept the injections. Measured on the
+    real fleet, only 12% of stored injections were reached that way.
+
+    **The contract this establishes, stated plainly because it is a trade.**
+    Once the cap binds, the guarantee is "the NEWEST genuine constraints
+    survive verbatim", not "every constraint survives forever". An old enough
+    operator turn CAN be evicted — after the injections are gone, oldest-first
+    among genuine turns is what remains. That is deliberate: unbounded
+    preservation is the defect this function exists to fix, and a rule stated
+    ten tasks ago is likelier to be spent than the one stated on the current
+    task. The eviction is never silent (see :func:`elision_notice_text`, which
+    names genuine drops separately from shed injections).
+
     Capping by TOKENS rather than turn count is what makes the bound mean
     anything — one 300k-token paste and 300 short turns are the same problem,
     and only the token budget sees both.
-
-    The elision is VISIBLE: an evicted prefix is replaced by a one-line notice
-    in the block's own position, so the model is told that older constraints
-    existed and were dropped rather than being left to believe the oldest
-    surviving turn is the start of the session. A silent drop is how an agent
-    concludes a constraint was never given.
-
-    The notice is CUMULATIVE and survives re-capping. A prior pass's notice is
-    replaced rather than stacked — otherwise the notices become the ratchet
-    they exist to report — but the count it carried is added to this pass's,
-    so the figure keeps describing everything ever dropped from this block.
-    Re-emitting it even when THIS pass drops nothing is deliberate: the block
-    is re-capped on every pass and on every replay, and a notice that vanished
-    the first time a block happened to fit would silently retract a fact the
-    model had already been told.
 
     The newest turn always survives, even alone and even when it exceeds the
     cap on its own: returning an empty block for one oversized turn would
     discard the live constraint, which is the exact failure the whole
     preservation mechanism exists to prevent.
+
+    ``already_dropped_*`` carry forward what earlier passes reported so the
+    figure keeps describing everything ever dropped from this block. They are
+    passed in from the payload rather than recovered from the turns, which is
+    what makes the count survive a round trip without existing as content.
     """
-    if cap <= 0 or not turns:
-        return list(turns)
-    # Separate any notice a PREVIOUS pass left behind, keeping the count it
-    # reported: this pass recomputes the elision over the real turns, and the
-    # old notice's own bytes must not be re-measured as if they were history.
-    previously_dropped = 0
-    real_turns: list[dict[str, str]] = []
-    for turn in turns:
-        identifier = str(turn.get("id", ""))
-        if identifier.startswith(PRESERVED_TURN_ELISION_ID_PREFIX):
-            previously_dropped += _elision_count(identifier)
-            continue
-        real_turns.append(turn)
+    real_turns = [
+        turn
+        for turn in turns
+        # A notice journalled by the previous revision is not history. Dropping
+        # it here is what stops a resumed session replaying it as a user turn.
+        if not str(turn.get("id", "")).startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
+    ]
+    genuine_dropped = already_dropped_genuine
+    injections_dropped = already_dropped_injections
+
+    # Provenance first: shedding an injection costs the operator nothing, so it
+    # must never compete with a genuine turn for the budget.
+    if injection_ids is not None:
+        kept_turns = [turn for turn in real_turns if str(turn.get("id", "")) not in injection_ids]
+        injections_dropped += len(real_turns) - len(kept_turns)
+        real_turns = kept_turns
+
+    if cap <= 0:
+        # Fails CLOSED. Returning the block unbounded here would restore the
+        # exact ratchet this function exists to prevent, on the one input a
+        # caller would plausibly pass to mean "nothing survives". The shipped
+        # default is the floor instead, so the invariant holds for every
+        # caller rather than only the careful one.
+        cap = DEFAULT_PRESERVED_TURN_CAP
+
     kept: list[dict[str, str]] = []
     used = 0
     # Walk NEWEST first and stop at the budget; the surviving prefix is then
@@ -597,32 +757,9 @@ def cap_preserved_user_turns(turns: Sequence[dict[str, str]], *, cap: int) -> li
         kept.append(turn)
         used += cost
     kept.reverse()
-    dropped = previously_dropped + (len(real_turns) - len(kept))
-    if not dropped:
-        return kept
-    notice = {
-        "id": f"{PRESERVED_TURN_ELISION_ID_PREFIX}{dropped}",
-        "text": (
-            f"[{dropped} older user message(s) preserved by earlier compaction "
-            "passes were dropped here to bound the context. They are not lost "
-            "from the record — the session transcript still has them — but they "
-            "are no longer in the model's context. If an earlier instruction "
-            "seems to be missing, ask rather than assuming it was never given.]"
-        ),
-    }
-    return [notice, *kept]
-
-
-def _elision_count(identifier: str) -> int:
-    """How many turns the notice with this id reported dropping.
-
-    Parsed back out of the id so the count survives a transcript round trip
-    without a second payload field. An unparseable id (a hand-edited record, a
-    future format) counts as one drop rather than zero: under-reporting an
-    elision is the direction that misleads the model.
-    """
-    suffix = identifier[len(PRESERVED_TURN_ELISION_ID_PREFIX) :]
-    try:
-        return max(0, int(suffix))
-    except ValueError:
-        return 1
+    genuine_dropped += len(real_turns) - len(kept)
+    return CappedPreservedTurns(
+        turns=kept,
+        genuine_dropped=genuine_dropped,
+        injections_dropped=injections_dropped,
+    )

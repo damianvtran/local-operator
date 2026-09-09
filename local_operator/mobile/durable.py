@@ -51,7 +51,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Container
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -68,6 +68,7 @@ from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     TranscriptEntry,
     _entry_to_message,
+    _journal_injection_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -340,7 +341,7 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
     prefix: list[AgentMessage] = []
     if compaction_index is not None:
         compaction = entries[compaction_index]
-        prefix = _compaction_prefix(compaction)
+        prefix = _compaction_prefix(compaction, _journal_injection_ids(entries))
         first_kept_id = compaction.payload.get("first_kept_entry_id")
         if first_kept_id is None:
             start = compaction_index + 1
@@ -376,10 +377,20 @@ def _replay(entries: list[TranscriptEntry]) -> list[AgentMessage]:
     return out
 
 
-def _compaction_prefix(compaction: TranscriptEntry) -> list[AgentMessage]:
+def _compaction_prefix(
+    compaction: TranscriptEntry,
+    injection_ids: Container[str] | None = None,
+) -> list[AgentMessage]:
     """The marker summary plus preserved user turns, exactly as
     ``build_llm_history`` injects them (see its docstring for why the turns
-    ride the payload verbatim)."""
+    ride the payload verbatim).
+
+    ``injection_ids`` carries the same journal-resolved provenance the
+    transcript read path uses. It is a parameter rather than something derived
+    here because the fold's incremental rebuild has only the new entry in hand,
+    not the journal — see the note at its call site for why passing ``None``
+    there is correct rather than a gap.
+    """
     details: dict[str, Any] = {"summary": compaction.payload.get("summary", "")}
     preserve_data = compaction.payload.get("preserve_data")
     if preserve_data is not None:
@@ -394,23 +405,16 @@ def _compaction_prefix(compaction: TranscriptEntry) -> list[AgentMessage]:
     preserved_turns = compaction.payload.get("preserved_user_turns") or ()
     if preserved_turns:
         from local_operator.compaction.cutpoint import (
-            DEFAULT_PRESERVED_TURN_CAP,
             PRESERVED_USER_TURN_KEY,
-            cap_preserved_user_turns,
+            replay_preserved_turns,
         )
 
-        # Mirrors ``build_llm_history``'s cap exactly, for the same reason the
-        # rest of this function mirrors it: the two must agree message for
-        # message or the mobile fold and a resumed session disagree about what
-        # the context contains. See the read-path note there.
-        preserved_turns = cap_preserved_user_turns(
-            [turn for turn in preserved_turns if isinstance(turn, dict)],
-            cap=int(compaction.payload.get("preserved_turns_cap") or DEFAULT_PRESERVED_TURN_CAP),
-        )
+        # THE shared helper, not a copy of it: the mobile fold and a resumed
+        # session must agree message for message, and three hand-kept copies of
+        # this logic is where a later fix lands in two places out of three.
+        preserved_turns = replay_preserved_turns(compaction.payload, injection_ids)
 
         for turn in preserved_turns:
-            if not isinstance(turn, dict):
-                continue
             message = Message.user(str(turn.get("text", "")))
             turn_id = turn.get("id")
             if isinstance(turn_id, str) and turn_id:
@@ -429,6 +433,12 @@ def _rebuild_history_after_compaction(state: DurableFoldState, entry: Transcript
     caller falls back to a full rebuild — the same direction
     ``build_llm_history`` chooses when it logs this edge.
     """
+    # No journal in hand here — this is the INCREMENTAL fold, which sees only
+    # the newly appended marker. Passing no injection ids is correct rather
+    # than a gap: a marker written by the current code has already had the
+    # write-path provenance filter applied, so its stored block contains no
+    # injections to shed. A legacy marker reaches this path only through the
+    # full rebuild above, which does resolve them.
     prefix = _compaction_prefix(entry)
     first_kept_id = entry.payload.get("first_kept_entry_id")
     kept: list[AgentMessage] = []

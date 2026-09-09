@@ -33,9 +33,13 @@ import pytest
 
 from local_operator.compaction.api import CompactionSettings
 from local_operator.compaction.cutpoint import (
+    DEFAULT_PRESERVED_TURN_CAP,
+    PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    _encode_len,
     cap_preserved_user_turns,
+    elision_notice_text,
     extract_preserved_user_turns,
 )
 from local_operator.harness.types import Message, ModelSpec, TextContent
@@ -170,21 +174,46 @@ def test_a_rendered_injection_is_not_preserved_even_when_its_id_is_genuine():
 async def test_a_session_state_delivery_is_not_preserved_on_the_second_pass(tmp_path):
     """End to end, against the real cut point and the real commit.
 
-    The reproduction: inject ``session_state`` between two passes so it sits
-    in pass 1's KEPT window and is therefore a plain user message in the live
-    context when pass 2 builds its id set. Pre-fix this preserved the brief
-    and re-preserved it on every later pass; post-fix only the operator's own
-    constraint is carried.
+    The ORDERING here is the whole test, and getting it wrong makes the test
+    vacuous. The injection must land in pass 1's KEPT window — i.e. be the last
+    thing before pass 1 — so that pass 1's commit rebuilds the context from the
+    RENDERED history and bakes it in as a plain ``Message(role="user")``. Only
+    then does pass 2 see the generational state the bug lives in, where the
+    injection's id is genuinely inside ``genuine_user_ids``.
+
+    An earlier version of this test injected AFTER pass 1. The delivery was
+    therefore still a ``CustomMessage`` when pass 2 built its id set, the id-set
+    test excluded it for the wrong reason, and the test passed against a mutant
+    with the provenance stamp removed — asserting the implementation back to
+    itself. Verified under mutation: with ``_injected_user_message``'s stamp
+    deleted this now fails, and the pre-fix tree leaks the brief here.
     """
     session = make_session(tmp_path, ScriptedStream(["reply"] * 40))
     await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
     for index in range(3):
         await session.prompt(f"question {index} " + "detail " * 30)
 
+    # Last before the pass: this is what puts it in the kept window.
+    await _inject_session_state(session)
     assert (await session.compact_now()).ran is True
 
-    await _inject_session_state(session)
-    for index in range(3):
+    # Pass 1 has now rewritten it into a plain user Message — the state the
+    # defeated discriminator could not see. Assert that rather than trust it.
+    baked = [
+        message
+        for message in session._context.messages
+        if isinstance(message, Message) and STATE_TEXT in (message.text or "")
+    ]
+    assert baked, "test premise void: the injection is not a plain Message after pass 1"
+    live_user_ids = {
+        message.id
+        for message in session._context.messages
+        if isinstance(message, Message) and message.role == "user"
+    }
+    assert baked[0].id in live_user_ids, "test premise void: the old id-set test would exclude it"
+
+    # Bury it so it falls into pass 2's SUMMARIZED partition.
+    for index in range(4):
         await session.prompt(f"round two {index} " + "detail " * 30)
 
     assert (await session.compact_now()).ran is True
@@ -318,34 +347,60 @@ def test_subagent_and_peer_deliveries_are_excluded_too():
 # ---------------------------------------------------------------------------
 
 
-def test_the_cap_evicts_oldest_first_and_leaves_a_visible_notice():
-    """Recent constraints are the live ones, so the OLDEST go first — and the
-    elision is announced rather than silent, because a silent drop is how an
-    agent concludes a constraint was never given."""
+def test_the_cap_evicts_oldest_first_and_reports_it_as_a_genuine_drop():
+    """Recent constraints are the live ones, so the OLDEST genuine turns go
+    first — and the elision is counted rather than silent, because a silent
+    drop is how an agent concludes a constraint was never given."""
     turns = [{"id": f"t{i}", "text": "word " * 100} for i in range(10)]
 
     capped = cap_preserved_user_turns(turns, cap=300)
 
-    assert capped[0]["id"].startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
-    assert "dropped" in capped[0]["text"]
-    surviving = [turn["id"] for turn in capped[1:]]
-    assert surviving, "the cap dropped everything"
+    assert capped.turns, "the cap dropped everything"
+    assert capped.genuine_dropped == len(turns) - len(capped.turns)
+    assert capped.injections_dropped == 0
+    surviving = [turn["id"] for turn in capped.turns]
     # A suffix of the original order: newest kept, oldest evicted.
     assert surviving == [turn["id"] for turn in turns][-len(surviving) :]
-    assert len(capped) < len(turns)
+    # The notice names the operator's own words explicitly.
+    notice = elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+    assert notice is not None and "you wrote" in notice
+
+
+def test_an_injection_is_shed_before_any_genuine_turn_is_evicted():
+    """Provenance beats age. Shedding a harness injection costs the operator
+    nothing, so it must never compete with a genuine turn for the budget.
+
+    The previous revision relied on oldest-first eviction to remove injections,
+    asserting they were "the oldest". They are typically the NEWEST
+    (``session_state`` arrives every turn), so age-based eviction preferentially
+    dropped the operator's constraints and kept the injections.
+    """
+    turns = [
+        {"id": "genuine-old", "text": CONSTRAINT},
+        {"id": "inj-1", "text": STATE_TEXT},
+        {"id": "inj-2", "text": STATE_TEXT},
+    ]
+
+    capped = cap_preserved_user_turns(turns, cap=1_000_000, injection_ids={"inj-1", "inj-2"})
+
+    assert [t["id"] for t in capped.turns] == ["genuine-old"]
+    assert capped.injections_dropped == 2
+    # No genuine turn was touched, so the notice must not claim one was.
+    assert capped.genuine_dropped == 0
+    notice = elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+    assert notice is not None
+    assert "harness-injected" in notice and "you wrote" not in notice
 
 
 def test_the_cap_is_a_token_budget_not_a_turn_count():
     """One oversized paste and 300 short turns are the same problem, and only a
     token budget sees both."""
     small = [{"id": f"s{i}", "text": "hi"} for i in range(50)]
-    assert cap_preserved_user_turns(small, cap=10_000) == small
+    assert cap_preserved_user_turns(small, cap=10_000).turns == small
 
     big = [{"id": "a", "text": "word " * 5_000}, {"id": "b", "text": "tiny"}]
     capped = cap_preserved_user_turns(big, cap=1_000)
-    assert [turn["id"] for turn in capped if not turn["id"].startswith("compaction-elision-")] == [
-        "b"
-    ]
+    assert [turn["id"] for turn in capped.turns] == ["b"]
 
 
 def test_the_newest_turn_survives_even_when_it_alone_exceeds_the_cap():
@@ -355,30 +410,63 @@ def test_the_newest_turn_survives_even_when_it_alone_exceeds_the_cap():
 
     capped = cap_preserved_user_turns(turns, cap=50)
 
-    assert [
-        t["id"] for t in capped if not t["id"].startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
-    ] == ["new"]
+    assert [t["id"] for t in capped.turns] == ["new"]
 
 
-def test_a_previous_elision_notice_is_replaced_not_stacked():
-    """The block is re-capped every pass; without this the notices themselves
-    become the ratchet they exist to report.
+def test_a_non_positive_cap_fails_closed():
+    """A cap of 0 used to return the block UNBOUNDED — restoring the exact
+    ratchet this function exists to prevent, on the one input a caller would
+    plausibly pass to mean "nothing survives". It now falls back to the shipped
+    default, so the invariant holds for every caller rather than the careful
+    one."""
+    turns = [{"id": f"t{i}", "text": "word " * 5_000} for i in range(40)]
 
-    Re-capping an already-capped block must leave exactly ONE notice, must not
-    lose the fact that turns were dropped (a vanished notice silently retracts
-    something the model was already told), and must keep the count CUMULATIVE.
+    for degenerate in (0, -5):
+        capped = cap_preserved_user_turns(turns, cap=degenerate)
+        assert len(capped.turns) < len(turns), f"cap={degenerate} degraded open"
+        total = sum(_encode_len(t["text"]) for t in capped.turns)
+        assert total <= DEFAULT_PRESERVED_TURN_CAP
+
+
+def test_the_running_count_is_carried_structurally_not_reparsed():
+    """The count must survive a round trip without existing as content.
+
+    Encoding it in a synthetic turn's id meant the persist path journalled that
+    turn and every later pass re-counted it: the reported figure doubled on
+    each resume (6 -> 7,167 over ten cycles, a 231x overstatement). Carried as
+    arguments, re-capping an already-capped block neither inflates nor loses it.
     """
     turns = [{"id": f"t{i}", "text": "word " * 100} for i in range(10)]
 
     once = cap_preserved_user_turns(turns, cap=300)
-    first_dropped = len(turns) - (len(once) - 1)
-    twice = cap_preserved_user_turns(once, cap=300)
+    twice = cap_preserved_user_turns(
+        once.turns,
+        cap=300,
+        already_dropped_genuine=once.genuine_dropped,
+        already_dropped_injections=once.injections_dropped,
+    )
 
-    notices = [t for t in twice if t["id"].startswith(PRESERVED_TURN_ELISION_ID_PREFIX)]
-    assert len(notices) == 1
-    assert f"[{first_dropped} older" in notices[0]["text"]
-    # Idempotent at the same cap: nothing further is dropped.
-    assert [t["id"] for t in twice] == [t["id"] for t in once]
+    # Idempotent at the same cap: nothing further dropped, count unchanged.
+    assert [t["id"] for t in twice.turns] == [t["id"] for t in once.turns]
+    assert twice.genuine_dropped == once.genuine_dropped
+    assert twice.total_dropped == once.total_dropped
+
+
+def test_a_notice_journalled_by_the_previous_revision_is_not_replayed():
+    """Forward compatibility with transcripts the broken revision wrote.
+
+    Those notices were journalled as ordinary turns with
+    ``compaction-elision-<count>`` ids. Replaying one would re-inject a
+    synthetic message as if the user had written it, so they are dropped.
+    """
+    turns = [
+        {"id": "compaction-elision-6", "text": "[6 older user message(s) ...]"},
+        {"id": "real", "text": CONSTRAINT},
+    ]
+
+    capped = cap_preserved_user_turns(turns, cap=1_000_000)
+
+    assert [t["id"] for t in capped.turns] == ["real"]
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +505,189 @@ async def test_replay_matches_the_live_context_after_the_filter_and_cap(tmp_path
         if isinstance(m, Message) and (m.provider_payload or {}).get(PRESERVED_USER_TURN_KEY)
     ]
     assert resumed == live
+
+
+@pytest.mark.asyncio
+async def test_live_and_resume_match_when_the_cap_BINDS_and_a_turn_follows(tmp_path, monkeypatch):
+    """The regression the pinned equivalence test structurally cannot catch.
+
+    Three conditions have to hold at once for the defect to appear, and the
+    older test satisfies none of them: the cap must actually BIND (so a notice
+    is minted at all), a turn must FOLLOW the pass (so the turn-end persist
+    pass runs), and the comparison must cover the WHOLE context rather than
+    only the preserved block.
+
+    What went wrong: the notice was minted as an ordinary ``Message`` in the
+    live context, ``_is_persistable_message`` admitted every plain ``Message``,
+    so the next boundary journalled it AFTER ``first_kept_entry_id`` — inside
+    the replayed suffix — while replay ALSO synthesized it from the payload.
+    Measured live 2 rows vs resumed 3. The journalled copy carried
+    ``compaction_preserved`` too, so ``find_cut_point`` skipped it and the next
+    pass folded its count into its own: the reported figure doubled on every
+    resume, 6 -> 7,167 over ten cycles.
+    """
+    # A cap small enough that a handful of ordinary turns overflow it.
+    monkeypatch.setattr(Session, "_preserved_turns_cap", lambda self, settings: 120)
+    session = make_session(tmp_path, ScriptedStream(["reply"] * 60))
+    await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
+    for index in range(5):
+        await session.prompt(f"question {index} " + "detail " * 30)
+
+    assert (await session.compact_now()).ran is True
+
+    notices = [m for m in _preserved(session) if m.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX)]
+    assert notices, "test premise void: the cap did not bind, so no notice was minted"
+
+    # The turn AFTER the pass is what triggers the persist that journalled it.
+    await session.prompt("after the pass " + "detail " * 30)
+
+    live = [
+        (type(m).__name__, getattr(m, "role", None), (m.text or "")[:60])
+        for m in session._context.messages
+        if isinstance(m, Message)
+    ]
+    directory = session._transcript.directory
+    await session.dispose()
+
+    replayed = Transcript(directory).build_llm_history()
+    resumed = [
+        (type(m).__name__, getattr(m, "role", None), (m.text or "")[:60])
+        for m in replayed
+        if isinstance(m, Message)
+    ]
+    assert resumed == live, "live and resumed contexts diverged once the cap bound"
+
+    # And the notice exists exactly once on each side, not duplicated on resume.
+    assert sum(1 for row in resumed if row[2].startswith("[")) == sum(
+        1 for row in live if row[2].startswith("[")
+    )
+
+    # The journal must not contain the notice at all: it is synthesized from
+    # the payload counts on both paths, so a stored copy is a duplicate by
+    # construction.
+    raw = (directory / "transcript.jsonl").read_text()
+    assert PRESERVED_TURN_ELISION_ID not in raw, "the elision notice was journalled"
+
+
+@pytest.mark.asyncio
+async def test_the_reported_elision_count_does_not_inflate_across_resumes(tmp_path, monkeypatch):
+    """The count must describe reality after N round trips.
+
+    QA measured it doubling every resume — 6 -> 7,167 over ten cycles, a 231x
+    overstatement — in the one message whose entire purpose is telling the
+    model the truth about what it lost. The cause was the count living in a
+    turn's id: that turn got journalled, replayed as history, and re-counted.
+    """
+    monkeypatch.setattr(Session, "_preserved_turns_cap", lambda self, settings: 120)
+    session = make_session(tmp_path, ScriptedStream(["reply"] * 60))
+    await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
+    for index in range(5):
+        await session.prompt(f"question {index} " + "detail " * 30)
+    await session.compact_now()
+    await session.prompt("after the pass " + "detail " * 30)
+    directory = session._transcript.directory
+    await session.dispose()
+
+    def reported() -> list[str]:
+        return [
+            m.text
+            for m in Transcript(directory).build_llm_history()
+            if isinstance(m, Message) and (m.text or "").startswith("[")
+        ]
+
+    first = reported()
+    assert first, "test premise void: no elision notice was rendered"
+    # Ten replays of the same transcript must all report the same figure.
+    for _ in range(10):
+        assert reported() == first, "the reported elision count changed across resumes"
+
+
+def test_the_heal_sheds_stored_injections_by_journal_provenance(tmp_path):
+    """The read path must shed injections regardless of whether the cap binds.
+
+    The previous revision applied only the cap on read and justified it with
+    "injections are the oldest, so oldest-first eviction removes them". They
+    are typically the NEWEST — ``session_state`` arrives every turn — so
+    age-based eviction preferentially dropped the operator's constraints. And
+    because most poisoned blocks sit BELOW the default cap, it never engaged at
+    all: measured on the real fleet, 12% of stored injections were reached.
+    After this change, 398 of 398 across the five named sessions.
+
+    The block here is deliberately far below any cap, so only provenance can
+    shed anything.
+    """
+    import json
+    import time
+
+    directory = tmp_path / "provenance-heal"
+    directory.mkdir()
+    kept = Message(role="user", content=[TextContent(text="the live turn")])
+    rows = [
+        {
+            "id": kept.id,
+            "ts": time.time(),
+            "type": "message",
+            "payload": json.loads(kept.model_dump_json()),
+        }
+    ]
+    stored: list[dict[str, str]] = []
+    # Genuine first, injections AFTER it — the real interleaving, and the one
+    # oldest-first eviction gets backwards.
+    stored.append({"id": "genuine-1", "text": CONSTRAINT})
+    rows.append(
+        {
+            "id": "genuine-1",
+            "ts": time.time(),
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [], "id": "genuine-1"},
+        }
+    )
+    for index in range(6):
+        turn_id = f"inj-{index}"
+        stored.append({"id": turn_id, "text": STATE_TEXT})
+        rows.append(
+            {
+                "id": turn_id,
+                "ts": time.time(),
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "session_state",
+                    "details": {"text": STATE_TEXT},
+                },
+            }
+        )
+    rows.append(
+        {
+            "id": "compaction-1",
+            "ts": time.time(),
+            "type": "compaction",
+            "payload": {
+                "summary": "a summary",
+                "first_kept_entry_id": kept.id,
+                "tokens_before": 100,
+                "preserved_user_turns": stored,
+            },
+        }
+    )
+    (directory / "transcript.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+
+    replayed = Transcript(directory).build_llm_history()
+    block = [
+        m
+        for m in replayed
+        if isinstance(m, Message) and (m.provider_payload or {}).get(PRESERVED_USER_TURN_KEY)
+    ]
+    texts = [m.text for m in block]
+
+    assert not any(STATE_TEXT in text for text in texts), "stored injections survived the heal"
+    assert any(CONSTRAINT in text for text in texts), "the heal dropped a genuine constraint"
+    # The shed is reported, and as a harness drop rather than as the operator's.
+    notice = next((t for t in texts if t.startswith("[")), None)
+    assert notice is not None and "harness-injected" in notice
+    assert "you wrote" not in notice
 
 
 def test_a_legacy_record_is_healed_on_resume(tmp_path):
