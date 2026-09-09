@@ -168,8 +168,19 @@ def test_the_builder_returns_none_when_the_store_cannot_import(
             raise ImportError("no crypto here")
         return real_import(name, *args, **kwargs)
 
+    # The refusal is installed and REMOVED around the one call under test
+    # rather than left to monkeypatch's unwind. The broker (#815) added an
+    # autouse teardown in tests/conftest.py that imports
+    # `local_operator.secrets.client` to sweep stray broker sockets, and
+    # fixture teardown runs BEFORE monkeypatch undoes a setattr made in the
+    # test body — so a still-installed refusal turns this passing test into a
+    # teardown ERROR. Scoping it here keeps the assertion identical while
+    # leaving no global hook alive past the line that needs it.
     monkeypatch.setattr(builtins, "__import__", refuse)
-    assert build_secret_tool(ToolContext()) is None
+    try:
+        assert build_secret_tool(ToolContext()) is None
+    finally:
+        monkeypatch.setattr(builtins, "__import__", real_import)
 
 
 # --------------------------------------------------------------------------
