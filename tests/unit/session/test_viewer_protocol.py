@@ -29,9 +29,10 @@ cannot follow ``getattr`` with a literal string, which is precisely why these
 members escaped typing in the first place.
 
 **What the derivation reaches, stated precisely — it is not "every access".**
-It sees ``<expr>.member`` and ``getattr``/``hasattr(<expr>, "literal", ...)``
-where ``<expr>`` is one of the bindings registered for that file in
-``_SCANNED``. It is blind to:
+It sees ``<expr>.member`` and a two-or-more-argument call to any name in
+``_PROBE_CALLS`` (``getattr``, ``hasattr``, and ``info/collect.py``'s ``_attr``
+wrapper) with a literal member name, where ``<expr>`` is one of the bindings
+registered for that file in ``_SCANNED``. It is blind to:
 
 * local aliases — ``s = self._session; s.member`` (see ``_SESSION_EXPRS``);
 * any other attribute or helper return holding a session
@@ -86,6 +87,14 @@ _ROOT = Path(local_operator.__file__).resolve().parent
 #: ``preserve_viewer_gate_reply`` (``app.py:15279``) — both approval-gate
 #: members sitting directly beside ones this protocol already declared.
 #:
+#: ``self.app.session`` is NOT here, and its removal is a fix rather than a
+#: narrowing: it was registered while occurring nowhere in the package, so it
+#: implied coverage of a spelling that does not exist. A binding that matches
+#: nothing is worse than an absent one — it reads as watched. Every entry here
+#: is now asserted to derive at least one member by
+#: ``test_every_registered_session_binding_still_matches_the_source`` (QA round
+#: 2, Q5), which is what makes that claim checkable instead of aspirational.
+#:
 #: These are BINDINGS, matched literally. ``s = self._session; s.member`` is
 #: not covered: a local alias is a different expression, and the guard does no
 #: dataflow. Following aliases means resolving assignments per scope, which is
@@ -94,13 +103,20 @@ _ROOT = Path(local_operator.__file__).resolve().parent
 #: session binding appears.
 _SESSION_EXPRS = frozenset(
     {
-        "self.session",
         "self._session",
         "session",
-        "self.app.session",
         "source.session",
     }
 )
+
+#: The binding that holds a session in the TUI's interaction helper.
+#:
+#: ``self.session`` was registered against ``app.py``, where it derives nothing
+#: — the app spells it ``self._session``. Rather than drop the spelling (which
+#: stops watching a name that IS live elsewhere), it is pointed at the file that
+#: actually uses it. Scanning that file adds no undeclared members today, so the
+#: entry costs a parse and buys a real binding instead of a fictional one.
+_INTERACTION_SESSION_EXPRS = frozenset({"self.session"})
 
 #: The bindings that hold a viewer facade in the desktop host.
 #:
@@ -109,6 +125,34 @@ _SESSION_EXPRS = frozenset(
 #: ``remote`` before use, which is a session binding by the same reasoning
 #: ``self._session`` is one in the TUI.
 _HOST_SESSION_EXPRS = frozenset({"remote", "self.remote"})
+
+#: The bindings that hold a viewer facade in a desktop ROUTE module.
+#:
+#: A third spelling, and it had to be added rather than folded into the set
+#: above: the routes reach the facade through the bridge they are handed by the
+#: ``host(request).session(...)`` context manager, so the binding is
+#: ``bridge.remote`` (and ``child.remote`` for the fork route's child), while
+#: ``desktop_catalogues.py`` also copies it into a local ``remote`` exactly as
+#: the utils host does.
+#:
+#: This is the binding QA round 2 (Q4) found the guard could not read, and the
+#: three members behind it — ``bind_runtime``, ``admit_prompt``, ``answer_gate``
+#: — are the more severe shape of the escape: HARD accesses in live HTTP
+#: routes, so a rename is a 500 on the phone portal rather than a silent
+#: ``None``. Adding this set needed no new machinery, only another literal
+#: binding, which is why it is fixed here rather than deferred.
+_ROUTE_SESSION_EXPRS = frozenset({"bridge.remote", "child.remote", "remote"})
+
+#: The bindings that hold a session in ``info/collect.py``.
+#:
+#: The ``/info`` collector takes its session as a plain ``session`` parameter,
+#: so one name covers it. Deliberately NOT ``_SESSION_EXPRS``: that set carries
+#: TUI-specific spellings (``self._session``, ``source.session``) which do not
+#: occur here, and re-using it would imply a coverage claim this file cannot
+#: make. Verified equivalent on today's source — scanning ``collect.py`` with
+#: either set yields the identical seven members — so the narrow set is honest
+#: rather than merely cheaper.
+_INFO_SESSION_EXPRS = frozenset({"session"})
 
 #: Files scanned for session duck-probes, with the bindings to read in each.
 #:
@@ -121,16 +165,67 @@ _HOST_SESSION_EXPRS = frozenset({"remote", "self.remote"})
 #: its original scope. A rename there made the phone portal report
 #: completion-attention as unsupported, silently and with no error.
 #:
+#: ``info/collect.py`` is here because it is the host of the MOTIVATING bug —
+#: the ``/info`` screen that reported zero subagents — and round 2 found the
+#: guard did not observe it. The reviewer renamed ``RemoteSession.
+#: subagent_comms``, i.e. re-shipped that exact regression, and got a green
+#: guard and zero pyright errors; only a site-local test in
+#: ``tests/unit/info/`` objected, which is precisely the kind of coverage this
+#: file's docstring argues does not close a class of bug (review round 2,
+#: MAJOR-1). A guard that misses the defect it was built from is not a guard.
+#:
+#: The desktop ROUTE modules are here for the same reason one file below them
+#: is: they hold the same facade under a different binding. Only these three of
+#: the five ``desktop_*`` route modules touch a session at all
+#: (``desktop_profiles.py`` and ``desktop_radient.py`` derive zero members), so
+#: listing those two would buy scan cost and no coverage.
+#:
 #: Adding a host is one entry here plus whatever it turns out to be probing.
 #: Other ``tui/`` modules also probe sessions (``session_interaction.py``,
 #: ``widgets/session_panel.py``, ``widgets/todo_panel.py``,
 #: ``widgets/subagent_panel.py``, ``widgets/wake_panel.py``), but every member
 #: they read is already declared or excluded below, so listing them today buys
 #: scan cost and no coverage; add one when it starts probing something new.
+#:
+#: The third element is that host's MINIMUM member count, and it is per host for
+#: a structural reason: ``app.py`` derives 104 of the 139 sites, so any single
+#: global floor loose enough to survive ordinary churn there cannot notice a
+#: smaller host going dark at all. Measured, not guessed: dropping the desktop
+#: utils host costs 4 viewer-only members out of 49 and dropping
+#: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
+#: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
+#: stated beside each path fires on the host that actually decayed and names it.
+#:
+#: Set a few members below the current value: enough headroom that deleting a
+#: call site is not a test failure, tight enough that losing a BINDING or a PATH
+#: is. Removing a probe legitimately means lowering the number in the same
+#: commit, which is where the argument for it belongs.
 _SCANNED = (
-    ("tui/app.py", _SESSION_EXPRS),
-    ("server/utils/desktop_sessions.py", _HOST_SESSION_EXPRS),
+    ("tui/app.py", _SESSION_EXPRS, 95),
+    ("server/utils/desktop_sessions.py", _HOST_SESSION_EXPRS, 6),
+    ("info/collect.py", _INFO_SESSION_EXPRS, 5),
+    ("server/routes/desktop_lifecycle.py", _ROUTE_SESSION_EXPRS, 7),
+    ("server/routes/desktop_sessions.py", _ROUTE_SESSION_EXPRS, 4),
+    ("server/routes/desktop_catalogues.py", _ROUTE_SESSION_EXPRS, 3),
+    ("tui/session_interaction.py", _INTERACTION_SESSION_EXPRS, 2),
 )
+
+#: Call shapes that read one named attribute off a session, by function name.
+#:
+#: ``getattr``/``hasattr`` are the builtins. ``_attr`` is ``info/collect.py``'s
+#: own wrapper (``_attr(session, "name", default)``): it exists because the
+#: members it reads are PROPERTIES on the real ``Session`` and a property on an
+#: unhealthy session can raise, which a bare ``getattr`` would let escape a
+#: function whose contract is "safe on the paint path".
+#:
+#: It has to be listed because a wrapper is indistinguishable from any other
+#: call to the AST, so adding ``collect.py`` to ``_SCANNED`` alone would have
+#: derived nothing from the three lines that matter — the guard would have been
+#: widened to the motivating host and still not observed it (review round 2,
+#: MAJOR-1). The name is matched by ARITY and a literal second argument like
+#: the builtins, so a same-named helper elsewhere cannot smuggle a probe past
+#: this; and a NEW wrapper of this shape is one entry here.
+_PROBE_CALLS = frozenset({"getattr", "hasattr", "_attr"})
 
 #: Members the TUI probes on a session that belong to an OWNER, not a viewer.
 #:
@@ -182,6 +277,16 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
 #: ``test_the_exclusion_sets_state_true_facts`` — the set is a claim about the
 #: code, not a mute list, so an entry that stops being true fails rather than
 #: silently widening the guard's blind spot.
+#:
+#: ``subagent_comms`` is the MOTIVATING member of this whole file and it sits
+#: here rather than on a protocol, which needs saying plainly. It is read by
+#: ``/info`` and lives on both classes, so declaring it is Stage 3's call-site
+#: work like every other name in this set. What matters for round 2 is that it
+#: is now DERIVED at all: until ``info/collect.py`` joined ``_SCANNED`` the
+#: reviewer could re-ship the original outage — rename it on the facade — with
+#: a green guard and zero pyright errors (review round 2, MAJOR-1). Being an
+#: entry in a checked set means a rename to a name that exists on NEITHER class
+#: now fails here, which is the shape the original bug had.
 _UNDECLARED_ON_BOTH_CLASSES = frozenset(
     {
         "acknowledge_attention",
@@ -199,6 +304,7 @@ _UNDECLARED_ON_BOTH_CLASSES = frozenset(
         "record_shell",
         "refresh_attention",
         "restored_usage",
+        "subagent_comms",
         "subscribe_frontend",
         "team_registry",
         "wake_scheduler",
@@ -214,11 +320,15 @@ _UNDECLARED_ON_BOTH_CLASSES = frozenset(
 #: Filing these as ordinary debt would let the guard built to surface
 #: silent-wrong-answers permanently silence one.
 #:
-#: * ``cwd`` — ``app.py:4049`` passes ``getattr(self._session, "cwd", "")`` to
+#: * ``cwd`` — ``app.py`` passes ``getattr(self._session, "cwd", "")`` to
 #:   ``saved_preview(...)``, so the saved preview's working directory is
 #:   ALWAYS ``""``. Pre-existing (present at ``a8f98be3b``), behavioural, and
 #:   out of scope for this additive change: deferred to Stage 3, where that
-#:   call site is rewritten against a declared member.
+#:   call site is rewritten against a declared member. Cited by call SHAPE
+#:   rather than by line number on purpose — a line number in a moving file is
+#:   the rot this file eliminated elsewhere (review round 2, MINOR-3), and the
+#:   name itself is machine-checked below, so the prose carries no claim the
+#:   suite cannot verify.
 #:
 #: ``test_the_exclusion_sets_state_true_facts`` asserts these are absent from
 #: both classes, so a name here that someone later implements fails the suite
@@ -248,11 +358,12 @@ def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, li
         # session.member / self._session.member
         if isinstance(node, ast.Attribute) and _unparse(node.value) in exprs:
             touched.setdefault(node.attr, []).append(node.lineno)
-        # getattr(session, "member", ...) / hasattr(session, "member")
+        # getattr(session, "member", ...) / hasattr(session, "member") /
+        # _attr(session, "member", default) — see ``_PROBE_CALLS``.
         if isinstance(node, ast.Call):
             if (
                 isinstance(node.func, ast.Name)
-                and node.func.id in ("getattr", "hasattr")
+                and node.func.id in _PROBE_CALLS
                 and len(node.args) >= 2
                 and _unparse(node.args[0]) in exprs
                 and isinstance(node.args[1], ast.Constant)
@@ -263,10 +374,17 @@ def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, li
 
 
 def _all_touched() -> dict[str, list[str]]:
-    """Every scanned file's session members, mapped name -> ``file:line`` sites."""
+    """Every scanned file's session members, mapped name -> ``file:line`` sites.
+
+    The site label keeps the parent directory, not just the basename: two
+    scanned hosts are both called ``desktop_sessions.py`` (one under
+    ``server/utils``, one under ``server/routes``), so a bare filename would
+    name an ambiguous file in the very message whose job is to send the reader
+    to the offending line.
+    """
     sites: dict[str, list[str]] = {}
-    for relpath, exprs in _SCANNED:
-        filename = relpath.rsplit("/", 1)[-1]
+    for relpath, exprs, _floor in _SCANNED:
+        filename = "/".join(relpath.rsplit("/", 2)[-2:])
         found = _session_members_touched((_ROOT / relpath).read_text(), exprs)
         for member, lines in found.items():
             sites.setdefault(member, []).extend(f"{filename}:{line}" for line in sorted(set(lines)))
@@ -361,15 +479,25 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     """The static half is pyright's; this is the runtime half.
 
     ``isinstance`` against a ``runtime_checkable`` Protocol checks member
-    PRESENCE only, not signatures — so it catches a rename or a deletion on the
-    facade, which is this guard's job, and pyright catches the signatures.
-    Both are needed: pyright alone would not see a member deleted at runtime by
-    a refactor of ``__init__``.
+    PRESENCE only, not signatures — so it catches a rename or a deletion of a
+    CLASS-level member (a method or property removed from ``RemoteSession``),
+    which is this guard's job, and pyright catches the signatures.
+
+    What it does NOT catch, contrary to what this docstring claimed for two
+    rounds, is an ``__init__``-assigned attribute disappearing. The four below
+    are hand-assigned to satisfy ``__new__``, so the ``isinstance`` passes
+    whether or not ``__init__`` still sets them — the reviewer deleted
+    ``owner_version`` from the class outright and got 7 tests passing against 2
+    pyright errors (review round 2, MINOR-2). For those four the division of
+    labour runs the other way: **pyright is the guard and this test is
+    structurally blind.** Stated here because a test believed to cover a case it
+    cannot is worse than an uncovered case.
     """
     session = RemoteSession.__new__(RemoteSession)
     # The instance attributes are assigned in ``__init__``, which dials a
     # socket. Set them directly: presence is what the protocol requires, and
-    # constructing a real facade would make this a network test.
+    # constructing a real facade would make this a network test. See the
+    # docstring: this assignment is exactly why the four are pyright's to guard.
     session.owner_version = ""
     session.owner_source_ref = ""
     session.degraded_reason = ""
@@ -436,11 +564,45 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     # ``_SESSION_EXPRS``, a moved path in ``_SCANNED`` — which drops a slice of
     # the surface while leaving the set plausibly populated, and a bare
     # ``assert viewer_only`` would still pass (review m3).
-    assert len(viewer_only) >= 20, (
+    #
+    # PER HOST, and that is the whole point rather than a refinement. A GLOBAL
+    # floor cannot do this job at any value: ``app.py`` contributes 104 of the
+    # 139 derived sites, so a number that survives ordinary churn there is
+    # necessarily far above every other host's entire contribution. Measured on
+    # this head — dropping the desktop utils host costs 4 viewer-only members of
+    # 49, dropping ``info/collect.py`` costs 0 — so both single-point decays
+    # slid under a global ``>= 40`` exactly as they slid under the ``>= 20``
+    # that review round 2 (MINOR-1) rejected. Raising one number would only
+    # move the blind spot. Each host is now asserted against its own count, so
+    # the failure names the host that decayed.
+    thin = {
+        relpath: (len(members), floor)
+        for relpath, exprs, floor in _SCANNED
+        for members in [
+            {
+                name
+                for name in _session_members_touched(
+                    (_ROOT / relpath).read_text(encoding="utf-8"), exprs
+                )
+                if not name.startswith("_")
+            }
+        ]
+        if len(members) < floor
+    }
+    assert not thin, (
+        f"these scanned hosts derive fewer members than they should: {thin} "
+        "(actual, floor). The bindings registered for that host no longer match "
+        "its source, or the path moved — either way the members it used to "
+        "guard are silently unguarded now. If probes were genuinely removed, "
+        "lower that host's floor in _SCANNED in the same commit and say which."
+    )
+    # The aggregate floor is kept BELOW the per-host ones as a backstop for a
+    # decay that is spread too thinly to trip any single host.
+    assert len(viewer_only) >= 40, (
         f"derivation found only {len(viewer_only)} viewer-only members "
-        f"({sorted(viewer_only)}) — expected at least 20, so the probe has "
-        "partially broken: check that _SESSION_EXPRS' bindings and _SCANNED's "
-        "paths still match the source."
+        f"({sorted(viewer_only)}) — expected at least 40, so the probe has "
+        "partially broken across several hosts at once: check that the "
+        "bindings and paths in _SCANNED still match the source."
     )
 
     undeclared = sorted(viewer_only - declared)
@@ -466,7 +628,7 @@ def test_owner_only_probes_are_all_optional_capability_probes() -> None:
     failing anything.
     """
     hard_accesses: dict[str, list[str]] = {}
-    for relpath, exprs in _SCANNED:
+    for relpath, exprs, _floor in _SCANNED:
         filename = relpath.rsplit("/", 1)[-1]
         tree = ast.parse((_ROOT / relpath).read_text())
         for node in ast.walk(tree):
@@ -536,6 +698,22 @@ def test_the_exclusion_sets_state_true_facts() -> None:
         "viewer surface and belong on ViewerSessionProtocol."
     )
 
+    # The OTHER half of that set's claim, and the one that was missing. The
+    # exclusion reads "an owner capability the viewer legitimately lacks", so
+    # absence-from-the-viewer alone does not justify it: a name on NEITHER class
+    # is a dead probe, and without this assertion an agent facing a red guard
+    # could silence one by appending a single line here and stay green on every
+    # test. Proved in review round 2 (MAJOR-2) with a fabricated name. Every
+    # sibling set above is two-sided; this one was not.
+    not_on_owner = sorted(n for n in _OWNER_ONLY_CAPABILITY_PROBES if n not in owner_members)
+    assert not not_on_owner, (
+        "_OWNER_ONLY_CAPABILITY_PROBES justifies each name as an OWNER "
+        f"capability, but these are absent from Session too: {not_on_owner}. A "
+        "name on neither class is a DEAD probe reading its own default forever "
+        "— move it to _KNOWN_MISSING_ON_BOTH_CLASSES, recording the value it "
+        "actually returns, rather than laundering it as an owner capability."
+    )
+
 
 def _static_conformance_is_checked_by_pyright() -> None:
     """The STATIC half of the conformance claim, checked by pyright, not pytest.
@@ -565,9 +743,140 @@ def _static_conformance_is_checked_by_pyright() -> None:
       disarms the static half of the conformance claim while every test still
       passes — the repo's pyright invocation is whole-tree for this reason;
     * deleting this function because "nothing calls it" removes the check
-      entirely, with no failing test to object.
+      entirely, with no failing test to object — except that
+      ``test_the_static_conformance_anchor_still_exists`` below now does object,
+      which is what turned that disclosure into detection (QA round 2, Q6).
     """
     viewer: ViewerSessionProtocol = RemoteSession.__new__(RemoteSession)
     owner: SessionProtocol = Session.__new__(Session)
     attached: SessionProtocol = RemoteSession.__new__(RemoteSession)
     _ = (viewer, owner, attached)
+
+
+def test_the_static_conformance_anchor_still_exists() -> None:
+    """Deleting the function above must not be silent in BOTH checkers.
+
+    It is never called, so pytest is indifferent to its existence and pyright
+    only reports what it can still see: delete it and the signature half of the
+    conformance claim vanishes with 7 tests passing and 0 pyright errors — QA
+    round 2 (Q6) verified exactly that. The disclosure in its docstring was
+    honest but disclosure is not detection.
+
+    Asserted on the ANNOTATIONS, not merely on the name: a body reduced to
+    ``pass`` keeps the symbol while removing every assignment that makes pyright
+    check anything, which is the same loss by a quieter route. Read out of the
+    module's own source because the values are type annotations on locals, which
+    do not survive into the compiled function object.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    anchor = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_static_conformance_is_checked_by_pyright"
+        ),
+        None,
+    )
+    assert anchor is not None, (
+        "_static_conformance_is_checked_by_pyright has been deleted. It is the "
+        "ONLY place either class is assigned to a protocol type, so removing it "
+        "silently drops signature checking (return types, parameter names, "
+        "async-ness) from the conformance claim: isinstance sees member "
+        "presence only. Restore it rather than deleting this test."
+    )
+
+    annotated = {
+        _unparse(node.annotation)
+        for node in ast.walk(anchor)
+        if isinstance(node, ast.AnnAssign) and node.annotation is not None
+    }
+    assert {"ViewerSessionProtocol", "SessionProtocol"} <= annotated, (
+        "_static_conformance_is_checked_by_pyright no longer assigns both "
+        f"classes to protocol-typed variables (found annotations: {annotated}). "
+        "Those annotations ARE the static check; a body without them keeps the "
+        "symbol and loses the coverage."
+    )
+
+
+def test_every_registered_session_binding_still_matches_the_source() -> None:
+    """Each binding in every ``_SCANNED`` set must derive at least one member.
+
+    The floor in ``test_the_viewer_protocol_covers_what_only_the_facade_has``
+    catches decay in AGGREGATE, and QA round 2 (Q5) showed that is not enough:
+    renaming ``self._session`` in ``_SESSION_EXPRS`` drops five members and the
+    total stays above any floor loose enough to be maintainable. A per-binding
+    assertion catches the same decay at its source and names the binding, which
+    a total never can.
+
+    Zero sites means one of two things and both need the reader's attention: the
+    binding was renamed in the source (fix the set), or it never matched and the
+    coverage it implies was always fictional. ``self.session`` and
+    ``self.app.session`` were the second case — registered in ``_SESSION_EXPRS``
+    and matching nothing in ``app.py`` — so they are asserted against the files
+    that DO use them rather than being quietly dropped, since dropping a
+    binding is how a real spelling stops being watched.
+
+    The count is pinned as well as the contribution, because the two decays are
+    different and only one of them is a rename. DELETING ``source.session``
+    outright costs 2 of 49 viewer-only members — under any floor, per-host or
+    aggregate, and invisible to the zero-sites check because a removed entry is
+    not an entry that derives nothing. It was the last planted violation this
+    guard did not catch. A registered binding is a coverage claim, so removing
+    one has to be a deliberate edit to a stated number rather than a quiet
+    deletion.
+    """
+    per_binding: dict[str, int] = {}
+    for relpath, exprs, _floor in _SCANNED:
+        source = (_ROOT / relpath).read_text(encoding="utf-8")
+        # Counted per binding rather than per member: a member reached through
+        # two bindings must credit both, or dropping either looks harmless.
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            expr = None
+            if isinstance(node, ast.Attribute) and not node.attr.startswith("_"):
+                expr = _unparse(node.value)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in _PROBE_CALLS
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+            ):
+                expr = _unparse(node.args[0])
+            if expr is not None and expr in exprs:
+                per_binding[expr] = per_binding.get(expr, 0) + 1
+
+    registered = {expr for _relpath, exprs, _floor in _SCANNED for expr in exprs}
+    dead = sorted(expr for expr in registered if per_binding.get(expr, 0) == 0)
+    assert not dead, (
+        f"these registered session bindings derive ZERO members: {dead}. Either "
+        "the binding was renamed in the source — in which case every member it "
+        "reached has silently stopped being guarded — or it never matched and "
+        "the coverage it implies is fictional. Fix the spelling or remove it "
+        "with a note saying which."
+    )
+
+    # The bindings themselves, pinned by name. Deliberately the whole set rather
+    # than a count: a count would let a deletion be paid for with an unrelated
+    # addition, and the message that matters names the spelling that stopped
+    # being watched.
+    assert registered == {
+        "self._session",
+        "session",
+        "source.session",
+        "remote",
+        "self.remote",
+        "bridge.remote",
+        "child.remote",
+        "self.session",
+    }, (
+        f"the set of registered session bindings changed: {sorted(registered)}. "
+        "Each one is a claim that this spelling of a session is watched, so "
+        "REMOVING one silently unguards every member it reached (deleting "
+        "'source.session' costs 2 viewer-only members — too few for any floor to "
+        "notice). Adding one is good news and needs this list updated too; "
+        "either way, say which in the commit."
+    )

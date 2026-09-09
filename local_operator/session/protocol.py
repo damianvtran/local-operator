@@ -683,6 +683,63 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    async def bind_runtime(self) -> None:
+        """Bind this viewer before an explicitly requested owner operation.
+
+        Declared because the desktop ROUTES call it as a HARD access on every
+        path that mutates owner state (``desktop_lifecycle.py`` /mcp,
+        /credential, /fork, aside completion and adoption;
+        ``desktop_sessions.py`` routed slash), reached through the
+        ``bridge.remote`` binding. A rename on the facade is therefore an
+        ``AttributeError`` inside a live HTTP route rather than the silent
+        ``None`` a duck-probe would return — louder, but a 500 on the phone
+        portal all the same, and equally invisible to pyright while the member
+        was undeclared (QA round 2, Q4).
+
+        Distinct from :meth:`attach_existing`: this one is allowed to START a
+        runtime, because the caller is a user action that needs one. A READ
+        must use ``attach_existing`` so serving history never promotes the HTTP
+        worker into an executor.
+        """
+        ...
+
+    async def admit_prompt(
+        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+    ) -> tuple[str, bool]:
+        """Submit a prompt and return the owner's ADMISSION receipt.
+
+        ``(detail, duplicate)``: the owner's receipt text, and whether the
+        stable ``command_id`` matched a reservation it already holds. It does
+        not wait for the turn's outcome — that is the point. The desktop routes
+        serve an HTTP request, and an HTTP disconnect must not cancel work the
+        owner already accepted, which is what awaiting completion would allow.
+
+        Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
+        ``desktop_lifecycle.py`` and ``desktop_sessions.py``.
+        """
+        ...
+
+    async def answer_gate(
+        self,
+        request_id: str,
+        *,
+        value: str | None = None,
+        approved: bool | None = None,
+        question_index: int | None = None,
+    ) -> str:
+        """Answer the owner's open approval gate; returns its receipt.
+
+        ``request_id`` is checked against the gate the facade currently holds
+        before anything crosses the wire, so a stale desktop popup cannot
+        answer a NEWER gate that a reconnect or a multi-question ask advanced
+        in another window. The owner validates again on its side; this check is
+        what keeps the wrong answer from being sent at all.
+
+        Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
+        ``desktop_sessions.py``.
+        """
+        ...
+
     async def request_stop(self) -> str:
         """Ask the owner to end the session; returns its receipt."""
         ...
