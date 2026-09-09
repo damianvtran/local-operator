@@ -1372,6 +1372,21 @@ ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 RETAINED_PRESENTATIONS = 12
 
 
+def _suppress_intermediate_paint() -> None:
+    """Stand in for ``Screen._compositor_refresh`` to drop one mid-commit paint.
+
+    The switch commit needs a synchronous LAYOUT so a freshly mounted page can
+    author its real height before the readiness gate reads the painted map, but
+    it must not put that layout on screen: at that moment the transcript has
+    been revealed while the composer still holds the outgoing draft's rows, and
+    a frame drawn from that arrangement shows an empty conversation (design
+    round 1, D1). Restoring the real method in a ``finally`` is what keeps this
+    to exactly one frame; see the call site in
+    :meth:`OperatorApp._prefill_resume_before_reveal` for the measurements.
+    """
+    return None
+
+
 def _set_transcript_parked(view: Widget, parked: bool) -> None:
     """Park or un-park a transcript WITHOUT the disabled stylesheet cascade.
 
@@ -1391,23 +1406,47 @@ def _set_transcript_parked(view: Widget, parked: bool) -> None:
       10.2 ms of the 18.8 ms commit, 54% of a section that deliberately never
       awaits, paid on every switch.
 
-    The appearance half is worth exactly nothing to a parked view: it is
-    ``overlay: screen`` at ``offset: 100vw``, so every cell of its ink is
-    clipped off-screen and no opacity it is given can be seen. The incoming
-    view's un-park is the mirror image — it is revealed at full opacity because
-    the cascade it never received never dimmed it.
+    The appearance half is worth nothing to a parked view WHILE IT IS PARKED:
+    it is ``overlay: screen`` at ``offset: 100vw``, so every cell of its ink is
+    clipped off-screen and no opacity it is given can be seen.
 
     ``set_reactive`` writes the reactive's value while skipping its watcher,
-    which is precisely that split. Verified on a 40-block subtree: shipped
-    toggle 4.13 ms / 44 ``Stylesheet.apply`` calls, this 0.002 ms / 0, with
-    ``disabled``, ``_self_or_ancestors_disabled``, ``focusable``,
-    ``allow_vertical_scroll`` and mouse-message refusal all identical.
+    which is precisely that split. Verified on a 40-block subtree: 44
+    ``Stylesheet.apply`` calls → 0, with ``disabled``,
+    ``_self_or_ancestors_disabled``, ``focusable``, ``allow_vertical_scroll``
+    and mouse-message refusal all identical. (The wall figures behind those
+    counts — ~4.1 ms → ~0 ms, and RC2's ~10.2 ms of an ~18.8 ms commit — were
+    taken on a box at load ~36 and are indicative only. The COUNTS are the
+    invariant worth defending; the milliseconds are not.)
 
-    IF A ``:disabled`` RULE IS EVER WRITTEN THAT MUST REACH A PARKED
-    TRANSCRIPT, this is the line to revert — the field would then be carrying
-    appearance the cascade is required to apply.
+    THE TWO DIRECTIONS ARE NOT SYMMETRIC, which is why this is not simply
+    ``set_reactive`` both ways. Skipping the park cascade declines to dim a
+    view nobody can see. Skipping the UN-park cascade would decline to
+    **un-dim** one the user is about to look at — and the rule that dims it
+    already exists: Textual's own ``*:disabled:can-focus { opacity: 0.7 }``
+    matches because ``TranscriptView.can_focus`` is True. Any cascade over the
+    subtree while it is parked (a terminal resize and a theme change were both
+    reproduced) applies that 0.7, and without a watcher on the un-park it is
+    revealed still dimmed and never self-heals — measured across a reveal, a
+    keystroke, a scroll and a further switch, and visible in the rendered
+    palette (body text ``#3b3527`` → ``#2f2a1e``). So the un-park goes through
+    the real reactive and pays the one cascade Textual already pays on every
+    switch today; the saving this helper exists for is on the OUTGOING 45-81
+    block transcript, which is untouched by that.
+
+    ``watch_disabled`` also blurs ``screen.focused`` when the disabled widget
+    is its ancestor and queues a ``Leave`` for a hovered widget; ``set_reactive``
+    skips both on the park. That is safe here because the commit path refocuses
+    the composer independently — probed with focus placed inside the outgoing
+    transcript before the switch, focus afterwards lands on the ``Editor``
+    rather than being stranded in the parked offscreen view. Documented so the
+    next reader does not have to re-derive it.
     """
-    view.set_reactive(Widget.disabled, parked)
+    if parked:
+        view.set_reactive(Widget.disabled, True)
+    else:
+        # The real reactive: see the asymmetry note above. Never `set_reactive`.
+        view.disabled = False
 
 
 #: Ranked entries warmed per catalog poll. Two is the top of the list — the
@@ -5494,6 +5533,20 @@ class OperatorApp(App[None]):
                 # the parked measurement is not final. The gate is what proves
                 # the resulting frame, which is why this may run after reveal
                 # without re-introducing a geometry lie.
+                #
+                # THE GUARD IS THE E2E `wrapped` PARAMETRISATION, not a unit
+                # test, and that is deliberate rather than an omission (QA round
+                # 1, Q3, which could not confirm this from outside because its
+                # rig never scheduled the callback). Re-verified by deleting
+                # this line: `test_sidebar_display_e2e.py::test_saved_view_
+                # switches_while_authenticated_owner_sync_is_held[...True-True
+                # -False]` fails with a TimeoutError. The unit rig in
+                # `test_sidebar_switch_smoothness.py` cannot reach here at all --
+                # its `_switch` helper installs a fresh lease per call, so the
+                # `SessionInteraction` carrying the saved anchor is replaced
+                # before the commit reads it, and the draft is re-captured from
+                # the on-screen view (which is at tail). Anyone tempted to
+                # delete this again: run the e2e stage, not just the unit suite.
                 view.restore_navigation_anchor(
                     source.draft.scroll_anchor_id,
                     source.draft.scroll_anchor_part,
@@ -7638,7 +7691,22 @@ class OperatorApp(App[None]):
             # frame would run, pulled forward, and it is SYNCHRONOUS -- no await
             # is introduced between the navigation's final identity check and
             # this commit (`session_navigation._prepare_and_commit`).
-            self.screen._refresh_layout()
+            #
+            # Paint suppressed for the same reason as the settle below, and it
+            # is the same defect: this layout runs with the transcript revealed
+            # and the composer still holding the OUTGOING draft's rows, so the
+            # frame it would paint shows 21 mounted blocks and NONE of them in
+            # view (design round 1, D1, cold/draft2 f001 at dock 7 / editor 3
+            # against a settled 5 / 1). The layout is needed -- it is what gives
+            # this first-visit view a measurable viewport -- but its
+            # intermediate arrangement must not reach the screen.
+            screen = self.screen
+            paint = screen._compositor_refresh
+            screen._compositor_refresh = _suppress_intermediate_paint
+            try:
+                screen._refresh_layout()
+            finally:
+                screen._compositor_refresh = paint
             viewport = view.container_size.height or view.size.height
         if not viewport or self._resume_paging or not self._resume_pending_head:
             # Nothing locally pending, or a fetch already owns the gate. The
@@ -7668,8 +7736,16 @@ class OperatorApp(App[None]):
                 # `on_settled` is the seam that method documents for exactly
                 # this, and it is why the `finally` below only starts a fill
                 # when no page was mounted here.
-                chained = True
                 self._mount_older_resume_page(on_settled=self._start_resume_fill)
+                # ONLY NOW is the deferred fill genuinely chained. Setting this
+                # BEFORE the mount meant a raising mount was swallowed by the
+                # `except` with `chained` already True, so the `finally` skipped
+                # the very fallback the docstring promises -- reproduced at 18
+                # blocks / scroll_y 15 against 42 / 63 normal. `_mount_older_
+                # resume_page` restores `_resume_pending_head` and releases the
+                # paging lease before re-raising, so the deferred fill that then
+                # starts runs against clean state.
+                chained = True
                 # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
                 # handed to the readiness gate. A mounted block authors its real
                 # height during a layout pass, so without this the view is
@@ -7678,7 +7754,45 @@ class OperatorApp(App[None]):
                 # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
                 # 4 cold switches without this call, 0 with it. Synchronous, for
                 # the same reason as above: this commit may not await.
-                self.screen._refresh_layout()
+                #
+                # THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout`
+                # ends in `_compositor_refresh()`, which calls `App._display`
+                # straight away -- so this settle PAINTED a frame of its own,
+                # mid-commit, and that frame is a half-arranged one: the
+                # transcript has already been revealed and tail-scrolled, while
+                # the composer still occupies the OUTGOING draft's rows (dock 7
+                # / editor 3 against the incoming draft's final 5 / 1). Content
+                # drawn against a box that is about to shrink lands outside the
+                # viewport, so the frame showed an EMPTY conversation -- design
+                # round 1, D1, reproduced at `blocks_mounted=46,
+                # blocks_in_view=0, scroll_y=84=max` immediately before a
+                # settled `82`. On a warm switch that was the FIRST painted
+                # frame, i.e. the fastest switch opened on a blank screen, and
+                # at 80x24 the whole screen blanked. It also produced the
+                # `84 -> 82` scroll excursion (D4) and showed the incoming
+                # draft inside the outgoing-sized box (D2).
+                #
+                # Suppressing just the paint keeps every reason this call is
+                # here -- the mounted page still authors its height, the gate
+                # still gets a complete painted map from the NEXT real frame --
+                # while the user never sees the intermediate arrangement.
+                # Measured across warm/cold/draft2 at 120x36 and 80x24: blank
+                # frames 1-3 -> 0 in every arm, painted frames 12 -> 9 (cold)
+                # and 11 -> 8 (draft2), the scroll excursion collapses to a
+                # single settled position, and gate refusals stay 0.
+                #
+                # `_compositor_refresh` rather than `App.batch_update()`: the
+                # batch defers this paint to a `call_later`, which still paints
+                # the same stale arrangement one turn later (measured: blanks
+                # unchanged at `[0]`). The frame must not exist at all, not
+                # arrive late.
+                screen = self.screen
+                paint = screen._compositor_refresh
+                screen._compositor_refresh = _suppress_intermediate_paint
+                try:
+                    screen._refresh_layout()
+                finally:
+                    screen._compositor_refresh = paint
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.

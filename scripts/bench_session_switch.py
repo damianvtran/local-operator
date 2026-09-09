@@ -69,9 +69,16 @@ SETTLE_PUMPS = 12
 DEFAULT_SAMPLES = 8
 
 #: Distinct sessions the cold pattern rotates through. Must exceed
-#: ``RETAINED_PRESENTATIONS`` (4) plus the two live sources by a clear margin,
-#: or the "cold" cell silently starts measuring cache hits.
-COLD_POOL = 12
+#: ``RETAINED_PRESENTATIONS`` -- which is **12**, not the 4 an earlier draft of
+#: this comment claimed (agent review round 1, R4) -- by a clear margin, or the
+#: "cold" cell silently starts measuring cache hits instead of cold switches.
+#:
+#: At 12 the rotation was exactly the retain budget, i.e. no margin at all: a
+#: presentation evicted only just before its turn came round again is one
+#: scheduling accident away from still being resident. 20 restores the headroom
+#: the sentence above promises, and the cost is only a few more seeded
+#: transcripts per worker.
+COLD_POOL = 20
 
 TRANSCRIPTS = {"small": 7, "large": 134}  # turns; a turn renders 3 blocks
 SIZES = {"120x36": (120, 36), "200x50": (200, 50)}

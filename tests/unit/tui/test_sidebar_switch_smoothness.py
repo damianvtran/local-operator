@@ -15,10 +15,31 @@ with machine load:
 * the readiness gate is never refused, so no switch pays a recovery relayout;
 * no painted frame shows the composer at a height neither session asked for;
 * no history rows mount into the view after it becomes visible;
-* the switch paints exactly one scroll position.
+* the switch paints exactly one scroll position;
+* no painted frame shows an empty conversation.
 
 Each is a fact about WHAT the app did, not how long it took, so it fails
 deterministically when the code regresses and never when the box is busy.
+
+TWO OF THESE ARE WIDTH-CONDITIONAL, and the sizes below are therefore
+load-bearing rather than incidental (QA round 1, Q1/Q2):
+
+* **Zero gate refusals holds at >=41 columns.** At 40x24 and narrower the gate
+  refuses again (24 arrivals / 18 recoveries, attributed to
+  ``TAIL_BLOCK_UNPAINTED`` and a 2-row ``TAIL_BLOCK_OVERFLOWS_CONTENT``), with a
+  sharp threshold at 41. The BASE behaves the same way there, so this is reach,
+  not regression -- the recovery branch is doing exactly the job it exists for,
+  and the switch still completes and lands correctly at every width measured
+  from 20 to 140.
+* **Exactly one painted scroll position holds at >=70 columns.** Below that the
+  switch paints two positions 1-2 rows apart, with ZERO post-reveal inserts --
+  a final geometry settle, not content arriving late. The base at the same
+  sizes paints ``[15.0, 63.0]`` / ``[13.0, 14.0, 62.0]`` with 24 rows mounting
+  after reveal, so the operator's actual complaint (the large upward shuffle)
+  is gone at every width.
+
+So a narrow-width failure of either test is a GENUINE regression at that width;
+do not "fix" it by widening the fixture.
 
 The rig drives the real prepare/commit pair through `_switch` from
 ``test_sidebar_swap_reset`` — only the owner lease is stubbed; the prepared
@@ -35,7 +56,7 @@ import pytest
 from textual._compositor import LayoutUpdate
 from textual.widget import Widget
 
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, _suppress_intermediate_paint
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.transcript import TranscriptView
 from tests.unit.tui.test_app_pilot import _factory
@@ -138,7 +159,20 @@ class _FrameRecorder:
             try:
                 view = self.app._transcript_view()
                 sample["scroll_y"] = float(view.scroll_y)
-                sample["blocks"] = len(view.blocks())
+                blocks = view.blocks()
+                sample["blocks"] = len(blocks)
+                # BLOCKS THE USER CAN ACTUALLY SEE, not blocks mounted. The two
+                # diverge exactly when a frame is laid out against geometry it
+                # is not drawn in, which is the D1 blank frame: 46 mounted, 0
+                # intersecting the content region.
+                content = view.content_region
+                sample["blocks_in_view"] = sum(
+                    1
+                    for block in blocks
+                    if (region := getattr(block, "region", None)) is not None
+                    and region.area
+                    and content.overlaps(region)
+                )
             except Exception:  # noqa: BLE001
                 pass
         return sample
@@ -155,6 +189,18 @@ class _FrameRecorder:
             float(scroll)
             for f in self.frames
             if isinstance(scroll := f.get("scroll_y"), (int, float))
+        ]
+
+    @property
+    def blank_frames(self) -> list[int]:
+        """Indices of painted frames that had rows mounted but none visible."""
+        return [
+            index
+            for index, f in enumerate(self.frames)
+            if isinstance(in_view := f.get("blocks_in_view"), int)
+            and in_view == 0
+            and isinstance(mounted := f.get("blocks"), int)
+            and mounted > 0
         ]
 
 
@@ -258,7 +304,8 @@ async def test_the_composer_never_paints_a_height_neither_session_asked_for() ->
 
 
 @pytest.mark.asyncio
-async def test_no_history_rows_mount_into_the_visible_view() -> None:
+@pytest.mark.parametrize("size", [(100, 30), (200, 50)])
+async def test_no_history_rows_mount_into_the_visible_view(size: tuple[int, int]) -> None:
     """RC4: the resume fill runs before reveal, so nothing arrives afterwards.
 
     The prepared window under-fills the viewport by construction, so the fill
@@ -268,6 +315,13 @@ async def test_no_history_rows_mount_into_the_visible_view() -> None:
 
     Counted on the VISIBLE view only: rows appended to a parked offscreen replay
     are the preparation doing its job.
+
+    TWO TERMINAL HEIGHTS, because the pre-reveal pass mounts exactly ONE page
+    and "one page is enough" is a claim about geometry, not a law (agent review
+    round 1, R3). A taller terminal needs more rows to fill the same viewport,
+    so 200x50 is where the bound would break first if `RESUME_PAGE_MESSAGES`
+    ever stopped covering it; the 30-row case is the one the audit measured
+    (21 blocks against a 27-row viewport).
     """
     home = SidebarRemote("home-session")
     target = _conversation("deep-session", 60)
@@ -291,7 +345,7 @@ async def test_no_history_rows_mount_into_the_visible_view() -> None:
         patch("local_operator.session.remote.RemoteSession", SidebarRemote),
         patch.object(TranscriptView, "insert_blocks", insert_blocks),
     ):
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=size) as pilot:
             for _ in range(20):
                 await pilot.pause()
 
@@ -595,10 +649,17 @@ def test_parking_a_transcript_skips_the_stylesheet_cascade() -> None:
     """The cost half of RC2, asserted structurally rather than in milliseconds.
 
     `watch_disabled` re-applies CSS across the whole subtree — 131 node
-    applications on a real transcript, 10.2 ms of the 18.8 ms commit, inside a
-    section that deliberately never awaits. The fact that matters is that the
-    watcher does not run at all, which is a property of the call and not of the
-    machine: `set_reactive` writes the value without invoking watchers.
+    applications on a real transcript, inside a section that deliberately never
+    awaits. The fact that matters is that the watcher does not run ON THE PARK,
+    which is a property of the call and not of the machine: `set_reactive`
+    writes the value without invoking watchers. (The millisecond figures behind
+    that count were taken on a loaded box and are indicative only; the count is
+    the invariant.)
+
+    ONLY THE PARK. The un-park deliberately DOES run the watcher — see
+    `test_a_revealed_transcript_is_never_left_dimmed` for why skipping it left
+    revealed transcripts at `opacity: 0.7`. The saving this asserts is on the
+    outgoing 45-81 block transcript, which is where the cost was measured.
     """
     from local_operator.tui.app import _set_transcript_parked
 
@@ -611,9 +672,9 @@ def test_parking_a_transcript_skips_the_stylesheet_cascade() -> None:
     probe = _Probe()
     _set_transcript_parked(probe, True)
     assert probe.disabled is True
+    assert calls == [], "the disabled watcher ran on the park, re-applying the subtree"
     _set_transcript_parked(probe, False)
     assert probe.disabled is False
-    assert calls == [], "the disabled watcher ran, re-applying the stylesheet subtree"
 
 
 @pytest.mark.asyncio
@@ -649,12 +710,27 @@ async def test_a_failed_pre_reveal_fill_does_not_invalidate_the_preparation() ->
                 calls.append(1)
                 raise RuntimeError("projection failed")
 
-            # Only the synchronous pre-reveal pass is exercised: it is called
-            # directly, exactly as the commit calls it, with the deferred
-            # follow-up stubbed out so a later raise cannot be mistaken for
-            # this one.
+            # The deferred fill is RECORDED, not stubbed to a no-op. Stubbing it
+            # out was this test's blind spot (agent review round 1, R2): with
+            # the call swallowed, the test still passed while `chained = True`
+            # was being set BEFORE the mount, so a raising mount left the
+            # `finally`'s `if not chained:` already False and the documented
+            # degradation path never ran. Recording it means the promise in the
+            # docstring -- "a projection failure must degrade to the deferred
+            # fill" -- is what is actually asserted.
+            # Recorded and then STOPPED. Letting the real deferred fill run
+            # would re-enter the same stubbed `_mount_older_resume_page` and
+            # raise from `_fill_resume_until_scrollable`, which re-raises by
+            # design (see the scope note above) -- a second, unrelated failure
+            # on a path this test does not own. What R2 is about is whether the
+            # degradation path is REACHED, so that is what is recorded.
+            deferred: list[int] = []
+
+            def record_start(**_kwargs):
+                deferred.append(1)
+
             app._mount_older_resume_page = explode  # type: ignore[method-assign]
-            app._start_resume_fill = lambda **_kw: None  # type: ignore[method-assign]
+            app._start_resume_fill = record_start  # type: ignore[method-assign]
 
             await _switch(app, pilot, target)
             for _ in range(40):
@@ -665,3 +741,163 @@ async def test_a_failed_pre_reveal_fill_does_not_invalidate_the_preparation() ->
             assert app._session.session_id == target.session_id
             assert app._transcript_view().blocks()
             assert calls, "the pre-reveal fill never reached the projection at all"
+            assert deferred, (
+                "the pre-reveal fill raised and the deferred fill never started; "
+                "the documented degradation path is dead (see R2)"
+            )
+
+
+@pytest.mark.asyncio
+async def test_no_painted_frame_shows_an_empty_conversation() -> None:
+    """D1: the switch must never paint a frame with rows mounted and none visible.
+
+    The pre-reveal fill needs a synchronous layout so a freshly mounted page can
+    author its height before the readiness gate reads the painted map. But
+    `Screen._refresh_layout()` ends in `_compositor_refresh()`, which paints
+    immediately — and at that moment the transcript has been revealed while the
+    composer still occupies the OUTGOING draft's rows. Content laid out against
+    a box that is about to shrink falls outside the viewport, so the frame
+    showed an EMPTY conversation: 46 blocks mounted, 0 intersecting the content
+    region, at `scroll_y = 84 = max_scroll_y` immediately before a settled 82.
+
+    On a warm switch that was the FIRST painted frame — the fastest, most
+    common switch opening on a blank screen — and at 80x24 the whole screen
+    blanked, sidebar included (design review round 1, D1). The base never
+    painted such a frame, so this was a regression introduced by the fix, and a
+    blank flash is a worse unpolish signal than the shuffle it replaced.
+
+    WHAT THIS ASSERTS, AND WHY IT IS NOT THE PAINTED SEQUENCE. Under `run_test`
+    the commit paints NOTHING -- measured: zero `App._display` calls between
+    entering and leaving `_commit_sidebar_session`, at any terminal size and
+    with any draft. The headless compositor does not service the synchronous
+    `_refresh_layout` the way a real terminal does, so a frame-sequence
+    assertion here would be vacuous: it passes identically with the fix and
+    without it (verified by neutering the suppression -- still green).
+
+    So the invariant is asserted where this rig can actually see it: the commit
+    must not perform a PAINTING refresh, only a layout. That is the property the
+    fix establishes, it fails when the suppression is removed, and it does not
+    pretend to be visual evidence.
+
+    The blank frames themselves are a rendered-frame fact and were measured with
+    the frame-capture rig against a real compositor (design round 1, D1 and its
+    remediation): blank frames 1-3 -> 0 across warm/cold/draft2 at 120x36 and
+    80x24, with the before/after SVGs attached to the PR. AGENTS.md is explicit
+    that a green test is not visual evidence; this test is the structural half.
+    """
+    home = SidebarRemote("home-session")
+    target = _conversation("blank-frame-session", 60)
+
+    app = OperatorApp(lambda: _factory(home))
+    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+        # 120x36, not the 100x30 the sibling tests use: with a 3-row outgoing
+        # draft the smaller terminal leaves a 16-row viewport that the prepared
+        # window ALREADY fills, so the pre-fill correctly early-returns and the
+        # settle this guard is about never runs (measured: scroll_y 17 against
+        # a 16-row viewport, 18 blocks in and 18 out). At 120x36 the same draft
+        # leaves a 25-row viewport and the fill mounts 20 -> 44 blocks.
+        async with app.run_test(size=(120, 36)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+
+            # A multi-row outgoing draft against the target's empty one: the
+            # stale box only exists while the composer is about to CHANGE
+            # height, so this is what makes the dock shrink across the commit.
+            editor = app._editor()
+            editor.load_text("outgoing draft line one\nline two\nline three")
+            for _ in range(20):
+                await pilot.pause()
+            assert int(editor.outer_size.height) > 1, (
+                "the outgoing draft must make the composer taller than the "
+                "incoming session's, or there is no height change to lag"
+            )
+
+            # Observe the COMPOSITOR REFRESH, which is the thing that paints,
+            # rather than the layout that calls it: the pre-fill reaches
+            # `_refresh_layout` by two routes (the first-visit viewport probe
+            # and the post-mount settle) and the fix guards both by rebinding
+            # this attribute for the duration of the call.
+            layouts: list[int] = []
+            paints: list[int] = []
+            screen = app.screen
+            real_layout = screen._refresh_layout
+            in_commit = {"yes": False}
+
+            def refresh_layout(*args, **kwargs):  # type: ignore[no-untyped-def]
+                if in_commit["yes"]:
+                    layouts.append(1)
+                    if screen._compositor_refresh is not _suppress_intermediate_paint:
+                        paints.append(1)
+                return real_layout(*args, **kwargs)
+
+            screen._refresh_layout = refresh_layout  # type: ignore[method-assign]
+            real_commit = app._commit_sidebar_session
+
+            def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
+                in_commit["yes"] = True
+                try:
+                    return real_commit(session_id, prepared, generation)
+                finally:
+                    in_commit["yes"] = False
+
+            app._commit_sidebar_session = commit  # type: ignore[method-assign]
+            await _switch(app, pilot, target)
+            for _ in range(60):
+                await pilot.pause()
+
+            assert layouts, (
+                "the commit ran no synchronous layout at all; the pre-reveal "
+                "settle this asserts about is not happening"
+            )
+            assert app._resume_fill_active or app._transcript_view().blocks(), (
+                "the pre-reveal fill never engaged, so the layouts counted above "
+                "are not the ones this guard is about"
+            )
+            assert not paints, (
+                f"{len(paints)} of {len(layouts)} synchronous layouts inside the commit "
+                "would have painted; the switch can put a half-arranged frame "
+                "(revealed transcript, outgoing-sized composer) on screen"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_revealed_transcript_is_never_left_dimmed() -> None:
+    """R1: un-parking must run the stylesheet cascade, even though parking skips it.
+
+    `_set_transcript_parked` skips `watch_disabled` to avoid a whole-subtree
+    re-apply inside the frozen commit. That is safe in one direction only: the
+    park declines to dim a view nobody can see, but skipping the UN-park cascade
+    would decline to UN-dim one the user is about to look at.
+
+    The rule that dims it already exists — Textual's own
+    `*:disabled:can-focus { opacity: 0.7 }` matches because
+    `TranscriptView.can_focus` is True. Any cascade while the view is parked (a
+    terminal resize, a theme change) applies it, and without a watcher on the
+    un-park the view is revealed still carrying 0.7 and never self-heals: the
+    reviewer measured it surviving a reveal, a keystroke, a scroll and a further
+    switch, visibly dimming the body text in the rendered palette.
+
+    Asserted here as the appearance half that
+    `test_the_parked_view_stays_non_interactive` deliberately does not cover.
+    """
+    from local_operator.tui.app import _set_transcript_parked
+
+    applied: list[bool] = []
+
+    class _Probe(Widget):
+        can_focus = True
+
+        def watch_disabled(self, disabled: bool) -> None:
+            applied.append(disabled)
+
+    probe = _Probe()
+    _set_transcript_parked(probe, True)
+    assert probe.disabled is True
+    assert applied == [], "parking ran the cascade it exists to skip"
+
+    _set_transcript_parked(probe, False)
+    assert probe.disabled is False
+    assert applied == [False], (
+        "un-parking did not run the disabled watcher, so a view dimmed by a "
+        "cascade while parked would stay dimmed after it is revealed"
+    )
