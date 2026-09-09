@@ -242,6 +242,16 @@ MODEL_PENDING = "connecting…"
 #: two MUST answer "what state is this" with the same word.
 MODEL_SETUP = "setup"
 
+#: The model row's word when a FOREGROUND runtime engage failed and the viewer
+#: is still cold. Same defect class as `MODEL_SETUP` above, recurring in a
+#: second state: `connecting…` promises progress, and after a failed bind
+#: nothing is in flight — the band has already stopped saying `starting…`, so
+#: the splash's word is the one row still claiming work that ended. "not
+#: connected" states the fact without a present participle and without
+#: claiming the runtime died (a busy owner it could not reach in time is
+#: alive). The band takes this word for the same state, per the rule above.
+MODEL_UNBOUND = "not connected"
+
 #: The few affordances a first-time user actually needs. ``/`` and ``/help``
 #: are kept separate on purpose: one is the inline picker, the other prints the
 #: full two-column list — a user who has met neither cannot infer the other.
@@ -554,6 +564,20 @@ class WelcomeInfo:
     #: hint table leads with, and which tip opens the rotation — so the screen
     #: reads as "you need to act" rather than "a session is still booting".
     setup: bool = False
+    #: A foreground runtime engage FAILED and the facade is still cold. The
+    #: splash is what the user is looking at in that state, and without this
+    #: flag its model row keeps either the `connecting…` sentinel — a promise
+    #: of progress from an attempt that has already ended — or the cold
+    #: facade's PROVISIONAL label, which is the viewer's own copy from local
+    #: config rather than state an owner confirmed and must not read as
+    #: connected. Carried as its own field rather than overloading ``notice``
+    #: because that slot is the harness's (quota fallback, provider missing)
+    #: and a bind failure must not be read off copy that may belong to
+    #: something else. Takes precedence over ``model_label`` in the row
+    #: ladder, and the band takes the same word, per the setup rule: two
+    #: surfaces answering "what state is this" with different words is a
+    #: shipped defect.
+    unbound: bool = False
 
 
 def app_version() -> str:
@@ -575,6 +599,7 @@ def session_welcome_info(
     *,
     notice: str | None = None,
     setup: bool = False,
+    unbound: bool = False,
     update_available: str | None = None,
 ) -> WelcomeInfo:
     """Snapshot the facts the welcome view shows.
@@ -627,6 +652,7 @@ def session_welcome_info(
         notice=notice or None,
         update_available=update_available or None,
         setup=setup,
+        unbound=unbound,
     )
 
 
@@ -764,12 +790,21 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     # `deepseek-chat-v3.1`, so one app answered "which model" with opposite
     # halves of the same string (D10). A display name in the band beside a raw
     # selector here would be that defect again.
-    # With no model resolved yet the word depends on WHY there is no model. In
-    # the first-run setup state the app is deliberately parked waiting on the
-    # user, so the row says `setup` (the same word the band shows) rather than
-    # `connecting…`, which would claim a session is being awaited when none is
-    # (D1). Only outside setup is `connecting…` the truth.
-    if info.model_label:
+    # With no model resolved yet the word depends on WHY there is no model —
+    # and a failed engage outranks a label the viewer never adopted. In the
+    # first-run setup state the app is deliberately parked waiting on the
+    # user, so the row says `setup` (the same word the band shows) rather
+    # than `connecting…`, which would claim a session is being awaited when
+    # none is (D1). After a FAILED foreground engage the same claim is wrong
+    # for the opposite reason — something was awaited and it ended — and the
+    # cold facade's `model_label` is the viewer's own provisional copy from
+    # local config, not state an owner confirmed, so it must not read as
+    # connected either: the row says `not connected` (see `MODEL_UNBOUND`)
+    # and so does the band. Only with nothing failed and nothing parked is
+    # `connecting…` the truth.
+    if info.unbound:
+        label = MODEL_UNBOUND
+    elif info.model_label:
         label = format_model_label(info.model_label, short=False, name=info.model_name)
     elif info.setup:
         label = MODEL_SETUP

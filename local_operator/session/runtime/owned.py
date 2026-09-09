@@ -890,6 +890,18 @@ class OwnedSessionHandle(SessionHandle):
         runtimes are not exempt either — a pristine stale runtime is the
         cheapest possible refresh.
 
+        Unsent viewer-side input is deliberately OUT of scope, and not by
+        oversight: a draft lives in the viewer's editor widget, in another
+        process this runtime cannot observe, and the viewer preserves it
+        across a refresh — a prompt whose bind fails under the rotation
+        restores its text unless delivery is positively known (the
+        ``_PROMPT_DELIVERED_ATTR`` seam in ``RemoteSession`` and the TUI's
+        fail-safe restore gate). Teaching this predicate about typed drafts
+        would need a viewer→runtime signal kept live-accurate, and a viewer
+        with any text in the composer would pin a stale runtime indefinitely
+        — the exact bug the no-hold rule exists to kill. Fix the consequence
+        (restore), never the schedule.
+
         Returns the REASON rather than a bool because the viewer paints a
         notice off the ``kept: <reason>`` answer and the log line names it.
         """
