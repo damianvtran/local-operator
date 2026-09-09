@@ -15,9 +15,19 @@ remove. So there are two properties here and they pull in opposite directions:
 * a source parked SHORTER than the window keeps its socket AND its presentation
   (the performance property that made the timed design worth building).
 
-The second is a regression guard in the strict sense: an implementation that
-simply drops the LRU clause passes every leak test in this file and fails that
-one.
+WHICH TEST CATCHES THE "just delete the LRU clause" MUTATION:
+``test_source_parked_past_the_window_is_releasable``, and only it. Running that
+mutation (replacing the clause at ``_sidebar_source_releasable`` with ``True``)
+fails exactly that test and leaves the other eight green — measured, review
+round 1 MINOR-3, not assumed. It is the one that asserts the ``"idle"`` refusal
+AND the ``"expired"`` release on the same source, so deleting the clause breaks
+the refusal half.
+
+``test_a_recently_parked_source_keeps_its_socket_and_presentation`` pins the
+TIME BOUND instead, and cannot catch that mutation: it parks 150 s into a 300 s
+window, so the sweep hits ``now - parked_at < deadline`` and skips the source
+before the predicate is consulted at all. Do not delete the first test on the
+belief that the second covers it — that trade loses the only guard there is.
 
 Assertions are STRUCTURAL — releasable booleans, map membership, dispose call
 counts — and the clock is injected, never slept on, per AGENTS.md
@@ -82,12 +92,18 @@ def app_with_clock(monkeypatch):
     return app, clock
 
 
-def _make_remote(app, session_id, clock, parked_for, *, history=4):
+def _make_remote(app, session_id, clock, parked_for, *, history=4, poison=False):
     """Build a parked source whose session passes the RemoteSession check.
 
     A real subclass rather than a mock: the predicate's first clause is an
     ``isinstance(..., RemoteSession)`` test, so a duck-typed stand-in would make
     every assertion here vacuously true.
+
+    ``poison`` makes ``frontend_state`` raise the way the real property does
+    before its store syncs (``remote.py``), which is the reachable way a probe
+    can throw — the predicate reads it through ``retained_for_auto_work``.
+    Declared on the class rather than assigned afterwards so the raise is part
+    of the type, as it is in production.
     """
     from local_operator.session.remote import RemoteSession
 
@@ -107,6 +123,12 @@ def _make_remote(app, session_id, clock, parked_for, *, history=4):
         @property
         def history_message_count(self) -> int:
             return history
+
+        @property
+        def frontend_state(self):
+            if poison:
+                raise RuntimeError("frontend state has not synchronized")
+            return super().frontend_state
 
         async def dispose(self) -> None:
             self.disposed += 1
@@ -137,8 +159,16 @@ def test_source_parked_past_the_window_is_releasable(app_with_clock):
 def test_a_recently_parked_source_keeps_its_socket_and_presentation(app_with_clock):
     """REGRESSION GUARD: the performance property the timed design protects.
 
-    An implementation that just deletes the LRU clause passes every other test
-    in this file and fails this one, which is the entire point of it.
+    This pins THE TIME BOUND ITSELF — that a sub-window source is skipped on
+    the clock, keeping both its socket and its presentation, which is the whole
+    reason the fix is a deadline rather than a deletion of the LRU clause.
+
+    It does NOT catch the "just delete the LRU clause" mutation, and an earlier
+    version of this docstring wrongly claimed it did (review round 1 MINOR-3).
+    It cannot: parking at half the window means the sweep returns on
+    ``now - parked_at < deadline`` before the predicate is ever consulted.
+    ``test_source_parked_past_the_window_is_releasable`` is the test that fails
+    under that mutation.
     """
     app, clock = app_with_clock
     presentation = object()
@@ -271,3 +301,122 @@ def test_the_sweep_never_raises_into_the_timer(app_with_clock, monkeypatch):
 
     clock.advance(app_module.SIDEBAR_IDLE_RELEASE_S + 1)
     app._sweep_idle_sidebar_sources()  # must not raise
+
+
+def test_one_raising_source_does_not_starve_the_healthy_ones_behind_it(app_with_clock):
+    """PER-SOURCE fail-closed, not per-tick — the difference is permanent leak.
+
+    `_sidebar_sources` iterates in insertion order, so a `try` at loop scope
+    abandons the same suffix of the map on EVERY tick, not just this one. The
+    sweep is the only reaper, so a single bad probe ordered first would restore
+    the original leak for every source behind it, forever (review round 1
+    MINOR-1: 21 consecutive ticks released 0 of 3 healthy sources).
+
+    The raise is planted on `frontend_state`, which is the reachable shape:
+    `retained_for_auto_work` reads it via `getattr` BEFORE the predicate's
+    `isinstance(..., RemoteSession)` guard, and `getattr` does not swallow an
+    exception raised by a property — only a missing attribute.
+    """
+    app, clock = app_with_clock
+    bad = _make_remote(app, "poisoned", clock, 0.0, poison=True)
+    # PRECONDITION: the probe really does raise, so the test cannot pass
+    # because nothing ever threw.
+    with pytest.raises(RuntimeError):
+        _ = bad.retained_for_auto_work
+    healthy = [_make_remote(app, f"healthy{index}", clock, 0.0) for index in range(3)]
+    # PRECONDITION: the bad source really is first, so a pass cannot come from
+    # the raiser happening to sort last.
+    assert list(app._sidebar_sources) == ["poisoned", "healthy0", "healthy1", "healthy2"]
+    released = []
+    app.run_worker = lambda coro, **kw: released.append(coro) or coro.close()
+
+    clock.advance(app_module.SIDEBAR_IDLE_RELEASE_S + 1)
+    app._sweep_idle_sidebar_sources()  # must not raise
+
+    assert len(released) == len(healthy), (
+        "a source whose probe raises must cost only itself; every healthy "
+        "source ordered after it still has to be released"
+    )
+    assert app._sidebar_sources.get("poisoned") is bad, "a failed probe is a KEEP"
+
+
+def test_the_runtime_retire_offer_is_bounded(monkeypatch):
+    """A wedged runtime must not hold the closing socket for `ACK_TIMEOUT_S`.
+
+    The offer crosses the socket and `dispose()` closes that socket, so the
+    caller cannot proceed until it answers. Unbounded, a sidebar close would
+    wait 15 s per source against a runtime that never replies. A timeout is
+    just another "kept": the runtime's residency drain collects it.
+
+    Deliberately NOT on the `app_with_clock` fixture: that fixture freezes
+    `time.monotonic`, which is the clock the asyncio event loop schedules
+    timeouts on, so a real `wait_for` inside it can never fire. This one needs
+    a real loop, so it takes a bare instance instead of the injected clock.
+    """
+    import asyncio
+
+    # PRECONDITION: 3 s is the number, matching `mobile/daemon.py`'s bound on
+    # the identical call. Compressed below only so the test costs milliseconds
+    # instead of the production bound.
+    assert app_module.RETIRE_OFFER_TIMEOUT_S == 3.0
+    monkeypatch.setattr(app_module, "RETIRE_OFFER_TIMEOUT_S", 0.05)
+
+    # No Textual app is booted: the method touches nothing but its argument,
+    # and booting one would drag the whole harness into a timing assertion.
+    app = OperatorApp.__new__(OperatorApp)
+    started: list[bool] = []
+
+    async def _wedged() -> str:
+        started.append(True)
+        await asyncio.sleep(300)  # a runtime that never answers
+        raise AssertionError("unreachable: the bound must fire first")
+
+    session = Mock()
+    session.retire_if_unused = _wedged
+
+    async def _drive() -> float:
+        loop = asyncio.get_running_loop()
+        begin = loop.time()
+        # The OUTER bound is the test's own failure mode, not the assertion:
+        # without the bound under test this await never returns, and a hang is
+        # a far worse test failure than a raise. `CancelledError` is a
+        # `BaseException`, so the method's `except Exception` cannot eat it.
+        await asyncio.wait_for(OperatorApp._retire_unused_runtime(app, session), timeout=2.0)
+        return loop.time() - begin
+
+    # Must RETURN (a timeout is a "kept"), never raise into teardown.
+    elapsed = asyncio.run(_drive())
+
+    assert started, "the offer must actually have been made"
+    assert elapsed < 1.0, (
+        "an unanswered offer must be abandoned on the bound, not held for the "
+        f"AttachClient default of 15 s (took {elapsed:.2f}s)"
+    )
+
+
+def test_the_sweep_re_reads_the_window_constant_every_tick(app_with_clock, monkeypatch):
+    """The only way to reach this path in a test is patching the constant.
+
+    `SIDEBAR_IDLE_RELEASE_S` is deliberately not an env knob (see its
+    docstring), so every test here — and the two e2e repros — compress the
+    window by setting the module attribute and relying on the sweep reading it
+    per tick. Hoisting it into a local or binding it at `on_mount` would leave
+    all of them green against a five-minute wait they never reach, and the
+    coverage would evaporate silently. QA round 1, Q1: this pins it.
+    """
+    app, clock = app_with_clock
+    _make_remote(app, "aged", clock, 0.0)
+    released = []
+    app.run_worker = lambda coro, **kw: released.append(coro) or coro.close()
+
+    clock.advance(10.0)
+    monkeypatch.setattr(app_module, "SIDEBAR_IDLE_RELEASE_S", 1_000_000.0)
+    app._sweep_idle_sidebar_sources()
+    assert not released, "a window widened after startup must be honoured"
+
+    monkeypatch.setattr(app_module, "SIDEBAR_IDLE_RELEASE_S", 1.0)
+    app._sweep_idle_sidebar_sources()
+    assert released, (
+        "a window narrowed after startup must be honoured too: the sweep reads "
+        "the module attribute per tick, which is what makes the e2e repros real"
+    )
