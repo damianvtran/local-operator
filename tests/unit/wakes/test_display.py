@@ -19,6 +19,8 @@ from local_operator.wakes.display import format_wake_time
 
 @pytest.fixture(autouse=True)
 def local_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from local_operator.config_watch import _reset_for_tests
+
     if not hasattr(time, "tzset"):
         pytest.skip("Changing the process timezone requires tzset")
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -28,10 +30,19 @@ def local_clock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             monkeypatch.delenv(key)
     monkeypatch.setenv("TZ", "America/Los_Angeles")
     time.tzset()
+    # Drop any watcher registered against a PREVIOUS test's config dir. The
+    # registry in ``config_watch`` is a process-global keyed by path, and the
+    # settings cache is filled from whichever watcher answers for the current
+    # ``config_dir()``. Without this reset a watcher built by an earlier
+    # parametrization keeps answering after its ``tmp_path`` is gone, so this
+    # test reads the previous case's persisted ``display.time_format`` and the
+    # 12h/24h assertion fails depending on execution order.
+    _reset_for_tests()
     settings_reload()
     yield
     monkeypatch.undo()
     time.tzset()
+    _reset_for_tests()
     settings_reload()
 
 
