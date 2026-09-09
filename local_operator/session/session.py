@@ -596,6 +596,27 @@ def _callable_accepts_one_positional(func: Callable[..., Any]) -> tuple[bool, bo
     return False, True
 
 
+def _injected_user_message(text: str, entry_id: str) -> Message:
+    """A user-role message minted from a harness aside, stamped as such.
+
+    The stamp is compaction's provenance signal. Once this function has run,
+    an injected delivery and an operator prompt are both a plain
+    ``Message(role="user")`` and no structural test can separate them — which
+    is precisely how a preserved-turn block on a real session came to be 160
+    injections against 11 genuine turns (see
+    :data:`~local_operator.compaction.cutpoint.RENDERED_INJECTION_KEY`).
+
+    It rides ``provider_payload``, which the wire builders never ship as
+    content, so this is invisible to the model and to every provider. The
+    import is local because ``session`` imports compaction lazily throughout.
+    """
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
+    message.provider_payload = {RENDERED_INJECTION_KEY: True}
+    return message
+
+
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     """Default transcript→LLM rendering.
 
@@ -614,6 +635,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     notice, the picker's parked row). It must never be dropped: an expiry that
     reads as a plain denial makes the next turn re-plan around a decision
     nobody made.
+
+    Every user-role message minted HERE from a ``CustomMessage`` is stamped
+    with :data:`RENDERED_INJECTION_KEY` (see :func:`_injected_user_message`).
+    That stamp is compaction's only reliable way to tell a harness injection
+    from an operator prompt once both are plain user messages, which is what
+    they both are the moment this function has run.
     """
     out: list[Message] = []
     # Only the NEWEST todo reminder survives the render. An earlier one asserts
@@ -659,13 +686,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # FAILURE reaches the model as a ``session_incident`` user turn, so
             # the recovery that supersedes it has to arrive on the same surface
             # or the model keeps believing the older, more emphatic claim.
-            out.append(
-                Message(
-                    role="user",
-                    content=[TextContent(text=message.details.get("text", ""))],
-                    id=message.id,
-                )
-            )
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
             # difference is the whole reason the row exists: without it the
@@ -679,18 +700,13 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             description = str(details.get("description") or "").strip()
             subject = f"{tool} ({description})" if description else tool
             out.append(
-                Message(
-                    role="user",
-                    content=[
-                        TextContent(
-                            text=(
-                                f"[system] The approval request for {subject} expired with "
-                                "nobody attached to this session and was denied automatically. "
-                                "This was a timeout, not a decision by the user."
-                            )
-                        )
-                    ],
-                    id=message.id,
+                _injected_user_message(
+                    (
+                        f"[system] The approval request for {subject} expired with "
+                        "nobody attached to this session and was denied automatically. "
+                        "This was a timeout, not a decision by the user."
+                    ),
+                    message.id,
                 )
             )
         elif message.custom_type in (
@@ -708,13 +724,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # cross-session transcript row but the model never does. Unlisted
             # custom types are dropped (bookkeeping), which is precisely the
             # trap a new aside type falls into.
-            out.append(
-                Message(
-                    role="user",
-                    content=[TextContent(text=message.details.get("text", ""))],
-                    id=message.id,
-                )
-            )
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == TODO_REMINDER_MESSAGE_TYPE and index == newest_reminder:
             # The continuation guardrail's nudge (``Session._todo_continuation``)
             # reaches the model as a user turn or it does nothing at all: this
@@ -8657,15 +8667,20 @@ class Session:
                 else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
             )
             # STRUCTURAL guarantee that a user turn is never paraphrased away.
-            # ``to_summarize`` is the RENDERED history, where a prior marker and
-            # every injected user-role delivery (wake/hub/incident/todo) already
-            # look like a plain user Message; the genuine prompts are the
-            # ``Message(role="user")`` entries in the LIVE context (injected
-            # content is a CustomMessage there), so their ids are the filter
-            # that keeps a previous summary from being carried forward verbatim.
             # The summarizer still ran over ``to_summarize`` above — the summary
             # may paraphrase the user, and that is fine BECAUSE the verbatim
             # copy rides alongside it and is what the model reads.
+            #
+            # The id set is a NARROWING filter, no longer the discriminator.
+            # It used to be justified by "an injected delivery is a
+            # CustomMessage in the live context, so it cannot be in this set" —
+            # which compaction's own output falsifies from the second pass on:
+            # the commit below rebuilds the context from the RENDERED history,
+            # so every injection in the kept window is a plain user Message
+            # here and therefore IS in the set. Provenance is now carried by
+            # the marker ``_injected_user_message`` stamps at render time and
+            # read by ``extract_preserved_user_turns``; this set only adds
+            # "and it is still in the live context at all".
             genuine_user_ids = {
                 message.id
                 for message in self._context.messages
@@ -8681,6 +8696,21 @@ class Session:
             if callable(extract):
                 extracted: Any = extract(to_summarize, genuine_user_ids)
                 preserved_user_turns = list(extracted)
+            # Bound the block. Preserved turns are skipped by ``find_cut_point``
+            # (they are already-compacted content), so without a cap the block
+            # only ever grows: on session 2f95e374dd22 it ratcheted to 362,780
+            # tokens — 57% of a ~640k trigger — and every pass then reclaimed
+            # nothing and immediately re-fired. Filtering injections shrinks it
+            # but cannot bound it; N genuine turns still grow without limit.
+            # ``_advisor_floor_cap`` is reused rather than a new knob because
+            # this window is the same kind of quantity as the task floor it
+            # already bounds, and on the same local ruler.
+            cap: Any = getattr(compaction_api, "cap_preserved_user_turns", None)
+            preserved_turns_cap: int | None = None
+            if callable(cap):
+                preserved_turns_cap = self._advisor_floor_cap(plan.settings)
+                capped: Any = cap(preserved_user_turns, cap=preserved_turns_cap)
+                preserved_user_turns = list(capped)
             first_kept_entry_id = kept[0].id
             await self._transcript.append_compaction(
                 summary,
@@ -8688,6 +8718,10 @@ class Session:
                 plan.context_tokens,
                 preserve_data=preserve_data,
                 preserved_user_turns=preserved_user_turns,
+                # Recorded so REPLAY re-applies this pass's own bound instead
+                # of recomputing one it has no settings for — the live/resume
+                # byte-equivalence depends on both sides using this figure.
+                preserved_turns_cap=preserved_turns_cap,
             )
             marker = build_compaction_marker(summary, preserve_data)
             # Rebuild the verbatim user turns as real user messages, reusing

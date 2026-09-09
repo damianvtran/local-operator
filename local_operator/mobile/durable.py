@@ -393,7 +393,20 @@ def _compaction_prefix(compaction: TranscriptEntry) -> list[AgentMessage]:
     ]
     preserved_turns = compaction.payload.get("preserved_user_turns") or ()
     if preserved_turns:
-        from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+        from local_operator.compaction.cutpoint import (
+            DEFAULT_PRESERVED_TURN_CAP,
+            PRESERVED_USER_TURN_KEY,
+            cap_preserved_user_turns,
+        )
+
+        # Mirrors ``build_llm_history``'s cap exactly, for the same reason the
+        # rest of this function mirrors it: the two must agree message for
+        # message or the mobile fold and a resumed session disagree about what
+        # the context contains. See the read-path note there.
+        preserved_turns = cap_preserved_user_turns(
+            [turn for turn in preserved_turns if isinstance(turn, dict)],
+            cap=int(compaction.payload.get("preserved_turns_cap") or DEFAULT_PRESERVED_TURN_CAP),
+        )
 
         for turn in preserved_turns:
             if not isinstance(turn, dict):

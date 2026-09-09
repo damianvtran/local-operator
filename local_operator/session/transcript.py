@@ -626,6 +626,7 @@ class Transcript:
         tokens_before: int,
         preserve_data: dict[str, Any] | None = None,
         preserved_user_turns: list[dict[str, str]] | None = None,
+        preserved_turns_cap: int | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -645,6 +646,15 @@ class Transcript:
         contiguous-suffix replay (``first_kept_entry_id`` onward) alone would
         drop these turns on the next resume, since they sit BEFORE the cut in
         the transcript, so they have to ride the marker payload instead.
+
+        ``preserved_turns_cap`` records the token bound the WRITING pass
+        applied to that block. Replay re-applies the same figure rather than
+        recomputing one, which is what keeps a resumed context byte-identical
+        to the live context it resumed from: the cap depends on the session's
+        ``keep_recent_tokens`` and model window, neither of which replay can
+        see. A record written before this field existed replays under
+        ``DEFAULT_PRESERVED_TURN_CAP`` instead, so an already-poisoned session
+        heals on resume rather than carrying its unbounded block forward.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -655,6 +665,8 @@ class Transcript:
             payload["preserve_data"] = preserve_data
         if preserved_user_turns:
             payload["preserved_user_turns"] = preserved_user_turns
+            if preserved_turns_cap is not None:
+                payload["preserved_turns_cap"] = preserved_turns_cap
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(self, custom_type: str, details: dict[str, Any]) -> TranscriptEntry:
@@ -1330,7 +1342,33 @@ def replay_entries(
             # dependency (the session imports compaction lazily for the same
             # reason). The flag marks these as already-compacted content so a
             # post-resume pass does not re-count them as fresh history.
-            from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+            from local_operator.compaction.cutpoint import (
+                DEFAULT_PRESERVED_TURN_CAP,
+                PRESERVED_USER_TURN_KEY,
+                cap_preserved_user_turns,
+            )
+
+            # The READ path caps too, or a session already poisoned on disk
+            # stays poisoned across a restart no matter what the write path
+            # does — the stored block is re-injected verbatim, so the fix has
+            # to reach the replay as well. Newer records carry the cap their
+            # own pass used and so replay unchanged (the live/resume
+            # byte-equivalence other tests pin); a legacy record has no such
+            # figure and is healed under the shipped default.
+            #
+            # Only the CAP is re-applied here, not the provenance filter:
+            # a stored turn has no rendered message to read a marker off, and
+            # re-deriving provenance from the text would be exactly the
+            # shape-based guess this fix removed. Injections already written
+            # into old records are evicted by the cap (oldest-first, and they
+            # are the oldest), and no NEW ones can be written now that the
+            # write path filters them.
+            preserved_turns = cap_preserved_user_turns(
+                [turn for turn in preserved_turns if isinstance(turn, dict)],
+                cap=int(
+                    compaction.payload.get("preserved_turns_cap") or DEFAULT_PRESERVED_TURN_CAP
+                ),
+            )
 
             for turn in preserved_turns:
                 if not isinstance(turn, dict):

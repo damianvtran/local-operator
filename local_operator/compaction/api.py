@@ -37,9 +37,14 @@ from .advisor import (
     validate_hint,
 )
 from .cutpoint import (
+    DEFAULT_PRESERVED_TURN_CAP,
+    PRESERVED_TURN_ELISION_ID_PREFIX,
     PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+    cap_preserved_user_turns,
     extract_preserved_user_turns,
     find_cut_point,
+    is_rendered_injection,
     prepare_partitions,
     task_boundary_floor,
 )
@@ -93,7 +98,12 @@ __all__ = [
     "IMAGE_TOKEN_ESTIMATE",
     "MAX_SUMMARY_TOKENS",
     "MIN_PRUNE_TOKENS",
+    "DEFAULT_PRESERVED_TURN_CAP",
+    "PRESERVED_TURN_ELISION_ID_PREFIX",
     "PRESERVED_USER_TURN_KEY",
+    "RENDERED_INJECTION_KEY",
+    "cap_preserved_user_turns",
+    "is_rendered_injection",
     "RECOVERY_BAND",
     "WIRE_RECOVERY_BAND",
     "DEFAULT_WIRE_BYTES_BUDGET",
