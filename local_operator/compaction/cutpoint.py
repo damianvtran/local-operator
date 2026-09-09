@@ -22,7 +22,9 @@ the moment the context was growing fastest. See :func:`_snap_to_valid_cut`.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Container, Sequence
 
 from local_operator.harness.types import AgentMessage, CustomMessage, Message
 
@@ -33,6 +35,9 @@ __all__ = [
     "prepare_partitions",
     "extract_preserved_user_turns",
     "task_boundary_floor",
+    "cap_preserved_user_turns",
+    "CappedPreservedTurns",
+    "elision_notice_text",
 ]
 
 
@@ -47,6 +52,102 @@ def _is_compaction_marker(message: AgentMessage) -> bool:
 #: the transcript, so it survives a resume the same way the ``pruned`` flag
 #: does.
 PRESERVED_USER_TURN_KEY = "compaction_preserved"
+
+#: One entry of a preserved block: ``{"id", "text"}`` for an operator turn, plus
+#: the two int counts on an elision notice. ``int`` is in the value type because
+#: those counts must travel as NUMBERS beside the text rather than as digits
+#: inside it — a count embedded in content is a count something re-parses and
+#: re-adds, which is how an earlier revision turned 6 into 7,167.
+PreservedTurn = dict[str, "str | int"]
+
+#: Marks a user-role ``Message`` that the RENDERER minted from a harness
+#: injection (``session_state``, ``hub_message``, ``peer_message``,
+#: ``session_incident``, a wake/job delivery, …) rather than from something the
+#: operator typed. Set at render time by ``_default_convert_to_llm``; rides
+#: ``provider_payload`` exactly as :data:`PRESERVED_USER_TURN_KEY` does, which
+#: the wire builders never ship as content.
+#:
+#: This exists because provenance CANNOT be recovered from the message's shape.
+#: The old discriminator asked "is this id one of the user Messages in the live
+#: context?", justified by the claim that an injected delivery is a
+#: ``CustomMessage`` there. That claim holds only for the FIRST pass: a pass
+#: commits ``[marker, *preserved, *kept]`` where ``kept`` comes from the
+#: RENDERED history, so from the second pass onward every injection inside the
+#: kept window is already a plain ``Message(role="user")`` in the live context
+#: — it therefore passed the very test written to exclude it. Measured on the
+#: session that motivated this (2f95e374dd22): 160 of 171 preserved turns were
+#: injections, 79 of them ``session_state`` repeats of the same system/team
+#: brief, and the block reached ~362,780 tokens against a ~640k trigger.
+#: A positive marker set at the point of minting is the only test that stays
+#: true across generations, because it records where the message CAME FROM
+#: instead of inferring it from what it currently looks like.
+RENDERED_INJECTION_KEY = "harness_injected"
+
+#: Id of the synthetic turn that reports an elision. Stable rather than
+#: count-suffixed: the count is carried STRUCTURALLY beside the block (see
+#: :class:`CappedPreservedTurns` and the ``preserved_turns_dropped`` payload
+#: field), never parsed back out of a string.
+#:
+#: **This turn must never be JOURNALLED.** It does live in
+#: ``Session._context.messages`` — that is how the model reads it, and how a
+#: mid-turn pass carries its counts forward — but it is synthesized on both
+#: paths and so a stored copy is a duplicate by construction. An earlier
+#: revision asserted here that "no entry was ever written for it". That was
+#: false in the assembled system: ``_is_persistable_message`` returned True for
+#: every plain ``Message``, so the next turn boundary journalled it AFTER
+#: ``first_kept_entry_id`` — inside the replayed suffix — while
+#: ``replay_entries`` re-injected it from the marker payload as well. Live and
+#: resumed contexts diverged (2 rows vs 3) whenever the cap bound, and because
+#: the journalled copy carried ``compaction_preserved`` it was skipped by
+#: ``find_cut_point`` and folded into the NEXT count: measured doubling every
+#: resume, 6 -> 7,167 over ten cycles, a 231x overstatement in the one message
+#: whose job is to tell the model the truth about what it lost.
+#:
+#: Enforced by ``_is_persistable_message`` (which excludes this id) and pinned
+#: by a test that greps the raw journal, rather than by this comment.
+#:
+#: So the notice is synthesized at RENDER time on both paths from the counts
+#: below, and is excluded from persistence by id (see
+#: ``_is_persistable_message``). Two independent guards, because one of them
+#: failing silently is what produced the defect.
+PRESERVED_TURN_ELISION_ID = "compaction-elision"
+
+#: Retained so a transcript written by the previous revision still parses: its
+#: notices were journalled with ``compaction-elision-<count>`` ids, and the read
+#: path has to recognise and drop them rather than replay them as user turns.
+PRESERVED_TURN_ELISION_ID_PREFIX = "compaction-elision"
+
+#: The elision counts a RENDERED notice carries on ``provider_payload``, so a
+#: READ-path heal's drops survive into the next write pass.
+#:
+#: They exist because the heal is the one producer whose numbers are in no
+#: payload: it acts on records written before the fields existed, computes the
+#: drops at render time, and the next pass seeds its carry-forward from the
+#: PREVIOUS marker — which has nothing. Measured before these keys: a resume
+#: reporting 160 shed injections was followed by a pass reporting none.
+#:
+#: Ints on the bookkeeping channel, never digits inside the notice text. The
+#: distinction is load-bearing rather than stylistic: a count that lives in
+#: content is a count something re-reads and re-adds, which is how an earlier
+#: revision turned 6 into 7,167 across ten resumes.
+ELISION_GENUINE_COUNT_KEY = "compaction_elision_genuine"
+ELISION_INJECTION_COUNT_KEY = "compaction_elision_injections"
+
+#: Preserved-block cap applied on the READ path to a record written BEFORE the
+#: cap existed. Records written since carry the cap the pass actually used
+#: (``preserved_turns_cap`` in the compaction payload), and replay reuses that
+#: so a resumed context is byte-identical to the live one it resumed from.
+#: Only a legacy record has no such figure, and it needs SOME bound or the
+#: sessions already poisoned on disk stay poisoned across a restart.
+#:
+#: 100,000 is what ``_advisor_floor_cap`` resolves to on the shipped defaults
+#: (``keep_recent_tokens`` 20,000 x ``_TASK_FLOOR_KEEP_MULTIPLE`` 5) above the
+#: ~250k window crossover. Deliberately the LOOSER of the two terms rather than
+#: a guess at the session's model: replay does not know the model's context
+#: window, and healing a legacy record too aggressively would drop constraints
+#: the live session still holds. Erring wide costs headroom on one resume; the
+#: next pass then re-caps with the real figure.
+DEFAULT_PRESERVED_TURN_CAP = 100_000
 
 
 def _is_preserved_user_turn(message: AgentMessage) -> bool:
@@ -63,6 +164,24 @@ def _is_preserved_user_turn(message: AgentMessage) -> bool:
         isinstance(message, Message)
         and bool(message.provider_payload)
         and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
+    )
+
+
+def is_rendered_injection(message: AgentMessage) -> bool:
+    """True for a user-role message the RENDERER minted from a harness aside.
+
+    The provenance test that replaced "is its id in the live context?" — see
+    :data:`RENDERED_INJECTION_KEY` for why that older test was not merely weak
+    but actively self-defeating (compaction's own output defeated it).
+
+    Used on both the write path (``Session._finish_compaction``) and the read
+    path (``Transcript.build_llm_history``), so a live and a resumed context
+    filter identically and stay byte-for-byte equal.
+    """
+    return (
+        isinstance(message, Message)
+        and bool(message.provider_payload)
+        and bool(message.provider_payload.get(RENDERED_INJECTION_KEY))
     )
 
 
@@ -333,10 +452,20 @@ def task_boundary_floor(
     ``genuine_user_ids`` is the same discriminator
     :func:`extract_preserved_user_turns` takes and for the same reason: in the
     RENDERED history a compaction marker and every injected user-role delivery
-    (wake, hub, session-incident, todo reminder) is structurally a
+    (session-state, hub, peer, incident, wake, todo reminder) is structurally a
     ``Message(role="user")``, so counting from the last of THOSE would measure
     from an injection rather than from the request the user actually made.
     Omitted (unit tests over raw lists), every user ``Message`` qualifies.
+
+    That id set is NOT sufficient on its own, and this docstring previously
+    claimed it was (\"injected content is a ``CustomMessage`` in the live
+    context\"). From the second pass onward it is not: compaction rebuilds the
+    context from the RENDERED history, so injections inside the kept window are
+    plain user ``Message`` entries there and pass the test. The floor therefore
+    also skips anything :func:`is_rendered_injection` recognises, which is the
+    provenance marker the renderer stamps at mint time. Without it a repeated
+    ``session_state`` delivery re-anchors the floor to itself on every pass and
+    the preserve window grows for the same reason the preserved block did.
 
     Returns ``0`` when there is no genuine user turn at all, which leaves the
     caller's ``keep_recent_tokens`` untouched.
@@ -354,6 +483,12 @@ def task_boundary_floor(
         # every subsequent pass to the same ancient request and grow the floor
         # without bound.
         if _is_preserved_user_turn(message):
+            continue
+        # A harness injection is not the start of the live task. The id set
+        # below cannot catch it after the first pass (see the docstring), so
+        # provenance is checked here too — otherwise a session_state delivery
+        # arriving every turn re-anchors the floor to itself forever.
+        if is_rendered_injection(message):
             continue
         if genuine_user_ids is not None and message.id not in genuine_user_ids:
             continue
@@ -381,7 +516,7 @@ def prepare_partitions(
 def extract_preserved_user_turns(
     to_summarize: Sequence[AgentMessage],
     genuine_user_ids: set[str] | None = None,
-) -> list[dict[str, str]]:
+) -> list[Mapping[str, object]]:
     """Verbatim ``{"id", "text"}`` for every USER turn in the summarized block.
 
     The structural half of "never summarize a user turn": a summarizer
@@ -392,25 +527,52 @@ def extract_preserved_user_turns(
     both the live and the replay path (see ``Session._run_compaction`` and
     ``Transcript.build_llm_history``).
 
-    ``genuine_user_ids`` is the crucial discriminator in production. The block
+    Provenance, not shape, decides what counts as user-authored. The block
     passed here is the RENDERED history, where a prior compaction marker and
-    every injected user-role delivery (wake, hub, session-incident, todo
-    reminder) have ALREADY been rendered from a ``CustomMessage`` into a plain
-    ``Message(role="user")`` — structurally indistinguishable from a real
-    prompt. Preserving those would carry a previous summary forward verbatim
-    and nest summaries across generations. The caller therefore passes the ids
-    of the genuine user turns (the ``Message(role="user")`` entries in the LIVE
-    context, which injected content is a ``CustomMessage`` in), and only those
-    ids are lifted. When it is omitted (unit tests over raw message lists with
-    no rendered markers), every user ``Message`` qualifies.
+    every injected user-role delivery (session-state, hub, peer, incident,
+    wake, job result, todo reminder) has ALREADY been rendered from a
+    ``CustomMessage`` into a plain ``Message(role="user")`` — structurally
+    indistinguishable from a real prompt. :func:`is_rendered_injection` reads
+    the marker the renderer stamps at mint time and excludes them.
+
+    **The id-set test alone is not sufficient, and this is the bug that took
+    a session down.** ``genuine_user_ids`` was previously documented as
+    complete because injected content "is a ``CustomMessage`` in the LIVE
+    context". That is true only before the first pass: a pass commits
+    ``[marker, *preserved, *kept]`` from the RENDERED history, so on pass two
+    every injection in the kept window is a plain user ``Message`` in the live
+    context and is therefore IN the id set. See :data:`RENDERED_INJECTION_KEY`
+    for the measurements. ``genuine_user_ids`` is retained as a second,
+    narrowing filter (it still excludes anything not in the live context at
+    all), but the provenance marker is what actually carries the guarantee.
+
+    Hub, peer and job-result deliveries are excluded along with the rest, and
+    deliberately: they are messages from SUBAGENTS and PEER SESSIONS, not
+    constraints the operator authored. The guarantee this function exists to
+    provide is "the user's own words are never paraphrased away" — a subagent's
+    status report is ordinary history the summarizer is entitled to compress,
+    and on the motivating session those three types alone accounted for 80 of
+    171 preserved turns. Preserving them buys no protection and costs the
+    headroom that makes a pass useful.
 
     Empty-text turns (a bare pasted screenshot) carry no constraint to protect
     and are skipped so the preserved block does not accrue blank messages
     every pass.
     """
-    preserved: list[dict[str, str]] = []
+    preserved: list[Mapping[str, object]] = []
     for message in to_summarize:
         if not isinstance(message, Message) or message.role != "user":
+            continue
+        if is_rendered_injection(message):
+            continue
+        # The elision NOTICE is compaction's own output, not user text. It has
+        # to be excluded here rather than only stripped later by
+        # ``cap_preserved_user_turns``: extracting it and stripping it discards
+        # the counts it carries, which is what silently retracted a READ-path
+        # heal's figure (a resume reporting 160 shed injections followed by a
+        # pass reporting none). The caller reads those counts off the message
+        # via ``elision_counts_of`` and seeds the next block with them.
+        if message.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX):
             continue
         if genuine_user_ids is not None and message.id not in genuine_user_ids:
             continue
@@ -419,3 +581,298 @@ def extract_preserved_user_turns(
             continue
         preserved.append({"id": message.id, "text": text})
     return preserved
+
+
+@dataclass(frozen=True)
+class CappedPreservedTurns:
+    """The preserved block after bounding, with the elision counted separately.
+
+    The counts are STRUCTURAL rather than encoded into a synthetic turn's id.
+    An earlier revision carried them in the id string, which the caller then
+    minted as a live ``Message``; the persist path journalled that message and
+    replay re-injected it from the payload as well, so the count was parsed
+    back out of a turn that existed twice and each pass added it to the next.
+    Measured: the reported figure doubled on every resume (6 -> 7,167 over ten
+    cycles, 231x overstatement). A number that must stay true across a
+    round trip belongs in a field, not in a string that is also content.
+
+    ``genuine_dropped`` is tracked apart from ``injections_dropped`` because
+    the two mean opposite things to the operator. Shedding a harness injection
+    reclaims context and loses nothing they wrote. Evicting a genuine turn
+    drops something they DID write, and the notice says so in as many words —
+    they should never have to infer that from a total.
+    """
+
+    turns: list[Mapping[str, object]]
+    genuine_dropped: int = 0
+    injections_dropped: int = 0
+
+    @property
+    def total_dropped(self) -> int:
+        return self.genuine_dropped + self.injections_dropped
+
+
+def elision_notice_text(genuine_dropped: int, injections_dropped: int) -> str | None:
+    """The notice rendered in place of an elided prefix, or ``None``.
+
+    Synthesized at RENDER time on both the live and the replay path, from the
+    counts, so it is never itself a stored turn that can be re-read as history.
+
+    The two causes are phrased differently on purpose. A shed injection is
+    bookkeeping the model does not need to act on; an evicted GENUINE turn is
+    the operator's own words leaving the context, and the whole point of a
+    visible elision is that the model asks rather than concluding the
+    instruction was never given.
+
+    **The counts must be CUMULATIVE, and once told the fact may not be
+    retracted.** Every producer of these numbers has to carry forward what
+    earlier passes reported: the block is re-capped on every pass AND on every
+    replay, and a notice that vanished the first time a block happened to fit
+    would silently retract a fact the model had already been told. This
+    paragraph was deleted in the same commit that broke the invariant it
+    describes — a resume reporting 160 shed injections was followed by a pass
+    reporting nothing — so it is restored here, next to the function every
+    producer calls, rather than beside any one of them. The carriers are the
+    ``preserved_turns_dropped``/``preserved_turns_shed`` payload fields for a
+    stored marker and :data:`ELISION_GENUINE_COUNT_KEY` /
+    :data:`ELISION_INJECTION_COUNT_KEY` for a rendered notice whose counts are
+    in no payload yet; :func:`elision_counts_of` reads the latter back.
+    """
+    if genuine_dropped <= 0 and injections_dropped <= 0:
+        return None
+    parts: list[str] = []
+    if genuine_dropped > 0:
+        parts.append(
+            f"{genuine_dropped} older user message(s) you wrote were dropped here to "
+            "bound the context. They are still in the session transcript but are no "
+            "longer in the model's context. If an earlier instruction seems to be "
+            "missing, ask rather than assuming it was never given."
+        )
+    if injections_dropped > 0:
+        parts.append(
+            f"{injections_dropped} harness-injected message(s) (session state, "
+            "subagent and peer deliveries) were also dropped; these were not "
+            "authored by the user."
+        )
+    return "[" + " ".join(parts) + "]"
+
+
+def replay_preserved_turns(
+    payload: dict[str, object],
+    injection_ids: Container[str] | None = None,
+) -> list[Mapping[str, object]]:
+    """The preserved block a REPLAY should inject, from a compaction payload.
+
+    One function for what were three hand-kept copies (``build_llm_history``,
+    ``mobile.durable._compaction_prefix``, and the fold's rebuild). The review
+    called that out: logic that "must agree message for message" and is
+    duplicated is where a fix lands in two places out of three. The notice is
+    synthesized here too, so no caller can accidentally reintroduce it as a
+    stored turn.
+
+    ``injection_ids`` is resolved by the caller against the JOURNAL — a stored
+    turn has no rendered message to read a provenance stamp off, but it does
+    have an id, and the entry that id names records its ``custom_type``. That
+    is a provenance lookup, not the shape-based guess the write path rejects.
+
+    Records written before the cap existed carry no ``preserved_turns_cap``;
+    they are healed under :data:`DEFAULT_PRESERVED_TURN_CAP`. Records written
+    since replay under the figure their own pass used, which is what keeps a
+    resumed context byte-identical to the live one it resumed from.
+
+    **The notice this returns carries its own counts.** A READ-path heal
+    computes drops that exist in no payload — the record it healed predates the
+    fields — so the numbers have to travel with the rendered notice or the next
+    write pass, which seeds its carry-forward from the previous marker, silently
+    RETRACTS them. Measured before this was carried: a resume reporting 160 shed
+    injections was followed by a pass reporting nothing. That is the same defect
+    as the notice-doubling one with the sign flipped to under-reporting, and it
+    is why :func:`elision_counts_of` exists rather than the count being
+    re-parsed out of the notice text (parsing a number back out of content is
+    exactly what produced the doubling).
+    """
+    stored = payload.get("preserved_user_turns") or ()
+    if not isinstance(stored, (list, tuple)):
+        stored = ()
+    turns = [turn for turn in stored if isinstance(turn, dict)]
+    raw_cap = payload.get("preserved_turns_cap")
+    cap = int(raw_cap) if isinstance(raw_cap, int) else DEFAULT_PRESERVED_TURN_CAP
+    capped = cap_preserved_user_turns(
+        turns,
+        cap=cap,
+        already_dropped_genuine=_payload_int(payload, "preserved_turns_dropped"),
+        already_dropped_injections=_payload_int(payload, "preserved_turns_shed"),
+        injection_ids=injection_ids,
+    )
+    notice = elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
+    if notice is None:
+        return list(capped.turns)
+    return [
+        {
+            "id": PRESERVED_TURN_ELISION_ID,
+            "text": notice,
+            # Ints, deliberately, beside the text rather than inside it. The
+            # caller stamps these onto the rendered message's
+            # ``provider_payload`` so the write path can seed from the block it
+            # RECEIVED instead of only from the previous marker.
+            ELISION_GENUINE_COUNT_KEY: capped.genuine_dropped,
+            ELISION_INJECTION_COUNT_KEY: capped.injections_dropped,
+        },
+        *capped.turns,
+    ]
+
+
+def preserved_turn_payload(turn: Mapping[str, object]) -> dict[str, object]:
+    """The ``provider_payload`` a replayed preserved turn must carry.
+
+    One builder for the three render sites (``build_llm_history``, the mobile
+    fold, and the live commit) so the bookkeeping cannot drift between them —
+    the same argument that collapsed the read-path cap into one helper. Every
+    turn is flagged already-compacted; a notice additionally carries its counts,
+    which is what lets a READ-path heal's drops reach the next write pass.
+    """
+    payload: dict[str, object] = {PRESERVED_USER_TURN_KEY: True}
+    for key in (ELISION_GENUINE_COUNT_KEY, ELISION_INJECTION_COUNT_KEY):
+        value = turn.get(key)
+        if isinstance(value, int) and value > 0:
+            payload[key] = value
+    return payload
+
+
+def elision_counts_of(message: AgentMessage) -> tuple[int, int]:
+    """``(genuine_dropped, injections_dropped)`` a rendered notice carries.
+
+    ``(0, 0)`` for anything that is not an elision notice, so a caller can scan
+    a history unconditionally.
+
+    Read off ``provider_payload`` — the same harness-bookkeeping channel
+    :data:`PRESERVED_USER_TURN_KEY` uses, which the wire builders never ship as
+    content. Never parsed out of the notice text: a count that lives in content
+    is a count that gets re-counted, which is precisely how an earlier revision
+    inflated 6 to 7,167 across ten resumes.
+    """
+    if not isinstance(message, Message) or not message.provider_payload:
+        return 0, 0
+    payload = message.provider_payload
+    genuine = payload.get(ELISION_GENUINE_COUNT_KEY)
+    injections = payload.get(ELISION_INJECTION_COUNT_KEY)
+    return (
+        genuine if isinstance(genuine, int) and genuine > 0 else 0,
+        injections if isinstance(injections, int) and injections > 0 else 0,
+    )
+
+
+def _payload_int(payload: dict[str, object], key: str) -> int:
+    """A non-negative int from a compaction payload, or 0.
+
+    Lenient because the field is absent on every record written before it
+    existed, and a malformed one must degrade to "nothing carried forward"
+    rather than break a resume.
+    """
+    value = payload.get(key)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def cap_preserved_user_turns(
+    turns: Sequence[Mapping[str, object]],
+    *,
+    cap: int,
+    already_dropped_genuine: int = 0,
+    already_dropped_injections: int = 0,
+    injection_ids: Container[str] | None = None,
+) -> CappedPreservedTurns:
+    """Bound the preserved block to ``cap`` tokens, dropping OLDEST first.
+
+    Without a bound the block is a monotonic ratchet.
+    :func:`_is_preserved_user_turn` makes :func:`find_cut_point` skip turns a
+    prior pass preserved, so they are never re-summarized and never dropped:
+    each pass carries the whole previous block forward and appends to it.
+    Measured over the last eight passes of session 2f95e374dd22, carried-forward
+    turns went 166→167→168→168→169→170→171 with **zero** removed, and the block
+    reached 362,780 tokens against a ~640k trigger — 57% of the context
+    permanently unshrinkable, so every pass produced no usable headroom and
+    immediately re-fired (25 passes in seven minutes).
+
+    Filtering injections out (the fix above) shrinks the block but does not
+    bound it: N genuine user turns in a long session still grow without limit.
+    This is the same argument :func:`task_boundary_floor` makes for its own
+    ``cap`` being "mandatory and load-bearing" — an unbounded preserve window
+    turns "protect the task" into "never compact" — and it is answered the same
+    way, with the same cap vocabulary (``Session._preserved_turns_cap``) rather
+    than a parallel knob nobody would keep in step.
+
+    ``injection_ids`` names turns the caller has identified as harness
+    injections by PROVENANCE. They are shed FIRST, before any age-based
+    eviction, and the reason is a correctness one rather than a preference: an
+    earlier revision relied on oldest-first eviction to remove them, asserting
+    they were "the oldest". They are typically the NEWEST — ``session_state``
+    arrives every turn — so age-based eviction preferentially dropped the
+    operator's genuine constraints and kept the injections. Measured on the
+    real fleet, only 12% of stored injections were reached that way.
+
+    **The contract this establishes, stated plainly because it is a trade.**
+    Once the cap binds, the guarantee is "the NEWEST genuine constraints
+    survive verbatim", not "every constraint survives forever". An old enough
+    operator turn CAN be evicted — after the injections are gone, oldest-first
+    among genuine turns is what remains. That is deliberate: unbounded
+    preservation is the defect this function exists to fix, and a rule stated
+    ten tasks ago is likelier to be spent than the one stated on the current
+    task. The eviction is never silent (see :func:`elision_notice_text`, which
+    names genuine drops separately from shed injections).
+
+    Capping by TOKENS rather than turn count is what makes the bound mean
+    anything — one 300k-token paste and 300 short turns are the same problem,
+    and only the token budget sees both.
+
+    The newest turn always survives, even alone and even when it exceeds the
+    cap on its own: returning an empty block for one oversized turn would
+    discard the live constraint, which is the exact failure the whole
+    preservation mechanism exists to prevent.
+
+    ``already_dropped_*`` carry forward what earlier passes reported so the
+    figure keeps describing everything ever dropped from this block. They are
+    passed in from the payload rather than recovered from the turns, which is
+    what makes the count survive a round trip without existing as content.
+    """
+    real_turns = [
+        turn
+        for turn in turns
+        # A notice journalled by the previous revision is not history. Dropping
+        # it here is what stops a resumed session replaying it as a user turn.
+        if not str(turn.get("id", "")).startswith(PRESERVED_TURN_ELISION_ID_PREFIX)
+    ]
+    genuine_dropped = already_dropped_genuine
+    injections_dropped = already_dropped_injections
+
+    # Provenance first: shedding an injection costs the operator nothing, so it
+    # must never compete with a genuine turn for the budget.
+    if injection_ids is not None:
+        kept_turns = [turn for turn in real_turns if str(turn.get("id", "")) not in injection_ids]
+        injections_dropped += len(real_turns) - len(kept_turns)
+        real_turns = kept_turns
+
+    if cap <= 0:
+        # Fails CLOSED. Returning the block unbounded here would restore the
+        # exact ratchet this function exists to prevent, on the one input a
+        # caller would plausibly pass to mean "nothing survives". The shipped
+        # default is the floor instead, so the invariant holds for every
+        # caller rather than only the careful one.
+        cap = DEFAULT_PRESERVED_TURN_CAP
+
+    kept: list[Mapping[str, object]] = []
+    used = 0
+    # Walk NEWEST first and stop at the budget; the surviving prefix is then
+    # re-reversed so the block keeps chronological order.
+    for turn in reversed(real_turns):
+        cost = _encode_len(str(turn.get("text", "")))
+        if kept and used + cost > cap:
+            break
+        kept.append(turn)
+        used += cost
+    kept.reverse()
+    genuine_dropped += len(real_turns) - len(kept)
+    return CappedPreservedTurns(
+        turns=kept,
+        genuine_dropped=genuine_dropped,
+        injections_dropped=injections_dropped,
+    )
