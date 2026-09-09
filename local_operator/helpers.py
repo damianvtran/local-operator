@@ -935,6 +935,16 @@ def get_posix_shell_path() -> str | None:
 
         # Run the command. shell=True is necessary here for the '-l' flag to work correctly
         # by invoking the shell itself to interpret the command string.
+        #
+        # The timeout is load-bearing rather than defensive. A login shell runs
+        # the user's rc files, and an rc that blocks — a slow network mount, an
+        # nvm/conda init, anything that reads from a terminal that is not there
+        # — parks this call forever. In an interactive launch that is merely a
+        # hang the user can see and Ctrl-C. In the wake supervisor's KeepAlive
+        # LaunchAgent it is invisible and unrecoverable: the process wedges
+        # BEFORE `serve()`, so it is alive, fires no wakes, and launchd never
+        # restarts it because nothing exited. Ten seconds is far above a
+        # healthy shell's cost and far below a user noticing a missed wake.
         result = subprocess.run(
             command,
             capture_output=True,
@@ -942,6 +952,7 @@ def get_posix_shell_path() -> str | None:
             check=True,
             shell=True,
             executable=shell_path,
+            timeout=10,
         )
 
         full_path = result.stdout.strip()
@@ -974,6 +985,18 @@ def get_posix_shell_path() -> str | None:
         logger.error(
             "Shell executable not found at '%s'. Cannot get PATH from login shell.",
             shell_path if shell_path is not None else "<unknown>",
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        # A wedged rc file. Degrading to `None` costs nothing that was not
+        # already lost — `setup_cross_platform_environment` falls back to the
+        # inherited `os.environ` PATH — and it is strictly better than the
+        # alternative, which is a supervised process that never reaches its
+        # own main loop.
+        logger.error(
+            "Timed out getting PATH from login shell. Command "
+            f"'{command if command is not None else '<unknown>'}' "
+            "did not finish within 10s; falling back to the inherited PATH."
         )
         return None
     except subprocess.CalledProcessError as e:

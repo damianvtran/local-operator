@@ -225,6 +225,29 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # launchd hands this process a bare ``PATH=/usr/bin:/bin:/usr/sbin:/sbin``
+    # — the LaunchAgent sets ``LOCAL_OPERATOR_CONFIG_DIR`` and nothing else,
+    # deliberately (a PATH baked into the plist render would vary per calling
+    # session and turn ``ensure_supervisor_installed``'s content comparison
+    # into a restart loop). That bare PATH does not stop here: every runtime
+    # this supervisor engages is spawned with ``dict(os.environ)``
+    # (``session/runtime/launch.py``), so a wake-driven turn inherits it and
+    # loses kubectl, Homebrew, nvm, cargo, pyenv and Nix. Interactive launches
+    # never showed it because a terminal already supplies a login PATH, which
+    # is exactly why this was the one process entry point that skipped the
+    # bootstrap every other entry (``cli.main``, ``server.app``) performs.
+    #
+    # Imported function-locally on purpose: importing ``helpers`` pulls in 53
+    # further modules and ~11.5-12.2 ms (measured on this commit, three runs),
+    # which a process whose whole justification is staying light must not pay
+    # at import time, and ``wakes/`` keeps a deliberately thin import graph
+    # (``tests/unit/test_import_graph.py`` pins ``wakes.store`` to stdlib-only;
+    # it does not constrain this module, but the intent covers it).
+    from local_operator.helpers import setup_cross_platform_environment
+
+    setup_cross_platform_environment()
+
     from local_operator.paths import config_dir
 
     try:
