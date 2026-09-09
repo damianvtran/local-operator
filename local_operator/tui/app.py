@@ -4278,6 +4278,20 @@ class OperatorApp(App[None]):
                 raise RuntimeError("Sidebar navigation requires an owner-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
+            #
+            # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
+            # v0.52.16 (#849) bounds `_recover_owner` at 90s, so a
+            # `RemoteSession` can reach a TERMINAL cold state on a path that
+            # used to retry forever; a speculative prepare can therefore meet
+            # `is_cold` for real rather than only in transit. Verified by
+            # execution against a terminally cold session rather than reasoned
+            # about: the raise costs one discarded speculative preparation and
+            # nothing else -- source not retired, no paging lease held, no
+            # presentation admitted, ZERO redials, and a subsequent real click
+            # on the same session still prepares successfully. `speculative`
+            # is reached only from the prewarm worker, whose `except Exception`
+            # logs at debug and whose `finally` releases the preparation, so no
+            # user-visible surface observes it.
             if speculative and session.is_cold:
                 raise RuntimeError("The prepared owner is no longer ready")
             if speculative or refresh:

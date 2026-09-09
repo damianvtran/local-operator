@@ -21,16 +21,32 @@ with machine load:
 Each is a fact about WHAT the app did, not how long it took, so it fails
 deterministically when the code regresses and never when the box is busy.
 
-TWO OF THESE ARE WIDTH-CONDITIONAL, and the sizes below are therefore
-load-bearing rather than incidental (QA round 1, Q1/Q2):
+TWO OF THESE ARE VIEWPORT-CONDITIONAL, and the sizes below are therefore
+load-bearing rather than incidental (QA rounds 1 and 2, Q1/Q2/Q4):
 
-* **Zero gate refusals holds at >=41 columns.** At 40x24 and narrower the gate
-  refuses again (24 arrivals / 18 recoveries, attributed to
-  ``TAIL_BLOCK_UNPAINTED`` and a 2-row ``TAIL_BLOCK_OVERFLOWS_CONTENT``), with a
-  sharp threshold at 41. The BASE behaves the same way there, so this is reach,
-  not regression -- the recovery branch is doing exactly the job it exists for,
-  and the switch still completes and lands correctly at every width measured
-  from 20 to 140.
+* **Zero gate refusals needs BOTH enough columns and enough rows.** An earlier
+  version of this note said ">=41 columns" and QA round 2 replied "no, it is
+  height"; both are half right, and the single-axis phrasing is what sent a
+  reader to the wrong axis. Measured on this rig, sweeping one axis at a time:
+
+  ===========  ============  ===========================================
+  size         recoveries    what it falsifies
+  ===========  ============  ===========================================
+  41x30        0             --
+  40x30        5             not "any height >= 22 passes"
+  120x22       0             --
+  120x20       9             not "any width >= 41 passes"
+  41x20        13            wide enough, still refuses -> height matters
+  30x36        13            tall enough, still refuses -> width matters
+  ===========  ============  ===========================================
+
+  So it is a viewport FLOOR on both axes, not a threshold on either one: at 30
+  rows the boundary sits between 40 and 41 columns, and at 120 columns it sits
+  between 20 and 22 rows. Below it the gate refuses again
+  (``TAIL_BLOCK_UNPAINTED`` and a 2-row ``TAIL_BLOCK_OVERFLOWS_CONTENT``) and
+  the recovery branch does exactly the job it exists for. The BASE behaves
+  identically in every cell measured, so this is reach, not regression, and the
+  switch still completes and lands correctly at every size tried.
 * **Exactly one painted scroll position holds at >=70 columns.** Below that the
   switch paints two positions 1-2 rows apart, with ZERO post-reveal inserts --
   a final geometry settle, not content arriving late. The base at the same
@@ -38,8 +54,10 @@ load-bearing rather than incidental (QA round 1, Q1/Q2):
   after reveal, so the operator's actual complaint (the large upward shuffle)
   is gone at every width.
 
-So a narrow-width failure of either test is a GENUINE regression at that width;
-do not "fix" it by widening the fixture.
+If either test fails at a SMALLER viewport than the one it declares, that is a
+genuine regression at that size -- do not "fix" it by enlarging the fixture. If
+one fails at the declared size, check both axes before concluding anything: the
+history of this note is two confident single-axis claims that were each wrong.
 
 The rig drives the real prepare/commit pair through `_switch` from
 ``test_sidebar_swap_reset`` — only the owner lease is stubbed; the prepared
@@ -766,24 +784,29 @@ async def test_no_painted_frame_shows_an_empty_conversation() -> None:
     painted such a frame, so this was a regression introduced by the fix, and a
     blank flash is a worse unpolish signal than the shuffle it replaced.
 
-    WHAT THIS ASSERTS, AND WHY IT IS NOT THE PAINTED SEQUENCE. Under `run_test`
-    the commit paints NOTHING -- measured: zero `App._display` calls between
-    entering and leaving `_commit_sidebar_session`, at any terminal size and
-    with any draft. The headless compositor does not service the synchronous
-    `_refresh_layout` the way a real terminal does, so a frame-sequence
-    assertion here would be vacuous: it passes identically with the fix and
-    without it (verified by neutering the suppression -- still green).
+    WHAT THIS ASSERTS. Both halves of the defect, directly: no painted frame
+    inside the commit shows rows mounted with none in view, AND the commit runs
+    no painting refresh at all. The second implies the first here, but they fail
+    with different diagnostics -- the frame assertion names the symptom the user
+    reported, the refresh assertion names the mechanism -- so both are kept.
 
-    So the invariant is asserted where this rig can actually see it: the commit
-    must not perform a PAINTING refresh, only a layout. That is the property the
-    fix establishes, it fails when the suppression is removed, and it does not
-    pretend to be visual evidence.
+    AN EARLIER VERSION OF THIS DOCSTRING WAS WRONG, and the correction is worth
+    recording because it would otherwise talk the next author out of the
+    stronger assertion. It claimed the commit "paints NOTHING" under `run_test`
+    and that a frame-sequence assertion would therefore be vacuous. That was a
+    measurement taken with the fix LIVE: zero paints in the commit is precisely
+    what the fix produces, and reading that as "the harness cannot see paints"
+    confused the fix working with the rig being blind (QA round 2, Q5). With
+    the suppression neutered -- the real `_compositor_refresh` restored inside
+    the stand-in, every other line untouched -- this rig reports
+    `displays_in_commit=1` with `mounted=44, in_view=0`. The frame sequence is
+    observable and non-vacuous, so it is asserted below.
 
-    The blank frames themselves are a rendered-frame fact and were measured with
-    the frame-capture rig against a real compositor (design round 1, D1 and its
-    remediation): blank frames 1-3 -> 0 across warm/cold/draft2 at 120x36 and
-    80x24, with the before/after SVGs attached to the PR. AGENTS.md is explicit
-    that a green test is not visual evidence; this test is the structural half.
+    The rendered-frame evidence still lives on the PR (design round 1 D1 and its
+    remediation; QA round 2 measured 0 blank frames across 18 cells on head
+    against 11 on the baseline). AGENTS.md is explicit that a green test is not
+    visual evidence: this test is the structural half of that pair, not a
+    replacement for it.
     """
     home = SidebarRemote("home-session")
     target = _conversation("blank-frame-session", 60)
@@ -831,6 +854,38 @@ async def test_no_painted_frame_shows_an_empty_conversation() -> None:
                 return real_layout(*args, **kwargs)
 
             screen._refresh_layout = refresh_layout  # type: ignore[method-assign]
+
+            # THE SYMPTOM ITSELF: every frame painted while the commit is on the
+            # stack, scored the way the user experiences it -- rows mounted but
+            # none intersecting the content region is a conversation the user
+            # sees as empty.
+            commit_frames: list[dict[str, int]] = []
+            real_display = app._display
+
+            def display(target_screen, renderable):  # type: ignore[no-untyped-def]
+                out = real_display(target_screen, renderable)
+                if in_commit["yes"]:
+                    try:
+                        view = app._transcript_view()
+                        blocks = view.blocks()
+                        content = view.content_region
+                        commit_frames.append(
+                            {
+                                "mounted": len(blocks),
+                                "in_view": sum(
+                                    1
+                                    for block in blocks
+                                    if (region := getattr(block, "region", None)) is not None
+                                    and region.area
+                                    and content.overlaps(region)
+                                ),
+                            }
+                        )
+                    except Exception:  # noqa: BLE001 - a mid-swap query can find nothing
+                        pass
+                return out
+
+            app._display = display  # type: ignore[method-assign]
             real_commit = app._commit_sidebar_session
 
             def commit(session_id, prepared, generation):  # type: ignore[no-untyped-def]
@@ -857,6 +912,16 @@ async def test_no_painted_frame_shows_an_empty_conversation() -> None:
                 f"{len(paints)} of {len(layouts)} synchronous layouts inside the commit "
                 "would have painted; the switch can put a half-arranged frame "
                 "(revealed transcript, outgoing-sized composer) on screen"
+            )
+            blank = [
+                index
+                for index, frame in enumerate(commit_frames)
+                if frame["in_view"] == 0 and frame["mounted"] > 0
+            ]
+            assert not blank, (
+                f"frames {blank} of {len(commit_frames)} painted inside the commit showed "
+                f"rows mounted with none in view ({[commit_frames[i] for i in blank]}); "
+                "the user sees an empty conversation mid-switch"
             )
 
 
