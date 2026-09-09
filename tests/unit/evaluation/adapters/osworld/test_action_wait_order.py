@@ -47,10 +47,10 @@ class _RecordingProvider:
     """Records every guest interaction in the order it actually happened."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, Any]] = []
+        self.calls: list[tuple[Any, ...]] = []
 
-    async def execute(self, statements: list[str]) -> None:
-        self.calls.append(("exec", list(statements)))
+    async def execute(self, statements: list[str], *, settle: bool = True) -> None:
+        self.calls.append(("exec", list(statements), settle))
 
     async def observe(self) -> dict[str, Any]:
         self.calls.append(("observe", None))
@@ -122,9 +122,14 @@ def _click(x: int = 10, y: int = 20) -> ClickAction:
     return ClickAction(observation_id="obs-1", frame_id="screen", x=x, y=y)
 
 
-def _guest_calls(provider: _RecordingProvider) -> list[tuple[str, Any]]:
+def _guest_calls(provider: _RecordingProvider) -> list[tuple[Any, Any]]:
     """Drop the trailing read-back so assertions describe the mutation only."""
-    return [c for c in provider.calls if c[0] != "observe"]
+    return [(c[0], c[1]) for c in provider.calls if c[0] != "observe"]
+
+
+def _settles(provider: _RecordingProvider) -> list[bool]:
+    """The settle flag of each guest execute, in order."""
+    return [bool(c[2]) for c in provider.calls if c[0] == "exec"]
 
 
 @pytest.mark.asyncio
@@ -240,3 +245,53 @@ async def test_multiple_waits_keep_their_positions(
     assert [c[0] for c in calls] == ["exec", "sleep", "exec", "sleep", "exec"], calls
     assert calls[1] == ("sleep", 0.3)
     assert calls[3] == ("sleep", 0.7)
+
+
+@pytest.mark.asyncio
+async def test_only_the_last_run_settles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A split batch pays ONE settle, not one per run.
+
+    The provider pauses ``action_delay_s`` (3 s) after each execute so the
+    desktop can repaint. Honouring order splits a batch into several runs, and
+    settling after each would multiply that pause AND stack it on top of the
+    wait the model asked for -- a requested 2 s becoming 5 s. Measured on the
+    2026-09 cohort, naive settling would have added 533 execute calls and
+    ~0.44 h (2%) of pure sleeping to a 22.76 h run.
+    """
+
+    inst, provider = _adapter(monkeypatch)
+    await inst.execute(
+        _params(
+            _click(1, 1),
+            WaitAction(observation_id="obs-1", duration_ms=2000),
+            _click(2, 2),
+            WaitAction(observation_id="obs-1", duration_ms=1000),
+            _click(3, 3),
+        )
+    )
+
+    assert _settles(provider) == [False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_an_unsplit_batch_still_settles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common wait-free batch is unchanged: one call, one settle."""
+
+    inst, provider = _adapter(monkeypatch)
+    await inst.execute(_params(_click(1, 1), _click(2, 2)))
+
+    assert _settles(provider) == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_wait_still_settles_on_the_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the wait last, the only guest run is the final one and settles."""
+
+    inst, provider = _adapter(monkeypatch)
+    await inst.execute(_params(_click(1, 1), WaitAction(observation_id="obs-1", duration_ms=500)))
+
+    assert _settles(provider) == [True]

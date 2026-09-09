@@ -728,9 +728,22 @@ class OSWorldV2Adapter:
         # is skipped and only the read-back below runs. The parent sets this
         # flag solely after we declared the commit via ObservationPhaseError.
         if not params.resume_observation and runs:
-            for kind, payload in runs:
+            # Only the LAST guest run settles. The provider pauses
+            # ``action_delay_s`` after each execute() so the desktop can
+            # repaint; splitting a batch into ordered runs would otherwise pay
+            # that pause once per run, multiplying it and stacking it on top of
+            # the wait the model asked for (a requested 2 s becoming 5 s). One
+            # settle per batch keeps the pacing identical to what a batch cost
+            # before ordering was honoured.
+            last_exec = max(
+                (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
+                default=-1,
+            )
+            for index, (kind, payload) in enumerate(runs):
                 if kind == "exec":
-                    await self._provider.execute(cast(list[str], payload))
+                    await self._provider.execute(
+                        cast(list[str], payload), settle=index == last_exec
+                    )
                 else:
                     await asyncio.sleep(cast(int, payload) / 1000.0)
             if not guest_lines:

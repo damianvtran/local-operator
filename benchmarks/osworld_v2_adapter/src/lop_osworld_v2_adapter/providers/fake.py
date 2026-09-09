@@ -69,6 +69,7 @@ class FakeProvider:
         self._sequence = 0
         self.allocated = False
         self.executed_statements: list[str] = []
+        self.settle_flags: list[bool] = []
         self.terminated_refs: list[str] = []
         self.deleted_schedules: list[str] = []
         self.evaluate_calls = 0
@@ -124,8 +125,12 @@ class FakeProvider:
             "instruction": "fake instruction",
         }
 
-    async def execute(self, statements: list[str]) -> None:
+    async def execute(self, statements: list[str], *, settle: bool = True) -> None:
+        # ``settle`` is accepted to satisfy the provider protocol; the fake has
+        # no desktop to repaint, so there is nothing to pause for. Recorded so
+        # a test can still assert that a split batch settles exactly once.
         self.executed_statements.extend(statements)
+        self.settle_flags.append(settle)
         self._sequence += 1
 
     async def evaluate(self) -> Any:

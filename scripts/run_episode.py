@@ -582,7 +582,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-dir", type=Path, default=None, help="lop config dir")
     parser.add_argument("--max-steps", type=int, default=25)
     parser.add_argument("--max-usd", type=float, default=0.50, help="provider spend cap")
-    parser.add_argument("--max-wall-s", type=int, default=1800)
+    # OSWorld 2.0 bounds an episode by MODEL STEPS (500), not by time: the
+    # upstream loop is `step_idx < max_steps` and no timeout decorator is
+    # applied anywhere. A wall clock here is a runaway guard only, so it is
+    # sized so the step budget always binds first. The previous 1800 s
+    # default silently converted a 500-step budget into ~65-85 steps at
+    # observed pace and truncated 9 of 30 episodes mid-work; see
+    # docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md.
+    parser.add_argument("--max-wall-s", type=int, default=18000)
     parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
     parser.add_argument("--keep-recent-frames", type=int, default=3)
     parser.add_argument(

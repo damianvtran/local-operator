@@ -178,8 +178,17 @@ class EnvironmentProvider(Protocol):
         """Return OSWorld's raw observation dict (screenshot/a11y/terminal/instruction)."""
         ...
 
-    async def execute(self, statements: list[str]) -> None:
-        """Run compiled guest statements, then settle. No observation here."""
+    async def execute(self, statements: list[str], *, settle: bool = True) -> None:
+        """Run compiled guest statements, then settle. No observation here.
+
+        ``settle=False`` runs the statements WITHOUT the post-batch pause. It
+        exists for a batch that interleaves actions and waits: such a batch is
+        sent as several ordered runs, and settling after each one would both
+        multiply the pause and add it to the delay the model explicitly asked
+        for. Only the final run of a batch settles, so a batch costs exactly
+        one settle however many runs it took -- the same as before ordering
+        was honoured.
+        """
         ...
 
     async def evaluate(self) -> Any:

@@ -29,23 +29,36 @@ is directly comparable to upstream.
 
 ### What the old 2400 s wall did
 
-At the cohort's median pace a 40-minute wall bought **~87 steps**, against a
-standard budget of 500 and reference agents that use 190–318. It was not
-measuring capability, it was measuring who fit in 40 minutes:
+At the cohort's median pace of 27.4 s per model call a 40-minute wall bought
+**~88 steps**, against a standard budget of 500 and reference agents that use
+190–318. It was not measuring capability, it was measuring who fit in 40
+minutes.
 
-| | n | mean partial |
-|---|---|---|
-| Hit the wall | 9 | **13.5%** |
-| Finished in time | 17 | **28.8%** |
+Four of the 26 tasks have more than one scoring run, so the exact means depend
+on which run is picked. The split is reported as a range because the
+CONCLUSION is what is robust, not the decimals:
 
-The truncated episodes were still working when they were cut off — 2–6 actions
-per batch, zero errors, compaction running normally.
+| pick | capped | finished | capped mean | finished mean |
+|---|---|---|---|---|
+| first scoring run | 9 | 17 | 13.5% | 28.8% |
+| last scoring run | 8 | 18 | 15.2% | 30.0% |
+| best partial | 8 | 18 | 15.2% | 30.6% |
+
+Under every selection the episodes that ran out of time score roughly half of
+those that finished. The truncated ones were still working when they were cut
+off — 2–6 actions per batch, zero errors, compaction running normally.
+
+One caveat on attribution: these episodes are recorded with
+`truncation_reason=budget-cap`, not a wall-specific reason, so "hit the wall"
+is inferred from elapsed time against the 2400 s ceiling rather than read
+directly from the journal.
 
 ### What the limits are now
 
-`--max-wall-s` defaults to **18000** (5 h) and exists only as a runaway guard;
-it is sized so the 500-step budget always binds first. `OSWORLD_TTL_SECONDS`
-defaults to **18900** — the wall plus 900 s of slack — because
+`--max-wall-s` now defaults to **18000** (5 h) in `scripts/run_episode.py` and
+exists only as a runaway guard; it is sized so the 500-step budget always binds
+first. The batch script passes `OSWORLD_TTL_SECONDS=18900` — the wall plus
+900 s of slack — because
 `providers/aws.py` falls back to `DEFAULT_TTL_SECONDS = 7200` when no TTL is
 supplied (the wall budget is not carried on the adapter wire), and an instance
 reclaimed at 2 h kills an episode that the harness would have let run.
@@ -92,7 +105,19 @@ promising:
 So ~59% of the run is the provider generating tokens, and the largest
 remaining harness-side lever is **output volume**, not harness CPU.
 
-### The 3.0 s settle is deliberate and stays
+### One settle per batch, not one per run
+
+Honouring order splits a batch into several guest runs, and the provider pauses
+`action_delay_s` after each `execute()`. Settling per run would multiply that
+pause AND stack it on the wait the model asked for -- a requested 2 s becoming
+5 s. Measured on the 2026-09 cohort, naive settling would have added 533
+execute calls and ~0.44 h (2% of 22.76 h) of pure sleeping.
+
+So `execute` takes `settle=`, and only the final guest run of a batch settles.
+A batch costs exactly one settle however many runs it took, which is what it
+cost before ordering was honoured.
+
+### The 3.0 s settle value itself is deliberate and stays
 
 `providers/aws.py` sleeps `action_delay_s = 3.0` after each batch. Upstream's
 `sleep_after_execution` defaults to `0.0` and the official script does not pass
