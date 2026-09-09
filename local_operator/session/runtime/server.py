@@ -573,6 +573,13 @@ class RuntimeServer:
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
         self._busy = False
+        #: Subagent trajectory counts, ``None`` until the handle answers the
+        #: probe at least once. Starting at ``None`` rather than 0 is what
+        #: makes a runtime whose handle cannot report indistinguishable from
+        #: one that predates the fields — both are honestly "unreported", and
+        #: neither is a measured zero.
+        self._subagents_running: int | None = None
+        self._subagents_queued: int | None = None
         #: True until a terminal attaches. A freshly spawned runtime genuinely
         #: has no viewer, so this starts True rather than False — the old
         #: default had every new runtime claiming a terminal it had never had.
@@ -1110,6 +1117,26 @@ class RuntimeServer:
                     probe = getattr(self._handle, "is_busy", None)
                 if callable(probe):
                     self.set_busy(bool(probe()))
+                # The FLOOR for the subagent counts, for the same reason and
+                # with the same hazard as ``busy`` directly above: this loop
+                # runs forever, so it MUST read the same predicate the
+                # transition publisher does (``subagent_counts`` on the
+                # handle, which ``_publish_busy`` also calls) or it would
+                # overwrite a correct value within one heartbeat instead of
+                # merely bounding staleness. A handle that does not implement
+                # the probe leaves the counts at ``None`` — unreported, which
+                # is the honest answer and not a zero.
+                counts = getattr(self._handle, "subagent_counts", None)
+                if callable(counts):
+                    # Shape-checked rather than unpacked blind: the probe is
+                    # duck-typed off the handle, so a handle that answers with
+                    # something else must leave the counts unreported instead
+                    # of raising inside the loop that also refreshes the
+                    # heartbeat — a heartbeat that stops is a runtime the whole
+                    # fleet reads as wedged.
+                    reported = counts()
+                    if isinstance(reported, tuple) and len(reported) == 2:
+                        self.set_subagents(reported[0], reported[1])
                 # A dead renderer can leave its main-process socket alive.
                 # Expiring the lease must reroute a parked gate even when no
                 # TCP disconnect arrives to trigger the ordinary detach path.
@@ -1461,6 +1488,25 @@ class RuntimeServer:
         self._busy = busy
         self._republish()
 
+    def set_subagents(self, running: int | None, queued: int | None) -> None:
+        """Record this runtime's subagent trajectory counts.
+
+        Deduped exactly like :meth:`set_busy`, and for the same reason: the
+        driver is ``_publish_busy`` on every session event, so the steady-state
+        cost has to be one comparison rather than a staged write.
+
+        ``None`` is accepted and republished as ``None`` on purpose — a handle
+        that cannot answer the probe (a ``kind="tui"`` runtime whose handle
+        does not implement it) must publish "I do not report" rather than a
+        fabricated zero, which is the distinction ``/info``'s lower-bound
+        caveat is built on.
+        """
+        if self._subagents_running == running and self._subagents_queued == queued:
+            return
+        self._subagents_running = running
+        self._subagents_queued = queued
+        self._republish()
+
     def _republish(self) -> None:
         """Refresh the discovery record with the current live state.
 
@@ -1481,6 +1527,8 @@ class RuntimeServer:
                 pending=self._pending,
                 busy=self._busy,
                 detached=not bool(self._visible_attach_surfaces()),
+                subagents_running=self._subagents_running,
+                subagents_queued=self._subagents_queued,
             )
         except Exception:  # noqa: BLE001 — a stale marker is not worth an exception
             logger.debug("could not republish the session record", exc_info=True)

@@ -175,6 +175,25 @@ def _latest_line(snapshot: InfoSnapshot) -> str:
     return f"{install.latest_known} · checked {format_duration(age)} ago{stale}"
 
 
+#: Nouns whose plural is not ``+ "s"``. A map rather than a second helper so
+#: the next irregular noun is a data change.
+_IRREGULAR_PLURALS = {"trajectory": "trajectories"}
+
+
+def plural(count: int, noun: str) -> str:
+    """``"1 runtime"`` / ``"5 runtimes"`` / ``"5 trajectories"``.
+
+    Lives HERE, one layer below the panel, because the panel imports this
+    module and not the other way round — and because the export and the screen
+    stating the same fact in different grammar is precisely the drift that put
+    ``1 sessions + 1 subagents`` into pasted bug reports while the screen read
+    correctly. One implementation, used by both.
+    """
+    if count == 1:
+        return f"{count} {noun}"
+    return f"{count} {_IRREGULAR_PLURALS.get(noun, noun + 's')}"
+
+
 def _tree_lines(tree: tuple[SubagentLine, ...], deeper: int) -> list[str]:
     out: list[str] = []
     for node in tree:
@@ -281,12 +300,62 @@ def build_export(snapshot: InfoSnapshot) -> str:
             lines.append(f"      {relativise_home(line.cwd)} · {line.model_label or '—'}")
 
     lines += ["", "## Agents and subagents"]
+    if sessions.available:
+        # The fleet answer FIRST: it is the question the section is opened
+        # with, and the per-session detail below it is the breakdown.
+        # ``live + wedged``: both name a running pid and both contribute to the
+        # sum below, so the denominator printed here has to match it.
+        lines.append(
+            f"  runtimes          {sessions.live + sessions.wedged} total — "
+            f"{sessions.live} live · {sessions.wedged} wedged"
+        )
+        # Same rule as the screen: the sum runs over runtimes that REPORTED, so
+        # when some did not the total is a floor, and when none did there is no
+        # total at all. This text is what lands in a bug report, where a
+        # fabricated zero is hardest to challenge after the fact.
+        # The SAME predicate as the panel's, deliberately: these two guards
+        # drifted apart once (the export asserted ``>=0 total — 0 sessions + 0
+        # subagents`` in a cell where the screen correctly refused to name a
+        # number), and the export is the copy that outlives the screen inside
+        # a bug report. Refuse the total whenever nothing was measured — not
+        # merely when nobody reported.
+        if sessions.subagents_unreported and not sessions.fleet_trajectories:
+            lines.append(
+                f"  trajectories      — ({sessions.subagents_unreported} of "
+                f"{sessions.live + sessions.wedged} runtimes did not report)"
+            )
+        else:
+            bound = ">=" if sessions.subagents_unreported else ""
+            # Inflected through the shared helper, like the panel: this line is
+            # pasted verbatim into issues, and ``1 sessions + 1 subagents`` —
+            # the state every fresh install passes through — reads as a
+            # template nobody finished rather than as a measurement.
+            addends = (
+                f"{plural(sessions.fleet_session_trajectories, 'session')} + "
+                f"{plural(sessions.fleet_subagents_running, 'subagent')}"
+            )
+            # Named beside the total, never added to it — see the panel's copy
+            # of this rule. A queued child spends nothing, so it is not a
+            # trajectory; but ``0 total`` alone, printed above a tree of
+            # ``queued`` rows, is the export repeating a contradiction the
+            # screen no longer makes.
+            if sessions.fleet_subagents_queued:
+                addends += f" · {sessions.fleet_subagents_queued} queued"
+            lines.append(
+                f"  trajectories      {bound}{sessions.fleet_trajectories} total — {addends}"
+            )
     lines.append(f"  profiles          {agents.profiles}")
     lines.append(f"  teams             {agents.teams}")
-    lines.append(
-        f"  subagents         {agents.running} running · {agents.queued} queued · "
-        f"{agents.settled} settled (retained)"
-    )
+    if agents.roster_unread:
+        # An unreadable roster is not a roster of zero, in the export exactly
+        # as on screen — this text is what lands in a bug report, where a
+        # fabricated zero is hardest to challenge.
+        lines.append("  this session      — (could not read the roster)")
+    else:
+        lines.append(
+            f"  this session      {agents.running} running · {agents.queued} queued · "
+            f"{agents.settled} settled (retained)"
+        )
     if agents.max_running is not None:
         lines.append(
             f"  capacity          {agents.max_running} concurrent"
@@ -295,11 +364,55 @@ def build_export(snapshot: InfoSnapshot) -> str:
     if agents.tree:
         lines.append(f"  tree (this session only, depth {agents.max_depth}):")
         lines += _tree_lines(agents.tree, agents.deeper)
+    elif agents.roster_unread:
+        lines.append("  roster unreadable — no tree")
     else:
         lines.append("  no subagents launched in this session")
-    # Stated, not implied: only this session's tree is observable, so a report
-    # that showed one tree could otherwise be read as a fleet-wide total.
-    lines.append("  (other sessions report busy/pending and memory only)")
+    # Stated, not implied: the COUNTS above are fleet-wide and the TREE is not,
+    # so a report showing one tree could otherwise be read as the whole story.
+    if agents.cross_session_known:
+        lines.append("  (only this session's tree is drawn; other sessions report counts)")
+    else:
+        lines.append("  (other sessions report busy/pending and memory only)")
+    # Both caveats qualify the SAME total, so they are collected and emitted as
+    # one parenthetical rather than as two stacked ones: a host that is both
+    # mid-upgrade and holding a wedged pid printed two bracketed apologies in a
+    # row, which reads as boilerplate in a pasted report and invites skipping
+    # the second. The clause wording is unchanged — only the packaging.
+    caveats: list[str] = []
+    if sessions.available and sessions.subagents_unreported:
+        # "lower bound", not a total: the sum above excluded every session that
+        # did not report, and a bug report must not present it as complete.
+        #
+        # Inflected, like the panel's copy: this text is pasted into an issue
+        # verbatim, and "1 sessions run ... and do not report" reads as a
+        # template nobody finished rather than as a measurement.
+        one = sessions.subagents_unreported == 1
+        caveats.append(
+            f"{sessions.subagents_unreported} session{'' if one else 's'} "
+            f"{'runs' if one else 'run'} an older build and "
+            f"{'does' if one else 'do'} not report subagents — lower bound"
+        )
+    if sessions.available and sessions.wedged:
+        # PARITY with the panel, which has said this since the counts landed.
+        # The totals above deliberately include wedged runtimes — a quiet pid
+        # can still have children working — so their contribution is as of
+        # their last heartbeat, and an export that omitted the disclosure would
+        # present stale counts as current in the one artifact that outlives the
+        # screen.
+        one = sessions.wedged == 1
+        caveats.append(
+            f"{sessions.wedged} session{'' if one else 's'} "
+            f"{'is' if one else 'are'} wedged; "
+            f"{'its' if one else 'their'} counts are as of "
+            f"{'its' if one else 'their'} last heartbeat"
+        )
+    if caveats:
+        # ``·`` and not ``;``: the wedged clause already contains a semicolon
+        # of its own, so a semicolon joiner produced two different grammatical
+        # levels sharing one punctuation mark. The interpunct is this screen's
+        # established separator, and it cannot collide with clause punctuation.
+        lines.append(f"  ({' · '.join(caveats)})")
 
     lines += [
         "",

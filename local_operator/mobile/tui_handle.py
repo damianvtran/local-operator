@@ -53,6 +53,7 @@ from local_operator.session.runtime.server import (
     image_blocks,
     image_blocks_in_thread,
 )
+from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 
 if TYPE_CHECKING:
     from local_operator.tui.app import OperatorApp
@@ -153,6 +154,39 @@ class TuiSessionHandle(SessionHandle):
         if session is None:
             raise RuntimeError("session is still starting")
         return session
+
+    def subagent_counts(self) -> tuple[int | None, int | None]:
+        """``(running, queued)`` subagent trajectories for the record.
+
+        The ``kind="tui"`` twin of ``OwnedSessionHandle.subagent_counts``, so a
+        full TUI runtime contributes to ``/info``'s fleet tally instead of being
+        counted as a session that does not report. Implemented rather than left
+        out because this handle already reaches the roster (see
+        ``_warm_subagent_details``), and an unimplemented probe would publish
+        ``None`` for the most common kind of window on this host.
+
+        Reads the same ``RUNNING_SUBAGENT_STATUSES`` predicate the owned handle
+        and ``/info`` use — a private set here would let the record and the tree
+        drawn beneath it disagree. ``(None, None)`` on any failure, never
+        ``(0, 0)``: this runs before the session finishes starting, and a
+        not-yet-readable roster is not a measurement of zero.
+        """
+        try:
+            comms = getattr(self._session(), "subagent_comms", None)
+            if comms is None:
+                return (None, None)
+            nodes = comms.nodes()
+        except Exception:  # noqa: BLE001 — a stale count never breaks the app
+            logger.debug("could not read the subagent roster", exc_info=True)
+            return (None, None)
+        running = queued = 0
+        for node in nodes:
+            status = str(getattr(node, "status", "") or "")
+            if status in RUNNING_SUBAGENT_STATUSES:
+                running += 1
+            elif status == "queued":
+                queued += 1
+        return (running, queued)
 
     def rebind(self) -> None:
         """Re-point the bridge at the app's NEW session after /new, /resume

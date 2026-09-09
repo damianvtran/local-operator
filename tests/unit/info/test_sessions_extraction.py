@@ -38,6 +38,8 @@ class _Record:
     pending: str | None = None
     busy: bool = False
     detached: bool = False
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
     version: str = ""
     source_ref: str = ""
 
@@ -77,6 +79,8 @@ FIXTURE: list[tuple[Any, str]] = [
             busy=True,
             version="0.51.6",
             source_ref="4311eb653aa9",
+            subagents_running=2,
+            subagents_queued=1,
         ),
         "live",
     ),
@@ -111,7 +115,11 @@ FIXTURE: list[tuple[Any, str]] = [
 ]
 
 #: EXACTLY what ``sessions_command`` produced before the extraction: same keys,
-#: same order, same values.
+#: same order, same values — PLUS ``subagents_running``/``subagents_queued``,
+#: added deliberately rather than discovered as a red test. ``--json`` is a
+#: published surface and a fleet consumer counting agent trajectories across a
+#: host wants them; the pin exists to make an addition a DECISION, which this
+#: is, not to forbid one. Everything above them is byte-for-byte unchanged.
 EXPECTED = [
     {
         "state": "live",
@@ -130,6 +138,8 @@ EXPECTED = [
         "detached": False,
         "version": "0.51.6",
         "source_ref": "4311eb653aa9",
+        "subagents_running": 2,
+        "subagents_queued": 1,
     },
     {
         "state": "live",
@@ -148,6 +158,8 @@ EXPECTED = [
         "detached": True,
         "version": "0.51.5",
         "source_ref": "",
+        "subagents_running": None,
+        "subagents_queued": None,
     },
     {
         "state": "stale",
@@ -166,6 +178,11 @@ EXPECTED = [
         "detached": False,
         "version": "",
         "source_ref": "",
+        # ``None``, not 0: ``_OldRecord`` has no such attribute at all, which
+        # is exactly a runtime predating the fields. The distinction is the
+        # whole point of the pair — see ``SessionsInfo.subagents_unreported``.
+        "subagents_running": None,
+        "subagents_queued": None,
     },
 ]
 

@@ -157,6 +157,21 @@ RUN_DIRNAME = "run/mobile"
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 
+#: Subagent roster statuses that count as a RUNNING trajectory — one agent loop
+#: that can independently make model calls right now.
+#:
+#: Lives here, beside the record fields it defines the meaning of, because two
+#: modules must agree on it and a divergence is invisible: the runtime publishes
+#: ``subagents_running`` from this set (``owned.OwnedSessionHandle``) and
+#: ``/info`` tallies this session's own tree from it (``info.collect``). If they
+#: drifted, the fleet total and the tree drawn directly beneath it on the same
+#: card would disagree, which is the one error that section must never make.
+#:
+#: ``queued`` is excluded and counted separately: a delegated child waiting for
+#: a capacity slot is not spending anything. This module stays stdlib-only, so
+#: the constant costs nothing to import on the CLI startup path.
+RUNNING_SUBAGENT_STATUSES = frozenset({"running", "starting", "pausing"})
+
 
 @dataclass
 class SessionRecord:
@@ -226,6 +241,39 @@ class SessionRecord:
     #: for PyPI/pipx/editable installs. Needed because same-version rebuilds
     #: are this host's common drift — see ``update.BuildStamp``.
     source_ref: str = ""
+
+    # -- agent trajectories -------------------------------------------------
+    # Same additive contract as the live-state and build-stamp blocks above,
+    # and for the same reason: PROTOCOL_VERSION deliberately does NOT move.
+    # It gates SOCKET FRAME compatibility and is read as a pre-dial CAPABILITY
+    # ASSERTION by peers already running — ``attach_client`` refuses below 2,
+    # ``session_factory`` and the TUI's takeover path below 4, ``remote``'s
+    # canonical attach below 5. Those readers take a HIGHER number as a promise
+    # that every frame through v5 is understood. Two JSON integers that touch
+    # no frame do not make that promise different, so bumping would spend the
+    # one number that carries it on a field nobody has to read, and would leave
+    # nothing to distinguish a build that genuinely changed the frames. A
+    # future reader that must REQUIRE these fields negotiates through
+    # ``capabilities``, which is the seam for exactly that (see
+    # ``FRONTEND_CAPABILITY``, gated alongside the version rather than by it).
+    #
+    # ``None`` (not 0) is the "this build does not report" signal, and the
+    # distinction is load-bearing: a runtime predating these fields has not
+    # told us it has no subagents, and a reader that collapsed the two would
+    # publish a confident total that is silently missing terms. See
+    # ``SessionsInfo.subagents_unreported``.
+
+    #: Subagent trajectories spending tokens right now: roster entries whose
+    #: status is running/starting/pausing. ``SubagentComms.nodes()`` returns
+    #: the COMPLETE roster including nested descendants (nested launches land
+    #: in the root session's single records map tagged with their true
+    #: parent), so this is a flat count over one read and must never be summed
+    #: with a recursive child walk.
+    subagents_running: int | None = None
+    #: Delegated but still waiting for a capacity slot. Kept separate from
+    #: ``subagents_running`` because a queued child is not spending anything,
+    #: and folding it in would inflate "what is running right now".
+    subagents_queued: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
