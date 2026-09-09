@@ -221,13 +221,48 @@ class Message(BaseModel):
 
     @staticmethod
     def tool_result(result: ToolResult) -> "Message":
-        return Message(
+        """A tool row carrying the harness bookkeeping beside its content.
+
+        ``details``/``useless``/``duration_s`` are written HERE rather than by
+        each caller because a caller that forgets them destroys information no
+        later surface can rebuild. ``duration_s`` is the executor's MEASURED
+        interval; a viewer repainting the row hours later has no clock that
+        could recover it.
+
+        That is not hypothetical. ``harness/loop.py::_append_results`` stamped
+        the payload onto the message AFTER calling this, so the owner's rows
+        carried it and everyone else's did not — and
+        ``RemoteSession._remember_live`` builds the live row for a relayed
+        ``tool_execution_end`` through exactly this constructor. The interval
+        reached the viewer on the wire (``event.result.duration_s``) and was
+        dropped the moment the row was built, so every tool card on a session
+        the viewer had WATCHED RUN repainted with a bare ``✓`` and no duration
+        (and no diff badge, since ``details`` died on the same line) as soon as
+        history was re-rendered — a sidebar switch, for instance. Only the
+        newest card looked right, because it is the live-painted widget settled
+        by ``_settle_painted_tool_card`` rather than replayed from history.
+
+        Written only when there is something to carry: a bare result keeps
+        ``provider_payload`` at ``None``, so rows that never had bookkeeping
+        serialize exactly as before and no consumer sees a new empty dict.
+        These are harness keys — every provider wire builder constructs its
+        tool entry from ``role``/``tool_call_id``/``content`` explicitly, so
+        they are structurally incapable of reaching a provider.
+        """
+        message = Message(
             role="tool",
             content=list(result.content),
             tool_call_id=result.tool_call_id,
             tool_name=result.tool_name,
             is_error=result.is_error,
         )
+        if result.details is not None or result.useless or result.duration_s is not None:
+            message.provider_payload = {
+                "details": result.details,
+                "useless": result.useless,
+                "duration_s": result.duration_s,
+            }
+        return message
 
 
 class Usage(BaseModel):

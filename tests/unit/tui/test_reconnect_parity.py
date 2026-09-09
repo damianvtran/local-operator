@@ -154,11 +154,18 @@ async def _boot(app: OperatorApp, pilot: Any) -> None:
 
 
 def _with_payload(message: Message, payload: dict[str, Any]) -> Message:
-    """Attach the ``provider_payload`` the harness writes beside a tool result.
+    """Force an EXACT ``provider_payload`` onto a fixture row.
 
-    ``Message.tool_result`` does not carry it — ``harness/loop.py`` sets it on
-    the message after construction — so the fixture reproduces that shape here
-    rather than asserting against a row no real transcript holds.
+    ``Message.tool_result`` now carries ``details``/``useless``/``duration_s``
+    itself, so this no longer compensates for a lossy constructor; it pins the
+    payload to a known value so the assertions below read a fixed interval
+    rather than whatever the fixture's ToolResult happened to hold.
+
+    This file's coverage stops at the DURABLE reconnect path, where
+    ``_live_history`` is cleared. The viewer path — a session whose turns this
+    terminal WATCHED RUN, so live rows exist and are what history re-renders
+    from — is covered by ``test_sidebar_duration_replay.py``, which is where
+    the blank-duration regression actually lived.
     """
     message.provider_payload = payload
     return message
