@@ -369,35 +369,64 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
  * moving a single glyph — the summary is still exactly one row of text, so
  * the ledger's one-line-per-action reading is unchanged.
  *
- * `height: 2` is `1 + padding-top`. Textual sizes a fixed-height widget
- * INCLUDING its padding, so the two move together or the summary clips. The
- * class carries BOTH or neither.
+ * `height: 3` is `1 + padding-top + padding-bottom`. Textual sizes a
+ * fixed-height widget INCLUDING its padding, so the three move together or
+ * the summary clips. The class carries BOTH or neither.
  *
- * TOP ONLY, and that is a correctness requirement rather than a taste call.
- * The dock guarantees EXACTLY ONE ground row between the last block and the
- * composer (`test_composer_seam`, which counts blank rows by walking the
- * composed frame). A bottom padding row is blank, so a padded last block read
- * as a five-row seam and the guarantee broke. Padding the top only buys the
- * same separation between neighbouring rows — every row still gains a cell of
- * air above it — while the block still ENDS on its summary, so the seam below
- * the ledger is the dock's one row and nothing else.
+ * SYMMETRIC, and the argument that said otherwise was wrong. This rule read
+ * `padding: 1 0 0 0` for its whole life while the comment above promised air
+ * "above and below", on the theory that a bottom row would break the dock's
+ * EXACTLY ONE ground row between the last block and the composer. It does
+ * not, and the reason is the distinction this sheet keeps making everywhere
+ * else: the guarantee is about GROUND, not about blankness. With a card last
+ * a naive blank-row count returns 2, and only one of them is the
+ * transcript's:
  *
- * The cost is real: a twelve-row ledger occupies thirty-six rows, so less
- * history fits on a screen. That is why this is a setting rather than a
+ *     row 24: fill=$lo-surface owner=grep            <- the card's OWN bottom pad
+ *     row 25: fill=$lo-bg      owner=TranscriptView  <- the dock's one ground row
+ *
+ * (Fills named by TOKEN rather than by the hex they resolved to: this sheet
+ * carries no literal hex anywhere, comments included, and
+ * `test_minimalism.py::test_tcss_has_no_literal_hex` enforces it on the whole
+ * file text.)
+ *
+ * That is the same reading `test_composer_seam` already applies to the `/btw`
+ * aside card, whose blank row is interior to the card and asserted on the
+ * REGIONS; its module docstring says outright that "a blank row proves
+ * nothing at all about whose surface it is". Measured on the composed frame,
+ * the seam is one ground row under symmetric padding at every size. What the
+ * top-only rule actually bought was a card whose fill terminated on an inked
+ * line, with the summary jammed against the bottom edge of its own slab —
+ * reported from the field as a row added above the tool call and not below.
+ *
+ * The pitch between consecutive actions goes 3 -> 4 rows, and that is the
+ * accepted cost rather than an oversight. Holding it at 3 means suppressing
+ * the `.gap-above` ground row between neighbours, which was measured and
+ * rejected: with no ground between them two cards share ONE unbroken
+ * `$lo-surface` slab, so two DIFFERENT click targets become indistinguishable
+ * adjacent rows. That defeats `SPACING_AIRY` (widgets/transcript.py) and the
+ * hit-target purpose this rule exists for. A margin instead of padding gives
+ * the symmetry for free and returns the card to a ONE-cell target, which is
+ * deleting the feature to fix its bug; a border is out by the card's own law
+ * (widgets/tool_card.py — "NO border. Elevation is a background step, never a
+ * shadow or line.").
+ *
+ * The cost is real: a twelve-action ledger occupies 47 rows against 35, so
+ * less history fits on a screen. That is why this is a setting rather than a
  * decision made for everyone — a user who reads a long ledger more often
  * than they click one turns it off.
  *
  * Expanded rows are exempt: they are already `height: auto` and content-sized,
  * and the payload gives the pointer plenty to hit. */
 .comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock {
-    height: 2;
-    padding: 1 0 0 0;
+    height: 3;
+    padding: 1 0 1 0;
 }
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded {
     height: auto;
-    padding: 1 0 0 0;
+    padding: 1 0 1 0;
 }
 
 /* State reaches the GROUND, not just the glyph: a live action sits one step
