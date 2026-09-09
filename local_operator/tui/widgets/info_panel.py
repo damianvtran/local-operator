@@ -48,7 +48,7 @@ from local_operator.info.model import (
     format_duration,
     is_shadowed_install,
 )
-from local_operator.info.render import build_export
+from local_operator.info.render import build_export, plural
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -362,8 +362,16 @@ class _Body:
             self.lines.append(row)
 
     def header(self, title: str, meta: str = "", short: str = "") -> None:
-        """A section header, shedding its meta to ``short`` on a narrow frame."""
-        if meta and self.width < _NOTE_MIN:
+        """A section header, shedding its meta to ``short`` on a narrow frame.
+
+        The threshold is a WIDTH FLOOR plus a fit check, not the floor alone:
+        ``_NOTE_MIN`` was calibrated against the metas that existed when it was
+        written, so a longer one (``5 runtimes · none running · 3 queued``)
+        overflowed by a cell at exactly 60 columns while passing the floor.
+        Measuring the string that will actually be drawn is what keeps a new
+        meta from having to rediscover this by overflowing a frame.
+        """
+        if meta and (self.width < _NOTE_MIN or cell_len(f"{title}   {meta}") + 2 > self.width):
             meta = short
         self.lines.append(section_header(title, meta))
 
@@ -736,19 +744,13 @@ def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
 #: Nouns whose plural is not formed by appending ``s``. One entry today; the
 #: map exists so the next irregular noun is a data change rather than a second
 #: pluralisation helper beside this one.
-_IRREGULAR_PLURALS = {"trajectory": "trajectories"}
-
-
-def _plural(count: int, noun: str) -> str:
-    """``"1 runtime"`` / ``"5 runtimes"`` / ``"5 trajectories"``.
-
-    ``/info`` pluralises everywhere else (``3 keys``, ``1 session is wedged``),
-    so an unpluralised count reads as unfinished rather than as house style,
-    and a single-window host is the state every fresh install starts in.
-    """
-    if count == 1:
-        return f"{count} {noun}"
-    return f"{count} {_IRREGULAR_PLURALS.get(noun, noun + 's')}"
+#: The ONE implementation, imported rather than reimplemented: the screen and
+#: the export must not inflect the same fact differently, and they did until
+#: the export's addends were found reading ``1 sessions + 1 subagents``.
+#: ``/info`` pluralises everywhere else (``3 keys``, ``1 session is wedged``),
+#: so an unpluralised count reads as unfinished rather than as house style, and
+#: a single-window host is the state every fresh install starts in.
+_plural = plural
 
 
 def _runtimes(sessions: SessionsInfo) -> int:
@@ -861,10 +863,24 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             # not a fourth vocabulary.
             meta = f"{_plural(runtimes, 'runtime')} · trajectories {UNKNOWN}"
             short = f"{runtimes}rt · tj {UNKNOWN}"
+        elif sessions is not None and sessions.fleet_subagents_queued:
+            # Measured, and measured as zero RUNNING — but not as nothing.
+            # ``fleet_trajectories`` deliberately excludes queued children
+            # (a child waiting on a capacity slot spends no tokens, which is
+            # what a trajectory count is for), so the total is honestly 0 while
+            # the tree below draws ``⏳ queued`` rows. Saying only ``none
+            # running`` there is the header contradicting a picture the same
+            # frame is showing — the exact failure the three states above
+            # exist to prevent, reached through arithmetic rather than
+            # through an unmeasured term.
+            queued = sessions.fleet_subagents_queued
+            meta = f"{_plural(runtimes, 'runtime')} · none running · {queued} queued"
+            short = f"{runtimes}rt · 0r · {queued}q"
         else:
-            # Every runtime reported, and every one of them reported zero. This
-            # is the one state in which the word is earned: it is a
-            # measurement, and ``none running`` reads better than ``0``.
+            # Every runtime reported, every one reported zero, and nothing is
+            # waiting either. This is the one state in which the bare word is
+            # earned: it is a measurement, and ``none running`` reads better
+            # than ``0``.
             meta = f"{_plural(runtimes, 'runtime')} · none running"
             # ``none`` and not ``0tj``: the bare-zero rule does not relax on a
             # narrow frame, and the word costs one cell more than the digit.
@@ -898,20 +914,53 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             )
         else:
             bound = "≥" if sessions.subagents_unreported else ""
+            addends = (
+                f"{_plural(sessions.fleet_session_trajectories, 'session')} + "
+                f"{_plural(sessions.fleet_subagents_running, 'subagent')}"
+            )
+            # Queued rides the ADDENDS, not the total: it is not a trajectory
+            # (nothing is being spent yet), so adding it to the sum would
+            # inflate the very number the section exists to state precisely.
+            # But a row reading ``0 total — 0 sessions + 0 subagents`` above a
+            # visible queued tree is the three-zeros failure again, so the
+            # waiting work is named beside the total rather than folded into
+            # it.
+            waiting = (
+                f" · {sessions.fleet_subagents_queued} queued"
+                if sessions.fleet_subagents_queued
+                else ""
+            )
+            # The waiting clause sheds LAST, after the addends it sits beside.
+            # Ordering matters because the state that needs it most is the one
+            # where the addends carry no information: at ``0 total`` they are
+            # ``0 sessions + 0 subagents``, three zeros whose only honest
+            # companion is the queued count. A ladder that dropped ``queued``
+            # first restored the contradiction at every narrow width while the
+            # wide frame looked fixed.
+            # Two extra rungs when work is waiting, because the note column is
+            # only ~2 cells wide at 50 columns: ``3 queued`` alone would shed
+            # wholesale there and leave ``0 total`` asserting nothing-in-flight
+            # over a queued tree. ``3q`` fits that budget and is decoded by the
+            # ``queued`` rows directly beneath it, the same bargain ``5rt·9tj``
+            # makes in the header.
+            terse: tuple[str, ...] = (
+                (f"{sessions.fleet_subagents_queued} queued", f"{sessions.fleet_subagents_queued}q")
+                if sessions.fleet_subagents_queued
+                else (f"{sessions.fleet_session_trajectories}+{sessions.fleet_subagents_running}",)
+            )
             body.kv(
                 "Trajectories",
                 f"{bound}{sessions.fleet_trajectories} total",
                 notes=(
-                    f"{_plural(sessions.fleet_session_trajectories, 'session')} + "
-                    f"{_plural(sessions.fleet_subagents_running, 'subagent')}"
+                    addends
+                    + waiting
                     + (
                         f" · {sessions.subagents_unreported} did not report"
                         if sessions.subagents_unreported
                         else ""
                     ),
-                    f"{_plural(sessions.fleet_session_trajectories, 'session')} + "
-                    f"{_plural(sessions.fleet_subagents_running, 'subagent')}",
-                    f"{sessions.fleet_session_trajectories}+{sessions.fleet_subagents_running}",
+                    addends + waiting,
+                    *terse,
                 ),
             )
     if agents is not None:

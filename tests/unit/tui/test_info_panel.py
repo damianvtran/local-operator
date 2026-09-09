@@ -1299,3 +1299,149 @@ def test_the_exports_lower_bound_caveat_inflects_like_the_panels() -> None:
         _snapshot(sessions=_fleet_sessions(subagents_unreported=3), agents=AgentsInfo(running=1))
     )
     assert "3 sessions run an older build and do not report subagents" in plural
+
+
+def test_queued_work_is_never_rendered_as_nothing_in_flight() -> None:
+    """D11: ``fleet_trajectories`` excludes queued, so the total is honestly 0.
+
+    A parked child spends nothing, which is why it is not a trajectory — but a
+    header reading ``none running`` above a tree of ``queued`` rows is the
+    screen contradicting a picture the same frame is drawing. The word is
+    reserved for the state where nothing is running AND nothing is waiting.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=5,
+        live=5,
+        subagents_reporting=5,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=3,
+        fleet_trajectories=0,
+    )
+    text = _text(_snapshot(sessions=sessions))
+    assert "none running · 3 queued" in text
+    header = [line for line in text.split("\n") if "Agents and subagents" in line][0]
+    assert not header.rstrip().endswith("none running")
+
+
+def test_the_queued_clause_survives_every_width_it_is_needed_at() -> None:
+    """The narrow rungs matter more than the wide one.
+
+    At ``0 total`` the addends are ``0 sessions + 0 subagents`` — three zeros
+    whose only informative companion is the queued count, so a ladder that shed
+    ``queued`` FIRST restored the contradiction on exactly the frames too small
+    to show anything else.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=5,
+        live=5,
+        subagents_reporting=5,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=3,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    for width in range(50, 121):
+        row = [line for line in _lines(snapshot, width=width) if "Trajectories" in line][0]
+        assert "3 queued" in row or "3q" in row, (width, row)
+
+    # Below 50 the note column cannot fit even ``3q`` plus its separator, so
+    # the fact has to live in the header's short form instead. A 60-column
+    # terminal renders a 47-cell card, which is exactly this case: a captured
+    # frame at that size is what showed the row alone was not enough.
+    for width in range(38, 50):
+        header = [line for line in _lines(snapshot, width=width) if "Agents and subagents" in line][
+            0
+        ]
+        assert "3q" in header, (width, header)
+
+
+def test_no_line_overflows_at_any_width_with_the_longest_meta() -> None:
+    """The header shed is a fit check, not only a width floor.
+
+    ``_NOTE_MIN`` was calibrated against the metas that existed when it was
+    written; ``5 runtimes · none running · 3 queued`` is one cell longer and
+    overflowed at exactly 60 columns while passing the floor.
+    """
+    from rich.cells import cell_len
+
+    sessions = SessionsInfo(
+        available=True,
+        total=5,
+        live=5,
+        subagents_reporting=5,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=3,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    for width in range(38, 161):
+        for line in _lines(snapshot, width=width):
+            assert cell_len(line) <= max(38, width), (width, repr(line))
+
+
+def test_the_export_refuses_a_total_on_the_same_terms_as_the_panel() -> None:
+    """Q5: the two guards drifted, and the export is the copy that gets pasted.
+
+    When some runtimes reported and everything they reported was zero, the
+    panel refused to name a number while the export asserted ``>=0 total — 0
+    sessions + 0 subagents``.
+    """
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=2,
+        live=2,
+        subagents_reporting=1,
+        subagents_unreported=1,
+        fleet_trajectories=0,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    assert "1 of 2 runtimes did not report" in export
+    assert ">=0 total" not in export
+
+
+def test_the_exports_addends_inflect_like_the_panels() -> None:
+    """Q6/D12: ``1 sessions + 1 subagents`` is the state a fresh install is in."""
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=1,
+        live=1,
+        subagents_reporting=1,
+        fleet_session_trajectories=1,
+        fleet_subagents_running=1,
+        fleet_trajectories=2,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    assert "1 session + 1 subagent" in export
+    assert "1 sessions + 1 subagents" not in export
+
+
+def test_the_export_states_both_caveats_as_one_parenthetical() -> None:
+    """Reviewer NIT: two stacked apologies read as boilerplate and get skipped.
+
+    Both clauses qualify the same total, and both must still be present — the
+    packaging changes, not the disclosure.
+    """
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=3,
+        live=2,
+        wedged=1,
+        subagents_reporting=1,
+        subagents_unreported=1,
+        fleet_session_trajectories=1,
+        fleet_subagents_running=2,
+        fleet_trajectories=3,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    caveats = [line for line in export.split("\n") if "lower bound" in line]
+    assert len(caveats) == 1, caveats
+    assert "1 session runs an older build" in caveats[0]
+    assert "1 session is wedged; its counts" in caveats[0]

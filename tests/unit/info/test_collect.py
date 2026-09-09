@@ -948,3 +948,52 @@ def test_a_numerically_plausible_but_wrong_count_is_also_unreported() -> None:
     ok = collect_sessions(scan=_scan(good), usage=_usage({}), now=0.0)
     assert ok.lines[0].subagents_running == 0
     assert ok.subagents_reporting == 1 and ok.subagents_unreported == 0
+
+
+def test_a_pausing_child_sorts_with_the_running_ones() -> None:
+    """The tree must not contradict the tally directly above it.
+
+    ``pausing`` is in ``RUNNING_SUBAGENT_STATUSES``, so the header counts it as
+    a running trajectory. A local literal in ``rank()`` omitted it and sorted it
+    below the settled rows — the same local-vs-shared divergence this module's
+    own comments say the predicate exists to remove.
+    """
+
+    class _Node:
+        def __init__(self, job_id: str, label: str, status: str) -> None:
+            self.job_id = job_id
+            self.label = label
+            self.status = status
+            self.parent_job_id = None
+            self.agent_role = ""
+            self.effort = ""
+            self.session_id = ""
+
+    rows, _, _ = build_subagent_tree(
+        [
+            _Node("a", "alpha", "completed"),
+            _Node("b", "bravo", "pausing"),
+            _Node("c", "charlie", "running"),
+        ]
+    )
+    assert [row.label for row in rows] == ["bravo", "charlie", "alpha"]
+
+
+def test_an_absurd_count_is_refused_rather_than_breaking_the_layout() -> None:
+    """Q7: a 31-digit count renders 81 cells wide and overflows every frame.
+
+    Not reachable from this codebase's publisher — the count is a ``len()`` over
+    a roster bounded by ``DEFAULT_MAX_RUNNING_JOBS`` — so this only guards a
+    corrupt or foreign record, which is exactly the population ``_reported_count``
+    already exists to reason about. Six digits still pass: the ceiling is about
+    rendering, not about a belief regarding how many subagents can exist.
+    """
+    for value, reported in ((999_999, True), (1_000_000, False), (10**30, False)):
+        records = [
+            (_Record(pid=1, subagents_running=1, subagents_queued=0), "live"),
+            (_Record(pid=2, subagents_running=value, subagents_queued=0), "live"),
+        ]
+        info = collect_sessions(scan=_scan(records), usage=_usage({}), now=0.0)
+        assert info.available is True
+        assert (info.lines[1].subagents_running is not None) is reported, value
+        assert info.subagents_unreported == (0 if reported else 1), value

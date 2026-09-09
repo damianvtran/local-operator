@@ -3,7 +3,7 @@
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
              fleet | fleet-mixed | fleet-unread
-             today-quiet | race | one | one-older
+             today-quiet | race | one | one-older | queued-only
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the
@@ -375,6 +375,58 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
                 cross_session_known=not older and not single,
             ),
             env=_env(),
+            captured_at=CAPTURED_AT,
+        )
+
+    if scenario == "queued-only":
+        # D11: every runtime REPORTS, every one reports zero running, and
+        # children are waiting on the capacity gate. ``fleet_trajectories``
+        # excludes queued by design (a parked child spends nothing), so this is
+        # the one measured state whose total is honestly 0 while the tree below
+        # is not empty — the header said "none running" over three ⏳ rows,
+        # with "Subagent capacity 4 concurrent" two lines above advertising
+        # exactly the state that produces it.
+        lines = tuple(
+            _session_line(
+                4243 + index,
+                "Investigate request latency" if index == 0 else f"Session {index}",
+                is_self=index == 0,
+                subagents_running=0,
+                subagents_queued=3 if index == 0 else 0,
+            )
+            for index in range(5)
+        )
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=len(lines),
+            subagents_reporting=len(lines),
+            subagents_unreported=0,
+            fleet_subagents_running=0,
+            fleet_subagents_queued=3,
+            fleet_session_trajectories=0,
+            fleet_trajectories=0,
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                running=0,
+                queued=3,
+                settled=3,
+                max_running=4,
+                at_capacity=True,
+                max_depth=1,
+                cross_session_known=True,
+                tree=(
+                    SubagentLine(job_id="j1", label="reviewer", status="queued", depth=0),
+                    SubagentLine(job_id="j2", label="coder", status="queued", depth=0),
+                    SubagentLine(job_id="j3", label="qa-tester", status="queued", depth=0),
+                ),
+            ),
             captured_at=CAPTURED_AT,
         )
 

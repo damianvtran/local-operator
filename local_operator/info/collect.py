@@ -255,6 +255,15 @@ def collect_process(
     )
 
 
+#: Above this, a published count is treated as corrupt rather than as a
+#: measurement. Deliberately far above anything this codebase can produce —
+#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a
+#: bounded roster — so it can only reject a foreign or damaged record, never a
+#: real fleet. It is a RENDERING ceiling, not a belief about how many subagents
+#: can exist: six digits still fit the narrow rung.
+_ABSURD_COUNT = 999_999
+
+
 def _reported_count(value: Any) -> int | None:
     """A published subagent count, or ``None`` when the record did not report one.
 
@@ -281,8 +290,17 @@ def _reported_count(value: Any) -> int | None:
     calling it ``None`` folds it into the lower-bound caveat, which already
     exists to say the total is missing terms. ``bool`` is excluded explicitly —
     it is an ``int`` subclass, so ``True`` would otherwise count as one subagent.
+
+    A count above ``_ABSURD_COUNT`` is refused the same way. It is not that the
+    number is wrong — it is that a 31-digit figure renders 81 cells wide and
+    overflows every frame, including the abbreviated rung that exists to serve
+    narrow ones, because the shed compresses the LABELS and not the FIGURE.
+    Treating it as unreported keeps a corrupt record from breaking the layout
+    of the screen you open when something is already broken.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    if value > _ABSURD_COUNT:
         return None
     return value
 
@@ -471,6 +489,11 @@ def build_subagent_tree(
     question being asked, mirroring ``sort_needs_you_first``'s urgency-first
     principle.
     """
+    # Function-local like every other cross-package import here (see the module
+    # docstring). ``runtime.types`` is stdlib-only by contract, but the
+    # convention is what keeps that true.
+    from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
+
     children: dict[str | None, list[Any]] = defaultdict(list)
     known = {getattr(node, "job_id", "") for node in nodes}
     for node in nodes:
@@ -480,8 +503,13 @@ def build_subagent_tree(
         children[parent if parent in known else None].append(node)
 
     def rank(node: Any) -> tuple[int, str]:
+        # The SHARED predicate, not a local literal: the header counts
+        # ``pausing`` as a running trajectory, so a local tuple that omitted it
+        # sorted a counted-as-running child below the settled rows — the tree
+        # disagreeing with the tally directly above it, which is the one error
+        # this section must never make.
         status = str(getattr(node, "status", "") or "")
-        order = 0 if status in ("running", "starting") else 1 if status == "queued" else 2
+        order = 0 if status in RUNNING_SUBAGENT_STATUSES else 1 if status == "queued" else 2
         return order, str(getattr(node, "label", "") or "")
 
     rows: list[SubagentLine] = []
