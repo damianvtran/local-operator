@@ -249,6 +249,18 @@ class SecretsMapping(Mapping[str, SecretValue]):
             # `"X" in secrets` are built on __getitem__ raising it. The store's
             # own message is kept as the argument so a cell that prints the
             # exception still gets the actionable sentence.
+            #
+            # **This clause depends on the SEAM preserving the class, not on
+            # the local path being the one that ran (round-4 R11/Q5).** When
+            # the broker flattened every store failure to a bare
+            # `SecretStoreError`, this `except` stopped matching the moment a
+            # broker was live, and `secrets.get("ABSENT", "dflt")` RAISED
+            # instead of returning the default. It was invisible because the
+            # test pinning this contract runs without a broker, so it exercised
+            # the branch that had not changed. `errors.error_for_kind` is what
+            # makes both paths raise the same class; do not repair a future
+            # instance of this by widening the clause here, which would re-fork
+            # the taxonomy per consumer instead of fixing it once at the seam.
             raise KeyError(str(exc)) from exc
         value = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
         # REGISTER BEFORE RETURNING. The cell gets the value only after the

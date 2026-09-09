@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.secrets.access import open_store, retrieve_secret, session_id
-from local_operator.secrets.errors import SecretStoreError
+from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
 from local_operator.secrets.store import SecretRecord
 
@@ -964,10 +964,21 @@ def _stop_broker(client: Any) -> bool | None:
     except OSError as exc:
         _err(f"Could not stop the secret broker (pid {pid}): {exc}")
         return False
+
+    # `is_running` propagates a version refusal (Q4), but here the only
+    # question is whether the socket still answers AT ALL — a stale daemon that
+    # has not died yet is still running for the purpose of waiting it out, and
+    # it is precisely the daemon this verb was invoked to clear.
+    def still_up() -> bool:
+        try:
+            return client.is_running(None)
+        except SecretStoreError:
+            return True
+
     deadline = time.monotonic() + _BROKER_STOP_TIMEOUT_S
-    while time.monotonic() < deadline and client.is_running(None):
+    while time.monotonic() < deadline and still_up():
         time.sleep(0.05)
-    if client.is_running(None):
+    if still_up():
         _err(f"The secret broker (pid {pid}) did not exit within {_BROKER_STOP_TIMEOUT_S:g}s.")
         return False
     _err(f"stopped secret broker (pid {pid})")
@@ -987,7 +998,15 @@ def _broker(args: argparse.Namespace) -> int:
         return broker_module.run_broker()
 
     if command == "start":
-        if client.ensure_broker(None):
+        # A stale daemon holds the socket, so `ensure_broker` cannot start over
+        # it and now says so instead of timing out (Q4). The refusal already
+        # names the fix, and `restart` is a verb away.
+        try:
+            started = client.ensure_broker(None)
+        except BrokerIncompatible as exc:
+            _err(str(exc))
+            return 2
+        if started:
             status = client.broker_status(None) or {}
             _err(f"secret broker running (pid {status.get('pid', '?')})")
             return 0

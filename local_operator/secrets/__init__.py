@@ -39,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.secrets.runtime import secrets as secrets
 
 from local_operator.secrets.errors import (
+    BrokerIncompatible,
     BrokerUnavailable,
     IncompatibleStore,
     InsecurePermissions,
@@ -60,6 +61,7 @@ def __getattr__(name: str) -> object:
 
 
 __all__ = [
+    "BrokerIncompatible",
     "BrokerUnavailable",
     "IncompatibleStore",
     "InsecurePermissions",

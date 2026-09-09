@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import shlex
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import pytest
 
 from local_operator.harness.types import AbortSignal, ToolContext
 from local_operator.secrets.promote import promote_session_credential
+from local_operator.secrets.protocol import PROTOCOL_VERSION
 from local_operator.secrets.runtime import SecretsMapping, SecretValue
 from local_operator.tools import builtin
 from local_operator.tools.secret_tool import build_secret_tool, execute_secret
@@ -218,6 +220,164 @@ def test_mapping_retrieves_registers_and_reports_existence(isolated: Path) -> No
     with pytest.raises(KeyError):
         mapping["NOPE"]
     assert mapping.get("NOPE") is None
+
+
+def test_mapping_contract_holds_over_the_broker_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SAME `Mapping` contract, served by a REAL broker (round-4 R11/Q5).
+
+    **Why this exists beside the test directly above it, which asserts the same
+    three things.** That one runs under `isolated`, which never starts a
+    broker, so `retrieve_secret` falls through to the local decrypt — it pins
+    the contract on the branch this PR did NOT change. Routing the mapping
+    through the broker broke it on the branch that has no test: the broker
+    reported every store failure as one flat `"store"` code, the class was
+    erased, `__getitem__`'s `except SecretNotFound` stopped matching, and
+    `secrets.get("ABSENT", "dflt")` RAISED instead of returning the default.
+    The suite stayed green throughout.
+
+    So the assertions are duplicated ON PURPOSE. The contract is one contract
+    and the two paths must be indistinguishable to a caller; a test that only
+    ever exercises one of them cannot notice when they diverge.
+    """
+    pytest.importorskip("local_operator.secrets.client")
+
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.secrets import client
+    from local_operator.secrets.broker import SecretBroker
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.keys import key_path, write_private_file
+    from local_operator.secrets.store import SecretStore
+
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    key = generate_master_key()
+    store_on_disk = SecretStore(key, base=root)
+    store_on_disk.initialize()
+    store_on_disk.set("API", b"sk-live-4417", description="d")
+    write_private_file(key_path(root), key)
+
+    broker = SecretBroker(root, key_provider=lambda: key, idle_shutdown_s=0)
+    broker.start()
+    channel = None
+    stop = threading.Event()
+    try:
+        # **A running broker is NOT enough to reach the broker path, and
+        # discovering that is part of this finding.** Without a registered
+        # session the broker denies the retrieval on ancestry, and §8's keyfile
+        # fallback quietly serves it from the local decrypt — so a version of
+        # this test that merely started a broker PASSED against the unfixed
+        # head, reproducing the very "green because it exercised the other
+        # branch" defect it was written to catch. The registration is what puts
+        # the retrieval on the broker path, exactly as the TUI's startup
+        # registration does in production.
+        channel = client.register_session(root, session_id="mapping-contract")
+        assert channel is not None, "registration failed; the broker path is unreachable"
+
+        def drain() -> None:
+            while not stop.is_set():
+                notice = client.read_notification(channel)
+                if notice is None:
+                    return
+                client.acknowledge(channel)
+
+        # A real session answers §6 notifications; an unanswered notice would
+        # make the broker refuse as unredactable and mask the contract.
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+
+        assert client.is_running(root), "no broker; this test would re-cover the local path"
+        mapping = SecretsMapping(root)
+        assert mapping["API"] == "sk-live-4417"
+
+        assert mapping.get("ABSENT", "dflt") == "dflt"
+        assert mapping.get("ABSENT") is None
+        with pytest.raises(KeyError):
+            mapping["MISSING"]
+        assert "MISSING" not in mapping
+        assert "API" in mapping
+    finally:
+        stop.set()
+        if channel is not None:
+            channel.close()
+        broker.stop(timeout=5)
+
+
+def test_a_stale_broker_refuses_rather_than_serving_unnotified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A LIVE broker this runtime cannot speak to must not degrade (round-4 Q4).
+
+    **The case is a runtime update under a live daemon**, which `AGENTS.md`
+    calls routine: the new client speaks a protocol the running broker does
+    not. `retrieve_secret`'s docstring named this as the accepted cost and said
+    it raises — but `is_running` caught the version refusal and answered
+    `False`, laundering "live but stale" into "unreachable", so the fallback
+    fired and the value came back through the UNNOTIFIED local decrypt. That is
+    a full reproduction of Q3, and it arms itself at exactly the moment a
+    protocol bump ships.
+
+    `PROTOCOL_VERSION` has only ever been 1, so the skew is produced here by
+    running a real broker whose module constant is bumped — a real daemon, a
+    real socket and a real refusal, rather than a mock that would only restate
+    the assumption being tested.
+    """
+    pytest.importorskip("local_operator.secrets.client")
+
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.secrets import broker as broker_module
+    from local_operator.secrets import client
+    from local_operator.secrets.access import retrieve_secret
+    from local_operator.secrets.crypto import generate_master_key
+    from local_operator.secrets.errors import BrokerIncompatible
+    from local_operator.secrets.keys import key_path, write_private_file
+    from local_operator.secrets.store import SecretStore
+
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    secret = b"stale-broker-payload-71c2"
+    key = generate_master_key()
+    store_on_disk = SecretStore(key, base=root)
+    store_on_disk.initialize()
+    store_on_disk.set("STALE_TOKEN", secret, description="q4")
+    write_private_file(key_path(root), key)
+
+    # The daemon speaks a version this client does not. Patched on the broker
+    # module only, so the CLIENT keeps the real constant and the two disagree
+    # exactly as they would across an update.
+    monkeypatch.setattr(broker_module, "PROTOCOL_VERSION", PROTOCOL_VERSION + 1)
+    stale = broker_module.SecretBroker(root, key_provider=lambda: key, idle_shutdown_s=0)
+    stale.start()
+    try:
+        with pytest.raises(BrokerIncompatible) as refusal:
+            retrieve_secret("STALE_TOKEN", root)
+        # Actionable, not merely fatal: the operator is told what to run, and
+        # the pid is present because `status` cannot answer through the same
+        # version gate.
+        assert "lop secret broker restart" in str(refusal.value)
+        assert isinstance(refusal.value.pid, int)
+
+        # The distinction that carries the safety property: an unreachable
+        # broker still degrades, a live one does not.
+        with pytest.raises(BrokerIncompatible):
+            client.is_running(root)
+        status = client.broker_status(root)
+        assert status is not None and status.get("incompatible") is True
+
+        # Metadata is the deliberate exception: it hands out no bytes and owes
+        # no §6 notice, so the read-only surfaces stay up under skew.
+        assert "STALE_TOKEN" in SecretsMapping(root)
+    finally:
+        stale.stop(timeout=5)
 
 
 def test_existence_check_does_not_write_a_retrieval_audit_row(isolated: Path) -> None:
