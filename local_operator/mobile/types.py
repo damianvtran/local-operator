@@ -367,7 +367,15 @@ class TranscriptEntry:
     # tool rows
     tool_call_id: str = ""
     tool_name: str = ""
-    tool_state: ToolState = "done"
+    # NOT "done". A row whose state nobody set is a call nobody has seen
+    # return, and defaulting to success ASSERTS an outcome that was never
+    # observed — an unanswered call rendered ✓ while the TUI showed it
+    # interrupted. This is the same class as the three shipped duration bugs:
+    # one path silently defaulting where another is explicit. Every path that
+    # knows the real state sets it (composing/running on the live events,
+    # done/failed when a result pairs), so the default is only ever read by a
+    # row that genuinely has no outcome.
+    tool_state: ToolState = "interrupted"
     summary: str = ""  # the one-line args summary (compacted path etc.)
     intent: str = ""  # the model's own narration, when it gave one
     diff_added: int = 0

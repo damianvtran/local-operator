@@ -75,7 +75,20 @@ function DiffBlock({ diff }: { diff: string | string[] }) {
 const DIFF_FIRST_TOOLS = new Set(["write", "edit", "apply_patch", "patch"]);
 
 export function ToolRow({ entry }: { entry: TranscriptEntry }) {
-	const [open, setOpen] = useState(false);
+	/* Bang-mode (`! cmd`) opens EXPANDED, matching the TUI: the user typed
+	   this command themselves and is waiting to read its output, so making
+	   them tap to see it asks for a gesture to reveal the thing they asked
+	   for. Every other card stays collapsed (§7.4 — one line per action,
+	   details in one tap).
+
+	   Tracked as an OVERRIDE rather than as initial state: a live bang row
+	   is mounted while still running and only learns `user_run` when its
+	   result settles, and a `useState` initializer runs once at mount, so
+	   seeding it there would leave the live card shut. `null` means "the
+	   user has not touched this row", in which case `user_run` decides. */
+	const [override, setOverride] = useState<boolean | null>(null);
+	const open = override ?? entry.details.user_run === true;
+	const setOpen = setOverride;
 	const running =
 		entry.tool_state === "running" || entry.tool_state === "composing";
 	const isDiffFirst =

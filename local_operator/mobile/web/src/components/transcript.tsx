@@ -180,8 +180,21 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			return <ToolRow entry={entry} />;
 		case "notice":
 		case "compaction":
+			/* Severity ink mirrors the TUI's NoticeBlock kind. A refusal, a
+			   failed turn and a failed compaction are things the user has to
+			   know happened; an unattended gate timeout is something they may
+			   have to act on. Everything else keeps the quiet default — the
+			   loudest ink in the palette is worth nothing once routine
+			   receipts are wearing it. */
 			return (
-				<p className="text-meta text-ink-dim break-words">
+				<p
+					className={cn(
+						"text-meta break-words",
+						entry.details.severity === "error" && "text-danger",
+						entry.details.severity === "warning" && "text-warning",
+						!entry.details.severity && "text-ink-dim",
+					)}
+				>
 					{entry.text}
 				</p>
 			);
