@@ -1822,14 +1822,20 @@ def test_a_named_id_survives_a_stat_that_fails(tmp_path, monkeypatch) -> None:
     # and the mail spool), so that is the call made to fail. ``session_activity``
     # itself reads a failing stat as "no such file" — which lands here as the
     # same ResumeNotFound a missing session produces, never a traceback.
-    real_stat = Path.stat
+    #
+    # Patched at ``os.stat`` rather than ``Path.stat`` because the clock stats
+    # by string path (``session_activity_path``) to keep the sidebar's 2-second
+    # poll off pathlib. The PROPERTY under test is unchanged and is what this
+    # asserts: whatever the call shape, a stat that raises must surface as
+    # ResumeNotFound rather than as a traceback on the way to the TUI.
+    real_stat = os.stat
 
-    def flaky(self, *args, **kwargs):  # noqa: ANN001, ANN202
-        if self.name == resume_mod.TRANSCRIPT_NAME:
+    def flaky(path, *args, **kwargs):  # noqa: ANN001, ANN202
+        if str(path).endswith(resume_mod.TRANSCRIPT_NAME):
             raise PermissionError("stat denied")
-        return real_stat(self, *args, **kwargs)
+        return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", flaky)
+    monkeypatch.setattr(os, "stat", flaky)
     with pytest.raises(resume_mod.ResumeNotFound):
         resume_mod.resume_dir(tmp_path, "sess-abc")
 
