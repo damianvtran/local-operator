@@ -32,6 +32,7 @@ from __future__ import annotations
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Static
 
@@ -209,6 +210,41 @@ class Toast(Static):
     window in which two cards exist at once.
     """
 
+    class Evicted(Message):
+        """An owned card was REPLACED while it was still showing.
+
+        The distinction this carries is "thrown away" versus "retired": a card
+        that ran its timer out, or that the user clicked away, was delivered —
+        they had their chance to read it. A card overwritten mid-display was
+        not, and a caller that announces something ONCE needs to know the
+        difference, because its record of "already told them" is otherwise
+        spent on a card nobody saw.
+
+        Concretely, the single slot is shared and ``yield_to_actionable`` only
+        protects an incumbent that is :data:`TOAST_FAILURE_MS`-long. The MCP
+        startup announce is a 5 s courtesy card, so a routine copy receipt
+        evicts it (UX round 1, U2) — this is how its owner learns to announce
+        again rather than treating the news as delivered.
+
+        Carries the card's GENERATION as well as its owner, and the text for
+        the reader's convenience only. The generation is the identity: an owner
+        that raises a second card legitimately evicts its own first one, and
+        matching on TEXT cannot tell "my stale card was dropped" from "my
+        current card is the one that dropped it" whenever the same words recur.
+        That is not hypothetical — a server that breaks, recovers and breaks
+        again inside one card's 5 s produces A→B→A, so the queued
+        ``Evicted(text=A)`` matches a record that has since come back to A and
+        releases an announce the user is reading right now (review round 2,
+        R2-3). :attr:`Toast.generation` exists for exactly this and says so:
+        "two notices can word themselves identically".
+        """
+
+        def __init__(self, owner: object, text: str, generation: int) -> None:
+            super().__init__()
+            self.owner = owner
+            self.text = text
+            self.generation = generation
+
     def __init__(self) -> None:
         super().__init__("")
         # Hidden means ``display: none`` — zero rows, so an empty slot cannot
@@ -307,6 +343,21 @@ class Toast(Static):
             # the stacking this widget exists to avoid.
             self._deferred = (text, duration_ms, owner)
             return
+        # A SHOWING card is being thrown away rather than retired, so its owner
+        # is owed the news that the interruption it asked for never landed. See
+        # :class:`Evicted`. Only OWNED cards are reported: an unowned card has
+        # nobody to tell, and posting for one is traffic with no reader.
+        #
+        # Captured BEFORE the state below is overwritten, but posted AFTER every
+        # guard that can still decline the slot, so the notice is true by
+        # construction rather than by the current guard ordering: any early
+        # return added between here and the replacement would otherwise announce
+        # an eviction that never happened (review round 2, R2-4).
+        evicted = (
+            self.Evicted(self._owner, self._message, self._generation)
+            if self.display and self._owner is not None
+            else None
+        )
         self._deferred = None
         self._stop_timer()
         self._generation += 1
@@ -326,6 +377,8 @@ class Toast(Static):
         self.display = True
         self._refit()
         self._timer = self.set_timer(duration_ms / 1000, self.dismiss_toast)
+        if evicted is not None:
+            self.post_message(evicted)
 
     def withdraw(self, owner: object) -> None:
         """Retire ``owner``'s card, whether it is SHOWING or still held.
