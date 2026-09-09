@@ -1133,12 +1133,15 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     concurrently) is skipped rather than raising out of an error path whose whole
     job is to be helpful.
 
-    The traversal is ``os.scandir``-based over the store, with one ``stat`` per
-    directory for the transcript and one for the marker. The store is scanned
-    once rather than each directory being scanned individually: the latter is
-    what the origin design proposed, and it measures ~2x WORSE (1986 ms vs
-    1127 ms over 31,700 dirs) because it stats every entry in every directory
-    to learn two filenames. Do not "fix" it back.
+    The traversal is ``os.scandir``-based over the store. Each directory costs
+    ONE ``stat`` (the origin marker) plus, only for the sessions that survive
+    that gate, the activity stats — see the gate-order note in
+    :func:`_recent_sessions_with_origin`, which is where the per-directory cost
+    is actually decided. The store is scanned once rather than each directory
+    being scanned individually: the latter is what the origin design proposed,
+    and it measures ~2x WORSE (1986 ms vs 1127 ms over 31,700 dirs) because it
+    stats every entry in every directory to learn two filenames. Do not "fix"
+    it back.
 
     The cost that matters is the ORIGIN check, which runs once per directory
     and therefore scales with the SUBAGENT population — ~10.6x the user
@@ -1178,7 +1181,7 @@ def _recent_sessions_with_origin(
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
     # module's import, not this function's.
-    from local_operator.session.retention import session_activity
+    from local_operator.session.retention import session_activity_path
 
     rows: list[tuple[str, float, str]] = []
     try:
@@ -1195,22 +1198,26 @@ def _recent_sessions_with_origin(
     seen: set[str] = set()
     with scan:
         for entry in scan:
-            # ONE ranking clock, shared with the cleanup policy
-            # (``session.retention.session_activity``): the picker's "most
-            # recent" and the policy's "most recent" must be the same
-            # directories, or the policy removes rows the picker shows
-            # (QA round 1 Q2, UX round 2 U11). A directory with no activity
-            # is not a resumable session and gets no row.
-            activity = session_activity(Path(entry.path))
-            if activity is None:
-                continue
-            mtime = activity
-            # After the transcript stat, not before: the stat is what proves the
-            # directory is a session at all, and an unreadable marker must not
-            # cost a row.
+            # ---- ORDER OF THE TWO GATES IS A MEASURED CHOICE ----------------
+            # A row must pass BOTH "has activity" and "is user-visible". That
+            # is a conjunction, so evaluating the cheaper, more SELECTIVE gate
+            # first is output-identical and strictly less work.
             #
-            # This stat does double duty — it answers "is there a marker" AND
-            # produces the cache key — so the cache costs no extra syscall.
+            # The origin gate is far more selective in practice: on the
+            # reporting machine 1,785 of 1,946 directories (92%) are subagent
+            # sessions that this scan discards. Asking the activity question
+            # first spent two stats on each of them to rank a row that was
+            # then thrown away — the scan's dominant cost, and the reason the
+            # 2-second sidebar poll scaled with every session ever created
+            # rather than with the user's own.
+            #
+            # Ordering it this way costs nothing when the gate does NOT fire:
+            # the marker stat below has to happen for a user session anyway, so
+            # it is merely moved earlier, never added.
+            #
+            # This stat does triple duty — it answers "is there a marker",
+            # produces the verdict-cache key, AND gates visibility — so the
+            # cache still costs no extra syscall.
             marker = os.path.join(entry.path, ORIGIN_NAME)
             try:
                 marker_stat: os.stat_result | None = os.stat(marker)
@@ -1266,7 +1273,27 @@ def _recent_sessions_with_origin(
                 # No marker: the user's own session, and the cheap path this
                 # scan is careful to keep free of reads.
                 origin = ""
-            rows.append((entry.name, mtime, origin))
+            # ONE ranking clock, shared with the cleanup policy
+            # (``session.retention.session_activity``): the picker's "most
+            # recent" and the policy's "most recent" must be the same
+            # directories, or the policy removes rows the picker shows
+            # (QA round 1 Q2, UX round 2 U11). A directory with no activity
+            # is not a resumable session and gets no row.
+            #
+            # Runs AFTER the origin gate (see the note above) so the ~92% of
+            # directories that are subagent sessions never pay for it. Note the
+            # marker bookkeeping above is unaffected by this order: ``seen``
+            # tracks which markers EXIST on disk, which is a fact about the
+            # store and not about whether a row is emitted, so a marked
+            # directory that fails this gate still keeps its cached verdict
+            # rather than being dropped and re-read on every scan.
+            #
+            # ``session_activity_path`` over ``session_activity``: same clock,
+            # same answer, without building a ``Path`` per candidate.
+            activity = session_activity_path(entry.path)
+            if activity is None:
+                continue
+            rows.append((entry.name, activity, origin))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }

@@ -8,6 +8,7 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -456,10 +457,24 @@ def cached_session_rows(
     selected = (
         candidates if candidates is not None else _recent_sessions_with_origin(directory, limit)
     )
+    # Resolved ONCE for the store, not per row. ``Path.resolve()`` is a
+    # ``realpath`` — an ``lstat`` per path component — and the loop below called
+    # it twice for every row, which measured 2,880 realpath calls and 1,440
+    # lstats per poll on a 144-row listing: 21% of the poll's profile spent
+    # building a dictionary key. The variable part of that path is the session
+    # id, which is a single directory name, so resolving the parent captures
+    # everything a symlinked store could redirect.
+    #
+    # Safe even for the exotic case of an individual session directory being
+    # itself a symlink: this key is only ever an in-process memo key, never an
+    # I/O path, so a key that differs from the fully-resolved one can only cost
+    # a cache MISS (a row rebuilt from disk, which is correct by construction),
+    # never a wrong or stale row.
+    root = (directory / "sessions").resolve()
     for session_id, mtime, origin in selected:
         session_dir = directory / "sessions" / session_id
         key = _row_stat_key(session_dir)
-        cached = _ROW_CACHE.get(session_dir.resolve())
+        cached = _ROW_CACHE.get(root / session_id)
         if key is not None and cached is not None and cached[0] == key:
             # Same transcript bytes as last poll: the name and the fork mark
             # cannot have changed, so neither read is repeated. `mtime` is
@@ -476,7 +491,7 @@ def cached_session_rows(
             )
         rows.append(row)
         if key is not None:
-            fresh[session_dir.resolve()] = (key, row)
+            fresh[root / session_id] = (key, row)
     _ROW_CACHE.clear()
     _ROW_CACHE.update(fresh)
     return rows
@@ -510,24 +525,57 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
         )
         for session_id, mtime, _ in candidates
     ]
-    for marker in (directory / "sessions").glob("*/desktop.json"):
-        if marker.parent.name in source or not session_directory_name(marker.parent.name):
-            continue
-        # A marker is a draft fallback, never a competing source of historical
-        # title/mtime for a transcript that fell beyond a previous page bound.
-        if (marker.parent / TRANSCRIPT_FILENAME).exists():
-            continue
-        try:
-            rows.append(
-                SessionRow(
-                    marker.parent.name,
-                    marker.stat().st_mtime,
-                    "",
-                    created_at=session_created_at(marker.parent),
+    # One directory read plus a stat per unlisted candidate, NOT
+    # ``glob("*/desktop.json")``. The glob looks equivalent and is not: a
+    # pattern whose wildcard is a DIRECTORY component makes pathlib open and
+    # enumerate every session directory to learn one filename, so this line
+    # alone issued 1,946 ``scandir`` calls per poll on the reporting machine
+    # — 1.20 s of a 6.47 s profile, the single largest term in it — to find
+    # the ONE marker that store actually contains. Asking about the file
+    # directly answers the same question with a stat.
+    #
+    # Cheaper still, the ``in source`` test now runs BEFORE the filesystem is
+    # touched rather than after the glob has already paid for the directory:
+    # every session that is already listed costs nothing here at all.
+    try:
+        entries = os.scandir(directory / "sessions")
+    except OSError:
+        entries = None
+    if entries is not None:
+        with entries:
+            for entry in entries:
+                if entry.name in source:
+                    continue
+                try:
+                    # No ``is_dir()`` guard: a successful stat of a file INSIDE
+                    # the entry already proves it is a directory, so asking
+                    # first would spend a stat per entry to learn what this one
+                    # tells us for free. The common answer here is ENOENT.
+                    marker_mtime = os.stat(os.path.join(entry.path, "desktop.json")).st_mtime
+                    # A marker is a draft fallback, never a competing source of
+                    # historical title/mtime for a transcript that fell beyond a
+                    # previous page bound.
+                    if os.path.exists(os.path.join(entry.path, TRANSCRIPT_FILENAME)):
+                        continue
+                except OSError:
+                    # Includes the common case: no ``desktop.json`` here, which
+                    # the glob expressed as a non-match rather than an error.
+                    continue
+                # Checked only for an entry that actually carries a marker.
+                # It is a containment guard on names that may come from
+                # discovery metadata, not a filter this loop needs per entry,
+                # and it is pure-Python per-character work worth keeping off
+                # the path taken by every directory in the store.
+                if not session_directory_name(entry.name):
+                    continue
+                rows.append(
+                    SessionRow(
+                        entry.name,
+                        marker_mtime,
+                        "",
+                        created_at=session_created_at(Path(entry.path)),
+                    )
                 )
-            )
-        except OSError:
-            continue
     rows = decorate_rows(directory, rows, include_live=True)
     identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
     attention: dict[str, dict[str, Any]] = {}
