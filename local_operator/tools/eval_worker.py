@@ -79,6 +79,103 @@ TRUNCATED_MARKER = "\n[…worker output truncated before protocol serialization]
 _PROTOCOL_OUT = sys.stdout
 _PROTOCOL_IN = sys.stdin
 
+#: R1. The parent's crash path must scrub the worker's REAL fd-2 tail, but the
+#: values live in this process's ledger, unreachable across the boundary. The
+#: worker publishes each value to the parent on a dedicated fd at the moment of
+#: registration, so the parent's scrub set is byte-identical to the ledger the
+#: other channels use rather than a second, divergent record — the exact shape
+#: of the original pipe bug. ``None`` until the parent spawns us with the fd
+#: (``LOCAL_OPERATOR_EVAL_SCRUB_FD``); a worker started without it publishes
+#: nothing, leaving the parent's crash path with an empty set, which is the
+#: pre-R1 behaviour and still fails safe.
+_SCRUB_FD_ENV = "LOCAL_OPERATOR_EVAL_SCRUB_FD"
+_SCRUB_FD: "int | None" = None
+
+
+def _publish_secret_value(value: str) -> None:
+    """Write one newly retrieved value to the parent's scrub channel.
+
+    Called from the runtime ledger's ``register`` hook, so it fires on the
+    retrieval itself — before the cell that just received the value can write
+    it anywhere. Length-prefixed and NUL-terminated so the parent frames one
+    value per record across pipe-read boundaries.
+
+    R9: THE WRITE IS NON-BLOCKING, AND THAT IS THE LOAD-BEARING PROPERTY.
+    ``register`` publishes BEFORE the value reaches the caller, so anything
+    that parks here parks the retrieval itself — and a blocking ``os.write``
+    onto a full pipe does not raise, it parks forever, which no ``except``
+    can rescue. The pipe holds 64 KiB and the parent drains it between
+    exchanges, so a full pipe means one cell out-published a whole drain
+    cycle. The ranking that settles what to do then: a dropped record
+    degrades to an UNSCRUBBED CRASH TAIL for that one value, which is the
+    documented pre-R1 fallback and survivable; a blocked write degrades to a
+    dead kernel and total loss of session state, which is not. Availability
+    of the retrieval outranks completeness of the crash-tail scrub, so a
+    record that does not fit is dropped.
+
+    A record smaller than ``PIPE_BUF`` is written atomically or not at all, so
+    an ordinary token-sized value can only ever be dropped WHOLE. A larger
+    value can be cut short, which would desynchronise the parent's framing and
+    cost every LATER value too — so a short write retires the channel instead,
+    leaving the partial record as the trailing one the parent already drops.
+    """
+    global _SCRUB_FD
+    fd = _SCRUB_FD
+    if fd is None:
+        return
+    try:
+        data = value.encode("utf-8", errors="replace")
+        record = str(len(data)).encode("ascii") + b"\x00" + data + b"\x00"
+        written = os.write(fd, record)
+        if written != len(record):
+            # Framing is now damaged; every later record would be misparsed.
+            # Stop publishing rather than corrupt values already delivered.
+            _SCRUB_FD = None
+    except BlockingIOError:
+        # The pipe is full. Drop this record — see the ranking above.
+        pass
+    except BaseException:  # noqa: BLE001 — publication must never fault a cell
+        pass
+
+
+def _install_scrub_channel() -> None:
+    """Resolve the side-channel fd and register the publish hook.
+
+    Reads ``LOCAL_OPERATOR_EVAL_SCRUB_FD`` once. The fd is inherited from the
+    parent; it is made non-inheritable so a grandchild process cannot hold it
+    open and stall the parent's read at the crash path, and NON-BLOCKING so a
+    full pipe can never park a retrieval (R9 — see ``_publish_secret_value``).
+    Both are required: if the non-blocking mode cannot be set, the channel is
+    left absent rather than run in a mode that can wedge the kernel.
+    """
+    global _SCRUB_FD
+    raw = os.environ.pop(_SCRUB_FD_ENV, None)
+    if raw is None:
+        return
+    try:
+        fd = int(raw)
+    except ValueError:
+        return
+    try:
+        os.set_inheritable(fd, False)
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError):
+        return
+    _SCRUB_FD = fd
+    # Lazy: the runtime module is only present once the worker has imported it
+    # (on first secret use). Deferring the import to ``main()`` keeps the crypto
+    # stack off the startup path of a worker that never touches a secret — the
+    # same ``sys.modules`` deferral ``_scrub_secrets`` is built around. The hook
+    # is inert until then because registration is the only thing that triggers
+    # publication.
+    try:
+        import local_operator.secrets.runtime as runtime
+
+        runtime.set_publish_hook(_publish_secret_value)
+    except BaseException:  # noqa: BLE001
+        pass
+
+
 # A worker can ask the parent to execute a harness tool, but cannot grant
 # itself one. The parent resolves only the current session's available or
 # explicitly discovered tools and repeats normal validation/approval. Keeping
@@ -393,20 +490,83 @@ State SURVIVES across calls: variables, imports and functions defined in one
 call are still present in the next. The kernel runs in the session's working
 directory. Use display(value) to show a value to the USER only — it is never
 added to the model's context.
+
+secrets["NAME"] retrieves a stored secret from the encrypted long-term store
+(`lop secret list` names them). The value stays in this process: it is scrubbed
+out of stdout, stderr, display and the cell's result, so use it directly in the
+call that needs it and never print it. `import secrets` still gets the stdlib
+module, as usual.
 """
 
 
+def _scrub_secrets(text: str) -> str:
+    """Strip values retrieved through ``local_operator.secrets`` out of ``text``.
+
+    The §6 sink for the eval surface. A cell that fetches a secret through the
+    library (design §5.3) holds real bytes in the worker; this is what keeps
+    them from riding stdout, stderr, a trailing expression, a ``display`` item
+    or a streaming frame into the model's transcript.
+
+    **Checked through ``sys.modules`` rather than imported.** This function is
+    on the path of EVERY cell in every kernel, and the secrets runtime pulls
+    SQLite and the AES binding behind it. A worker that never touched a secret
+    must not pay that import. The check is also exactly correct rather than
+    merely cheap: if the module was never imported, nothing obtained a value
+    through it, so there is provably nothing to scrub.
+
+    Failure here is swallowed on purpose — but it FAILS CLOSED. A scrubber that
+    raised would surface as a broken cell, and a scrubber that silently
+    returned the input would publish the secret. So an unexpected failure drops
+    the text entirely and says why, because losing output is recoverable (re-run
+    the cell) and leaking a credential is not.
+    """
+    if not text:
+        return text
+    runtime = sys.modules.get("local_operator.secrets.runtime")
+    if runtime is None:
+        return text
+    try:
+        scrubbed = runtime.scrub(text)
+    except BaseException:  # noqa: BLE001 — see the fail-closed note above
+        return (
+            "[output withheld: the secret redaction filter failed, and this worker "
+            "has retrieved at least one secret value. Re-run the cell.]"
+        )
+    # R6: the scrubber's contract is "return a scrubbed string". Anything else
+    # (a broken store returning a non-str) is an unexpected failure, and the
+    # fail-closed rule above applies to it exactly as it does to a raise —
+    # publishing ``text`` unscrubbed here would be the leak the guard exists
+    # to stop.
+    return (
+        scrubbed
+        if isinstance(scrubbed, str)
+        else (
+            "[output withheld: the secret redaction filter returned an unexpected "
+            "result, and this worker has retrieved at least one secret value. "
+            "Re-run the cell.]"
+        )
+    )
+
+
 def _safe_repr(value: Any) -> str:
-    """``repr(value)`` that cannot raise.
+    """``repr(value)`` that cannot raise, with retrieved secrets scrubbed.
 
     A user-defined ``__repr__`` is arbitrary code; one that raises would turn
     a successful computation into a lost result, so the failure is reported
     in-band instead.
+
+    The scrub covers the case :class:`~local_operator.secrets.runtime.\
+SecretValue`'s own ``__repr__`` cannot: a secret nested inside a container,
+    whose repr is built by the CONTAINER (``[token]`` renders through
+    ``list.__repr__``, which calls ``repr`` on the element — that one is
+    covered — but ``"".join`` or an f-string inside a user ``__repr__`` is
+    not). Scrubbing the finished string catches every route at one point.
     """
     try:
-        return _REPR.repr(value)
+        rendered = _REPR.repr(value)
     except BaseException as exc:  # noqa: BLE001 — user code, any failure is data
-        return f"<unrepresentable result: {type(exc).__name__}: {exc}>"
+        rendered = f"<unrepresentable result: {type(exc).__name__}: {exc}>"
+    return _scrub_secrets(rendered)
 
 
 def _make_display(sink: _DisplaySink) -> Callable[..., None]:
@@ -504,11 +664,18 @@ class _StreamingTextIO(_CappedTextIO):
     def write(self, value: str) -> int:
         written = super().write(value)
         if value:
+            # SCRUBBED HERE TOO, not only in the final response. A streaming
+            # frame reaches `jobs(op='peek')` and the live card while the cell
+            # is still running, so a secret printed by a long-running cell
+            # would paint in the live view for as long as the cell ran even
+            # though the final response redacted it. Same hole as the bash
+            # pipe filter, same fix.
+            #
             # A failure to emit must never break the user's code, which is what
             # an exception raised inside ``print`` would do. The frame is
             # advisory; the authoritative copy rides the final response.
             with contextlib.suppress(Exception):
-                self._emit(value)
+                self._emit(_scrub_secrets(value))
         return written
 
 
@@ -563,14 +730,22 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         # Background threads left behind by arbitrary Python code cannot issue
         # tool calls between cells using an expired turn's authority.
         _ACTIVE_BRIDGE = ("", False)
+    # EVERY model-visible channel of the response passes the secret scrubber,
+    # at the single point where the response is assembled rather than at each
+    # producer. `result` is already scrubbed by `_safe_repr`; it is re-scrubbed
+    # here anyway because this choke point is the invariant ("nothing leaves
+    # the worker unscrubbed") and a second pass over a redacted string is a
+    # no-op. `error` matters as much as `stdout`: a traceback renders the
+    # arguments of the failing frame, so a request that fails WITH a secret in
+    # scope puts it in the error text.
     return {
         "id": request.get("id", ""),
         "ok": ok,
-        "stdout": stdout.getvalue(),
-        "stderr": stderr.getvalue(),
-        "error": error,
-        "result": result,
-        "display": display_sink.finish(),
+        "stdout": _scrub_secrets(stdout.getvalue()),
+        "stderr": _scrub_secrets(stderr.getvalue()),
+        "error": _scrub_secrets(error) if error is not None else None,
+        "result": _scrub_secrets(result) if result is not None else None,
+        "display": [_scrub_secrets(item) for item in display_sink.finish()],
     }
 
 
@@ -597,14 +772,74 @@ def _enable_cwd_imports() -> None:
         sys.path.append(cwd)
 
 
+class _LazySecrets:
+    """``secrets`` in the cell namespace, importing the store on FIRST USE.
+
+    Bound into every kernel's namespace so a cell can write ``secrets["NAME"]``
+    with no import line, while a kernel that never asks for a secret never
+    loads SQLite or the AES binding — the import this proxy exists to defer.
+    That deferral is also what keeps :func:`_scrub_secrets`'s ``sys.modules``
+    check honest: the runtime module appears there exactly when a lookup has
+    been attempted.
+
+    Only the mapping operations are forwarded, and each one re-resolves through
+    the real object rather than caching it, so this stays a thin alias for
+    ``local_operator.secrets.secrets`` instead of a second implementation that
+    could drift from it.
+
+    **It shadows the stdlib ``secrets`` module, and that is survivable rather
+    than accidental.** The name comes from design §5.3. A cell that wants
+    ``secrets.token_hex()`` writes ``import secrets`` first, which REBINDS the
+    name in this namespace to the stdlib module for the rest of the kernel's
+    life — the ordinary Python behaviour, unaffected by the pre-binding. The
+    only case the pre-binding changes is a cell that used ``secrets.token_hex``
+    with no import at all, which raised ``NameError`` before and now raises
+    ``AttributeError``: a different message for code that was already broken.
+    """
+
+    __slots__ = ()
+
+    def _target(self) -> Any:
+        from local_operator.secrets.runtime import secrets as target
+
+        return target
+
+    def __getitem__(self, name: str) -> Any:
+        return self._target()[name]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self._target().get(name, default)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._target()
+
+    def __iter__(self) -> Any:
+        return iter(self._target())
+
+    def __len__(self) -> int:
+        return len(self._target())
+
+    def keys(self) -> Any:
+        return self._target().keys()
+
+    def __repr__(self) -> str:
+        # Does not resolve the target: a repr must not import the crypto stack
+        # (nor touch the store) just because a traceback rendered the namespace.
+        return "<local_operator secrets: secrets['NAME'] retrieves one value>"
+
+
 def main() -> None:
     """Read requests, run them, answer — until stdin closes or the tool kills
     the process. Either ending is normal from this side: the tool owns the
     lifecycle (idle reaping, LRU eviction, timeout kill)."""
     _enable_cwd_imports()
+    _install_scrub_channel()
     namespace: dict[str, Any] = {
         "__name__": "__eval__",
         "__doc__": NAMESPACE_DOC,
+        # Pre-bound so the documented form works with no import line; see
+        # _LazySecrets for why this is a proxy rather than the real mapping.
+        "secrets": _LazySecrets(),
     }
     for line in sys.stdin:
         line = line.strip()

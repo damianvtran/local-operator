@@ -69,6 +69,14 @@ _AMBIENT_VARS = (
     "LOP_MOBILE_CHILD_PROVIDER",
     "LOP_MOBILE_CHILD_MODEL",
     "LOP_MODEL_SELECTION_OVERRIDE",
+    # The eval worker's scrub-channel transport (R1). The parent sets it per
+    # spawn, but a worker that inherited a STALE value from the operator's own
+    # runtime would publish retrieved secret values onto whatever that number
+    # names in the test process — an arbitrary fd, not the pipe the parent is
+    # holding. The parent's explicit env override makes that unreachable in
+    # practice; scrubbing it keeps the guarantee at the fixture rather than
+    # resting on one caller always remembering to set it.
+    "LOCAL_OPERATOR_EVAL_SCRUB_FD",
     "LOP_MOBILE_CHILD_CWD",
     "LOP_MOBILE_PASSWORD",
     # The calling cmux workspace/surface. A headless fork e2e test inherited

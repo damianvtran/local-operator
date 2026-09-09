@@ -95,8 +95,85 @@ class InsecurePermissions(SecretStoreError):
 class BrokerUnavailable(SecretStoreError):
     """The key broker could not be reached.
 
-    Defined here, and not raised anywhere yet, because the CLI's ``harden`` and
-    ``unlock`` verbs report it as a not-yet-shipped capability. The broker
-    daemon and peer authentication land in the follow-up PR; that PR raises
-    this from the broker client in ``access.open_store``.
+    Strictly "nothing answered": the socket is absent, refused the connection,
+    or the daemon accepted and then never replied. A broker that ANSWERED and
+    said no is a different condition and must not be collapsed into this one —
+    see :class:`BrokerIncompatible` and the round-4 note on it.
     """
+
+
+class BrokerIncompatible(SecretStoreError):
+    """A broker is listening, but it speaks a different protocol version.
+
+    **Its own class because "live but unusable" is not "unreachable", and
+    conflating them silently disarmed a safety property (round-4 Q4).** The
+    broker refuses a version-mismatched request, and every such refusal used to
+    reach callers as a bare :class:`SecretStoreError` that
+    ``client.is_running`` swallowed into ``False``. Every caller then read that
+    as "no broker", and :func:`local_operator.secrets.access.retrieve_secret`
+    degraded to the UNNOTIFIED local decrypt — serving the value with no §6
+    redaction notice, which is the exact defect (Q3) the broker seam exists to
+    close. Because a stale daemon is most likely precisely at a runtime update,
+    the laundering armed itself at the worst moment.
+
+    ``PROTOCOL_VERSION`` has only ever been 1, so no shipped runtime can reach
+    this yet; it is a latent hole being closed before the first bump makes it
+    live rather than after.
+
+    It carries the daemon's ``pid`` and the ``protocol`` it speaks because the
+    version refusal is the one message that MUST be actionable: the advice is
+    to restart the broker, and stopping it needs a pid that no other request
+    can obtain — ``status`` fails the same version gate.
+    """
+
+    def __init__(self, message: str, *, pid: int | None = None, protocol: object = None) -> None:
+        super().__init__(message)
+        self.pid = pid
+        self.protocol = protocol
+
+
+#: Store-error classes that survive a broker round trip, by class name.
+#:
+#: **Why a name-keyed allowlist and not ``getattr`` on this module.** The class
+#: name arrives from the broker socket, and resolving an arbitrary attribute
+#: name off a module because a peer asked for it is how a wire format turns
+#: into a lookup primitive. An explicit table can only ever yield one of these
+#: classes, and an unknown name degrades to :class:`SecretStoreError` rather
+#: than raising something unexpected.
+#:
+#: **Why the taxonomy has to cross the seam at all (round-4 R11/Q5).** The
+#: broker flattened every store failure into one ``"store"`` reply code, so a
+#: caller could not tell a missing secret from a corrupt record — and
+#: :class:`~local_operator.secrets.runtime.SecretsMapping` translates exactly
+#: one of them (:class:`SecretNotFound`) into the ``KeyError`` its ``Mapping``
+#: contract owes callers. With the class erased, ``secrets.get("ABSENT",
+#: "dflt")`` RAISED instead of returning the default whenever a broker happened
+#: to be live. Preserving the class here fixes it for every consumer at once,
+#: rather than in the one that noticed.
+WIRE_ERROR_KINDS: dict[str, type[SecretStoreError]] = {
+    cls.__name__: cls
+    for cls in (
+        InvalidSecretName,
+        SecretNotFound,
+        SecretExists,
+        SecretCorrupt,
+        IncompatibleStore,
+        StaleKeyEpoch,
+        InsecurePermissions,
+    )
+}
+
+
+def error_for_kind(kind: object, message: str) -> SecretStoreError:
+    """Rebuild a store error the broker named, or the base class.
+
+    An unknown or absent ``kind`` is the OLD-broker case and must not be an
+    error of its own: a daemon from before this field existed passes the
+    version gate (the wire version did not change) and simply says nothing
+    about the class, which is exactly the pre-round-4 behaviour.
+    """
+    if isinstance(kind, str):
+        cls = WIRE_ERROR_KINDS.get(kind)
+        if cls is not None:
+            return cls(message)
+    return SecretStoreError(message)

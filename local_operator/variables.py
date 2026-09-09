@@ -117,7 +117,7 @@ def describe_store_failure(reason: CredentialStoreFailure, key: str) -> str:
 class CredentialCommand:
     """What ``/credential <args>`` asked for."""
 
-    action: Literal["list", "store", "forget", "forget-all", "error"]
+    action: Literal["list", "store", "forget", "forget-all", "persist", "error"]
     key: str = ""
     message: str = ""
 
@@ -125,6 +125,7 @@ class CredentialCommand:
 CREDENTIAL_USAGE = (
     "Usage: /credential <KEY>\n"
     "       /credential                # list\n"
+    "       /credential --persist <KEY>  # also save to the encrypted long-term store\n"
     "       /credential --forget <KEY>\n"
     "       /credential --forget-all"
 )
@@ -145,6 +146,17 @@ def parse_credential_command(args: str) -> CredentialCommand:
         if key is None:
             return CredentialCommand("error", message=f"Not a usable credential key: {rest}")
         return CredentialCommand("forget", key=key)
+    if trimmed.startswith("--persist"):
+        # Design §5.4: the session path is unchanged and GAINS a route. The
+        # credential named here stays in session memory and is additionally
+        # written to the encrypted long-term store.
+        rest = trimmed[len("--persist") :].strip()
+        if not rest:
+            return CredentialCommand("error", message=f"Missing key. {CREDENTIAL_USAGE}")
+        key = normalize_credential_key(rest)
+        if key is None:
+            return CredentialCommand("error", message=f"Not a usable credential key: {rest}")
+        return CredentialCommand("persist", key=key)
     if trimmed.startswith("-"):
         option = trimmed.split()[0]
         return CredentialCommand("error", message=f"Unknown option: {option}. {CREDENTIAL_USAGE}")

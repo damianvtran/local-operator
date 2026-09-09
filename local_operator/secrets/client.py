@@ -36,7 +36,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from local_operator.secrets.errors import BrokerUnavailable, SecretStoreError
+from local_operator.secrets.errors import (
+    BrokerIncompatible,
+    BrokerUnavailable,
+    SecretStoreError,
+    error_for_kind,
+)
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -119,6 +124,19 @@ def request(
             raise BrokerDenied(message)
         if code == "locked":
             raise BrokerLocked(message)
+        if code == "version":
+            # **A live-but-stale broker is not an unreachable one (Q4).**
+            # Falling through to the bare `SecretStoreError` below let
+            # `is_running` swallow this into `False`, which every caller reads
+            # as "no broker" — and `retrieve_secret` then served the value
+            # through the unnotified local decrypt. Its own class keeps that
+            # distinction available to the seam.
+            raise BrokerIncompatible(message, pid=reply.get("pid"), protocol=reply.get("protocol"))
+        if code == "store":
+            # The broker names the class it caught; rebuilding it here is what
+            # makes the broker and local paths present ONE error taxonomy to
+            # callers, so a miss is a miss whichever path served it (R11/Q5).
+            raise error_for_kind(reply.get("kind"), message)
         raise SecretStoreError(message)
     return reply
 
@@ -140,18 +158,43 @@ class BrokerLocked(SecretStoreError):
 
 
 def is_running(base: Path | None = None) -> bool:
-    """Is a broker listening right now? Never raises, never blocks long."""
+    """Is a USABLE broker listening right now? Never raises, never blocks long.
+
+    **A version-incompatible broker propagates rather than reporting False
+    (Q4).** It is listening, so answering ``False`` — the same answer given for
+    an empty socket path — laundered "live but unusable" into "unreachable",
+    and :func:`~local_operator.secrets.access.retrieve_secret` keys its
+    fallback on exactly that distinction: an unreachable broker degrades to the
+    unnotified local decrypt, which is correct for an outage and is the Q3
+    defect for a daemon that is right there and refusing. Callers that only
+    want a liveness bool and genuinely do not care about the reason catch
+    :class:`BrokerIncompatible` themselves, where the choice is visible.
+    """
     try:
         request("ping", base)
+    except BrokerIncompatible:
+        raise
     except SecretStoreError:
         return False
     return True
 
 
 def broker_status(base: Path | None = None) -> dict[str, Any] | None:
-    """The broker's own view of itself, or ``None`` when it is not running."""
+    """The broker's own view of itself, or ``None`` when it is not running.
+
+    A version-mismatched daemon cannot answer ``status`` — the gate runs before
+    the operation — so its pid is synthesised from the refusal instead, which
+    is the whole reason the broker attaches one. Reporting ``None`` here would
+    tell ``lop secret broker stop`` that nothing was running while a daemon
+    held the socket, leaving the operator with no way to clear the skew that
+    the version message tells them to clear.
+    """
     try:
         return request("status", base)
+    except BrokerIncompatible as exc:
+        if not isinstance(exc.pid, int):
+            return None
+        return {"running": True, "pid": exc.pid, "protocol": exc.protocol, "incompatible": True}
     except SecretStoreError:
         return None
 
@@ -167,6 +210,14 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
     the winner's socket, bounded by ``timeout``. No caller ever waits on the
     lock itself, so a holder that wedges costs a bounded delay rather than a
     deadlock.
+
+    **A version-incompatible daemon raises out of here rather than returning
+    False (Q4).** Returning False would send this function on to spawn a
+    replacement that cannot bind — the stale daemon holds the socket — and
+    then, after burning the full ``timeout``, report "no broker" to a caller
+    that degrades to an unnotified local read. Propagating is both faster and
+    the only answer that lets the seam tell the operator what is actually
+    wrong.
     """
     if is_running(base):
         return True

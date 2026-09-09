@@ -1773,6 +1773,59 @@ feel like wiring up. Using it to silence the failure defeats the guard: the
 whole point is that a registry default disagreeing with the code's default is a
 painted lie that nothing else reports.
 
+## Credentials and the encrypted secret store
+
+Full agent-facing guidance is `guide://credentials` (packaged at
+`local_operator/guides/credentials/GUIDE.md`); the design is
+`docs/design/secret-store.md`. This section is what someone CHANGING this code
+needs to know.
+
+**Four things are called credentials and they must stay distinct.** Provider API
+keys (`credentials.py`, plaintext, read by the model layer at boot); session
+credentials (`VariableStore._credentials`, memory-only, injected into `bash`,
+never readable by the agent); ordinary variables (denylist-filtered, not
+secret); and the encrypted long-term store (`local_operator/secrets/`, on disk,
+reachable by the agent through `lop secret get` and the eval library). A change
+that blurs two of them is a defect even when every test passes.
+
+**The agent uses a secret it cannot read — preserve that inversion.** No surface
+returns a value to the model. The `secret` tool's `retrieve` verb returns a
+receipt naming the secret and stating how to reach it; the eval library hands
+real bytes to the WORKER process, not to the transcript. Any new surface that
+returns a value into a tool result is writing it into a transcript that is
+persisted and replayed to the provider on every later turn.
+
+**Redaction has three sinks and they are not interchangeable.** `redact_tool_
+result` (the loop's choke point) covers finished tool results;
+`_redact_tool_text` covers UIs that read output before a result exists;
+`_PipeRedactor` covers live stream bytes and holds back a possible secret suffix
+so a value split across two reads cannot leak. A value must be registered with
+`VariableStore` before the output carrying it can be read — which is why the
+broker writes its session notification and waits for the ack BEFORE answering
+the retrieving child.
+
+**Build a stream filter from `_stream_redaction_values`, never from
+`credential_env()` alone.** That was a real hole: `credential_env()` holds only
+the values this process INJECTED, so a value a child fetched with
+`$(lop secret get X)` was scrubbed from the finished result and painted live in
+the streaming card and in `jobs(op='peek')`. The helper unions the injected map
+with the store's registered values, and **its failure path fails closed** — a
+redaction sink that cannot be read withholds the live output rather than
+publishing bytes it cannot vouch for, while still draining the pipe so the child
+does not block forever on a full buffer.
+
+**The eval worker scrubs through `sys.modules`, deliberately.**
+`eval_worker._scrub_secrets` checks whether `local_operator.secrets.runtime` is
+already imported instead of importing it. A kernel that never touched a secret
+must not pay for SQLite and the AES binding, and the check is exactly correct:
+if nothing imported the module, nothing obtained a value through it.
+
+**Do not describe this store as a vault, in code comments, docs, or to the
+user.** §9 of the design is explicit and the guide repeats it: it defeats the
+"scan the disk for credential files" malware that a bad link drops, and anything
+running as the operator that is willing to run `lop` can still read every
+secret. A comment or a docstring that promises more than that is wrong.
+
 ## Usage analytics (`local_operator/analytics/`)
 
 Every provider call across every session contributes to one shared, on-disk

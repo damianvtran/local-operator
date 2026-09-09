@@ -27,8 +27,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from local_operator.secrets.access import open_store, session_id
-from local_operator.secrets.errors import SecretStoreError
+from local_operator.secrets.access import open_store, retrieve_secret, session_id
+from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
 from local_operator.secrets.store import SecretRecord
 
@@ -243,8 +243,15 @@ def _get(args: argparse.Namespace) -> int:
     ``$( )`` stripping the newline we add is luck, not contract, in every other
     consumer (a Python ``subprocess.check_output``, a here-string, a file
     redirect).
+
+    Routed through :func:`~local_operator.secrets.access.retrieve_secret` so
+    the §6 notice fires BEFORE these bytes exist here (QA Q3). This verb is the
+    headline path — ``$(lop secret get NAME)`` is what the credentials guide
+    tells agents to write — so it is the one that most needs the value already
+    registered for redaction by the time it can be printed. Nothing about the
+    stdout contract changes: same bytes, no trailing newline.
     """
-    value = open_store().get(args.name, session_id=session_id())
+    value = retrieve_secret(args.name)
     sys.stdout.buffer.write(value)
     sys.stdout.buffer.flush()
     return 0
@@ -747,7 +754,9 @@ def _file(args: argparse.Namespace) -> int:
         _err("usage: lop secret file NAME [--env-var VAR] -- COMMAND...")
         return 2
 
-    value = open_store().get(args.name, session_id=session_id())
+    # Same announcement seam as `_get`: the plaintext is about to be written
+    # to a path the child reads, so the session must already be scrubbing it.
+    value = retrieve_secret(args.name)
     directory = Path(tempfile.mkdtemp(prefix="lop-secret-"))
     os.chmod(directory, DIR_MODE)
     target = directory / args.name.replace(os.sep, "_")
@@ -790,13 +799,16 @@ def _run(args: argparse.Namespace) -> int:
         _err("lop secret run: name at least one secret with --secret NAME")
         return 2
 
-    store = open_store()
     environment = os.environ.copy()
     for specification in args.secret:
         name, _, variable = specification.partition("=")
-        environment[variable or name] = store.get(name, session_id=session_id()).decode(
-            "utf-8", errors="strict"
-        )
+        # Through the announcement seam, per secret. These values go into a
+        # child's environment, which any same-uid process can read while it
+        # runs, so they need the redaction notice at least as much as `_get`'s
+        # do. One store handle is no longer reused across the loop: each
+        # retrieval is its own broker round trip, which is also what makes the
+        # audit trail record them individually.
+        environment[variable or name] = retrieve_secret(name).decode("utf-8", errors="strict")
     return subprocess.run(command, env=environment, check=False).returncode
 
 
@@ -952,10 +964,21 @@ def _stop_broker(client: Any) -> bool | None:
     except OSError as exc:
         _err(f"Could not stop the secret broker (pid {pid}): {exc}")
         return False
+
+    # `is_running` propagates a version refusal (Q4), but here the only
+    # question is whether the socket still answers AT ALL — a stale daemon that
+    # has not died yet is still running for the purpose of waiting it out, and
+    # it is precisely the daemon this verb was invoked to clear.
+    def still_up() -> bool:
+        try:
+            return client.is_running(None)
+        except SecretStoreError:
+            return True
+
     deadline = time.monotonic() + _BROKER_STOP_TIMEOUT_S
-    while time.monotonic() < deadline and client.is_running(None):
+    while time.monotonic() < deadline and still_up():
         time.sleep(0.05)
-    if client.is_running(None):
+    if still_up():
         _err(f"The secret broker (pid {pid}) did not exit within {_BROKER_STOP_TIMEOUT_S:g}s.")
         return False
     _err(f"stopped secret broker (pid {pid})")
@@ -975,7 +998,15 @@ def _broker(args: argparse.Namespace) -> int:
         return broker_module.run_broker()
 
     if command == "start":
-        if client.ensure_broker(None):
+        # A stale daemon holds the socket, so `ensure_broker` cannot start over
+        # it and now says so instead of timing out (Q4). The refusal already
+        # names the fix, and `restart` is a verb away.
+        try:
+            started = client.ensure_broker(None)
+        except BrokerIncompatible as exc:
+            _err(str(exc))
+            return 2
+        if started:
             status = client.broker_status(None) or {}
             _err(f"secret broker running (pid {status.get('pid', '?')})")
             return 0
