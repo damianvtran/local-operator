@@ -49,7 +49,7 @@ describe("rows the phone used to drop entirely", () => {
 	it("shows a refusal, a failed turn and a gate timeout", () => {
 		render(
 			<Transcript
-				pid={1}
+				pid="1"
 				entries={[
 					entry({ id: "a", kind: "assistant", text: "I started to answer but" }),
 					entry({ id: "b", text: "content policy", details: { severity: "error" } }),
@@ -75,7 +75,7 @@ describe("rows the phone used to drop entirely", () => {
 		// deciding what to do next, and one ink for both loses that.
 		render(
 			<Transcript
-				pid={1}
+				pid="1"
 				entries={[
 					entry({ id: "a", text: "compaction failed", details: { severity: "error" } }),
 					entry({ id: "b", text: "compaction skipped", details: { severity: "warning" } }),
@@ -84,11 +84,67 @@ describe("rows the phone used to drop entirely", () => {
 			/>,
 		);
 
-		expect(screen.getByText("compaction failed").className).toContain("text-danger");
-		expect(screen.getByText("compaction skipped").className).toContain("text-warning");
+		/* The tint sits on the notice ROW, not on the text node: the row is
+		   `<p class="…text-danger"><span aria-hidden>✗</span><span>text</span></p>`,
+		   so the severity class lives on the text span's parent. */
+		const row = (text: string) => screen.getByText(text).parentElement;
+
+		expect(row("compaction failed")?.className).toContain("text-danger");
+		expect(row("compaction skipped")?.className).toContain("text-warning");
 		// Negative control: an unmarked notice keeps the quiet default rather
 		// than acquiring the loudest ink in the palette.
-		expect(screen.getByText("an ordinary receipt").className).toContain("text-ink-dim");
+		expect(row("an ordinary receipt")?.className).toContain("text-ink-dim");
+	});
+
+	it("fronts a notice with a glyph so severity survives losing colour", () => {
+		/* Design D2: severity was HUE-ONLY here. danger-vs-ink-dim measures
+		   1.30:1, and across all 31 themes those two sit within 1.6:1 on 30 of
+		   them (1.00:1 on six) — so in grayscale a failure and a routine
+		   receipt were one indistinguishable grey, while the TUI survived
+		   desaturation because it fronts every notice with ✗/!/·. */
+		render(
+			<Transcript
+				pid="1"
+				entries={[
+					entry({ id: "a", text: "compaction failed", details: { severity: "error" } }),
+					entry({ id: "b", text: "compaction skipped", details: { severity: "warning" } }),
+					entry({ id: "c", text: "an ordinary receipt" }),
+				]}
+			/>,
+		);
+
+		const glyphOf = (text: string) =>
+			screen.getByText(text).parentElement?.textContent?.trimStart()[0];
+
+		// The TUI's NOTICE_GLYPHS grammar exactly (transcript.py).
+		expect(glyphOf("compaction failed")).toBe("✗");
+		expect(glyphOf("compaction skipped")).toBe("!");
+		expect(glyphOf("an ordinary receipt")).toBe("·");
+	});
+
+	it("gives a wake receipt its own affordance instead of an anonymous line", () => {
+		/* Design D3 / review MINOR-1: `notice_kind: "wake"` was emitted and
+		   typed but read by NO component, so the row rendered exactly as it
+		   did before the field existed — a typed-but-unread field is worse
+		   than none. A wake is a receipt the user scheduled, so it takes a
+		   neutral clock rather than alarm ink. */
+		render(
+			<Transcript
+				pid="1"
+				entries={[
+					entry({
+						id: "a",
+						text: "w-9 (1, every 6h) — Check the deploy pipeline",
+						details: { notice_kind: "wake" },
+					}),
+				]}
+			/>,
+		);
+
+		const row = screen.getByText("w-9 (1, every 6h) — Check the deploy pipeline");
+		expect(row.parentElement?.textContent?.trimStart()[0]).toBe("○");
+		// Not dressed as a failure: the user asked for this to fire.
+		expect(row.parentElement?.className).not.toContain("text-danger");
 	});
 });
 
@@ -96,7 +152,7 @@ describe("a hub steer never leaks its envelope", () => {
 	it("renders the parent's own words as a parent_message card", () => {
 		render(
 			<Transcript
-				pid={1}
+				pid="1"
 				entries={[entry({ id: "a", kind: "parent_message", text: "focus on the parser" })]}
 			/>,
 		);
@@ -113,7 +169,7 @@ describe("tool rows", () => {
 		// observed.
 		render(
 			<Transcript
-				pid={1}
+				pid="1"
 				entries={[
 					entry({
 						id: "a",
@@ -151,7 +207,7 @@ describe("tool rows", () => {
 				details: { output: "MODEL RAN THIS" },
 			}),
 		];
-		render(<Transcript pid={1} entries={rows} />);
+		render(<Transcript pid="1" entries={rows} />);
 
 		// The user's own command shows its output without a tap...
 		expect(screen.getByText(/drwxr-xr-x/)).toBeTruthy();

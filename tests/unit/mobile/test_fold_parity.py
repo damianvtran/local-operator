@@ -1,4 +1,4 @@
-"""The two phone folds and the TUI fold must agree about the same row.
+"""The two phone folds must agree about the same row.
 
 WHY THIS FILE EXISTS
 --------------------
@@ -15,12 +15,30 @@ SEPARATELY and never runs two folds over one input. A contract asserted by
 comment is a contract nothing checks. These tests run the folds over the same
 history and compare, so the next divergence fails here rather than shipping.
 
-The TUI-parity half deliberately compares ROW KINDS and TEXT rather than
-widgets: the two surfaces legitimately differ in how they mount a row (the
-TUI has a dedicated ``WakeBlock`` where the phone has a tagged notice), and a
-divergence has to be NAMED in ``TUI_ALLOWANCES`` to be legal. An entry
-disappearing from that list is a fix; an entry appearing without a reason is
-the failure mode this file exists to prevent.
+WHAT THIS FILE DOES **NOT** DO
+------------------------------
+It does not compare the phone against the TUI. Every assertion here is
+phone-fold vs phone-fold, or pins one fold's output against a literal. The
+cross-SURFACE contract is enforced structurally instead: the row decisions
+both hosts share live in ``harness/rows.py`` and each host calls them, so
+there is no second implementation left to disagree with — which is why the
+convergence work moved those decisions out of the hosts rather than adding a
+test to watch two copies stay in step.
+
+That structural guarantee stops at the module boundary. A host can still
+misuse a shared helper (feed it differently-normalized text, ignore a field
+it emits), and nothing in this file would catch it. Closing THAT gap needs a
+test mounting the real ``OperatorApp`` through ``_project_settled_rows`` over
+this corpus and comparing rendered row kinds and text against the phone's,
+with the legitimate mounting differences (the TUI's dedicated ``WakeBlock``
+against the phone's tagged notice) named in an allowance table.
+
+An earlier version of this docstring claimed that comparison and that table
+already existed. Neither did — no test here ever built a TUI row, and no
+``TUI_ALLOWANCES`` was ever defined. The claim is recorded as absent rather
+than quietly deleted because a docstring promising a guarantee the file does
+not provide is worse than no docstring: it tells the next reader a whole
+class of defect is already covered.
 """
 
 from __future__ import annotations
@@ -39,7 +57,12 @@ from local_operator.harness.comms import (
     PARENT_MESSAGE_TAG,
     TO_CHILD_INSTRUCTIONS,
 )
-from local_operator.harness.rows import harness_chrome_prompts
+from local_operator.harness.rows import (
+    assistant_stop_notice,
+    harness_chrome_prompts,
+    is_harness_chrome,
+    user_row_text,
+)
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -411,3 +434,61 @@ def test_a_model_issued_call_does_not_open_expanded() -> None:
     ]
 
     assert not _page_rows(history)[-1].details.get("user_run")
+
+
+def test_a_wake_receipt_strips_the_model_facing_envelope() -> None:
+    """D6/design D3: the phone rendered ``wake.py``'s payload VERBATIM.
+
+    The envelope — ``(alarm) Scheduled wake w-9 (1, every 6h) — cancel with
+    wake({op:"cancel",id:"w-9"})`` — is markup addressed to the model. The
+    TUI stripped it inside ``WakeBlock._summary``, so the strip was
+    unreachable from the phone and the raw JSON-ish cancel instruction landed
+    on a human surface: the same defect class as D1's leaked
+    ``<parent-message>`` rows.
+    """
+    history = [
+        CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            details={
+                "text": (
+                    "(alarm) Scheduled wake w-9 (1, every 6h) — cancel with "
+                    'wake({op:"cancel",id:"w-9"})\n\nCheck the deploy pipeline'
+                ),
+                "wake_id": "w-9",
+            },
+        )
+    ]
+
+    for rows in (_page_rows(history), _attach_rows(history)):
+        assert [row.kind for row in rows] == ["notice"]
+        row = rows[0]
+        assert row.details["notice_kind"] == "wake"
+        # The cancel how-to and the (alarm) prefix are for the model.
+        assert "cancel with wake(" not in row.text
+        assert "(alarm)" not in row.text
+        # What the user needs: which wake fired, and what it delivered.
+        assert row.text == "w-9 (1, every 6h) — Check the deploy pipeline"
+
+
+def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
+    """Review round 1: the two hosts fed the shared helpers differently.
+
+    The TUI strips a message's text at the top of its replay loop; the phone
+    fold passed ``message.text`` verbatim. A whitespace-only assistant turn
+    with ``stop_reason="error"`` therefore said "turn failed" on the TUI and
+    NOTHING on the phone — D3 reopening inside the module built to close it.
+    The strip belongs to the helper, so neither host's normalization can
+    decide the answer.
+    """
+    padded = "  \n\t "
+
+    assert assistant_stop_notice(
+        text=padded, has_tool_calls=False, stop_reason="error", provider_payload=None
+    ) == assistant_stop_notice(
+        text=padded.strip(), has_tool_calls=False, stop_reason="error", provider_payload=None
+    )
+
+    # Chrome and skill payloads take the same treatment, for the same reason.
+    chrome = harness_chrome_prompts()[0]
+    assert is_harness_chrome(f"  {chrome}\n")
+    assert user_row_text("  hello  ") == "hello"
