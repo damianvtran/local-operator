@@ -130,3 +130,32 @@ def test_an_explicit_lease_override_is_never_overwritten() -> None:
     values = run_episode._ensure_lease_outlasts_wall(given, args)
 
     assert [v.value for v in values if v.name == "OSWORLD_TTL_SECONDS"] == ["99"]
+
+
+def test_the_run_path_actually_applies_the_lease_derivation() -> None:
+    """The DERIVATION is wired into ``run``, not merely defined beside it.
+
+    A round-3 review deleted the sole call site and the entire 1311-test suite
+    still passed: the helper's logic was pinned, its USE was not, so a future
+    refactor could silently restore the 7200 s fixed lease this work removed --
+    the bug where an episode past two hours dies on a terminated instance
+    rather than at a budget boundary.
+
+    Reading the source is the honest check here. Driving ``run`` end to end
+    would need a selector, an adapter, credentials and a cloud provider, and a
+    test that heavy would be skipped in exactly the environments that matter.
+    """
+
+    import inspect
+
+    source = inspect.getsource(run_episode.run)
+
+    assert "_ensure_lease_outlasts_wall(" in source, (
+        "run() must derive the cloud lease from the wall budget; without this "
+        "call the provider falls back to a fixed 7200 s lease that is SHORTER "
+        "than the 18000 s wall default"
+    )
+    # It must happen before the spec is built, or the adapter never sees it.
+    assert source.index("_ensure_lease_outlasts_wall(") < source.index(
+        "build_spec("
+    ), "the lease must be derived before build_spec() consumes infra_values"

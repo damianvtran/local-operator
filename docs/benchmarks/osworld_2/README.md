@@ -168,12 +168,19 @@ follow-up `create_tags` would leave a window in which the instance exists
 untagged and therefore outside both the lease's authority and the leak audit.
 
 Lease length: `OSWORLD_TTL_SECONDS` if the operator sets it, otherwise
-`DEFAULT_TTL_SECONDS = 7200`, floored at `TTL_SLACK_SECONDS = 900`.
-`ttl_seconds_for` can derive `wall_budget + 900 s` from a capped wall budget,
-but **the wall budget is not on the adapter wire today**: the adapter passes
-`None` for it and only the override or the 7200 s default is ever in force.
-Setting `OSWORLD_TTL_SECONDS` to the wall budget plus 900 is therefore the
-operator's job, and is what bounds a leaked instance's worst-case cost.
+derived by `run_episode.py` as **wall budget + 900 s**
+(`_ensure_lease_outlasts_wall`), floored at `TTL_SLACK_SECONDS = 900` by the
+provider.
+
+The derivation happens in the runner rather than the provider because **the
+wall budget is not on the adapter wire**: `ttl_seconds_for` receives `None`
+and would otherwise fall back to `DEFAULT_TTL_SECONDS = 7200`. That fallback
+was harmless while the wall default was 1800 s and became a defect when it
+rose to 18000 s — a lease shorter than the wall means an episode past two
+hours dies on a terminated instance rather than at a budget boundary, losing
+the episode instead of ending it. An explicit `OSWORLD_TTL_SECONDS` still
+wins and is never shortened; it is what bounds a leaked instance's worst-case
+cost.
 
 ### Burstable credit exhaustion, and `AWS_INSTANCE_TYPE`
 
