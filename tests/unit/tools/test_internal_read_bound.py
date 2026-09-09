@@ -20,8 +20,10 @@ modelled on the real document's structure rather than on a generic large blob.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -121,13 +123,23 @@ async def test_review_gate_heading_survives_shaping_and_its_range_resolves(
     assert _GATE_HEADING in shaped, "the review-gate heading vanished from the outline"
     assert _GATE_BODY not in shaped, "fixture is too small to have been shaped"
 
-    # Pull the range the outline printed beside the gate heading and run it.
-    entry = next(line for line in shaped.splitlines() if _GATE_HEADING in line)
-    span = entry.rsplit("[lines ", 1)[1].rstrip("]")
     handle = result.details["spill"]["handle"]  # type: ignore[index]
 
-    expanded = _text_of(await _call(context, {"path": handle, "range": span}))
-    assert _GATE_BODY in expanded, f"range {span} did not resolve to the gate section"
+    # Asserted as REACHABILITY — the rule's text comes back through the
+    # advertised range of SOME outline entry — rather than as "it is its own
+    # top-level entry". A rule that lives inside a fenced template (the round-2
+    # comment template does, in the real skill) is correctly folded under its
+    # enclosing section by the fence fix; demanding its own entry would pin the
+    # phantom-heading bug instead of the property that matters.
+    reached = False
+    for line in shaped.splitlines():
+        if "  [lines " not in line:
+            continue
+        span = line.rsplit("[lines ", 1)[1].rstrip("]")
+        if _GATE_BODY in _text_of(await _call(context, {"path": handle, "range": span})):
+            reached = True
+            break
+    assert reached, "the gate text is not retrievable through any advertised range"
 
 
 @pytest.mark.asyncio
@@ -254,7 +266,13 @@ async def test_the_outline_covers_every_line_past_the_head(tmp_path: Path) -> No
     ]
     assert spans, "the outline indexed nothing"
 
-    head_lines = len(shaped.split("\n\n[... ", 1)[0].splitlines()) - 2  # minus banner+blank
+    # Derive the head's extent by MATCHING its last line back to the source
+    # rather than by counting rendered lines. A count has to subtract the
+    # banner and its blank line, which is exactly the kind of off-by-one that
+    # reports a phantom one-line gap and hides a real one.
+    head_body = shaped.split("\n\n[... ", 1)[0].split("\n\n", 1)[1]
+    head_lines = len(head_body.splitlines())
+    assert doc.splitlines()[:head_lines] == head_body.splitlines()
     assert spans[0][0] <= head_lines + 1, "a gap sits between the head and the first span"
     assert spans[-1][1] == len(doc.splitlines()), "the outline stops short of EOF"
 
@@ -278,6 +296,192 @@ async def test_kill_switch_restores_unbounded_passthrough(tmp_path: Path) -> Non
         assert _text_of(await _call(context, {"path": "skill://fixture-skill"})) == doc
     finally:
         del os.environ[builtin.INTERNAL_READ_LIMIT_ENV]
+
+
+def _true_extent(lines: list[str], start: int) -> int:
+    """The real last line of the section opening at 1-based ``start``.
+
+    Computed independently of the implementation — a fresh fence-aware scan —
+    so this is a cross-check rather than a restatement of the code under test.
+    """
+    in_fence = False
+    for offset in range(start, len(lines)):
+        stripped = lines[offset].lstrip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if not in_fence and re.match(r"^#{1,3} +\S", lines[offset]):
+            return offset
+    return len(lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guide", ["browser", "peer-messaging"])
+async def test_outline_spans_match_the_true_section_extent(tmp_path: Path, guide: str) -> None:
+    """Every advertised ``[lines N-M]`` must be the section's REAL extent.
+
+    The regression: ``_HEADING_RE`` had no fence awareness, so a ``# comment``
+    inside a ```` ``` ```` block parsed as a heading — 19 phantoms across 6
+    bundled guides. Because a section's ``end`` is the next heading's start
+    minus one, a phantom INSIDE a real section silently truncated that
+    section's range: ``guide://browser``'s "0. Make sure the paired browser is
+    actually open" advertised 151-157 against a true 151-191, so an agent
+    obeying the footer got a fragment with no signal 34 lines were missing.
+
+    Pinned against guides that SHIP in the repo, with real fenced bash, so the
+    fixture cannot rot. Note that ``test_the_outline_covers_every_line_past_the
+    _head`` passed throughout the bug — coverage stayed contiguous by
+    construction — which is exactly why extent, not coverage, is the assertion
+    that matters here.
+    """
+    body = (Path(builtin.__file__).parents[1] / "guides" / guide / "GUIDE.md").read_text()
+    lines = body.splitlines()
+
+    # Asserted on the collector as well as on a shaped result, because the two
+    # strongest fenced-bash fixtures straddle the threshold: ``browser``
+    # (29 KB) shapes, ``peer-messaging`` (14 KB) is correctly returned whole.
+    # The span arithmetic the fence bug corrupted must be right for both.
+    for heading in builtin._collect_headings(lines):
+        assert heading.end == _true_extent(lines, heading.start), (
+            f"{guide}: {heading.text!r} spans {heading.start}-{heading.end} but its "
+            f"true extent ends at {_true_extent(lines, heading.start)}"
+        )
+
+    if len(body) > builtin.INTERNAL_READ_LIMIT_CHARS:
+        context = _context(tmp_path, body, url_prefix="guide://")
+        shaped = _text_of(await _call(context, {"path": f"guide://{guide}"}))
+        entries = [line for line in shaped.splitlines() if "  [lines " in line]
+        assert entries, "expected a shaped outline for an oversized guide"
+        for entry in entries:
+            span = entry.rsplit("[lines ", 1)[1].rstrip("]")
+            start, end = (int(part) for part in span.split("-"))
+            assert end == _true_extent(lines, start), (
+                f"{guide}: {entry.rsplit('  [lines ', 1)[0]!r} advertises "
+                f"{start}-{end}, true extent ends at {_true_extent(lines, start)}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_no_heading_is_collected_from_inside_a_fenced_block(tmp_path: Path) -> None:
+    """The phantom source itself, including the wrapped-comment-continuation
+    shape that did the most range damage in ``guide://browser``."""
+    lines = ["# Real Title", "", "## Real Section", "", "```sh", "# macOS", "pgrep -x x"]
+    lines += ["# a long shell comment that wraps onto", "# the next line as a continuation"]
+    lines += ["```", "", "~~~bash", "## not a heading either", "~~~", ""]
+    lines += [f"filler {i} " + "x" * 60 for i in range(400)]
+    lines += ["## Second Real Section", "tail"]
+    body = "\n".join(lines)
+    context = _context(tmp_path, body, url_prefix="guide://")
+
+    shaped = _text_of(await _call(context, {"path": "guide://fenced"}))
+
+    for phantom in ("# macOS", "not a heading either", "the next line as a continuation"):
+        assert not any(
+            phantom in line and "  [lines " in line for line in shaped.splitlines()
+        ), f"{phantom!r} was indexed as a heading"
+
+
+@pytest.mark.asyncio
+async def test_a_crlf_document_indexes_every_heading_with_resolvable_spans(
+    tmp_path: Path,
+) -> None:
+    """CRLF must behave exactly as LF, and the spans must still resolve.
+
+    The invariant at risk is that the heading scan and the spill store share
+    ONE line basis. Normalising line endings into a copy the store never sees,
+    or counting offsets as ``len(line) + 1`` against CRLF content, drifts the
+    two apart and the advertised ranges stop pointing at their sections.
+    """
+    sections = [f"## Section {i}" for i in range(20)]
+    parts: list[str] = ["# Title", ""]
+    for section in sections:
+        parts += [section, ""] + [f"body of {section} line {j} " + "y" * 50 for j in range(20)]
+    lf_body = "\n".join(parts)
+    crlf_body = "\r\n".join(parts)
+    assert len(crlf_body) > builtin.INTERNAL_READ_LIMIT_CHARS
+
+    def entries(text: str) -> list[str]:
+        return [line.strip() for line in text.splitlines() if "  [lines " in line]
+
+    lf_ctx = _context(tmp_path, lf_body, url_prefix="guide://")
+    crlf_ctx = _context(tmp_path, crlf_body, url_prefix="guide://")
+    lf_shaped = _text_of(await _call(lf_ctx, {"path": "guide://lf"}))
+    crlf_result = await _call(crlf_ctx, {"path": "guide://crlf"})
+    crlf_shaped = _text_of(crlf_result)
+
+    # Equality with the LF twin is the assertion that matters: line endings
+    # must not change the index at all. Headings inside the head budget are
+    # legitimately absent from the OUTLINE (they are shown in full above it),
+    # so the comparison is against LF rather than against every section.
+    assert entries(crlf_shaped) == entries(lf_shaped)
+    assert entries(crlf_shaped), "CRLF produced no outline at all"
+    assert len(sections) == 20
+
+    # And a CRLF span still resolves to its own section through the handle.
+    handle = crlf_result.details["spill"]["handle"]  # type: ignore[index]
+    last = entries(crlf_shaped)[-1]
+    span = last.rsplit("[lines ", 1)[1].rstrip("]")
+    expanded = _text_of(await _call(crlf_ctx, {"path": handle, "range": span}))
+    assert "Section 19" in expanded
+
+
+@pytest.mark.asyncio
+async def test_a_long_frontmatter_leaves_no_orphaned_lines(tmp_path: Path) -> None:
+    """When the first heading sits below the head cut, the lines between must
+    still be addressable. Measured at 109 orphaned lines before the fix, while
+    the banner asserted the index was complete."""
+    body = "---\n" + "\n".join(f"meta_{i}: a metadata value " + "p" * 40 for i in range(200))
+    body += "\n---\n\n"
+    body += "\n".join(
+        f"## S{i}\n" + "\n".join(f"body {i}.{j} " + "y" * 60 for j in range(20)) for i in range(20)
+    )
+    context = _context(tmp_path, body, url_prefix="guide://")
+
+    result = await _call(context, {"path": "guide://frontmatter"})
+    shaped = _text_of(result)
+
+    # Same discipline as the coverage test: match the head back to the source
+    # instead of counting rendered lines, so a banner-shape change cannot make
+    # this assertion quietly wrong in either direction.
+    head_body = shaped.split("\n\n[... ", 1)[0].split("\n\n", 1)[1]
+    head_lines = len(head_body.splitlines())
+    assert body.splitlines()[:head_lines] == head_body.splitlines()
+    spans = [
+        int(line.rsplit("[lines ", 1)[1].rstrip("]").split("-")[0])
+        for line in shaped.splitlines()
+        if "  [lines " in line
+    ]
+    assert (
+        spans[0] <= head_lines + 1
+    ), f"{spans[0] - head_lines - 1} lines are addressable by nothing"
+
+    # The covering entry must actually resolve to the skipped frontmatter.
+    handle = result.details["spill"]["handle"]  # type: ignore[index]
+    expanded = _text_of(
+        await _call(context, {"path": handle, "range": f"{head_lines + 1}-{spans[0] + 2}"})
+    )
+    assert "meta_" in expanded
+
+
+@pytest.mark.asyncio
+async def test_the_degraded_path_still_announces_partiality(tmp_path: Path) -> None:
+    """A refused spill is the path where the agent has LESS recourse — no
+    handle to expand — so the top-of-result banner matters more there, not
+    less. It must stay bounded and must not raise."""
+    body = "\n".join(
+        f"## S{i}\n" + "\n".join(f"body {i}.{j} " + "z" * 60 for j in range(20)) for i in range(20)
+    )
+    context = _context(tmp_path, body, url_prefix="guide://")
+
+    with mock.patch.object(builtin, "_spill", return_value=None):
+        result = await _call(context, {"path": "guide://nospill"})
+
+    shaped = _text_of(result)
+    assert not result.is_error
+    assert "PARTIAL" in shaped.splitlines()[0]
+    assert "NOT read the whole document" in shaped
+    assert len(shaped) <= builtin.INTERNAL_READ_LIMIT_CHARS
+    assert "spill" not in (result.details or {})
 
 
 @pytest.mark.asyncio

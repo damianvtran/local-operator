@@ -2271,7 +2271,12 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
 #: Markdown ATX headings, depth 1-3, at line start. Depth 4+ is deliberately
 #: out: a document deep enough to need them has more headings than an outline
 #: budget can carry, and the depth fallback would drop them first anyway.
-_HEADING_RE = re.compile(r"(?m)^(#{1,3}) +(\S.*?)\s*$")
+_HEADING_RE = re.compile(r"^(#{1,3}) +(\S.*?)\s*$")
+
+#: A fenced-code delimiter. Both markdown fence styles, and only ever tested
+#: against an already-lstripped line, so an indented fence inside a list item
+#: still toggles.
+_FENCE_PREFIXES = ("```", "~~~")
 
 
 def _internal_read_limit() -> int:
@@ -2304,18 +2309,45 @@ class _Heading(NamedTuple):
     end: int
 
 
-def _collect_headings(content: str) -> list[_Heading]:
-    """Every depth-1..3 heading with the line span of its section."""
-    lines = content.splitlines()
+def _collect_headings(lines: list[str]) -> list[_Heading]:
+    """Every depth-1..3 heading OUTSIDE a fenced code block, with its span.
+
+    Scans line by line rather than running the pattern over the whole document,
+    and takes the caller's already-``splitlines()`` list so the line numbers
+    here are the SAME basis the spill store serves ranges on. That shared basis
+    is the invariant the advertised ``[lines N-M]`` spans depend on; a parallel
+    offset counter is how those numbers silently drift apart (notably on CRLF,
+    where a ``len(line) + 1`` accounting under-counts by one char per line).
+
+    Fenced blocks are skipped, and that is a correctness fix rather than
+    tidiness. These documents are full of shell examples, so a ``# comment``
+    inside a fence used to parse as a heading — 19 phantoms across 6 bundled
+    guides. The cosmetic harm is a junk index entry; the harm that matters is
+    that a section's ``end`` is the next heading's start minus one, so a phantom
+    INSIDE a real section silently truncates that section's advertised range.
+    ``guide://browser``'s "0. Make sure the paired browser is actually open"
+    advertised lines 151-157 against a true 151-191, so an agent following the
+    footer's own instruction got a fragment with no signal that 34 lines were
+    missing — the exact "expansion returns the wrong text" failure this whole
+    shape exists to prevent.
+    """
     total = len(lines)
     found: list[tuple[int, str, int]] = []
-    for match in _HEADING_RE.finditer(content):
-        # ``count`` over the prefix is O(n) per heading but n is a few dozen
-        # headings over ~80 KB, which is microseconds — and it cannot drift
-        # from the ``splitlines`` basis the spill store serves ranges on,
-        # which a parallel hand-rolled line counter could.
-        line_no = content.count("\n", 0, match.start()) + 1
-        found.append((len(match.group(1)), match.group(2), line_no))
+    in_fence = False
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(_FENCE_PREFIXES):
+            # An unclosed fence keeps everything after it out of the index,
+            # which is the safe direction: a phantom corrupts a real section's
+            # span, while a missed heading only costs one index entry and the
+            # enclosing section still covers those lines.
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        match = _HEADING_RE.match(line)
+        if match:
+            found.append((len(match.group(1)), match.group(2), index + 1))
     return [
         _Heading(depth, text, start, (found[i + 1][2] - 1) if i + 1 < len(found) else total)
         for i, (depth, text, start) in enumerate(found)
@@ -2362,9 +2394,14 @@ def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
             head_lines.append(line)
             used += len(line) + 1
         dropped = len(lines) - len(head_lines)
+        # Names what the call ACTUALLY returns. Spill search caps at
+        # SPILL_SEARCH_MATCH_LIMIT and its ``range`` pages through MATCHES, not
+        # lines, so a promise to "list every heading" is false past that cap and
+        # a footer that over-promises teaches the model expansion does not work.
         head_lines.append(
             f"[+{dropped} more sections not listed; "
-            f'read(path="{handle}?q=^#") lists every heading]'
+            f'read(path="{handle}?q=^#") lists the first '
+            f"{SPILL_SEARCH_MATCH_LIMIT} headings]"
         )
         return "\n".join(head_lines)
     return ""
@@ -2397,13 +2434,28 @@ def _shape_internal_document(
     if limit == 0 or len(content) <= limit:
         return content, None
 
+    # ONE line basis for the heading scan, the head cut and the spill store
+    # alike. Splitting the document once and passing the list down is what
+    # keeps the advertised ``[lines N-M]`` spans in the same coordinate space
+    # the handle resolves in.
+    lines = content.splitlines()
+
     meta = _spill(content, "read", context)
     if meta is None:
         # Same degradation contract as the rest of the module: losing
-        # expansion is an inconvenience, failing the call is a bug.
-        return truncate_output(content, limit), None
+        # expansion is an inconvenience, failing the call is a bug. The banner
+        # still leads the result: this is the path where the agent has LESS
+        # recourse (no handle to expand), so the statement that it has not read
+        # the whole document matters more here, not less.
+        degraded_banner = (
+            f"[{target} — {len(lines)} lines, {len(content)} chars. This is a PARTIAL "
+            f"view and the full text could not be saved for expansion. You have NOT "
+            f"read the whole document; re-read it to see any section not shown.]"
+        )
+        budget = max(limit - len(degraded_banner) - 2, 0)
+        return f"{degraded_banner}\n\n{truncate_output(content, budget)}", None
 
-    headings = _collect_headings(content)
+    headings = _collect_headings(lines)
     if len(headings) < INTERNAL_READ_MIN_HEADINGS:
         # No addressable structure to index — fall through to the plain uniform
         # head+tail every other oversized output gets.
@@ -2412,9 +2464,9 @@ def _shape_internal_document(
 
     # Cut the head at a heading boundary so it never ends mid-rule: the last
     # heading that starts at or under the budget wins, and everything from it
-    # onward belongs to the outline. Offsets come from one prefix scan rather
-    # than a re-sum per heading, so this stays linear in the document.
-    lines = content.splitlines()
+    # onward belongs to the outline. Offsets come from one prefix scan over the
+    # SAME line list, using the real line lengths, so the accounting does not
+    # under-count a CRLF document by one char per line.
     offsets = [0]
     for line in lines:
         offsets.append(offsets[-1] + len(line) + 1)
@@ -2424,14 +2476,15 @@ def _shape_internal_document(
             break
         head_end_line = heading.start - 1
     if head_end_line == 0:
-        # First heading is already past the budget (a long frontmatter): take a
-        # plain line-boundary cut rather than emitting an empty head.
-        clipped = content[:INTERNAL_READ_HEAD_CHARS]
-        cut = clipped.rfind("\n")
-        head_text = clipped[:cut] if cut > 0 else clipped
-        head_end_line = len(head_text.splitlines())
-    else:
-        head_text = "\n".join(lines[:head_end_line])
+        # First heading is already past the budget (a long frontmatter): cut on
+        # a line boundary rather than emitting an empty head.
+        head_end_line = 0
+        for index in range(len(lines)):
+            if offsets[index + 1] > INTERNAL_READ_HEAD_CHARS:
+                break
+            head_end_line = index + 1
+        head_end_line = max(head_end_line, 1)
+    head_text = "\n".join(lines[:head_end_line])
 
     # Never empty by construction: ``head_end_line`` is the last FITTING
     # heading's start minus one, so that heading always lands here. That is
@@ -2441,6 +2494,22 @@ def _shape_internal_document(
     # rather than dropping it. Pinned by
     # test_the_outline_covers_every_line_past_the_head.
     remaining = [h for h in headings if h.start > head_end_line]
+
+    # A document whose first heading sits far below the head cut (a long
+    # frontmatter) would otherwise leave every line between the two addressable
+    # by NOTHING — measured at 109 orphaned lines on a 200-line frontmatter —
+    # while the banner asserts the index is complete. Cover the gap with an
+    # explicit entry so the completeness claim stays true by construction.
+    if remaining and remaining[0].start > head_end_line + 1:
+        remaining = [
+            _Heading(
+                1,
+                "(unindexed lines before the first section)",
+                head_end_line + 1,
+                remaining[0].start - 1,
+            )
+        ] + remaining
+
     outline = _heading_outline(remaining, meta.handle, INTERNAL_READ_OUTLINE_CHARS)
 
     # The banner goes at the TOP, not only in the footer. The model reads a
@@ -2449,9 +2518,9 @@ def _shape_internal_document(
     # arrive before the content it qualifies.
     banner = (
         f"[{target} — {len(lines)} lines, {len(content)} chars. This is a PARTIAL "
-        f"view: the head below plus a complete index of every remaining section. "
-        f"You have NOT read the whole document. Expand any section you intend to "
-        f"act on before acting on it.]"
+        f"view: the head below plus an index of every remaining section (headings "
+        f"of depth 1-3). You have NOT read the whole document. Expand any section "
+        f"you intend to act on before acting on it.]"
     )
     # A concrete call derived from a REAL outline entry, following the
     # _spill_footer discipline: a footer that describes an expansion instead of
