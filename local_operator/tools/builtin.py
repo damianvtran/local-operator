@@ -259,6 +259,28 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "SSH_ASKPASS": "/usr/bin/false",
     "CI": "1",
+    # Self-identification, so a tool that must distinguish "automated" from
+    # "dedicated single-purpose runner" can. ``CI=1`` above conflates the two:
+    # it is set here to make CLIs non-interactive, but every consumer in the
+    # ecosystem reads it as "hosted runner, nothing else competes for this
+    # box" - which is the exact inverse of a shared developer laptop running
+    # several agent sessions at once. Measured 2026-09-08: the root
+    # ``conftest.py`` worker-count hook read this ``CI`` and handed every
+    # agent-run suite the whole machine, disabling the CPU share written
+    # specifically to protect a contended laptop, and only there.
+    #
+    # This is a DENYLIST marker, deliberately, rather than narrowing that hook
+    # to an allowlist of provider variables (GITHUB_ACTIONS, ...): the set of
+    # CI providers is open and grows, while the set of harnesses that inject
+    # ``CI`` into a shared laptop is closed, small, and ours. Denying the thing
+    # we control cannot silently halve parallelism on a provider nobody thought
+    # to list. ``CI=1`` itself stays - dropping it would change npm/jest/yarn/
+    # playwright behaviour across every agent-run command, a far wider blast
+    # radius than this hook.
+    #
+    # If this marker is ever dropped the failure is benign and loud (a laptop
+    # takes too many workers again), not a silent permanent CI slowdown.
+    "LOCAL_OPERATOR_AGENT_SHELL": "1",
     # Package manager defaults for unattended execution.
     "npm_config_yes": "true",
     "npm_config_update_notifier": "false",
