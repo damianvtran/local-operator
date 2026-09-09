@@ -51,7 +51,10 @@ from local_operator.harness.types import (  # noqa: E402
     Usage,
 )
 from local_operator.session.naming import ConversationName  # noqa: E402
-from local_operator.session.protocol import CompactionOutcome, RuntimeLocality  # noqa: E402
+from local_operator.session.protocol import (  # noqa: E402
+    CompactionOutcome,
+    RuntimeLocality,
+)
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
