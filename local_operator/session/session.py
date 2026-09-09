@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard
 
 from local_operator.compaction.cutpoint import (
+    ELISION_GENUINE_COUNT_KEY,
+    ELISION_INJECTION_COUNT_KEY,
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
@@ -8733,16 +8735,34 @@ class Session:
             # constraints on a small keep window.
             cap: Any = getattr(compaction_api, "cap_preserved_user_turns", None)
             preserved_turns_cap: int | None = None
-            # Carried forward from the previous marker so the figure keeps
-            # describing everything ever dropped from this block. Read from the
-            # PAYLOAD rather than recovered from the turns: an earlier revision
-            # encoded it in a synthetic turn's id, which the persist path then
-            # journalled as an ordinary message and each pass re-counted —
-            # measured doubling on every resume (6 -> 7,167 over ten cycles).
+            # Carried forward so the figure keeps describing everything ever
+            # dropped from this block. Read as NUMBERS — from the previous
+            # marker's payload, and from the notice actually present in the
+            # context — never re-parsed out of notice text: an earlier revision
+            # encoded the count in a synthetic turn's id, the persist path
+            # journalled it as an ordinary message, and each pass re-counted it
+            # (6 -> 7,167 over ten cycles).
+            #
+            # BOTH sources are required, and the second is the fix for a
+            # regression this method introduced. A READ-path heal computes drops
+            # that exist in no payload — it acts on records predating the fields
+            # — so seeding only from the previous marker discarded them: a resume
+            # reporting 160 shed injections was followed by a pass reporting
+            # nothing, silently retracting what the model had been told. The
+            # heal's counts ride the rendered notice's ``provider_payload``
+            # instead, and ``max`` reconciles the two so neither an unhealed
+            # marker nor a healed context can lower the figure.
             previous = self._transcript.latest_entry("compaction")
             previous_payload = previous.payload if previous is not None else {}
             preserved_turns_dropped = _payload_count(previous_payload, "preserved_turns_dropped")
             preserved_turns_shed = _payload_count(previous_payload, "preserved_turns_shed")
+            counts_of: Any = getattr(compaction_api, "elision_counts_of", None)
+            if callable(counts_of):
+                for message in self._context.messages:
+                    carried: Any = counts_of(message)
+                    carried_genuine, carried_shed = int(carried[0]), int(carried[1])
+                    preserved_turns_dropped = max(preserved_turns_dropped, carried_genuine)
+                    preserved_turns_shed = max(preserved_turns_shed, carried_shed)
             if callable(cap):
                 preserved_turns_cap = self._preserved_turns_cap(plan.settings)
                 capped: Any = cap(
@@ -8799,7 +8819,16 @@ class Session:
             if notice_text:
                 notice_content: list[Content] = [TextContent(text=notice_text)]
                 notice = _replayed_user_message(notice_content, PRESERVED_TURN_ELISION_ID)
-                notice.provider_payload = {compaction_api.PRESERVED_USER_TURN_KEY: True}
+                # The counts ride the notice here too, not only on the replay
+                # path. The marker payload is the primary carrier for a LIVE
+                # pass, but a mid-turn pass reads the context back before any
+                # newer marker exists, so a notice without them would let the
+                # figure regress within a single session.
+                notice.provider_payload = {
+                    compaction_api.PRESERVED_USER_TURN_KEY: True,
+                    ELISION_GENUINE_COUNT_KEY: preserved_turns_dropped,
+                    ELISION_INJECTION_COUNT_KEY: preserved_turns_shed,
+                }
                 preserved_messages.append(notice)
             for turn in preserved_user_turns:
                 message = _replayed_user_message([TextContent(text=turn["text"])], turn["id"])

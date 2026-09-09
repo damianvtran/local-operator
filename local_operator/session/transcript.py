@@ -1384,7 +1384,7 @@ def replay_entries(
             # reason). The flag marks these as already-compacted content so a
             # post-resume pass does not re-count them as fresh history.
             from local_operator.compaction.cutpoint import (
-                PRESERVED_USER_TURN_KEY,
+                preserved_turn_payload,
                 replay_preserved_turns,
             )
 
@@ -1415,7 +1415,7 @@ def replay_entries(
                 turn_id = turn.get("id")
                 if isinstance(turn_id, str) and turn_id:
                     message.id = turn_id
-                message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+                message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
         first_kept_id = compaction.payload.get("first_kept_entry_id")
         # The first kept entry normally sits BEFORE the compaction marker

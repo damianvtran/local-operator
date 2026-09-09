@@ -61,6 +61,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import (
+    CUSTOM_KIND_CUSTOM,
     ENTRY_COMPACTION,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
@@ -135,6 +136,15 @@ class DurableFoldState:
     #: the cheap invariant that says the incremental cursor and the file agree,
     #: which the cache tests assert against a full re-parse.
     entry_count: int = 0
+    #: Ids of message entries journalled from a harness aside, accumulated as
+    #: entries stream in. The INCREMENTAL fold has no journal in hand, so
+    #: without this it could not resolve preserved-turn provenance and would
+    #: disagree with the full rebuild on a legacy marker. An earlier revision
+    #: asserted in a comment that a legacy marker "reaches this path only
+    #: through the full rebuild" — true in practice, enforced by nothing, and
+    #: forced onto the incremental path the fold leaked an injection. Carrying
+    #: the ids makes the two paths agree by construction instead.
+    injection_ids: set[str] = field(default_factory=set)
     #: Newest-wins custom-entry details by type, mirroring the store's
     #: ``latest_custom``. The durable projection reads the subagent roster and
     #: a child's todo snapshot from here instead of re-parsing transcripts.
@@ -250,6 +260,13 @@ class DurableFoldCache:
         rebuild_render = False
         for entry in new_entries:
             if entry.type == ENTRY_MESSAGE:
+                if entry.payload.get("kind") == CUSTOM_KIND_CUSTOM and entry.payload.get(
+                    "custom_type"
+                ):
+                    # Same predicate as ``_journal_injection_ids``, applied
+                    # incrementally so a later marker on this path sheds exactly
+                    # what the full rebuild would.
+                    state.injection_ids.add(entry.id)
                 message = _entry_to_message(entry, _attachments())
                 if message is None:
                     continue
@@ -309,6 +326,7 @@ class DurableFoldCache:
             custom_type = entry.payload.get("custom_type")
             if custom_type in _TRACKED_CUSTOM_TYPES and custom_type not in latest_customs:
                 latest_customs[str(custom_type)] = dict(entry.payload.get("details", {}))
+        state.injection_ids = _journal_injection_ids(entries)
         state.history = _replay(entries)
         state.render = _fold(state.history)
         state.prunes = {
@@ -405,7 +423,7 @@ def _compaction_prefix(
     preserved_turns = compaction.payload.get("preserved_user_turns") or ()
     if preserved_turns:
         from local_operator.compaction.cutpoint import (
-            PRESERVED_USER_TURN_KEY,
+            preserved_turn_payload,
             replay_preserved_turns,
         )
 
@@ -419,7 +437,7 @@ def _compaction_prefix(
             turn_id = turn.get("id")
             if isinstance(turn_id, str) and turn_id:
                 message.id = turn_id
-            message.provider_payload = {PRESERVED_USER_TURN_KEY: True}
+            message.provider_payload = preserved_turn_payload(turn)
             prefix.append(message)
     return prefix
 
@@ -433,13 +451,15 @@ def _rebuild_history_after_compaction(state: DurableFoldState, entry: Transcript
     caller falls back to a full rebuild — the same direction
     ``build_llm_history`` chooses when it logs this edge.
     """
-    # No journal in hand here — this is the INCREMENTAL fold, which sees only
-    # the newly appended marker. Passing no injection ids is correct rather
-    # than a gap: a marker written by the current code has already had the
-    # write-path provenance filter applied, so its stored block contains no
-    # injections to shed. A legacy marker reaches this path only through the
-    # full rebuild above, which does resolve them.
-    prefix = _compaction_prefix(entry)
+    # Provenance comes from ``state.injection_ids``, accumulated as entries
+    # streamed in, because this path has no journal to scan. The previous
+    # revision passed nothing and justified it by asserting that a legacy
+    # marker could only arrive via the full rebuild. That was an unverified
+    # structural claim of exactly the kind this PR exists to remove: nothing
+    # enforced it, and driven onto this path directly the fold leaked an
+    # injection and disagreed with the full rebuild. Now both paths resolve
+    # from the same predicate, so they agree by construction.
+    prefix = _compaction_prefix(entry, state.injection_ids)
     first_kept_id = entry.payload.get("first_kept_entry_id")
     kept: list[AgentMessage] = []
     if first_kept_id is not None:

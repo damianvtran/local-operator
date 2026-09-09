@@ -89,6 +89,23 @@ def make_session(tmp_path, stream) -> Session:
     )
 
 
+def make_session_at(directory, stream) -> Session:
+    """A session resumed from an EXISTING transcript directory.
+
+    Separate from :func:`make_session`, which mints a fresh ``sess`` subdir: the
+    read-path tests need a session that boots on a transcript they wrote, since
+    resume is the surface under test.
+    """
+    return Session(
+        model=TEXT_MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable"],
+        compaction_settings=CompactionSettings(keep_recent_tokens=KEEP_RECENT),
+    )
+
+
 def _preserved(session) -> list[Message]:
     """Preserved turns in the live context: user messages carrying the flag."""
     from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
@@ -424,7 +441,7 @@ def test_a_non_positive_cap_fails_closed():
     for degenerate in (0, -5):
         capped = cap_preserved_user_turns(turns, cap=degenerate)
         assert len(capped.turns) < len(turns), f"cap={degenerate} degraded open"
-        total = sum(_encode_len(t["text"]) for t in capped.turns)
+        total = sum(_encode_len(str(t["text"])) for t in capped.turns)
         assert total <= DEFAULT_PRESERVED_TURN_CAP
 
 
@@ -753,3 +770,270 @@ def test_a_legacy_record_is_healed_on_resume(tmp_path):
     assert any(m.id.startswith(PRESERVED_TURN_ELISION_ID_PREFIX) for m in preserved)
     # The kept window is untouched by the heal.
     assert "the live turn" in _texts(replayed)
+
+
+# ---------------------------------------------------------------------------
+# R2-1 — a READ-path heal's count must survive the next WRITE pass
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_marker(directory, injections: int, genuine_text: str = CONSTRAINT) -> None:
+    """A pre-fix compaction record: injections in the block, no count fields.
+
+    This is what the poisoned sessions on disk actually contain, and the shape
+    no existing test used — both resume tests were built on markers written by
+    the CURRENT code, where the write path's payload carry-forward already
+    works, so they structurally could not see R2-1.
+    """
+    import json
+    import time
+
+    directory.mkdir(parents=True, exist_ok=True)
+    kept = Message(role="user", content=[TextContent(text="the live turn")])
+    rows: list[dict[str, object]] = [
+        {
+            "id": kept.id,
+            "ts": time.time(),
+            "type": "message",
+            "payload": json.loads(kept.model_dump_json()),
+        },
+        {
+            "id": "genuine-1",
+            "ts": time.time(),
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [], "id": "genuine-1"},
+        },
+    ]
+    stored: list[dict[str, str]] = [{"id": "genuine-1", "text": genuine_text}]
+    for index in range(injections):
+        turn_id = f"inj-{index}"
+        stored.append({"id": turn_id, "text": STATE_TEXT})
+        rows.append(
+            {
+                "id": turn_id,
+                "ts": time.time(),
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "session_state",
+                    "details": {"text": STATE_TEXT},
+                },
+            }
+        )
+    rows.append(
+        {
+            "id": "compaction-1",
+            "ts": time.time(),
+            "type": "compaction",
+            "payload": {
+                "summary": "a summary",
+                "first_kept_entry_id": kept.id,
+                "tokens_before": 100,
+                "preserved_user_turns": stored,
+            },
+        }
+    )
+    (directory / "transcript.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def _notice_text(messages) -> str | None:
+    for message in messages:
+        if isinstance(message, Message) and (message.text or "").startswith("["):
+            return message.text
+    return None
+
+
+@pytest.mark.asyncio
+async def test_a_read_path_heals_count_survives_the_next_write_pass(tmp_path):
+    """The heal's elision count must not be silently retracted.
+
+    A READ-path heal computes drops that exist in NO payload — it acts on a
+    record written before the count fields existed. The write path seeds its
+    carry-forward from the previous marker, which for such a record has
+    nothing, so the figure evaporated on the first pass after resume:
+    measured "8 / 36 / 160 harness-injected message(s) dropped" on resume and
+    then ``None``. That is the notice-doubling defect with the sign flipped to
+    under-reporting, in the one message whose job is telling the model the
+    truth about what it lost.
+
+    The counts therefore ride the rendered notice (``elision_counts_of``) as
+    well as the marker payload, and the pass persists what it received.
+    """
+    directory = tmp_path / "legacy"
+    _write_legacy_marker(directory, injections=8)
+
+    healed = _notice_text(Transcript(directory).build_llm_history())
+    assert healed is not None and "8 harness-injected" in healed
+
+    session = make_session_at(directory, ScriptedStream(["reply"] * 40))
+    assert _notice_text(session._context.messages) == healed, "resume dropped the heal notice"
+
+    for index in range(3):
+        await session.prompt(f"turn {index} " + "detail " * 30)
+    assert (await session.compact_now()).ran is True
+
+    after = _notice_text(session._context.messages)
+    assert after is not None, "the elision fact was fully retracted by the next pass"
+    assert "8 harness-injected" in after, f"count regressed after the pass: {after}"
+
+    # And it is now PERSISTED, so the figure survives the next resume too.
+    payload = [e for e in Transcript(directory).entries() if e.type == "compaction"][-1].payload
+    assert payload.get("preserved_turns_shed") == 8
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_heal_count_survives_a_pass_that_drops_nothing_itself(tmp_path):
+    """The full-retraction case: a pass with no drops of its own must still
+    report the heal's.
+
+    This is the exact wording of the invariant whose docstring paragraph was
+    deleted in the commit that broke it — "a notice that vanished the first
+    time a block happened to fit would silently retract a fact the model had
+    already been told".
+    """
+    directory = tmp_path / "legacy-quiet"
+    _write_legacy_marker(directory, injections=5)
+    session = make_session_at(directory, ScriptedStream(["reply"] * 40))
+
+    # A generous cap: this pass evicts nothing, so any surviving count is the
+    # heal's carried forward rather than one this pass computed.
+    session._preserved_turns_cap = lambda settings: 1_000_000  # type: ignore[method-assign]
+    for index in range(3):
+        await session.prompt(f"turn {index} " + "detail " * 30)
+    assert (await session.compact_now()).ran is True
+
+    after = _notice_text(session._context.messages)
+    assert after is not None, "elision fact fully retracted by a pass that dropped nothing"
+    assert "5 harness-injected" in after
+    await session.dispose()
+
+
+def test_the_notice_carries_its_counts_as_numbers_not_text(tmp_path):
+    """The counts must be readable structurally, never re-parsed from content.
+
+    Parsing a number back out of the notice text is what inflated 6 to 7,167
+    across ten resumes, so the carrier is asserted directly here.
+    """
+    from local_operator.compaction.cutpoint import elision_counts_of
+
+    directory = tmp_path / "carrier"
+    _write_legacy_marker(directory, injections=4)
+
+    replayed = Transcript(directory).build_llm_history()
+    notice = next(m for m in replayed if isinstance(m, Message) and (m.text or "").startswith("["))
+
+    assert elision_counts_of(notice) == (0, 4)
+    # Anything that is not a notice answers (0, 0), so a caller can scan freely.
+    assert elision_counts_of(Message(role="user", content=[TextContent(text="hi")])) == (0, 0)
+
+
+def test_the_notice_is_not_re_extracted_as_a_user_turn(tmp_path):
+    """The notice is compaction's own output, not operator text.
+
+    It has to be excluded at EXTRACTION, not merely stripped later by the cap:
+    extracting then stripping discards the counts it carries, which is the
+    mechanism that retracted the heal's figure.
+    """
+    from local_operator.compaction.cutpoint import PRESERVED_TURN_ELISION_ID
+
+    notice = Message(role="user", content=[TextContent(text="[4 older ...]")])
+    notice.id = PRESERVED_TURN_ELISION_ID
+    prompt = Message(role="user", content=[TextContent(text=CONSTRAINT)])
+
+    preserved = extract_preserved_user_turns([notice, prompt], {notice.id, prompt.id})
+
+    assert [turn["text"] for turn in preserved] == [CONSTRAINT]
+
+
+def test_an_empty_block_with_counts_still_reports_them(tmp_path):
+    """Q4: ``append_compaction`` records counts even with an empty block, so
+    the read path must not return early before reading them.
+
+    Live rendered the notice and replay rendered nothing — the same live/resume
+    divergence as the notice-duplication defect, in the opposite direction.
+    """
+    from local_operator.compaction.cutpoint import replay_preserved_turns
+
+    turns = replay_preserved_turns(
+        {"preserved_user_turns": [], "preserved_turns_dropped": 3, "preserved_turns_shed": 5}
+    )
+
+    assert len(turns) == 1
+    text = str(turns[0]["text"])
+    assert "3 older user message(s) you wrote" in text
+    assert "5 harness-injected" in text
+    # A payload with nothing to report still yields nothing.
+    assert replay_preserved_turns({}) == []
+
+
+def test_the_incremental_fold_agrees_with_the_full_rebuild_on_a_legacy_marker():
+    """R2-2: the fold must resolve provenance, not assert that it never needs to.
+
+    The previous revision passed no injection ids on the incremental path and
+    justified it by asserting a legacy marker "reaches this path only through
+    the full rebuild". Nothing enforced that; driven onto the path directly the
+    fold leaked an injection and disagreed with the full rebuild. Both paths now
+    resolve from the same predicate.
+    """
+    import json
+    import pathlib
+    import time
+
+    from local_operator.compaction.cutpoint import PRESERVED_USER_TURN_KEY
+    from local_operator.mobile.durable import (
+        DurableFoldState,
+        _rebuild_history_after_compaction,
+        _replay,
+    )
+    from local_operator.session.transcript import TranscriptEntry, replay_entries
+
+    kept = Message(role="user", content=[TextContent(text="live turn")])
+    entries = [
+        TranscriptEntry(kept.id, time.time(), "message", json.loads(kept.model_dump_json())),
+        TranscriptEntry(
+            "g1",
+            time.time(),
+            "message",
+            {"kind": "message", "role": "user", "content": [], "id": "g1"},
+        ),
+        TranscriptEntry(
+            "i1",
+            time.time(),
+            "message",
+            {"kind": "custom", "custom_type": "session_state", "details": {"text": STATE_TEXT}},
+        ),
+    ]
+    marker = TranscriptEntry(
+        "c1",
+        time.time(),
+        "compaction",
+        {
+            "summary": "s",
+            "first_kept_entry_id": kept.id,
+            "tokens_before": 10,
+            "preserved_user_turns": [
+                {"id": "g1", "text": CONSTRAINT},
+                {"id": "i1", "text": STATE_TEXT},
+            ],
+        },
+    )
+
+    def block(messages):
+        return [
+            m.text
+            for m in messages
+            if isinstance(m, Message) and (m.provider_payload or {}).get(PRESERVED_USER_TURN_KEY)
+        ]
+
+    full = replay_entries(entries + [marker], None)
+
+    state = DurableFoldState(directory=pathlib.Path("/tmp"))
+    state.history = _replay(entries)
+    for entry in entries:
+        if entry.payload.get("kind") == "custom" and entry.payload.get("custom_type"):
+            state.injection_ids.add(entry.id)
+    assert _rebuild_history_after_compaction(state, marker) is True
+
+    assert block(state.history) == block(full)
+    assert not any(STATE_TEXT in text for text in block(state.history))
