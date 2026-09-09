@@ -61,7 +61,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -206,6 +206,50 @@ READ_LINE_CAP = 2000
 #: spill handle, because spilling a copy of a file that is already on disk
 #: would double the bytes for nothing.
 READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+
+#: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
+#: before it is shaped into a map. DELIBERATELY 16 KiB rather than
+#: :data:`READ_OUTPUT_LIMIT_CHARS`, and the asymmetry is the point.
+#:
+#: Instructional markdown is not a log tail. A guide the model is REQUIRED to
+#: read (``prompts_md/system.md``) delivered whole in one call beats the same
+#: guide split into an outline it must then expand twice, so the threshold is
+#: set to return mid-sized documents untouched and intervene only on the few
+#: pathological ones. Measured over the 43 skill/guide docs on the authoring
+#: machine: 8 KiB returns 23/43 whole, 16 KiB returns 34/43, 32 KiB returns
+#: 37/43 while halving the saving. 16 KiB is where the intervention lands on
+#: the four 46-80 KB documents that are the entire problem.
+#:
+#: The threshold is not the output size: shaping compresses an 80 KB skill to
+#: ~7 KB either way, so raising it from 8 to 16 KiB costs almost nothing on the
+#: oversized docs and only decides which mid-sized docs stay whole.
+#:
+#: Overridable via :data:`INTERNAL_READ_LIMIT_ENV` for rollout; ``0`` disables
+#: shaping entirely.
+INTERNAL_READ_LIMIT_CHARS = 16 * 1024
+#: Kill switch for the shaping above. Read per call, never cached at import, so
+#: the operator (or a test) can turn it off in one variable without waiting for
+#: a release — the same discipline :func:`_grep_engine` uses.
+INTERNAL_READ_LIMIT_ENV = "LOCAL_OPERATOR_INTERNAL_READ_LIMIT"
+#: Head kept when an internal document is shaped, cut at a heading boundary.
+#: Sized to cover the ROUTING sections rather than an arbitrary prefix: in the
+#: largest skill on the authoring machine the frontmatter, title and the two
+#: "what you must go read next" sections are 70 lines / 4,645 chars, so 6 KiB
+#: keeps them plus slack and stops before the body rules the outline indexes.
+INTERNAL_READ_HEAD_CHARS = 6 * 1024
+#: Ceiling on the heading outline. Bounded separately from the head so a
+#: heading-dense document cannot turn the map back into the dump it replaced;
+#: the depth fallback in :func:`_heading_outline` spends this budget by
+#: dropping DEPTH (### then ##), which keeps every remaining entry complete,
+#: before it resorts to eliding entries and saying how many it dropped.
+INTERNAL_READ_OUTLINE_CHARS = 4 * 1024
+#: Minimum headings for the outline shape to be worth building. Below this a
+#: document has no addressable structure to index, so it degrades to the plain
+#: uniform :func:`spill_truncate` head+tail every other oversized output gets.
+INTERNAL_READ_MIN_HEADINGS = 3
+#: Slack the bound tests allow over :data:`INTERNAL_READ_LIMIT_CHARS` for a
+#: shaped result: head + outline + banner + footer framing.
+INTERNAL_READ_SHAPE_SLACK_CHARS = 4 * 1024
 #: Lines a footer suggests per expansion call. Sized so one page of ordinary
 #: log text lands inside :data:`TOOL_OUTPUT_LIMIT_CHARS` (~55 head + ~55 tail
 #: lines measured at 8 KiB, so 200 lines of typical 40-char output is the
@@ -2224,6 +2268,208 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     )
 
 
+#: Markdown ATX headings, depth 1-3, at line start. Depth 4+ is deliberately
+#: out: a document deep enough to need them has more headings than an outline
+#: budget can carry, and the depth fallback would drop them first anyway.
+_HEADING_RE = re.compile(r"(?m)^(#{1,3}) +(\S.*?)\s*$")
+
+
+def _internal_read_limit() -> int:
+    """The shaping threshold in force, honouring the kill switch.
+
+    Read per call rather than cached at import so the override can be set
+    after this module is imported — the same reason :func:`_grep_engine` and
+    :func:`spill_dir` resolve late. A malformed or negative value falls back to
+    the default instead of raising: a bad environment variable must not turn
+    every ``read skill://`` into a failed tool call.
+    """
+    raw = os.environ.get(INTERNAL_READ_LIMIT_ENV)
+    if not raw:
+        return INTERNAL_READ_LIMIT_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        return INTERNAL_READ_LIMIT_CHARS
+    return value if value >= 0 else INTERNAL_READ_LIMIT_CHARS
+
+
+class _Heading(NamedTuple):
+    """One outline entry: ``depth`` hashes, ``text``, and the 1-based line span
+    it covers in the SPILLED copy (``end`` inclusive, up to the next heading of
+    any depth or EOF)."""
+
+    depth: int
+    text: str
+    start: int
+    end: int
+
+
+def _collect_headings(content: str) -> list[_Heading]:
+    """Every depth-1..3 heading with the line span of its section."""
+    lines = content.splitlines()
+    total = len(lines)
+    found: list[tuple[int, str, int]] = []
+    for match in _HEADING_RE.finditer(content):
+        # ``count`` over the prefix is O(n) per heading but n is a few dozen
+        # headings over ~80 KB, which is microseconds — and it cannot drift
+        # from the ``splitlines`` basis the spill store serves ranges on,
+        # which a parallel hand-rolled line counter could.
+        line_no = content.count("\n", 0, match.start()) + 1
+        found.append((len(match.group(1)), match.group(2), line_no))
+    return [
+        _Heading(depth, text, start, (found[i + 1][2] - 1) if i + 1 < len(found) else total)
+        for i, (depth, text, start) in enumerate(found)
+    ]
+
+
+def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
+    """The section index, complete unless the budget physically forbids it.
+
+    COMPLETENESS IS THE FEATURE, not a nicety, and this is the part a future
+    reader is most likely to "simplify" away. A head-only truncation of an
+    instructional document is a silent behavioural regression: in the largest
+    skill on the authoring machine the binding ``## Mandatory Agent Review
+    Gate`` sits at char offset 30,343 and the human-reviewer decision tree at
+    60,012, while the frontmatter phrase "agent-review round" at offset 420
+    survives any head cap. The result therefore READS complete while every
+    operative rule has been deleted, and an agent acting on it merges without a
+    review round. Cheaper and wrong is worse than expensive and right.
+
+    So no rule may become invisible. Budget pressure is spent on DEPTH first —
+    drop ``###`` entries, then ``##`` — because a shallower outline still names
+    every region of the document and its ranges still cover every line. Only if
+    depth-1 alone overflows does it elide entries, and then it says how many it
+    dropped and how to list them.
+    """
+    for min_depth in (3, 2, 1):
+        kept = [h for h in headings if h.depth <= min_depth]
+        if not kept:
+            continue
+        lines = [f"{'#' * h.depth} {h.text}  [lines {h.start}-{h.end}]" for h in kept]
+        rendered = "\n".join(lines)
+        if len(rendered) <= budget:
+            return rendered
+        if min_depth > 1:
+            continue
+        # Depth-1 alone still overflows: keep the prefix that fits and name the
+        # escape hatch, so the dropped sections are one call away rather than
+        # unknowable.
+        head_lines: list[str] = []
+        used = 0
+        for line in lines:
+            if used + len(line) + 1 > budget - 120:
+                break
+            head_lines.append(line)
+            used += len(line) + 1
+        dropped = len(lines) - len(head_lines)
+        head_lines.append(
+            f"[+{dropped} more sections not listed; "
+            f'read(path="{handle}?q=^#") lists every heading]'
+        )
+        return "\n".join(head_lines)
+    return ""
+
+
+def _shape_internal_document(
+    content: str, target: str, context: ToolContext | None
+) -> tuple[str, dict[str, Any] | None]:
+    """``(display_text, spill_details)`` for one internal-URL document.
+
+    This branch serves the LARGEST documents in the system (skills and guides
+    run to 80 KB) and was the one ``read`` outcome with no bound at all, so a
+    single ``read skill://…`` injected ~27k billed tokens that ``_is_prunable``
+    then pinned for the life of the session.
+
+    Shape is head + COMPLETE heading outline, not head-only — see
+    :func:`_heading_outline` for why that distinction is load-bearing rather
+    than stylistic. Documents under the threshold are returned byte-identical:
+    most guides fit, and the MUST-read guide rule stays untouched for them.
+
+    The caller must keep the ORIGINAL ``skill://`` URL in ``details['url']``.
+    ``_is_prunable`` (compaction/pruning.py) matches on that prefix to exempt
+    skill reads from pruning, and post-shaping the exempted result carries the
+    spill handle the agent needs to expand — rewriting ``url`` to the handle
+    would silently disable the exemption and blank the address of the very
+    expansion the footer just promised.
+    """
+    limit = _internal_read_limit()
+    # ``0`` is the documented kill switch, not a zero-length budget.
+    if limit == 0 or len(content) <= limit:
+        return content, None
+
+    meta = _spill(content, "read", context)
+    if meta is None:
+        # Same degradation contract as the rest of the module: losing
+        # expansion is an inconvenience, failing the call is a bug.
+        return truncate_output(content, limit), None
+
+    headings = _collect_headings(content)
+    if len(headings) < INTERNAL_READ_MIN_HEADINGS:
+        # No addressable structure to index — fall through to the plain uniform
+        # head+tail every other oversized output gets.
+        body, span = _elide_inline(content, limit)
+        return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+    # Cut the head at a heading boundary so it never ends mid-rule: the last
+    # heading that starts at or under the budget wins, and everything from it
+    # onward belongs to the outline. Offsets come from one prefix scan rather
+    # than a re-sum per heading, so this stays linear in the document.
+    lines = content.splitlines()
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    head_end_line = 0
+    for heading in headings:
+        if offsets[heading.start - 1] > INTERNAL_READ_HEAD_CHARS:
+            break
+        head_end_line = heading.start - 1
+    if head_end_line == 0:
+        # First heading is already past the budget (a long frontmatter): take a
+        # plain line-boundary cut rather than emitting an empty head.
+        clipped = content[:INTERNAL_READ_HEAD_CHARS]
+        cut = clipped.rfind("\n")
+        head_text = clipped[:cut] if cut > 0 else clipped
+        head_end_line = len(head_text.splitlines())
+    else:
+        head_text = "\n".join(lines[:head_end_line])
+
+    # Never empty by construction: ``head_end_line`` is the last FITTING
+    # heading's start minus one, so that heading always lands here. That is
+    # what makes the tail addressable no matter how the headings are
+    # distributed — a document with three headings at the top and 4,000 lines
+    # of prose after them indexes the prose under its last heading's span
+    # rather than dropping it. Pinned by
+    # test_the_outline_covers_every_line_past_the_head.
+    remaining = [h for h in headings if h.start > head_end_line]
+    outline = _heading_outline(remaining, meta.handle, INTERNAL_READ_OUTLINE_CHARS)
+
+    # The banner goes at the TOP, not only in the footer. The model reads a
+    # result top-down and may act on the head before it ever reaches a trailing
+    # footer, so the statement "you have NOT read this whole document" has to
+    # arrive before the content it qualifies.
+    banner = (
+        f"[{target} — {len(lines)} lines, {len(content)} chars. This is a PARTIAL "
+        f"view: the head below plus a complete index of every remaining section. "
+        f"You have NOT read the whole document. Expand any section you intend to "
+        f"act on before acting on it.]"
+    )
+    # A concrete call derived from a REAL outline entry, following the
+    # _spill_footer discipline: a footer that describes an expansion instead of
+    # spelling one out teaches the model that expansion does not work.
+    example = remaining[0]
+    example_end = min(example.end, example.start + SPILL_PAGE_LINES - 1)
+    footer = (
+        f"\n[The FULL document ({meta.lines} lines) is saved at {meta.handle}. "
+        f"The [lines N-M] spans above are coordinates INTO that handle:\n"
+        f'  read(path="{meta.handle}", range="{example.start}-{example_end}")'
+        f"  -> the '{example.text}' section\n"
+        f'  read(path="{meta.handle}?q=<regex>")  -> find a section by name first]'
+    )
+    body = f"{banner}\n\n{head_text}\n\n[... {len(remaining)} further sections not shown; "
+    body += f"indexed below ...]\n\n{outline}\n{footer}"
+    return body, {"spill": _spill_detail(meta)}
+
+
 def _joined_capped_list_body(
     full_items: list[str],
     shown_items: list[str],
@@ -2682,7 +2928,13 @@ async def execute_read(
         # gets re-read in a loop. Declaring a key would be inert for those and
         # would add avoidable risk for the rest, since a resolver result is not
         # always the same content under the same URL.
-        return _text(tool_call_id, "read", content, details={"url": target})
+        #
+        # ``url`` MUST stay the original internal URL. ``_is_prunable`` keys the
+        # skill exemption off ``details['url'].startswith('skill://')``;
+        # substituting the spill handle here would silently disable it and let
+        # compaction blank the result that carries the expansion handle.
+        body, spill_details = _shape_internal_document(content, target, context)
+        return _text(tool_call_id, "read", body, details={"url": target, **(spill_details or {})})
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
@@ -2715,11 +2967,21 @@ async def execute_read(
         # output) is tens of thousands of stat calls, and the loop this
         # coroutine rides is the one rendering the TUI.
         entries = await asyncio.to_thread(_list_dir_entries, path)
+        # Bounded like every other read outcome: a directory with tens of
+        # thousands of entries (a node_modules, a build output) joined raw is
+        # the same unbounded-result defect the internal-URL branch had, and the
+        # entries beyond the cap are what a spill handle is for.
+        listing, spill_details = spill_truncate(
+            f"Directory listing of {path} ({len(entries)} entries):\n" + "\n".join(entries),
+            "read",
+            context,
+            READ_OUTPUT_LIMIT_CHARS,
+        )
         return _text(
             tool_call_id,
             "read",
-            f"Directory listing of {path} ({len(entries)} entries):\n" + "\n".join(entries),
-            details={"path": str(path)},
+            listing,
+            details={"path": str(path), **(spill_details or {})},
         )
 
     # Stat, content sniff and body read are one worker-thread transaction.
