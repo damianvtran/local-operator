@@ -1301,6 +1301,9 @@ async def test_an_inconclusive_order_keeps_todays_notice(monkeypatch, tmp_path) 
     owner = [n for n in notices if "is running" in n]
     assert len(owner) == 1, notices
     assert "\u2192" not in owner[0], f"nothing here can rank the pair: {owner[0]}"
+    # The remedy is the reason the line is worth painting at all; a mutation
+    # that strips it must not stay green (QA round 2, Q2-1).
+    assert "switch" in owner[0], owner[0]
 
 
 @pytest.mark.asyncio
@@ -1328,7 +1331,13 @@ async def test_an_unparseable_version_is_not_guessed_at(monkeypatch, tmp_path) -
         await pilot.pause()
         notices = _notices(app)
 
-    assert len([n for n in notices if MOVES_OVER in n]) == 1, notices
+    # parse_version cannot rank the pair, so neither predicate claims a
+    # direction and the notice is the undirected one — a full-label, arrow-free
+    # line. Non-silence is the claim this cell has always made.
+    owner = [n for n in notices if "is running" in n]
+    assert len(owner) == 1, notices
+    assert "\u2192" not in owner[0], owner[0]
+    assert "switch" in owner[0], owner[0]
 
 
 # --- The completed self-refresh, said once ----------------------------------
@@ -1352,11 +1361,16 @@ async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tm
         app._session = _BoundViewer(
             owner_version="0.51.29",
             owner_source_ref="2412b1daf",
+            session_id="s1",
             conversation_name="Investigating suspicious pwned notification source",
         )
         app._on_runtime_refreshed()
-        # The successor, resolved from the build now on disk.
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        # The successor, resolved from the build now on disk, is the SAME
+        # session rebound — the refresh keeps the id, which is exactly what the
+        # belt keys on.
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+        )
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)
@@ -1389,9 +1403,13 @@ async def test_an_unchanged_build_after_a_refresh_says_nothing(monkeypatch, tmp_
         await pilot.pause()
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+        )
         app._on_runtime_refreshed()
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+        )
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)
@@ -1430,10 +1448,12 @@ async def test_a_runtime_too_old_to_name_its_build_is_not_half_announced(
         await pilot.pause()
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
-        app._session = _BoundViewer(owner_version="")
+        app._session = _BoundViewer(owner_version="", session_id="s1")
         app._on_runtime_refreshed()
         assert app._refreshed_from is None
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+        )
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)
@@ -1641,7 +1661,12 @@ async def test_three_refs_at_one_version_claim_no_direction(monkeypatch, tmp_pat
     owner = [n for n in notices if "is running" in n]
     assert len(owner) == 1, notices
     assert "\u2192" not in owner[0], f"no arrow may claim a direction here: {owner[0]}"
-    assert "0.51.30@bbbbbbb" in owner[0] and "0.51.30@aaaaaaa" in owner[0], owner[0]
+    # Collapsed: the versions are equal by construction here, so the pair must
+    # be stated once and the "vs" pivot must show which stamp is whose (design
+    # round 2, D2-2/D2-3).
+    assert "0.51.30, bbbbbbb vs this window\u2019s aaaaaaa" in owner[0], owner[0]
+    assert "0.51.30@bbbbbbb" not in owner[0], "the shared version must not be stated twice"
+    assert "switch" in owner[0], owner[0]
 
 
 @pytest.mark.asyncio
@@ -1700,6 +1725,7 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
         app._session = _BoundViewer(
             owner_version="0.51.29",
             owner_source_ref="2412b1daf",
+            session_id="sess-a",
             conversation_name="Session A",
         )
         app._on_runtime_refreshed()
@@ -1713,6 +1739,7 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
         app._session = _BoundViewer(
             owner_version="0.51.19",
             owner_source_ref="dc6bec0aa",
+            session_id="sess-b",
             conversation_name="Session B",
         )
         app._announce_refresh_completed()
@@ -1720,6 +1747,129 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
         notices = _notices(app)
 
     assert notices == [], notices
+
+
+@pytest.mark.asyncio
+async def test_a_sidebar_switch_cannot_announce_the_previous_session(monkeypatch, tmp_path) -> None:
+    """The belt, not the route. The sidebar switch swaps ``self._session``
+    through the ``"session"`` worker group — NOT ``"warm-engage"`` — so the
+    round-1 fix in ``_cancel_runtime_engage`` never ran for it, and the
+    in-flight engage worker's own tail fired the announcement against the
+    session switched TO. The guard is a comparison at the paint point, which
+    closes the CLASS rather than enumerating swap routes (review round 2,
+    R2-1). Driven through the real methods, not a hand-run sequence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._session = _BoundViewer(
+            owner_version="0.51.29",
+            owner_source_ref="2412b1daf",
+            session_id="sess-a",
+            conversation_name="Session A",
+        )
+        app._on_runtime_refreshed()
+        assert app._refreshed_from is not None
+
+        # The sidebar swap: the pending slot SURVIVES this, which is the
+        # route round 1 missed. Session B then binds and its engage tail runs.
+        app._session = _BoundViewer(
+            owner_version="0.51.19",
+            owner_source_ref="dc6bec0aa",
+            session_id="sess-b",
+            conversation_name="Session B",
+        )
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert notices == [], f"session A's stamp answered against session B: {notices}"
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_rebind_to_the_same_session_still_announces(monkeypatch, tmp_path) -> None:
+    """The belt must not over-fire: a refresh keeps the session id, so the
+    successor binding the SAME session paints the note. Without this the
+    R2-1 guard could be `return` and every silent cell would still pass.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._skew_notice_shown.clear()
+        monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
+        app._session = _BoundViewer(
+            owner_version="0.51.29",
+            owner_source_ref="2412b1daf",
+            session_id="s1",
+            conversation_name="Session A",
+        )
+        app._on_runtime_refreshed()
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+        )
+        app._announce_refresh_completed()
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert len(notices) == 1, notices
+    assert "0.51.29@2412b1d \u2192 0.51.30@d7f12d3" in notices[0], notices[0]
+
+
+@pytest.mark.asyncio
+async def test_one_build_pair_is_announced_once_across_a_disk_move(monkeypatch, tmp_path) -> None:
+    """R2-2: the two skew wordings share ONE debounce key.
+
+    A same-version pair can paint directed C\u2032 at adopt (disk == the window)
+    and, after `lop-update` moves disk to a third ref, qualify as undirected
+    on the next check. Two kinds meant ONE unchanged build pair painted BOTH —
+    the second apparently withdrawing the direction the first asserted. The
+    pair is one fact in one session and is announced once, whichever wording
+    won the race.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app._loaded_build = BuildStamp(version="0.51.30", source_ref="aaaaaaa11")
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        # First check: disk == the window, so the pair is rankable and the
+        # directed copy paints.
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="aaaaaaa11"),
+        )
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="bbbbbbb22", session_id="s1", idle=False
+        )
+        app._check_build_skew(reason="adopt")
+        await pilot.pause()
+        first = _notices(app)
+        # Disk moves to a third ref; the SAME pair now qualifies as undirected.
+        monkeypatch.setattr(
+            update_mod,
+            "installed_build",
+            lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="ccccccc33"),
+        )
+        app._check_build_skew(reason="engage")
+        await pilot.pause()
+        second = _notices(app)
+
+    owner = [n for n in second if "is running" in n]
+    assert len(owner) == 1, f"one pair must paint once: {second}"
+    # The DRIFT notice re-paints on the disk move — that is its own fact, not
+    # the pair being repeated. The claim under test is narrower than
+    # `second == first`: the owner notice that already painted at adopt does
+    # not fire again, in EITHER wording, when the direction becomes unknowable.
+    owner_first = [n for n in first if "is running" in n]
+    assert owner == owner_first, (owner_first, owner)
+    assert "\u2192" in owner[0], "the directed form won the race and is the one shown"
 
 
 @pytest.mark.asyncio
@@ -1776,10 +1926,13 @@ async def test_the_refresh_note_keeps_its_version_pair_on_one_row(monkeypatch, t
                 app._session = _BoundViewer(
                     owner_version="0.51.29",
                     owner_source_ref="2412b1daf",
+                    session_id="s1",
                     conversation_name=name,
                 )
                 app._on_runtime_refreshed()
-                app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+                app._session = _BoundViewer(
+                    owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+                )
                 app._announce_refresh_completed()
                 await pilot.pause()
                 blocks = list(app.query(NoticeBlock))
@@ -1804,9 +1957,13 @@ async def test_the_refresh_note_does_not_restate_the_version_twice(monkeypatch, 
         await pilot.pause()
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="aaaaaaa11")
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="aaaaaaa11", session_id="s1"
+        )
         app._on_runtime_refreshed()
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="bbbbbbb22")
+        app._session = _BoundViewer(
+            owner_version="0.51.30", owner_source_ref="bbbbbbb22", session_id="s1"
+        )
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)

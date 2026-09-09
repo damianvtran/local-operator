@@ -2909,7 +2909,7 @@ class OperatorApp(App[None]):
         #: successor binds. Held across that gap because the retiring stamp
         #: only exists BEFORE the re-bind overwrites it, and the comparison it
         #: is needed for can only be made after.
-        self._refreshed_from: tuple[Any, str] | None = None
+        self._refreshed_from: tuple[Any, str, str] | None = None
         #: True while a runtime is being started for a cold viewer; the band
         #: says "starting…" for exactly this interval.
         self._starting_runtime = False
@@ -11837,6 +11837,13 @@ class OperatorApp(App[None]):
                     source_ref=str(getattr(session, "owner_source_ref", "") or ""),
                 ),
                 _session_subject(session),
+                # WHICH session retired. The subject alone cannot answer this:
+                # two sessions share a title, and the title of one says nothing
+                # about the id of another. This id is the predicate
+                # ``_announce_refresh_completed`` gates the paint on, because a
+                # stamp captured for one session must never be named against
+                # another's runtime (review round 2, R2-1).
+                str(getattr(session, "session_id", "") or ""),
             )
         else:
             # A runtime too old to say what it ran. There is no "from" side to
@@ -11866,21 +11873,43 @@ class OperatorApp(App[None]):
         they would otherwise ask ("why did my session restart?"), which is not
         what the dim ``info`` receipt is for.
 
-        THE ARROW IS SOUND HERE BY CONSTRUCTION, which is why this does not
-        need the directional predicate ``_check_build_skew`` uses. A runtime
-        retires for a refresh only when its own comparison finds the build on
-        disk has moved, and the successor is spawned from that same disk
-        install \u2014 so ``after`` is the disk build and ``before`` is one the disk
-        has already replaced. The one route that could pair unrelated stamps
-        was a refresh slot surviving a cancelled engage, which is closed at its
-        source in :meth:`_cancel_runtime_engage` rather than papered over with
-        a second check here (review round 1, R1-2).
+        THE ARROW IS SOUND HERE ONLY WITH THE GUARD ABOVE. I argued the stamp
+        pair could never be mismatched once the cancel route cleared the slot
+        (round 1); round 2 falsified that with the sidebar-switch route, which
+        swaps the session through a different worker group the cancel never
+        touches. The construction claim is restored by the session-id
+        comparison, not by enumerating swap routes: a runtime retires only when
+        disk has moved and the successor is spawned from that install, so WITHIN
+        one session ``after`` is the disk build and ``before`` is one disk has
+        already replaced; the guard is what makes "within one session" true
+        rather than assumed (R2-1).
         """
         pending, self._refreshed_from = self._refreshed_from, None
         if pending is None:
             return
-        before, subject = pending
+        before, subject, refreshed_id = pending
         session = self._session
+        # THE BELT, added after source-closing proved insufficient. The slot is
+        # cleared on every engage exit found, but the sidebar switch swaps
+        # ``self._session`` through the ``"session"`` worker group — NOT the
+        # ``"warm-engage"`` group the cancel clears — and neither
+        # ``_commit_sidebar_session`` nor ``_adopt_session`` touches this slot,
+        # so the in-flight worker's tail reached this paint against a DIFFERENT
+        # session. Auditing every present and future swap route is the fragile
+        # per-callsite reasoning this file warns against elsewhere; one
+        # comparison here closes the class. A pending stamp belongs to the
+        # session that retired — if what is bound now is not that session, this
+        # line would name one conversation against another's runtime, with the
+        # pair running backwards under the word "updated" (R2-1). An empty
+        # captured id cannot corroborate the pair, so it is silent too: the
+        # alternative is one wrong-named line per unidentifiable swap.
+        if refreshed_id != str(getattr(session, "session_id", "") or ""):
+            logger.debug(
+                "refresh announcement dropped: pending belongs to %s, %s is bound",
+                refreshed_id or "<unstamped>",
+                getattr(session, "session_id", "") or "<none>",
+            )
+            return
         version = str(getattr(session, "owner_version", "") or "")
         if not version:
             return
@@ -20434,17 +20463,52 @@ class OperatorApp(App[None]):
                 # rebuilds of one release, which no ordering can rank. The
                 # arrow copy below would assert an order we cannot derive, and
                 # asserting one anyway is exactly how the reversed sentence
-                # shipped. Name both builds without claiming which came first;
-                # the remedy is identical either way, since the runtime's own
+                # shipped. The copy therefore drops the arrow but keeps every
+                # other rule of the family:
+                #  - ONE debounce kind as the directed branch. The pair is ONE
+                #    fact in one session; two kinds meant a disk move between
+                #    two checks painted the directed C\u2032 and then the undirected
+                #    variant withdrawing the direction the first had asserted
+                #    (review round 2, R2-2).
+                #  - The COLLAPSED pair. ``_skew_direction_is_knowable`` can only
+                #    return False after its versions-differ term has failed, so
+                #    this line is reachable only when the versions are EQUAL
+                #    \u2014 full labels would restate the version twice and bury the
+                #    seven characters that actually differ, the exact defect D3
+                #    removed from the refresh note (design round 2, D2-2).
+                #  - A visible pivot. The comma form read as apposition and the
+                #    eye had to re-parse which stamp belonged to which side;
+                #    "vs" restores the assignment the sibling's arrow supplies
+                #    (design round 2, D2-3). It asserts opposition, not order.
+                # The remedy is identical either way, since the runtime's own
                 # reaper compares itself against disk and acts on the answer
                 # (QA round 1, Q-1 all-refs sub-case).
                 announce(
-                    "owner-undirected",
+                    "owner",
                     owner.label(),
                     loaded.label(),
-                    f"{subject} is running {owner.label()}, this window "
-                    f"{loaded.label()} \u2014 it will switch to the version on disk "
-                    "when it is next idle.",
+                    # Collapsed by hand when the versions are EQUAL (the
+                    # dominant route here, since equal-and-parsing fails
+                    # term 1 of the predicate by definition) \u2014
+                    # ``0.51.30, bbbbbbb vs this window\u2019s aaaaaaa``. An
+                    # UNPARSEABLE pair (``0.51.31rc1``) has no collapse and no
+                    # short ref, so it keeps the full labels; ``label()`` never
+                    # raises on either shape. The "vs" pivot replaces the arrow
+                    # (a claim of order) with opposition, which is all this
+                    # line can support (design round 2, D2-2/D2-3).
+                    (
+                        f"{subject} is running {owner.version}, "
+                        f"{owner.source_ref[:7]} vs this window\u2019s "
+                        f"{loaded.source_ref[:7]} \u2014 it will "
+                        "switch to the version on disk when it is next idle."
+                        if owner.version
+                        and owner.version == loaded.version
+                        and owner.source_ref
+                        and loaded.source_ref
+                        else f"{subject} is running {owner.label()} vs this window "
+                        f"{loaded.label()} \u2014 it will switch to the version on "
+                        "disk when it is next idle."
+                    ),
                     scope,
                     notice_kind="note",
                 )
@@ -31356,21 +31420,43 @@ def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
 
     Three ways to know, mirroring the discriminator above:
 
-    * the versions differ, so ordering ranks them;
+    * the versions differ AND both parse, so ordering ranks them;
     * the refs are equal, so there is only one build to talk about;
     * disk is readable and IS one of the two — whichever side equals the build
       on disk is the newer one, which is the whole reason the same-version
       rebuild is resolvable at all.
 
-    False leaves only the shape where nothing can rank them: one version, three
-    distinct refs — window, runtime and disk each on a different ``main`` build
-    of ``0.51.30`` — or that same pair with disk unreadable. The caller still
-    paints there, because an undiagnosable skew is worth one advisory line, but
-    it must not use the arrow: an arrow asserts an order, and asserting one we
-    have not derived is precisely how the reversed sentence shipped (QA round
-    1, Q-1 all-refs sub-case).
+    False leaves only the shapes where nothing can rank them: one version,
+    three distinct refs — window, runtime and disk each on a different
+    ``main`` build of ``0.51.30`` — that same pair with disk unreadable, and a
+    version string that does not parse. The caller still paints there, because
+    an undiagnosable skew is worth one advisory line, but it must not use the
+    arrow: an arrow asserts an order, and asserting one we have not derived is
+    precisely how the reversed sentence shipped (QA round 1, Q-1 all-refs
+    sub-case).
+
+    The first term gates on PARSE, not on string inequality. ``0.51.31rc1`` !=
+    ``0.51.30`` as a string, but ``parse_version`` returns None for the rc
+    form, so the sibling predicate refuses to rank the pair while this one
+    would have claimed it could — the two must agree on what "rankable"
+    means, or an unparseable pair takes the arrow branch asserting an order
+    neither term derived (review round 2, R2-3).
     """
-    if owner.version != loaded.version:
+    from local_operator.update import parse_version
+
+    owner_parsed = parse_version(owner.version)
+    loaded_parsed = parse_version(loaded.version)
+    # An unparseable side whose string DIFFERS from the other is unrankable
+    # outright: ``0.51.31rc1`` vs ``0.51.30`` can be compared only by ordering,
+    # and ordering is unavailable, so neither the arrow's order nor an
+    # implicit "they differ" is derivable. (An unparseable side with the SAME
+    # string is either one build — equal refs, the next term — or a
+    # same-version ref drift, which disk can rank below.) Without this early
+    # exit the equal-ref term promoted an unparseable rc to rankable (R2-3,
+    # second shape).
+    if owner.version != loaded.version and (owner_parsed is None or loaded_parsed is None):
+        return False
+    if owner_parsed is not None and loaded_parsed is not None and owner_parsed != loaded_parsed:
         return True
     if owner.source_ref == loaded.source_ref:
         return True
