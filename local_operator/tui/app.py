@@ -1717,6 +1717,30 @@ class _ApprovalsFollow(NamedTuple):
     kept: bool
 
 
+class _McpAnnounce(NamedTuple):
+    """An MCP startup announce that was actually put on screen.
+
+    Two fields because "has the user been told this" and "is this the same
+    CARD that carried it" are different questions, and the second cannot be
+    answered by the words.
+
+    Held as the app's ``_last_mcp_announce`` this is the most recent announce,
+    not the card on screen: only an eviction clears it, so it survives the card
+    being dismissed or timing out (UX round 3, U3-3).
+
+    ``sentence`` is the UNTRUNCATED text, so the comparison is width-independent
+    (review round 2, R2-1/R2-2). ``generation`` is :attr:`Toast.generation` at
+    the moment the card took the slot, and it is what makes an eviction release
+    precise: the same sentence recurs (a server that breaks, recovers and breaks
+    again inside one card), so a queued ``Toast.Evicted`` carrying the text of a
+    long-gone card would otherwise match a record that has come back to those
+    words and release an announce the user is reading right now (R2-3).
+    """
+
+    sentence: str
+    generation: int
+
+
 #: Tag for the toast the COMPOSER's copy raises, so a later edit can withdraw
 #: that card and no other. One `Toast` slot serves every caller, and a receipt
 #: may be SHOWING or HELD behind an actionable notice; the tag rides the card
@@ -1741,6 +1765,28 @@ COMPOSER_PASTE_NOTICE = object()
 # A fast local setup can finish before the old setup toast times out. Retire
 # only that session's notice on reload, never an unrelated actionable card.
 SPLASH_NOTICE = object()
+
+#: Tag for the MCP startup announce, so `on_toast_evicted` can tell the app's
+#: own card from every other caller's. That announce is reported AT MOST ONCE
+#: per distinct sentence, and the record of having reported it has to be
+#: released if the card is thrown away unread — which only works if the app can
+#: recognise its own card coming back. Same sentinel idiom and same reason as
+#: `COMPOSER_COPY`: identity is all that is compared.
+MCP_STARTUP_TOAST_OWNER = object()
+
+#: Width budget for the MCP announce's IDENTITY text, as opposed to the card's
+#: DISPLAY text (which is fitted to the terminal). A ceiling rather than a
+#: budget: no real sentence approaches it, so nothing is truncated and the
+#: sentence `format_mcp_startup` returns under it is the complete one, free of
+#: the ellipsis. The announce's "already told them" record keys on that complete
+#: sentence because the truncated one let the terminal width into the identity
+#: in both directions — a resize re-announced news the user had read (review
+#: round 2, R2-1), and two genuinely different failures that ellipsis to the
+#: same characters collapsed, silently swallowing the second (R2-2, UX round 2,
+#: U2-1). `10 ** 6` cells is ~16 km of terminal; it is a sentinel for "do not
+#: truncate", spelled as a width so the existing `format_mcp_startup` path is
+#: reused rather than a second renderer that could drift from it.
+_MCP_ANNOUNCE_KEY_CELLS = 10**6
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
 #: :data:`COMPOSER_PASTE_NOTICE`.
@@ -2463,6 +2509,96 @@ class OperatorApp(App[None]):
         #: own id or it does not, no swap site has to remember to clear, and a
         #: path added later cannot reintroduce either direction by forgetting.
         self._sessions_that_used_eval: set[str] = set()
+        #: What this process has already told the user about MCP startup, in
+        #: two parts, because "have they been told this" has two answers and a
+        #: single global slot cannot give both (QA round 2, Q2-1).
+        #:
+        #: PER SESSION: the sentence each session's own last announce carried.
+        #: A re-report for a session whose sentence has not changed since ITS
+        #: last announce is silent, which is what makes a click away and back
+        #: quiet: the sidebar is not cwd-scoped (`load_catalog` scans the whole
+        #: store) while MCP is wired per session cwd, so alternating between a
+        #: repo with `.mcp.json` and one without is ordinary A→B→A→B — and a
+        #: global slot re-announced on every single click, 20 in 20, which is
+        #: the reported defect at full strength.
+        #:
+        #: CURRENT: the sentence the most recent announce carried, with the
+        #: generation of that card, held until that card is EVICTED. A session
+        #: that has never been told anything and whose sentence is the one the
+        #: user was most recently shown inherits that record rather than raising
+        #: a duplicate — that is what keeps four sidebar clicks onto one shared
+        #: MCP set to one toast even though the four sessions have no
+        #: per-session record between them, and it must keep working across the
+        #: card being dismissed between those clicks, which is the honest
+        #: sidebar gesture.
+        #:
+        #: Deliberately NOT "the card on screen": nothing clears this on the
+        #: ordinary retirement (timer expiry, or the user clicking the card
+        #: away), so it outlives the card, and writing the screen invariant here
+        #: promised a guarantee the code does not maintain (UX round 3, U3-3).
+        #: What makes the outliving safe is the `told is None` gate below rather
+        #: than any screen state — a session carrying its own, contradicting
+        #: record can never inherit over the top of it, so retired words cannot
+        #: swallow a genuine new failure (review round 3, R3-1; UX round 3,
+        #: U3-1). What is left is a session with no history reading words the
+        #: user was shown moments ago, which is the shared-set case itself.
+        #:
+        #: Together they give A→A silent, A→B→A on the SAME session announcing
+        #: (a server that breaks, recovers and breaks again is the most
+        #: interruption-worthy thing here — UX round 1, U1), and A→B→A ACROSS
+        #: sessions silent (nothing changed; the user moved).
+        #:
+        #: The key is the UNTRUNCATED sentence. Keying the width-fitted one let
+        #: the terminal width into the identity in both directions: a resize
+        #: re-announced news already read (R2-1), and worse, two genuinely
+        #: different failures that ellipsis to the same characters collapsed,
+        #: swallowing the second — the one case this surface exists to raise
+        #: (R2-2, U2-1). The card still SHOWS the width-fitted renderable.
+        #:
+        #: Bounded by the sessions ATTACHED in this process, not by attaches
+        #: and not by outcomes: a re-attach and a changed outcome both write
+        #: the same entry, so the entry count is the count of distinct sessions
+        #: the user has clicked into since launch, and a day's sidebar
+        #: catalogue is hundreds at the outside. Each entry is a key string
+        #: plus a two-field record — hundreds of bytes, not kilobytes — so no
+        #: cap is warranted and none is imposed (review round 1, R1-3's
+        #: standard). Stated structurally rather than as a byte figure on
+        #: purpose: three rounds measured 194 B, 276 B and 286 B for this
+        #: entry and all three were honest, because the answer depends on
+        #: whether the key string and the shared sentence fall inside the
+        #: measurement window (review round 3, R3-4; QA round 3, Q3-2). The
+        #: session count is the term that decides whether a cap is needed, and
+        #: it is not method-dependent.
+        #:
+        #: Written when the toast is DISPLAYED, not when `show` is called — the
+        #: single slot may evict a 5 s courtesy card, and recording at call
+        #: time spent the one announce the user was owed on a card they never
+        #: saw (UX round 1, U2). `on_toast_evicted` clears it back.
+        #:
+        #: Never persisted: an announce that survived a restart would silence
+        #: the one launch the user actually wants told about.
+        self._announced_mcp_startup: dict[str, _McpAnnounce] = {}
+        self._last_mcp_announce: _McpAnnounce | None = None
+        #: MCP failures whose durable notice a session's transcript already
+        #: carries, keyed by `(session id, server name, error text)`.
+        #:
+        #: Per SESSION because a failure record belongs in the transcript of
+        #: the session it describes, so a second session deserves its own copy;
+        #: it is the repeat on the SAME session (a re-attach) that duplicates a
+        #: line the user already scrolled past.
+        #:
+        #: Per FAILURE rather than per outcome because keying the whole outcome
+        #: made a later round that ADDS a failure re-emit every failure already
+        #: in the transcript — the key changed, so the loop rewrote all of them
+        #: (review round 1, R1-1). Keyed this way each distinct failure lands
+        #: once per session and a new one does not drag its neighbours back.
+        #:
+        #: Grows with DISTINCT failures actually seen, not with attaches — a
+        #: re-attach adds nothing, which is the whole fix. Measured at 246 B
+        #: per key, 1,000 keys total 160 KiB; reaching a megabyte would take
+        #: ~6,500 distinct (session, server, error) triples in one process, so
+        #: no cap is warranted and none is imposed.
+        self._mcp_failure_notices: set[tuple[str, str, str]] = set()
         #: A show `_set_welcome_visible` withheld during a swap. Applied by
         #: `_reload_session` once the answer is settled, which is what still
         #: puts the splash up for a swap onto a genuinely empty session.
@@ -10934,6 +11070,70 @@ class OperatorApp(App[None]):
         the same failure. So the record goes through :meth:`_system_notice`: it
         lands under the splash, survives the toast, and is there when the
         conversation does begin.
+
+        BOTH surfaces suppress REPEATS, and they are keyed differently because
+        they answer different questions.
+
+        The TOAST announces when THIS SESSION's sentence differs from what THIS
+        SESSION was last told — one record per session, not one global slot.
+        ``session.mcp_startup`` is a frozen BOOT SNAPSHOT, and this method runs
+        on every adoption — boot, ``/new``, ``/resume``, a remote takeover, and
+        every sidebar click, which re-adopts a session and replays a snapshot
+        taken minutes ago (``RemoteSession`` even rehydrates the OWNER's round,
+        so attaching to a peer replayed a round this process never ran). MCP
+        servers are process-wide and shared, so re-confirming "12 servers, 425
+        tools" on each sidebar click is pure noise over the user's work.
+
+        Why PER SESSION rather than one global sentence (QA round 2, Q2-1): the
+        sidebar catalogue is not cwd-scoped (``load_catalog`` scans the whole
+        store) while MCP is wired per session cwd, so two conversations in two
+        repos — one with a ``.mcp.json``, one without — render two different
+        sentences, and clicking between them is A→B→A→B. A single slot cannot
+        tell "the world changed" from "I clicked away and came back": it
+        re-announced on EVERY click, 20 announces in 20, which is the reported
+        defect at full strength. Per session, each side of the alternation is
+        unchanged since its own last announce and stays silent after its first.
+
+        Why the sentence at all, and not the structural outcome: two disjoint
+        server sets that render one identical sentence are one piece of news to
+        the person reading it, and keying structurally toasted those identical
+        words twice (R1-2). A session seeing a sentence that another session
+        has CURRENTLY on screen inherits that record rather than raising a
+        duplicate — that is what keeps four sidebar clicks onto one shared MCP
+        set to one toast even though the four sessions had no record of their
+        own.
+
+        Why each session's record holds only its LAST sentence, rather than
+        every sentence it ever showed: a server that dies, recovers, then dies
+        AGAIN is the same sentence as its first death, and a ledger of retired
+        sentences silenced it forever (U1). A recurring failure is precisely
+        what the user needs interrupting for. So A→A on one session is silent,
+        A→B→A on one session announces on the return, and A→B→A across
+        sessions is silent — the world changed back, and the user only moved.
+
+        The record is taken when the toast is DISPLAYED, not when ``show`` is
+        called. The single slot may evict a courtesy card, and the announce is
+        ``TOAST_DEFAULT_MS`` — below ``yield_to_actionable``'s protection — so
+        recording at call time spent the user's one announce on a card a copy
+        receipt overwrote before they read it (U2). :meth:`on_toast_evicted`
+        clears the record so the next attach re-announces.
+
+        The settle path is unaffected. The 250 ms gate snapshot is ``settling``
+        and therefore unreportable (``format_mcp_startup`` returns ``None``),
+        so nothing is recorded until the settled outcome arrives — and that one
+        renders its own sentence and announces.
+
+        Nothing is lost by the suppression: the status band's MCP segment
+        (``_mcp_status``/``_refresh_mcp_status``) is re-read from the LIVE
+        manager on every attach and states the current count unconditionally.
+        That is the surface that legitimately re-states MCP state per attach,
+        and it is precisely what makes silencing the repeat toast safe.
+
+        The NOTICE is keyed per session and per FAILURE instead — see
+        :attr:`_mcp_failure_notices`. It also names ``/mcp``, because the toast
+        is now one-shot and the standing answer needs signposting at the moment
+        the failure is read (U4); the pointer goes on the durable line, where
+        there is room, and not on the width-budgeted toast.
         """
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
@@ -10943,12 +11143,138 @@ class OperatorApp(App[None]):
         if payload is None:
             return
         text, duration_ms = payload
-        toast.show(text, duration_ms=duration_ms)
+        # A session with no usable id (a reduced facade, a test double) shares
+        # one bucket with every other id-less host. Under the per-session record
+        # that degrades further than it did under round 1's global slot, and the
+        # justification written there no longer holds: two id-less hosts with
+        # DIFFERENT outcomes now flip the single `""` entry on every attach, so
+        # alternating between them announces every time — the reported defect at
+        # full strength in this lane, measured at 20 of 20 clicks (review round
+        # 3, R3-3; QA round 3, Q3-1). It is accepted rather than fixed because
+        # no production session reaches here without an id, which QA traced
+        # rather than assumed: all three `_report_mcp_startup` callers are on
+        # the adopted-session path, `SessionProtocol.session_id` returns `str`,
+        # `Session` falls back to the transcript directory name,
+        # `RemoteSession` takes the id as a constructor argument, and the one
+        # `str | None` implementation (`headless_print`) is never adopted by
+        # this app. Keying id-less hosts by `id(session)` would close the lane
+        # but buy nothing reachable, so the honest statement is that a keyless
+        # host announces per attach. Derived once and shared with the notice
+        # ledger below, so the two surfaces can never disagree about which
+        # session they are talking about.
+        try:
+            session_key = str(getattr(session, "session_id", "") or "")
+        except Exception:  # noqa: BLE001 — a property may raise on a reduced host
+            session_key = ""
+        # The comparison text is rendered WITHOUT a width budget while the card
+        # shows the width-fitted one. `max_cells` here is a ceiling no real
+        # sentence approaches, so nothing is truncated and the identity carries
+        # no terminal width — the ellipsis is a display concern, and letting it
+        # into the key both re-announced read news on a resize and, worse,
+        # collapsed two different failures into one and swallowed the second
+        # (review round 2, R2-1/R2-2; UX round 2, U2-1/U2-2).
+        full = format_mcp_startup(outcome, max_cells=_MCP_ANNOUNCE_KEY_CELLS)
+        # Unreachable in practice — `reportable` already said yes above and this
+        # call differs only in width — but `format_mcp_startup` is typed
+        # optional and falling back to the shown text keeps the rule total.
+        key_text = full[0] if full is not None else text
+        sentence = key_text.plain if isinstance(key_text, Text) else str(key_text)
+        told = self._announced_mcp_startup.get(session_key)
+        if told is None or told.sentence != sentence:
+            showing = self._last_mcp_announce
+            if told is None and showing is not None and showing.sentence == sentence:
+                # A session with NO history of its own, landing on words another
+                # session raised most recently: it is looking at its news
+                # already. It inherits that card's generation, so one eviction
+                # releases every session the card spoke for — otherwise a
+                # piggybacking session would keep a record for a card nobody
+                # read.
+                #
+                # `told is None` is the load-bearing half. `_last_mcp_announce`
+                # is released by eviction only, so after the ORDINARY
+                # retirement — the timer expiring, the user clicking the card
+                # away — it still names words that have left the screen. A
+                # session whose server then genuinely died matched those retired
+                # words and was marked told, so its failure never announced at
+                # all (review round 3, R3-1; UX round 3, U3-1). A session that
+                # was told something else is, by its own record, not looking at
+                # these words — whatever is on screen — so it may never inherit
+                # over the top of that. Gating on `toast.display` instead is the
+                # wrong reading and breaks the case this branch exists for: the
+                # shared-set clicks legitimately inherit across a card the user
+                # already dismissed.
+                self._announced_mcp_startup[session_key] = showing
+            else:
+                # Tagged with the app so the eviction notice can be told from
+                # every other card's, and the announce is recorded from what
+                # actually took the slot rather than from the call — a card that
+                # yields to an actionable incumbent is HELD, not shown, and must
+                # not count as told (that is the same U2 mistake in its other
+                # form). The RENDERABLE is what gets shown: it carries the
+                # semantic lamp colour `format_mcp_startup` derived through the
+                # band's own rule.
+                before = toast.generation
+                toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
+                if toast.generation != before and toast.display:
+                    announce = _McpAnnounce(sentence, toast.generation)
+                    self._last_mcp_announce = announce
+                    self._announced_mcp_startup[session_key] = announce
+        if not outcome.failures:
+            return
         # No "server" in the wording: one failure key is ``discovery`` (the
         # config layer itself), and "MCP server discovery failed" would name a
-        # server that does not exist.
+        # server that does not exist. `/mcp` is named because it is the standing
+        # answer and this is the durable surface with room to point at it.
         for name, error in sorted(outcome.failures.items()):
-            self._system_notice(f"MCP {name} failed: {error}", "error")
+            notice_key = (session_key, name, str(error))
+            if notice_key in self._mcp_failure_notices:
+                continue
+            self._mcp_failure_notices.add(notice_key)
+            self._system_notice(f"MCP {name} failed: {error} — /mcp for details", "error")
+
+    def on_toast_evicted(self, message: Toast.Evicted) -> None:
+        """Un-record the MCP announce when its card was thrown away unread.
+
+        The announce is a 5 s courtesy card in a single shared slot, so a
+        routine gesture — the copy receipt is the documented one — can replace
+        it inside those 5 s. ``yield_to_actionable`` does not protect it: that
+        guard only holds for a ``TOAST_FAILURE_MS`` incumbent, and this card is
+        ``TOAST_DEFAULT_MS``. Before this, the announce was recorded at ``show``
+        time and therefore spent on a card the user never read, with no second
+        chance because the rule is one-shot (UX round 1, U2).
+
+        Only the app's OWN startup card matters here, and only the exact CARD
+        that was evicted: matching on the words instead released a live announce
+        whenever the same sentence recurred, because ``Evicted`` is posted and
+        therefore arrives after a flap A→B→A has already brought the record back
+        to A (review round 2, R2-3). The generation is the card's identity and
+        cannot alias, which is the reason :attr:`Toast.generation` exists.
+
+        The release targets the SESSIONS whose announce that card WAS — every
+        session that took its record from it, which is the raising session plus
+        any that piggybacked on the words already being on screen. Sessions told
+        by an earlier card are untouched: they were told by a card that retired
+        normally, and re-arming them would announce news they have read.
+
+        That per-session filter is the ONLY release, and it always runs. The
+        global slot is a separate, weaker fact — the card showing most recently
+        — and short-circuiting on it dropped exactly the case this PR is about:
+        two quick sidebar clicks, where session ``b``'s card displaces ``a``'s
+        unread, moves the slot to ``b``'s generation, and left ``a`` marked told
+        for a card nobody saw (review round 3, R3-2). The filter needs no such
+        guard because it is already scoped to the evicted card's generation, so
+        it can only ever release the sessions that card spoke for.
+        """
+        if message.owner is not MCP_STARTUP_TOAST_OWNER:
+            return
+        showing = self._last_mcp_announce
+        if showing is not None and showing.generation == message.generation:
+            self._last_mcp_announce = None
+        self._announced_mcp_startup = {
+            key: announce
+            for key, announce in self._announced_mcp_startup.items()
+            if announce.generation != message.generation
+        }
 
     def _report_startup_cleanup(self, *, rechecks_left: float = 0.0) -> None:
         """Announce a startup cleanup pass that removed sessions, once.
