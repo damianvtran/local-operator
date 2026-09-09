@@ -11079,8 +11079,15 @@ class OperatorApp(App[None]):
             return McpStatus(
                 configured=len(configured),
                 connected=len(manager.get_connected_servers()),
+                # Anything not connected is a failure for the band's purposes.
+                # Tested against "connected" rather than "disconnected" because
+                # the status vocabulary grew an ``auth-required`` value: an
+                # equality test on the old string silently stops counting a
+                # server whose grant expired, which is the exact case the band
+                # exists to surface. ``connecting`` is momentary and settles
+                # into one of the terminal values on the next refresh.
                 failed=any(
-                    manager.get_connection_status(name) == "disconnected" for name in configured
+                    manager.get_connection_status(name) != "connected" for name in configured
                 ),
             )
         except Exception:

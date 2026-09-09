@@ -1648,7 +1648,15 @@ class TestAuthRequiredHandling:
 
         An expired grant will not heal by retrying, so further attempts would
         only burn the breaker window. The manager abandons auto-reconnect and
-        leaves ``/mcp login`` as the recovery path.
+        leaves ``/mcp login`` — or a peer session's, via
+        ``revalidate_auth_blocked`` — as the recovery path.
+
+        The abandonment is recorded in ``_auth_blocked``, NOT in the flap
+        breaker: the two conditions recover differently (a breaker on time, an
+        auth block on the shared grant changing), and this assertion used to
+        read ``reconnect_suspended`` only because they shared one set. Keeping
+        that predicate breaker-only is what lets the block be lifted by a
+        store change without also resurrecting a flapping server.
         """
         from local_operator.mcp.auth import McpAuthRequiredError
         from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
@@ -1677,8 +1685,11 @@ class TestAuthRequiredHandling:
 
         # The reconnect must NOT have re-scheduled itself (abandoned instead).
         assert scheduled["called"] is False
-        # And the server must be marked as having abandoned auto-reconnect.
-        assert manager.reconnect_suspended("dd") is True
+        # And the server must be marked as having abandoned auto-reconnect over
+        # AUTHORIZATION, which the flap breaker deliberately does not claim.
+        assert manager.auth_blocked("dd") is True
+        assert manager.reconnect_suspended("dd") is False
+        assert manager.get_connection_status("dd") == "auth-required"
 
     @pytest.mark.asyncio
     async def test_an_abandoned_grant_survives_the_real_transport(
@@ -2885,3 +2896,440 @@ class TestMcpRecoveryNotice:
         assert await manager.reconnect_server("fast") is not None
         assert recoveries == [], "a sinkless connect left the server armed to re-announce"
         await manager.disconnect_all()
+
+
+class TestAuthBlockRevalidation:
+    """Propagation of a SHARED grant change into a session that gave up.
+
+    ``~/.local-operator/auth.db`` is shared by every running process, but a
+    session that hit an auth failure never re-read it: the block was cleared
+    only by user action IN THAT PROCESS. So completing ``/mcp reauth`` in one
+    session left every other running session with a dead server for its whole
+    lifetime — observed on the operator's machine as sessions booted at 08:52
+    still reporting ``notion [disconnected]`` at 13:30 against a grant re-authed
+    at 12:31 with eight hours left on it.
+
+    Two properties here are load-bearing rather than stylistic, and each has a
+    test that must not be deleted:
+
+    * the retry is keyed on ``tokens_obtained_at``, NOT on the row's
+      ``updated_at`` — a marker that moves on our own writes turns a 60 s poll
+      in nine processes into a refresh-token retry storm against a provider
+      running reuse detection, which revokes the whole token family
+      (``test_a_client_info_write_is_not_a_new_grant``);
+    * the poll never connects interactively, because it runs unattended
+      (``test_the_poll_never_opens_an_interactive_grant``).
+    """
+
+    URL = "https://srv.example/mcp"
+
+    @staticmethod
+    def _oauth_manager(tmp_path: Path, store: Any = None) -> McpManager:
+        """A manager with one OAuth HTTP server configured, no connections."""
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path), auth_store=store)
+        manager._configs["dd"] = MCPHttpServerConfig(
+            url=TestAuthBlockRevalidation.URL, auth=MCPAuthConfig(type="oauth")
+        )
+        manager._sources["dd"] = "global"
+        return manager
+
+    @staticmethod
+    def _real_store(tmp_path: Path, obtained_at: float) -> Any:
+        """A REAL ``AuthStore`` over a temp file holding one stale grant.
+
+        A real store rather than a fake because the whole mechanism rests on
+        what ``McpTokenStorage`` actually writes: a fake that returns invented
+        markers would pass while the production read looked at the wrong key.
+        """
+        from local_operator.mcp.auth import MCP_OAUTH_PROVIDER, TOKENS_OBTAINED_AT_KEY
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore(str(tmp_path / "auth.db"))
+        store.upsert_credential(
+            MCP_OAUTH_PROVIDER,
+            {
+                "project_id": TestAuthBlockRevalidation.URL,
+                "tokens": {
+                    "access_token": "STALE",
+                    "refresh_token": "R1",
+                    "token_type": "Bearer",
+                    "expires_in": 28800,
+                },
+                TOKENS_OBTAINED_AT_KEY: obtained_at,
+            },
+        )
+        return store
+
+    @staticmethod
+    async def _block_via_reconnect(manager: McpManager, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Drive the REAL ``_reconnect`` auth arm so the block is genuine."""
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        async def failing(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            raise McpAuthRequiredError(TestAuthBlockRevalidation.URL)
+
+        monkeypatch.setattr(manager, "_connect_server", failing)
+        await manager._reconnect("dd", 0.0, manager._epoch)
+
+    @pytest.mark.asyncio
+    async def test_an_auth_block_is_not_the_flap_breaker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The two conditions recover differently, so they are separate state.
+
+        A breaker recovers when a server stops flapping; an auth block recovers
+        when the shared grant is replaced. Fusing them is what forced the auth
+        arm to borrow "permanent" semantics it could never shed.
+        """
+        manager = self._oauth_manager(tmp_path)
+        await self._block_via_reconnect(manager, monkeypatch)
+
+        assert manager.auth_blocked("dd") is True
+        assert manager.reconnect_suspended("dd") is False
+        assert "dd" not in manager._reconnect_suspended
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_server_refuses_reconnects_exactly_as_before(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Splitting the sets must not weaken the refusal the block exists for.
+
+        Both reconnect entry points still decline, and the parked waiter still
+        gets a real error rather than hanging (MCP-08).
+        """
+        manager = self._oauth_manager(tmp_path)
+        await self._block_via_reconnect(manager, monkeypatch)
+
+        attempts: list[str] = []
+
+        async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            attempts.append(name)
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", counting)
+        manager._schedule_reconnect("dd")
+        await asyncio.sleep(0)
+        assert await manager._reconnect_for_call("dd") is None
+        assert attempts == [], "a blocked server must not be re-dialled"
+
+        future = manager._connect_futures.get("dd")
+        assert future is None or future.done(), "a waiter was left parked forever"
+
+    @pytest.mark.asyncio
+    async def test_revalidate_retries_only_when_the_grant_marker_moved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unchanged grant costs zero connects, however many ticks run."""
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            await self._block_via_reconnect(manager, monkeypatch)
+
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", counting)
+            for _ in range(5):
+                assert await manager.revalidate_auth_blocked() == []
+            assert attempts == []
+
+            # A peer writes a fresh grant: exactly ONE attempt, and it heals.
+            await self._write_fresh_grant(store)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert attempts == ["dd"]
+            assert manager.get_connection_status("dd") == "connected"
+
+            # …and a healed server is no longer polled at all.
+            assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"]
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @staticmethod
+    async def _write_fresh_grant(store: Any) -> None:
+        """What a peer's completed ``/mcp reauth`` writes: a real ``set_tokens``."""
+        from mcp.shared.auth import OAuthToken
+
+        from local_operator.mcp.auth import McpTokenStorage
+
+        storage = McpTokenStorage(TestAuthBlockRevalidation.URL, store)
+        await storage.set_tokens(
+            OAuthToken(
+                access_token="FRESH", refresh_token="R2", token_type="Bearer", expires_in=28800
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_client_info_write_is_not_a_new_grant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE guard against a fleet-wide retry storm. Do not delete or weaken.
+
+        ``wire_oauth_auth`` calls ``seed_client_info`` on EVERY connect for a
+        pinned-client server, and that write moves the row's ``updated_at``. If
+        the marker were keyed on ``updated_at`` — which looks like the same
+        signal and is not — this session would retry on its own writes, every
+        tick, in every process, re-presenting a refresh token that Notion's
+        reuse detection answers by revoking the entire token family. Keying on
+        ``tokens_obtained_at`` (written only by ``set_tokens``) is what makes
+        the retry mean "somebody obtained a NEW grant".
+        """
+        from local_operator.mcp.auth import McpTokenStorage
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            await self._block_via_reconnect(manager, monkeypatch)
+
+            attempts: list[str] = []
+
+            async def counting(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", counting)
+
+            storage = McpTokenStorage(self.URL, store)
+            row_before = storage._read_row()
+            assert row_before is not None
+            for _ in range(3):
+                storage.seed_client_info("client-abc")
+            row_after = storage._read_row()
+            assert row_after is not None
+            assert row_after.updated_at >= row_before.updated_at
+
+            assert await manager.revalidate_auth_blocked() == []
+            assert attempts == [], "a client-info write was mistaken for a new grant"
+            assert manager.auth_blocked("dd") is True
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_revalidate_reblocks_on_the_new_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A grant that changed but is still bad costs ONE attempt, not a loop.
+
+        Re-blocking against the NEW marker is what bounds the cost to one
+        connect per genuine grant change rather than one per tick.
+        """
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            await self._block_via_reconnect(manager, monkeypatch)
+            attempts: list[str] = []
+
+            async def still_failing(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                attempts.append(name)
+                raise McpAuthRequiredError(self.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", still_failing)
+            await self._write_fresh_grant(store)
+
+            assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"]
+            assert manager.auth_blocked("dd") is True
+
+            for _ in range(3):
+                assert await manager.revalidate_auth_blocked() == []
+            assert attempts == ["dd"], "a still-bad grant was retried on every tick"
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_the_poll_never_opens_an_interactive_grant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """This runs unattended in every session; a browser must never open."""
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            await self._block_via_reconnect(manager, monkeypatch)
+            seen: list[bool] = []
+
+            async def recording(
+                name: str, cfg: Any, *, interactive: bool = False
+            ) -> ServerConnection:
+                seen.append(interactive)
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", recording)
+            await self._write_fresh_grant(store)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert seen == [False]
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_startup_gate_auth_failure_is_blocked_and_heals(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second dead state: after-gate auth failures were FORGOTTEN.
+
+        ``_finish_pending``'s auth arm fired the incident and the toast but
+        neither suspended nor rescheduled, so the server was invisible to
+        anything inspecting the breaker and was never retried. HTTP OAuth
+        servers land here rather than in ``_reconnect``'s arm — discovery plus a
+        refresh makes them miss the 250 ms gate — so this is the arm the
+        operator's dead sessions were actually stuck in.
+        """
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            incidents: list[tuple[str, str]] = []
+            recoveries: list[tuple[str, int]] = []
+            manager.on_incident = lambda server, reason: incidents.append((server, reason))
+            manager.on_recovery = lambda server, count: recoveries.append((server, count))
+
+            # A connect that resolves AFTER the gate, exactly as a real OAuth
+            # HTTP server does, so the failure runs through _finish_pending.
+            async def slow_auth_failure(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                await asyncio.sleep(0.05)
+                raise McpAuthRequiredError(self.URL)
+
+            monkeypatch.setattr(manager, "_connect_server", slow_auth_failure)
+            monkeypatch.setattr("local_operator.mcp.manager.STARTUP_GATE_MS", 1)
+            await manager._connect_round({"dd": manager._configs["dd"]}, {"dd": "global"})
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if manager.auth_blocked("dd"):
+                    break
+
+            assert manager.auth_blocked("dd") is True
+            assert manager.get_connection_status("dd") == "auth-required"
+            assert [name for name, _ in incidents] == ["dd"]
+
+            async def good(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", good)
+            await self._write_fresh_grant(store)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert manager.get_connection_status("dd") == "connected"
+            # The model was told it broke, so it must be told it came back.
+            assert recoveries == [("dd", 1)]
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_healing_a_server_the_model_never_heard_about_stays_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``on_recovery`` stays gated on ``_incident_announced`` through the poll.
+
+        Healing routes through ``_register_connection`` precisely so the
+        existing gate applies: a server blocked on a host with no incident sink
+        must not produce a recovery notice for a failure nobody announced.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            # No incident sink installed => nothing armed.
+            await self._block_via_reconnect(manager, monkeypatch)
+            assert "dd" not in manager._incident_announced
+
+            recoveries: list[tuple[str, int]] = []
+            manager.on_recovery = lambda server, count: recoveries.append((server, count))
+
+            async def good(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", good)
+            await self._write_fresh_grant(store)
+            assert await manager.revalidate_auth_blocked() == ["dd"]
+            assert recoveries == []
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_status_reports_auth_required_only_while_actually_blocked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A connected server never reports ``auth-required``.
+
+        The status surfaces render this string directly, so a stale block must
+        never outrank a live connection.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            assert manager.get_connection_status("dd") == "disconnected"
+            await self._block_via_reconnect(manager, monkeypatch)
+            assert manager.get_connection_status("dd") == "auth-required"
+
+            async def good(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                return _make_conn(name, cfg)
+
+            monkeypatch.setattr(manager, "_connect_server", good)
+            assert await manager.reconnect_server("dd") is not None
+            assert manager.get_connection_status("dd") == "connected"
+            assert manager.auth_blocked("dd") is False
+        finally:
+            await manager.disconnect_all()
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_fleet_reads_the_store_zero_times(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cost gate: this runs on a 60 s timer in every session.
+
+        With nothing blocked the tick must not touch SQLite at all, or nine
+        processes pay for a condition none of them are in.
+        """
+        manager = self._oauth_manager(tmp_path)
+        reads: list[str] = []
+        monkeypatch.setattr(
+            manager, "_grant_marker", lambda name: (reads.append(name), (0.0, False))[1]
+        )
+        for _ in range(100):
+            assert await manager.revalidate_auth_blocked() == []
+        assert reads == []
+
+    @pytest.mark.asyncio
+    async def test_a_disposed_manager_never_registers_a_healed_connection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The poller and dispose race: a tick must not resurrect a connection.
+
+        ``disconnect_all`` bumps the epoch; a connect already in flight when it
+        runs must close its own stack rather than land in a torn-down manager.
+        """
+        store = self._real_store(tmp_path, obtained_at=1000.0)
+        manager = self._oauth_manager(tmp_path, store)
+        try:
+            await self._block_via_reconnect(manager, monkeypatch)
+            await self._write_fresh_grant(store)
+            closed = {"stack": False}
+
+            class _Stack:
+                async def aclose(self) -> None:
+                    closed["stack"] = True
+
+            async def disposing_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+                await manager.disconnect_all()
+                conn = _make_conn(name, cfg)
+                conn.stack = cast(Any, _Stack())
+                return conn
+
+            monkeypatch.setattr(manager, "_connect_server", disposing_connect)
+            assert await manager.revalidate_auth_blocked() == []
+            assert manager.get_connection("dd") is None
+            assert closed["stack"] is True
+        finally:
+            store.close()

@@ -6039,6 +6039,9 @@ class FakeMcpManager:
         self._configs: dict[str, Any] = {}
         self.disconnects: list[str] = []
         self.connects: list[tuple[str, Any]] = []
+        #: Servers held back by an unusable OAuth grant, which the real manager
+        #: reports as ``auth-required`` rather than ``disconnected``.
+        self._auth_blocked: set[str] = set()
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -6047,7 +6050,9 @@ class FakeMcpManager:
         return sorted(self._connected)
 
     def get_connection_status(self, name: str) -> str:
-        return "connected" if name in self._connected else "disconnected"
+        if name in self._connected:
+            return "connected"
+        return "auth-required" if name in self._auth_blocked else "disconnected"
 
     def get_server_config(self, name: str) -> Any:
         return self._configs.get(name)
@@ -12194,3 +12199,33 @@ async def test_a_never_active_only_sweep_does_not_announce(
         for _ in range(8):
             await pilot.pause()
         assert not [b for b in app.query(NoticeBlock) if "session cleanup" in (b.text() or "")]
+
+
+@pytest.mark.asyncio
+async def test_the_band_counts_an_auth_blocked_server_as_failed() -> None:
+    """A server whose grant expired must still turn the lamp.
+
+    The band asks "is anything not up", and it used to answer by comparing the
+    status against the literal ``"disconnected"``. When the manager gained
+    ``auth-required`` as a fourth value, that equality silently stopped counting
+    exactly the servers this segment exists to surface — a session would show a
+    calm two-of-two lamp while a server had been unusable for hours. The test is
+    the guard for the ``!= "connected"`` form.
+    """
+    manager = FakeMcpManager(["github", "notion"], ["github", "notion"])
+    session = McpSession(manager=manager, startup=McpStartupOutcome())
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        for _ in range(6):
+            await pilot.pause()
+        assert app._mcp_status().failed is False
+
+        # notion's grant expires mid-session: not connected, not dead.
+        manager.drop("notion")
+        manager._auth_blocked.add("notion")
+        for _ in range(4):
+            await pilot.pause()
+        assert manager.get_connection_status("notion") == "auth-required"
+        status = app._mcp_status()
+        assert status.connected == 1
+        assert status.failed is True, "an auth-blocked server was not counted as failed"

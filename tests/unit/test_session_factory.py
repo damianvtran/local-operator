@@ -879,6 +879,12 @@ class FakeMcpManager:
         # creating attributes the production object also has.
         self.on_incident: Callable[[str, str], None] | None = None
         self.on_recovery: Callable[[str, int], None] | None = None
+        #: Ticks the auth-revalidation poller has performed against this manager.
+        self.revalidations = 0
+
+    async def revalidate_auth_blocked(self) -> list[str]:
+        self.revalidations += 1
+        return []
 
     def set_on_tools_changed(self, cb) -> None:
         self.callback = cb
@@ -3649,4 +3655,69 @@ async def test_attach_mcp_dispose_installs_the_recovery_sink() -> None:
     assert manager.on_recovery is not None
     manager.on_recovery("minerva-qa", 41)
     assert recoveries == [("minerva-qa", 41)]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_auth_revalidation_runs_from_the_composition_root(monkeypatch) -> None:
+    """Every host polls the shared credential store, and stops on dispose.
+
+    The poller lives in ``attach_mcp_dispose`` because that is the seam every
+    front end goes through: a CLI, headless, exec or server session must heal
+    from a peer's ``/mcp reauth`` too, and bolting it onto the TUI would cover
+    one of six routes. Subagents deliberately never reach this function (they
+    BORROW the parent's manager), so a child starts no second poller.
+
+    The cancel hook is registered BEFORE ``manager.disconnect_all``: dispose
+    runs hooks in registration order and ``disconnect_all`` bumps the manager's
+    epoch, so a tick must not still be in flight when it does.
+    """
+    session = FakeSessionShell()
+    manager = FakeMcpManager()
+    # A tick per event-loop turn, so the test waits on the EVENT rather than
+    # on the clock (the production interval is 60 s).
+    monkeypatch.setattr("local_operator.mcp.manager.AUTH_REVALIDATE_INTERVAL_S", 0)
+
+    attach_mcp_dispose(session, cast("McpManager", manager))
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if manager.revalidations:
+            break
+    assert manager.revalidations > 0, "the composition root installed no revalidation poller"
+
+    await session.dispose()
+    assert manager.disconnected == 1
+    settled = manager.revalidations
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert manager.revalidations == settled, "the poller outlived the session that owns it"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_revalidation_never_kills_the_poller(monkeypatch) -> None:
+    """A store read that blows up must cost one tick, not the whole session.
+
+    Auth state is best-effort throughout this subsystem; a poller that dies on
+    a transient store error would silently stop healing for the rest of the
+    session, which is the failure it exists to fix.
+    """
+    session = FakeSessionShell()
+    manager = FakeMcpManager()
+    calls = {"n": 0}
+
+    async def flaky() -> list[str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("store unavailable")
+        return []
+
+    manager.revalidate_auth_blocked = flaky  # type: ignore[method-assign]
+    monkeypatch.setattr("local_operator.mcp.manager.AUTH_REVALIDATE_INTERVAL_S", 0)
+
+    attach_mcp_dispose(session, cast("McpManager", manager))
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if calls["n"] >= 3:
+            break
+    assert calls["n"] >= 3, "the poller stopped after a raising tick"
     await session.dispose()
