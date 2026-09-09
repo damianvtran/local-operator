@@ -46,9 +46,34 @@ _TASKS = {"task_plain": fixtures.PLAIN}
 
 @pytest.fixture(scope="module")
 def adapter_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Build the shipped wheel once; each test installs it into its own venv."""
+    """Build the shipped wheel once for every test in this module."""
 
     return spawn_helpers.build_adapter_wheel(tmp_path_factory.mktemp("wheel"))
+
+
+@pytest.fixture(scope="module")
+def spawn_interpreter(
+    tmp_path_factory: pytest.TempPathFactory, adapter_wheel: Path
+) -> spawn_helpers.SpawnInterpreter:
+    """One copied interpreter with the wheel installed, shared by this module.
+
+    Module scope, matching ``test_score_evidence.py`` and
+    ``test_run_episode_script.py``, which already build their interpreter this
+    way. Function scope here meant a real ``venv --copies`` clone (~17.7 MB)
+    per test per xdist worker, and this module has six spawn tests — the single
+    largest contributor to the temp footprint a suite run leaves behind.
+
+    Sharing is sound because the tests below only READ the install: they spawn
+    workers from it and pin its ``package_digest``, and each still gets its own
+    ``tmp_path`` workspace and artifact root, which is where everything a test
+    writes actually goes. ``test_helper_wheel_record_and_lazy_startup`` is the
+    exception and deliberately does not use this fixture — it tampers with the
+    installed bytes, so it needs an install nothing else can observe.
+    """
+
+    return spawn_helpers.build_spawn_interpreter(
+        tmp_path_factory.mktemp("spawn-interpreter"), adapter_wheel
+    )
 
 
 def _spec_for_spawn(episode_id: str) -> Any:
@@ -75,6 +100,12 @@ def _spec_for_spawn(episode_id: str) -> Any:
 def test_helper_wheel_record_and_lazy_startup(tmp_path: Path, adapter_wheel: Path) -> None:
     import subprocess
 
+    # Deliberately NOT the module-scoped ``spawn_interpreter``: this test
+    # rewrites a file inside the installed distribution to prove the digest
+    # refuses it. The bytes are restored in a ``finally``, but a failure
+    # between the two writes would leave a tampered install behind, and every
+    # later test sharing it would fail its handshake for a reason that names
+    # none of this. A private install keeps the blast radius at one test.
     selector = spawn_helpers.build_spawnable_adapter(tmp_path, adapter_wheel, _TASKS)
     result = subprocess.run(
         [
@@ -117,8 +148,12 @@ assert distribution_digest(dist) == digest
 
 
 @pytest.mark.asyncio
-async def test_real_wheel_handshakes_and_reaps(tmp_path: Path, adapter_wheel: Path) -> None:
-    selector = spawn_helpers.build_spawnable_adapter(tmp_path, adapter_wheel, _TASKS)
+async def test_real_wheel_handshakes_and_reaps(
+    tmp_path: Path, adapter_wheel: Path, spawn_interpreter: spawn_helpers.SpawnInterpreter
+) -> None:
+    selector = spawn_helpers.build_spawnable_adapter(
+        tmp_path, adapter_wheel, _TASKS, interpreter=spawn_interpreter
+    )
     supervisor = AdapterSupervisor.launch(selector)
     try:
         handshake = await supervisor.handshake(timeout=60)
@@ -139,7 +174,10 @@ async def test_real_wheel_handshakes_and_reaps(tmp_path: Path, adapter_wheel: Pa
 
 @pytest.mark.asyncio
 async def test_spawned_worker_seals_a_verified_bundle(
-    tmp_path: Path, adapter_wheel: Path, episode_id: str
+    tmp_path: Path,
+    adapter_wheel: Path,
+    episode_id: str,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
 ) -> None:
     """THE headline: a real out-of-process episode ends in a verifiable bundle.
 
@@ -158,6 +196,7 @@ async def test_spawned_worker_seals_a_verified_bundle(
         # stripped, so the backend selection has to live in the workspace whose
         # digest the handshake pins.
         provider={"provider": "fake", "scripted_score": 1.0},
+        interpreter=spawn_interpreter,
     )
     config = spawn_helpers.spawn_config(tmp_path)
 
@@ -210,7 +249,10 @@ async def test_spawned_worker_seals_a_verified_bundle(
 
 @pytest.mark.asyncio
 async def test_spawned_worker_reports_a_partial_score(
-    tmp_path: Path, adapter_wheel: Path, episode_id: str
+    tmp_path: Path,
+    adapter_wheel: Path,
+    episode_id: str,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
 ) -> None:
     """A fractional evaluator score survives the boundary as exact ppm.
 
@@ -225,6 +267,7 @@ async def test_spawned_worker_reports_a_partial_score(
         adapter_wheel,
         _TASKS,
         provider={"provider": "fake", "scripted_score": 0.5},
+        interpreter=spawn_interpreter,
     )
     runner = EpisodeRunner(
         _spec_for_spawn(episode_id),
@@ -245,7 +288,10 @@ async def test_spawned_worker_reports_a_partial_score(
 
 @pytest.mark.asyncio
 async def test_secrets_cross_the_boundary_and_never_appear_in_the_worker_env(
-    tmp_path: Path, adapter_wheel: Path, episode_id: str
+    tmp_path: Path,
+    adapter_wheel: Path,
+    episode_id: str,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
 ) -> None:
     """Schema 1.2's ``ResetStartParams.secrets`` reaches a REAL spawned worker.
 
@@ -268,7 +314,11 @@ async def test_secrets_cross_the_boundary_and_never_appear_in_the_worker_env(
     )
 
     selector = spawn_helpers.build_spawnable_adapter(
-        tmp_path, adapter_wheel, _TASKS, provider={"provider": "fake"}
+        tmp_path,
+        adapter_wheel,
+        _TASKS,
+        provider={"provider": "fake"},
+        interpreter=spawn_interpreter,
     )
     spec = _spec_for_spawn(episode_id)
     artifact_root = tmp_path / "artifacts"
@@ -353,7 +403,10 @@ def test_a_1_1_selector_cannot_even_be_built_against_a_1_2_parent(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_request(
-    tmp_path: Path, episode_id: str, adapter_wheel: Path
+    tmp_path: Path,
+    episode_id: str,
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
 ) -> None:
     import hashlib
 
@@ -365,6 +418,7 @@ async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_reque
         adapter_wheel,
         {"task_plain": fixtures.SCRIPTED_SIMULATOR},
         provider={"provider": "fake", "has_user_simulator": True},
+        interpreter=spawn_interpreter,
     )
     config = spawn_helpers.spawn_config(tmp_path)
     model, stream = _offline_ask_client(config.artifact_root)
