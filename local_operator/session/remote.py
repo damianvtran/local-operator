@@ -4084,6 +4084,23 @@ class RemoteSession:
         return "main"
 
     @property
+    def subagent_comms(self) -> Any:
+        """This follower's read-only view of the owner's subagent graph.
+
+        The PUBLIC name the real ``Session`` exposes, added because callers
+        duck-type on it and the private attribute alone did not satisfy that.
+        ``/info`` read ``session.subagent_comms`` and got ``None`` here, so a
+        follower window reported zero subagents for a session that had
+        several — a fabricated zero rather than a raise, so nothing was even
+        named as degraded. Every attached window is on this path.
+
+        Never ``None``: the facade is built in ``__init__`` and refilled from
+        canonical state on every sync, so a caller gets an empty roster before
+        the first sync rather than an attribute that is sometimes missing.
+        """
+        return self._subagent_comms
+
+    @property
     def is_streaming(self) -> bool:
         return self._streaming
 

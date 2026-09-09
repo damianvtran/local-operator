@@ -157,6 +157,12 @@ class SessionLine:
     #: fields (the ``getattr`` defaulting for mid-upgrade records) long before
     #: it drifted on this one.
     is_self: bool = False
+    #: Subagent trajectories this runtime published on its record. ``None``
+    #: means the runtime did not report — an older build, or a handle that
+    #: cannot answer the probe — which is NOT the same fact as zero and must
+    #: never be summed as one. See :attr:`SessionsInfo.subagents_unreported`.
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +189,34 @@ class SessionsInfo:
     #: header rather than annotating it.
     available: bool = True
 
+    # -- fleet trajectories -------------------------------------------------
+    # The operator's question: how many agent trajectories are running on this
+    # machine right now. Summed over LIVE runtimes only, and split into what
+    # was measured against what could not be, because a total with silently
+    # missing terms is the failure this screen writes essays about.
+
+    #: Live runtimes whose build reports subagent counts.
+    subagents_reporting: int = 0
+    #: Live runtimes that do NOT report them. The denominator of the honesty
+    #: caveat: 3 non-reporting sessions is a different fact from 3 sessions
+    #: with no subagents, and only this field can tell the reader which they
+    #: are looking at.
+    subagents_unreported: int = 0
+    #: Summed across REPORTING live runtimes only. Each term is already a flat
+    #: count over one session's complete roster (nested descendants included),
+    #: so this is an addition over disjoint sets: a subagent never publishes a
+    #: record of its own, so it can never also be counted as a runtime.
+    fleet_subagents_running: int = 0
+    fleet_subagents_queued: int = 0
+    #: Session trajectories — live runtimes publishing ``busy``. The same
+    #: number as :attr:`busy`, named separately so the header does not have to
+    #: explain that the spinner field is also a trajectory count.
+    fleet_session_trajectories: int = 0
+    #: :attr:`fleet_session_trajectories` + :attr:`fleet_subagents_running`. A
+    #: LOWER BOUND whenever :attr:`subagents_unreported` is non-zero, and the
+    #: renderer must say so rather than presenting it as a total.
+    fleet_trajectories: int = 0
+
 
 @dataclass(frozen=True)
 class SubagentLine:
@@ -205,12 +239,22 @@ class SubagentLine:
 class AgentsInfo:
     """Agent profiles, teams, and the subagent tree of THIS session.
 
-    The tree is this session's only. ``SubagentComms`` is a live in-memory
-    object on one ``Session`` and ``SessionRecord`` carries no subagent field,
-    so nothing about another session's children is observable without a new
-    control-socket op and a ``PROTOCOL_VERSION`` bump. The screen says so rather
-    than implying a fleet-wide view; :attr:`cross_session_known` is the seam a
-    later change would flip, and is always ``False`` today.
+    The TREE is still this session's only, and always will be: ``SubagentComms``
+    is a live in-memory object on one ``Session``, so another session's lineage
+    cannot be drawn without putting a socket fan-out on a diagnostic screen that
+    is opened precisely when peers are wedged.
+
+    The COUNTS are another matter, and this docstring used to be wrong about
+    them. It claimed a fleet view needed a new control-socket op and a
+    ``PROTOCOL_VERSION`` bump; in fact each runtime now publishes its own
+    ``subagents_running``/``subagents_queued`` on its ``SessionRecord`` — the
+    same purely additive contract the ``busy`` and build-stamp fields use — and
+    the protocol deliberately did NOT move for it. It must not: peers read
+    ``record.protocol`` as a pre-dial promise about which FRAMES a runtime
+    speaks (``attach_client``, ``session_factory``, ``remote``), and a JSON
+    field that touches no frame changes nothing they are asking about. The
+    fleet roll-ups live on :class:`SessionsInfo`, beside the scan that
+    produces them.
     """
 
     profiles: int = 0
@@ -229,7 +273,20 @@ class AgentsInfo:
     #: Number of nodes below the render depth cap, folded into one summary row
     #: rather than indented off the card.
     deeper: int = 0
+    #: True when at least one live runtime OTHER THAN THIS ONE reported its
+    #: subagent counts — i.e. when the fleet numbers describe more than the
+    #: session being looked at. ``False`` on a single-session host or an
+    #: all-older fleet, where the screen must keep saying that only this
+    #: session is visible. Deliberately "someone else reported", not "the
+    #: feature is compiled in": the note it gates claims knowledge of other
+    #: windows, and on a host where nobody else answered that claim is false.
     cross_session_known: bool = False
+    #: This session's roster could not be READ (a session exposing no comms
+    #: facade, or a roster read that raised). Renders as ``UNKNOWN`` with the
+    #: reason in the degraded block, never as "no subagents have been
+    #: launched" — the screen must not state as fact something it failed to
+    #: measure.
+    roster_unread: bool = False
 
 
 @dataclass(frozen=True)

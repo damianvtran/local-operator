@@ -19,6 +19,7 @@ from textual.binding import Binding
 
 from local_operator.info.collect import LiveState, collect_live
 from local_operator.info.model import (
+    UNKNOWN,
     AgentsInfo,
     EnvInfo,
     InfoSnapshot,
@@ -956,3 +957,544 @@ def test_the_depth_fold_row_is_a_section_summary_not_a_child_row() -> None:
     # Base indent — the same two cells every top-level row in the section uses,
     # not the cap's child indent.
     assert len(row) - len(row.lstrip()) == 2, f"fold is not at base indent: {row!r}"
+
+
+# -- the fleet tally ----------------------------------------------------------
+
+
+def _unwrapped(text: str) -> str:
+    """One line, so a phrase assertion is not defeated by ``note``'s wrapping.
+
+    ``_Body.note`` wraps at the body width and re-indents every continuation, so
+    a sentence under test is routinely split mid-phrase at a width the test did
+    not choose.
+    """
+    return " ".join(text.split())
+
+
+def _fleet_sessions(**overrides: Any) -> SessionsInfo:
+    base: dict[str, Any] = dict(
+        lines=(),
+        total=3,
+        live=3,
+        busy=2,
+        subagents_reporting=3,
+        subagents_unreported=0,
+        fleet_subagents_running=5,
+        fleet_subagents_queued=1,
+        fleet_session_trajectories=2,
+        fleet_trajectories=7,
+    )
+    base.update(overrides)
+    return SessionsInfo(**base)
+
+
+def test_the_header_answers_the_fleet_question_not_this_session_only() -> None:
+    """The operator's actual question, on the header line.
+
+    The section used to say "none running" on a host with a dozen busy windows,
+    because the only number it had was this session's tree.
+    """
+    text = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)))
+    assert "3 runtimes · 7 trajectories" in text
+    assert "7 total" in text
+    assert "2 sessions + 5 subagents" in text
+
+
+def test_the_first_frame_shows_this_session_and_says_the_fleet_is_still_checking() -> None:
+    """The tree is live (first frame); the fleet comes from the ~900 ms worker.
+
+    So the header must not print a fleet number it does not have yet. It reuses
+    ``checking…`` — the screen's ONE loading word — rather than a zero it would
+    then revise upward, which is the flash this rule exists to prevent.
+    """
+    text = _text(None, _live(running=2))
+    assert "this session: 2 running · fleet checking…" in text
+    assert "7 trajectories" not in text
+
+
+def test_a_quiet_fleet_says_none_running_rather_than_zero() -> None:
+    """A zero in a count column reads as a failed probe; a word does not."""
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(
+                busy=0,
+                fleet_subagents_running=0,
+                fleet_session_trajectories=0,
+                fleet_trajectories=0,
+            ),
+            agents=AgentsInfo(),
+        )
+    )
+    assert "3 runtimes · none running" in text
+
+
+def test_the_lower_bound_caveat_appears_only_when_a_session_did_not_report() -> None:
+    """A permanent disclaimer is wallpaper; a conditional one is information.
+
+    "lower bound" is the load-bearing phrase: it distinguishes "2 sessions could
+    not report" from "2 sessions have no subagents" without making the reader
+    cross-reference the degraded block.
+    """
+    mixed = _text(
+        _snapshot(sessions=_fleet_sessions(subagents_unreported=2), agents=AgentsInfo(running=1))
+    )
+    assert "2 sessions run an older build" in mixed
+    assert "lower bound" in mixed
+
+    clean = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)))
+    assert "lower bound" not in clean
+
+
+def test_a_wedged_session_is_named_as_possibly_stale() -> None:
+    """Its counts are real but as of its last heartbeat, and the screen says so
+    rather than presenting them as current."""
+    text = _text(_snapshot(sessions=_fleet_sessions(wedged=1), agents=AgentsInfo()))
+    assert "1 session is wedged" in text
+    assert "last heartbeat" in text
+
+
+def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:
+    """THE REGRESSION, as an assertion.
+
+    "No subagents have been launched in this session" is a statement of FACT. It
+    must not appear when the roster could not be read — that is the fabricated
+    zero a follower window used to show on a host full of subagents.
+    """
+    text = _text(
+        _snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(roster_unread=True)),
+        _live(roster_unread=True),
+    )
+    assert "No subagents have been launched" not in text
+    assert "could not be read" in text
+    assert "could not read the roster" in text
+
+
+def test_a_genuinely_empty_session_still_says_so() -> None:
+    """The honest empty state must survive: a fresh session has no subagents and
+    the screen should say that plainly rather than hedging."""
+    text = _text(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo()))
+    assert "No subagents have been launched in this session." in text
+
+
+def test_the_closing_note_promises_counts_only_when_someone_else_reported() -> None:
+    """The note claims knowledge of other windows, so it must be true.
+
+    On an all-older fleet nobody reported, and the older wording — other
+    sessions report busy/pending and memory — is still exactly right.
+    """
+    tree = (SubagentLine(job_id="j1", label="reviewer", status="running"),)
+    known = _text(
+        _snapshot(
+            sessions=_fleet_sessions(),
+            agents=AgentsInfo(tree=tree, running=1, cross_session_known=True),
+        )
+    )
+    assert "Other sessions report counts." in _unwrapped(known)
+
+    unknown = _text(
+        _snapshot(
+            sessions=_fleet_sessions(subagents_unreported=3, subagents_reporting=0),
+            agents=AgentsInfo(tree=tree, running=1, cross_session_known=False),
+        )
+    )
+    assert "busy, pending and memory" in _unwrapped(unknown)
+
+
+def test_the_header_short_form_keeps_both_halves_of_the_answer() -> None:
+    """Below ``_NOTE_MIN`` the header abbreviates rather than dropping a half.
+
+    The operator's question is explicitly two-part — how many runtimes AND how
+    many trajectories — so shedding the denominator leaves the count
+    unanchored: N trajectories across how many processes? Abbreviating is what
+    makes keeping both affordable at a narrow width (design round 1, D4).
+    """
+    text = _text(
+        _snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)),
+        width=52,
+    )
+    assert "3rt · 7tj" in text
+    assert "3 runtimes · 7 trajectories" not in text, "the long form must have shed"
+
+
+def test_an_unmeasured_fleet_never_renders_as_a_measured_zero() -> None:
+    """D1/D2 — the section contradicting itself in this host's default state.
+
+    When NO runtime reported, every term of ``fleet_trajectories`` is unknown,
+    but the falsy total used to render through the measured branch: the header
+    printed ``none running`` and the row ``0 total — 0 sessions + 0 subagents``
+    while the same frame drew this session's running children four rows below.
+    ``none running`` is a word chosen precisely because it asserts more
+    confidently than a bare ``0`` — so it must not be spent on a number nobody
+    measured. The record layer honours "None is not 0"; the header must too.
+    """
+    sessions = _fleet_sessions(
+        live=4,
+        busy=0,
+        subagents_reporting=0,
+        subagents_unreported=4,
+        fleet_subagents_running=0,
+        fleet_session_trajectories=0,
+        fleet_trajectories=0,
+    )
+    text = _text(
+        _snapshot(
+            sessions=sessions,
+            agents=AgentsInfo(
+                running=3,
+                queued=1,
+                tree=(SubagentLine(job_id="j1", label="reviewer", status="running"),),
+            ),
+        )
+    )
+    assert "none running" not in text, "nothing was measured, so nothing may be asserted"
+    assert "0 total" not in text
+    assert "0 sessions + 0 subagents" not in text
+    assert f"4 runtimes · trajectories {UNKNOWN}" in text
+    assert "4 of 4 runtimes did not report" in _unwrapped(text)
+    # And the tree it would have contradicted is still drawn.
+    assert "reviewer" in text
+
+
+def test_a_partially_reported_fleet_hedges_the_figure_itself() -> None:
+    """The caveat is twelve rows and a page-turn from the header at 100x30, so
+    the hedge rides the number rather than waiting for the note (D2)."""
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(subagents_unreported=2),
+            agents=AgentsInfo(running=1),
+        )
+    )
+    assert "≥7 trajectories" in text, "the header figure carries its own floor marker"
+    assert "≥7 total" in text
+    # The caveat still states the denominator; the marker does not replace it.
+    assert "lower bound" in _unwrapped(text)
+
+
+def test_none_running_survives_only_when_every_runtime_reported_zero() -> None:
+    """The one state where the word is earned: it is then a measurement."""
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(
+                busy=0,
+                subagents_reporting=3,
+                subagents_unreported=0,
+                fleet_subagents_running=0,
+                fleet_session_trajectories=0,
+                fleet_trajectories=0,
+            ),
+            agents=AgentsInfo(),
+        )
+    )
+    assert "none running" in text
+    assert UNKNOWN not in text.split("Agents and subagents")[1].split("Environment")[0]
+
+
+@pytest.mark.parametrize("width", list(range(50, 101)))
+def test_no_row_in_the_section_is_clipped_mid_word(width: int) -> None:
+    """D3 — ``· depth N`` arrived with no rung in the shed ladder.
+
+    The value column is padded and then hard-cropped, so a value that outgrows
+    a narrow frame loses characters mid-word: at 64 columns the row ended on
+    the bare label ``depth`` with no number, at 60/62 on ``de``/``dept``. A
+    label promising a value that is not there reads as a broken field, which is
+    a regression against the pre-fleet row — shorter, but always complete.
+    """
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(),
+            agents=AgentsInfo(running=3, queued=1, settled=7, max_depth=2),
+        ),
+        width=width,
+    )
+    section = text.split("Agents and subagents")[1].split("Environment")[0]
+    for line in section.split("\n"):
+        stripped = line.rstrip()
+        assert not stripped.endswith("·"), f"{width}: dangling separator: {stripped!r}"
+        for fragment in ("depth", "de", "dept", "runnin", "queue"):
+            assert not stripped.endswith(fragment), f"{width}: clipped: {stripped!r}"
+
+
+def test_counts_are_pluralised() -> None:
+    """D5 — ``1 runtimes · 1 trajectories`` is what every fresh install saw."""
+    text = _text(
+        _snapshot(
+            sessions=_fleet_sessions(
+                total=1,
+                live=1,
+                busy=1,
+                subagents_reporting=1,
+                fleet_subagents_running=0,
+                fleet_session_trajectories=1,
+                fleet_trajectories=1,
+            ),
+            agents=AgentsInfo(),
+        )
+    )
+    assert "1 runtime · 1 trajectory" in text
+    assert "1 session + 0 subagents" in text
+    assert "1 runtimes" not in text and "1 trajectories" not in text
+
+
+def test_the_caveats_agree_with_themselves_in_the_singular() -> None:
+    """D6/D7 — the singular branches switched number mid-sentence."""
+    older = _unwrapped(
+        _text(
+            _snapshot(
+                sessions=_fleet_sessions(subagents_unreported=1), agents=AgentsInfo(running=1)
+            )
+        )
+    )
+    assert "1 session runs an older build and does not report" in older
+    assert "do not report" not in older
+
+    wedged = _unwrapped(
+        _text(_snapshot(sessions=_fleet_sessions(wedged=1), agents=AgentsInfo(running=1)))
+    )
+    assert "1 session is wedged; its counts are as of its last heartbeat." in wedged
+    assert "their counts" not in wedged
+
+
+def test_the_export_discloses_wedged_staleness_like_the_panel() -> None:
+    """Q2 — the panel has said this since the counts landed; the export did not.
+
+    The fleet totals deliberately include wedged runtimes (a quiet pid can still
+    have children working), so their contribution is as of their last heartbeat.
+    The export is the artifact that outlives the screen and lands in an issue,
+    which makes an undisclosed stale number harder to challenge there than
+    anywhere else.
+    """
+    from local_operator.info.render import build_export
+
+    export = build_export(
+        _snapshot(sessions=_fleet_sessions(live=4, wedged=2), agents=AgentsInfo(running=1))
+    )
+    assert "2 sessions are wedged; their counts are as of their last heartbeat" in export
+
+    single = build_export(
+        _snapshot(sessions=_fleet_sessions(live=5, wedged=1), agents=AgentsInfo(running=1))
+    )
+    assert "1 session is wedged; its counts are as of its last heartbeat" in single
+
+    # Conditional, not standing: with nothing wedged the CAVEAT is absent,
+    # though the runtimes row still reports "· 0 wedged" as a breakdown.
+    quiet = build_export(_snapshot(sessions=_fleet_sessions(), agents=AgentsInfo(running=1)))
+    assert "last heartbeat" not in quiet
+
+
+def test_the_exports_lower_bound_caveat_inflects_like_the_panels() -> None:
+    """Q3 — the export read "1 sessions run ... and do not report".
+
+    Pasted verbatim into an issue, an uninflected count reads as a template
+    nobody finished rather than as a measurement.
+    """
+    from local_operator.info.render import build_export
+
+    single = build_export(
+        _snapshot(sessions=_fleet_sessions(subagents_unreported=1), agents=AgentsInfo(running=1))
+    )
+    assert "1 session runs an older build and does not report subagents" in single
+
+    plural = build_export(
+        _snapshot(sessions=_fleet_sessions(subagents_unreported=3), agents=AgentsInfo(running=1))
+    )
+    assert "3 sessions run an older build and do not report subagents" in plural
+
+
+def test_queued_work_is_never_rendered_as_nothing_in_flight() -> None:
+    """D11: ``fleet_trajectories`` excludes queued, so the total is honestly 0.
+
+    A parked child spends nothing, which is why it is not a trajectory — but a
+    header reading ``none running`` above a tree of ``queued`` rows is the
+    screen contradicting a picture the same frame is drawing. The word is
+    reserved for the state where nothing is running AND nothing is waiting.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=5,
+        live=5,
+        subagents_reporting=5,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=3,
+        fleet_trajectories=0,
+    )
+    text = _text(_snapshot(sessions=sessions))
+    assert "none running · 3 queued" in text
+    header = [line for line in text.split("\n") if "Agents and subagents" in line][0]
+    assert not header.rstrip().endswith("none running")
+
+
+def test_the_queued_clause_survives_every_width_it_is_needed_at() -> None:
+    """The narrow rungs matter more than the wide one.
+
+    At ``0 total`` the addends are ``0 sessions + 0 subagents`` — three zeros
+    whose only informative companion is the queued count, so a ladder that shed
+    ``queued`` FIRST restored the contradiction on exactly the frames too small
+    to show anything else.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=5,
+        live=5,
+        subagents_reporting=5,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=3,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    for width in range(50, 121):
+        row = [line for line in _lines(snapshot, width=width) if "Trajectories" in line][0]
+        assert "3 queued" in row or "3q" in row, (width, row)
+
+    # Below 50 the note column cannot fit even ``3q`` plus its separator, so
+    # the fact has to live in the header's short form instead. A 60-column
+    # terminal renders a 47-cell card, which is exactly this case: a captured
+    # frame at that size is what showed the row alone was not enough.
+    for width in range(38, 50):
+        header = [line for line in _lines(snapshot, width=width) if "Agents and subagents" in line][
+            0
+        ]
+        assert "3q" in header, (width, header)
+
+
+@pytest.mark.parametrize(
+    ("runtimes", "queued"),
+    [
+        (5, 3),
+        # Two- and three-digit counts: this header's short form is the FIRST
+        # whose width grows with its digits, and pinning a single-digit fixture
+        # is exactly why the original guard could not see it overflow. A
+        # fleet-wide queued sum is not bounded by ``max_running``, so a host
+        # with several sessions past capacity reaches double digits normally.
+        (5, 12),
+        (5, 120),
+        (12, 1),
+        (12, 12),
+        (99, 999),
+    ],
+)
+def test_no_line_overflows_at_any_width_with_the_longest_meta(runtimes: int, queued: int) -> None:
+    """The header shed is a fit check, not only a width floor.
+
+    ``_NOTE_MIN`` was calibrated against the metas that existed when it was
+    written; ``5 runtimes · none running · 3 queued`` is one cell longer and
+    overflowed at exactly 60 columns while passing the floor.
+
+    The container FOLDS rather than crops, so an overflowing header renders as
+    a second line at column 0 — the card's left margin visibly broken, which is
+    the "one record reads as two" fault these screens exist to remove.
+    """
+    from rich.cells import cell_len
+
+    sessions = SessionsInfo(
+        available=True,
+        total=runtimes,
+        live=runtimes,
+        subagents_reporting=runtimes,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=queued,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    for width in range(38, 161):
+        for line in _lines(snapshot, width=width):
+            assert cell_len(line) <= max(38, width), (width, repr(line))
+
+
+def test_the_queued_header_keeps_both_counts_when_it_sheds() -> None:
+    """D14's shed must drop a RESTATEMENT, never a measured number.
+
+    ``0r`` is inferable from a queued-only header; the queued count is not
+    inferable from anything. So the narrow rung sheds ``0r`` and keeps both
+    figures rather than truncating one of them away.
+    """
+    sessions = SessionsInfo(
+        available=True,
+        total=12,
+        live=12,
+        subagents_reporting=12,
+        fleet_subagents_running=0,
+        fleet_subagents_queued=12,
+        fleet_trajectories=0,
+    )
+    snapshot = _snapshot(sessions=sessions)
+    header = [line for line in _lines(snapshot, width=38) if "Agents and subagents" in line][0]
+    assert "12rt" in header and "12q" in header, header
+
+
+def test_the_loading_header_keeps_its_hedge_at_every_width() -> None:
+    """D15: a number about to be revised upward must not render as settled.
+
+    The fleet half arrives ~900 ms after the live half, and the bare short form
+    dropped ``fleet checking…`` entirely below 66 cells — showing ``0 running``
+    as though the probe had finished.
+    """
+    for width in range(38, 161):
+        header = [line for line in _lines(None, width=width) if "Agents and subagents" in line][0]
+        assert "checking…" in header or "fleet …" in header, (width, header)
+
+
+def test_the_export_refuses_a_total_on_the_same_terms_as_the_panel() -> None:
+    """Q5: the two guards drifted, and the export is the copy that gets pasted.
+
+    When some runtimes reported and everything they reported was zero, the
+    panel refused to name a number while the export asserted ``>=0 total — 0
+    sessions + 0 subagents``.
+    """
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=2,
+        live=2,
+        subagents_reporting=1,
+        subagents_unreported=1,
+        fleet_trajectories=0,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    assert "1 of 2 runtimes did not report" in export
+    assert ">=0 total" not in export
+
+
+def test_the_exports_addends_inflect_like_the_panels() -> None:
+    """Q6/D12: ``1 sessions + 1 subagents`` is the state a fresh install is in."""
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=1,
+        live=1,
+        subagents_reporting=1,
+        fleet_session_trajectories=1,
+        fleet_subagents_running=1,
+        fleet_trajectories=2,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    assert "1 session + 1 subagent" in export
+    assert "1 sessions + 1 subagents" not in export
+
+
+def test_the_export_states_both_caveats_as_one_parenthetical() -> None:
+    """Reviewer NIT: two stacked apologies read as boilerplate and get skipped.
+
+    Both clauses qualify the same total, and both must still be present — the
+    packaging changes, not the disclosure.
+    """
+    from local_operator.info.render import build_export
+
+    sessions = SessionsInfo(
+        available=True,
+        total=3,
+        live=2,
+        wedged=1,
+        subagents_reporting=1,
+        subagents_unreported=1,
+        fleet_session_trajectories=1,
+        fleet_subagents_running=2,
+        fleet_trajectories=3,
+    )
+    export = build_export(_snapshot(sessions=sessions))
+    caveats = [line for line in export.split("\n") if "lower bound" in line]
+    assert len(caveats) == 1, caveats
+    assert "1 session runs an older build" in caveats[0]
+    assert "1 session is wedged; its counts" in caveats[0]

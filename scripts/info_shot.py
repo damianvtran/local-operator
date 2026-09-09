@@ -2,6 +2,8 @@
 
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
+             fleet | fleet-mixed | fleet-unread
+             today-quiet | race | one | one-older | queued-only | queued-many
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
 operator's real one. That is not convenience — the frames go on a PR, and the
@@ -295,6 +297,249 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
             captured_at=CAPTURED_AT,
         )
 
+    if scenario in ("today-quiet", "race", "one", "one-older"):
+        # The states design round 1 captured. ``today-quiet``/``race`` are this
+        # host's ACTUAL default until the whole fleet restarts: nothing
+        # publishes the new fields, so the fleet half is entirely unmeasured
+        # while this session's own tree may well be running (D1/D2).
+        older = scenario in ("today-quiet", "race", "one-older")
+        single = scenario in ("one", "one-older")
+        count = 1 if scenario == "one" else 2 if scenario == "one-older" else 11
+        rows = []
+        for index in range(count):
+            pid = 4243 + index
+            reports = not older or (scenario == "one-older" and index == 0)
+            rows.append(
+                _session_line(
+                    pid,
+                    "Investigate request latency" if index == 0 else f"Session {index}",
+                    is_self=index == 0,
+                    busy=scenario == "one",
+                    # A runtime that predates the fields publishes NEITHER key,
+                    # which is ``None`` and not ``0`` — the whole distinction
+                    # these frames exist to show.
+                    subagents_running=0 if reports else None,
+                    subagents_queued=0 if reports else None,
+                )
+            )
+        lines = tuple(rows)
+        reporting = [line for line in lines if line.subagents_running is not None]
+        busy = sum(1 for line in lines if line.busy)
+        running = sum(line.subagents_running or 0 for line in reporting)
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=len(lines),
+            busy=busy,
+            subagents_reporting=len(reporting),
+            subagents_unreported=len(lines) - len(reporting),
+            fleet_subagents_running=running,
+            fleet_session_trajectories=busy,
+            fleet_trajectories=busy + running,
+        )
+        # ``race``: the own roster reads fine and shows running children while
+        # the own record has not published busy yet (event publish + 15 s
+        # floor). This is the frame where the old header said "none running"
+        # over a visible running tree.
+        tree = (
+            (
+                SubagentLine(
+                    job_id="j1",
+                    label="reviewer",
+                    status="running",
+                    depth=0,
+                    agent_role="reviewer",
+                ),
+                SubagentLine(
+                    job_id="j2", label="scout", status="running", depth=1, agent_role="scout"
+                ),
+                SubagentLine(job_id="j3", label="coder", status="running", depth=0),
+                SubagentLine(job_id="j4", label="qa-tester", status="queued", depth=0),
+            )
+            if scenario == "race"
+            else ()
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                tree=tree,
+                running=3 if scenario == "race" else 0,
+                queued=1 if scenario == "race" else 0,
+                settled=7 if scenario == "race" else 0,
+                max_running=4,
+                max_depth=2 if scenario == "race" else 0,
+                cross_session_known=not older and not single,
+            ),
+            env=_env(),
+            captured_at=CAPTURED_AT,
+        )
+
+    if scenario in ("queued-only", "queued-many"):
+        # D11: every runtime REPORTS, every one reports zero running, and
+        # children are waiting on the capacity gate. ``fleet_trajectories``
+        # excludes queued by design (a parked child spends nothing), so this is
+        # the one measured state whose total is honestly 0 while the tree below
+        # is not empty — the header said "none running" over three ⏳ rows,
+        # with "Subagent capacity 4 concurrent" two lines above advertising
+        # exactly the state that produces it.
+        lines = tuple(
+            _session_line(
+                4243 + index,
+                "Investigate request latency" if index == 0 else f"Session {index}",
+                is_self=index == 0,
+                subagents_running=0,
+                subagents_queued=(12 if scenario == "queued-many" else 3) if index == 0 else 0,
+            )
+            for index in range(5)
+        )
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=len(lines),
+            subagents_reporting=len(lines),
+            subagents_unreported=0,
+            fleet_subagents_running=0,
+            # D14: a fleet-wide queued SUM is not bounded by ``max_running``,
+            # so two digits are ordinary on a busy host — and two digits are
+            # what pushed the header's short rung past the card floor.
+            fleet_subagents_queued=12 if scenario == "queued-many" else 3,
+            fleet_session_trajectories=0,
+            fleet_trajectories=0,
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                running=0,
+                queued=12 if scenario == "queued-many" else 3,
+                settled=3,
+                max_running=4,
+                at_capacity=True,
+                max_depth=1,
+                cross_session_known=True,
+                tree=(
+                    SubagentLine(job_id="j1", label="reviewer", status="queued", depth=0),
+                    SubagentLine(job_id="j2", label="coder", status="queued", depth=0),
+                    SubagentLine(job_id="j3", label="qa-tester", status="queued", depth=0),
+                ),
+            ),
+            captured_at=CAPTURED_AT,
+        )
+
+    if scenario in ("fleet", "fleet-mixed", "fleet-unread"):
+        # THE REPORTED CASE: a host running a dozen sessions with children in
+        # several of them, which used to render "none running".
+        #
+        # ``fleet-mixed`` adds runtimes on an OLDER build (``subagents_running``
+        # is None, not 0) plus a wedged one, which is the normal state of this
+        # host mid-upgrade and the state the lower-bound caveat exists for.
+        # ``fleet-unread`` is the follower defect's honest rendering: the
+        # roster could not be READ, so the screen must say so rather than
+        # denying that any subagent was launched.
+        mixed = scenario == "fleet-mixed"
+        unread = scenario == "fleet-unread"
+        lines = (
+            _session_line(
+                4243,
+                "Investigate request latency",
+                is_self=True,
+                busy=True,
+                subagents_running=2,
+                subagents_queued=1,
+            ),
+            _session_line(4244, "Add /move command", busy=True, subagents_running=3),
+            _session_line(4245, "OSWorld benchmark", subagents_running=0),
+            # In ``fleet-mixed`` these two run an OLDER build: they publish no
+            # counts at all, which is ``None`` and NOT zero. That is what the
+            # lower-bound caveat is computed from.
+            _session_line(
+                4246,
+                "Sidebar wakes first",
+                busy=True,
+                subagents_running=None if mixed else 1,
+            ),
+            _session_line(4247, "Credential broker", subagents_running=None if mixed else 0),
+        ) + (
+            (
+                _session_line(
+                    4248,
+                    "Wedged runtime",
+                    state="wedged",
+                    heartbeat_age_s=310.0,
+                    busy=True,
+                    subagents_running=2,
+                ),
+            )
+            if mixed
+            else ()
+        )
+        live_count = sum(1 for line in lines if line.state == "live")
+        reporting = [line for line in lines if line.subagents_running is not None]
+        running = sum(line.subagents_running or 0 for line in reporting)
+        busy = sum(1 for line in lines if line.busy)
+        sessions = SessionsInfo(
+            lines=lines,
+            total=len(lines),
+            live=live_count,
+            wedged=sum(1 for line in lines if line.state == "wedged"),
+            busy=busy,
+            build_skew=mixed,
+            subagents_reporting=len(reporting),
+            subagents_unreported=len(lines) - len(reporting),
+            fleet_subagents_running=running,
+            fleet_subagents_queued=sum(line.subagents_queued or 0 for line in reporting),
+            fleet_session_trajectories=busy,
+            fleet_trajectories=busy + running,
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=sessions,
+            agents=AgentsInfo(
+                profiles=20,
+                teams=3,
+                roster_unread=unread,
+                running=0 if unread else 2,
+                queued=0 if unread else 1,
+                settled=0 if unread else 3,
+                max_running=4,
+                max_depth=0 if unread else 1,
+                cross_session_known=True,
+                tree=(
+                    ()
+                    if unread
+                    else (
+                        SubagentLine(
+                            job_id="j1",
+                            label="reviewer",
+                            status="running",
+                            depth=0,
+                            agent_role="reviewer",
+                        ),
+                        SubagentLine(
+                            job_id="j2",
+                            label="scout",
+                            status="running",
+                            depth=1,
+                            agent_role="scout",
+                        ),
+                        SubagentLine(job_id="j3", label="qa-tester", status="queued", depth=0),
+                        SubagentLine(job_id="j4", label="coder", status="completed", depth=0),
+                    )
+                ),
+            ),
+            env=_env(),
+            degraded=((("live.subagents", "session exposes no subagent_comms"),) if unread else ()),
+            captured_at=CAPTURED_AT,
+        )
+
     # populated: the reference frame.
     return InfoSnapshot(
         install=_install(),
@@ -349,6 +594,7 @@ def live_for(scenario: str) -> LiveState:
         max_running=agents.max_running,
         max_depth=agents.max_depth,
         deeper=agents.deeper,
+        roster_unread=agents.roster_unread,
     )
 
 

@@ -43,11 +43,12 @@ from local_operator.info.collect import LiveState
 from local_operator.info.model import (
     UNKNOWN,
     InfoSnapshot,
+    SessionsInfo,
     format_bytes,
     format_duration,
     is_shadowed_install,
 )
-from local_operator.info.render import build_export
+from local_operator.info.render import build_export, plural
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
     section_header,
@@ -219,6 +220,7 @@ class _Body:
         value: str,
         note: str = "",
         *,
+        values: Sequence[str] = (),
         notes: Sequence[str] = (),
         value_style: str = "fg",
     ) -> None:
@@ -227,6 +229,13 @@ class _Body:
         Values are left-aligned because they are IDENTIFIERS, not magnitudes:
         nothing is being compared down this column, and one column edge reads
         more calmly than two.
+
+        ``values`` is the same ladder for the VALUE itself, and exists because
+        the value column has no shed of its own: it is padded to
+        ``_VALUE_MIN`` and then hard-cropped by the final ``truncate``, so a
+        value that outgrows a narrow frame loses characters mid-word. Pass it
+        whenever a value carries an optional trailing clause; the last rung is
+        what the row degrades to and must be the irreducible fact.
 
         ``notes`` is a ladder of progressively shorter spellings of the SAME
         qualifier, widest first, first-that-fits wins. It exists because the
@@ -244,6 +253,16 @@ class _Body:
         """
         row = Text()
         row.append(f"  {name:<{_LABEL_CELL}}", style=semantic_style("dim"))
+        if values:
+            # A ladder for the VALUE, mirroring ``notes`` below, and needed for
+            # the same reason: without one the value is hard-cropped by the
+            # final ``truncate``, which cuts mid-word and can leave a label
+            # promising a number that is not there ("... · depth" with no
+            # digit). That reads as a broken field rather than a narrow one.
+            # Widest-first, first-that-fits, and the last rung must always fit
+            # by construction — it is the caller's irreducible fact.
+            budget = self.width - row.cell_len - 2
+            value = next((rung for rung in values if len(rung) <= budget), values[-1])
         row.append(f"{value:<{_VALUE_MIN}}", style=semantic_style(value_style))
         if notes:
             # Budget measured from the row as actually BUILT, not from a
@@ -342,11 +361,45 @@ class _Body:
             row.append(f"  {line}", style=semantic_style("dim"))
             self.lines.append(row)
 
-    def header(self, title: str, meta: str = "", short: str = "") -> None:
-        """A section header, shedding its meta to ``short`` on a narrow frame."""
-        if meta and self.width < _NOTE_MIN:
-            meta = short
-        self.lines.append(section_header(title, meta))
+    def header(
+        self, title: str, meta: str = "", short: str = "", *, shorts: Sequence[str] = ()
+    ) -> None:
+        """A section header, shedding its meta to ``short`` on a narrow frame.
+
+        ``shorts`` is the same widest-first, first-that-fits ladder ``kv`` uses
+        for ``notes`` and ``values``, and exists for a header whose short form
+        grows with its DIGITS rather than being fixed at authoring time. Pass it
+        instead of ``short`` when a narrower spelling is available; the last
+        rung is what the header degrades to and must be the irreducible fact.
+
+        The threshold is a WIDTH FLOOR plus a fit check, not the floor alone:
+        ``_NOTE_MIN`` was calibrated against the metas that existed when it was
+        written, so a longer one (``5 runtimes · none running · 3 queued``)
+        overflowed by a cell at exactly 60 columns while passing the floor.
+        Measuring the string that will actually be drawn is what keeps a new
+        meta from having to rediscover this by overflowing a frame.
+
+        The final ``truncate`` is the same backstop ``kv`` and ``marked``
+        already end with, and ``header`` was the only row builder without one.
+        The fit check picks BETWEEN ``meta`` and ``short`` but cannot make
+        ``short`` fit, so a short form that outgrows the ``_MIN_CARD_WIDTH``
+        floor had nothing to stop it: the container FOLDS rather than crops, so
+        it rendered as a second line starting at column 0 — the "one record
+        reads as two" fault these screens exist to remove. Cropping a header's
+        trailing meta is survivable; breaking the card's left margin is not.
+        """
+
+        def _fits(candidate: str) -> bool:
+            # ``+ 2`` for the ``▌ `` accent bar the header always carries; the
+            # same measurement the meta fit check above uses.
+            return cell_len(f"{title}   {candidate}") + 2 <= self.width
+
+        if meta and (self.width < _NOTE_MIN or not _fits(meta)):
+            rungs = tuple(shorts) or ((short,) if short else ())
+            meta = next((rung for rung in rungs if _fits(rung)), rungs[-1] if rungs else "")
+        row = section_header(title, meta)
+        row.truncate(self.width, overflow="crop")
+        self.lines.append(row)
 
     def to_text(self) -> Text:
         out = Text(style=semantic_style("fg"), overflow="fold")
@@ -714,6 +767,68 @@ def _counted(value: int, probe: str, snapshot: "InfoSnapshot | None") -> str:
     return str(value)
 
 
+#: Nouns whose plural is not formed by appending ``s``. One entry today; the
+#: map exists so the next irregular noun is a data change rather than a second
+#: pluralisation helper beside this one.
+#: The ONE implementation, imported rather than reimplemented: the screen and
+#: the export must not inflect the same fact differently, and they did until
+#: the export's addends were found reading ``1 sessions + 1 subagents``.
+#: ``/info`` pluralises everywhere else (``3 keys``, ``1 session is wedged``),
+#: so an unpluralised count reads as unfinished rather than as house style, and
+#: a single-window host is the state every fresh install starts in.
+_plural = plural
+
+
+def _runtimes(sessions: SessionsInfo) -> int:
+    """Processes publishing a record: ``live`` plus ``wedged``.
+
+    The denominator the trajectory tally is summed over, so it is computed in
+    ONE place. A wedged runtime is a pid that still exists and whose children
+    may still be working; only ``stale`` — whose record file the scan just
+    deleted because the process is gone — is not a runtime. A header that
+    counted a narrower set than the sum beneath it would be a screen
+    disagreeing with itself.
+    """
+    return sessions.live + sessions.wedged
+
+
+def _fleet_caveats(body: _Body, sessions: SessionsInfo | None) -> None:
+    """Name the terms the fleet total is MISSING, only when there are any.
+
+    Emitted conditionally rather than as a standing disclaimer: a line that is
+    always there is wallpaper and gets read as boilerplate, so the one time it
+    matters it is not read either.
+
+    ``lower bound`` is the load-bearing phrase. It is the honest description of
+    a sum whose unknown terms were excluded, and it is what distinguishes "3
+    sessions could not report" from "3 sessions have no subagents" without
+    making the reader cross-reference the degraded block.
+    """
+    if sessions is None or not sessions.available:
+        return
+    if sessions.subagents_unreported:
+        count = sessions.subagents_unreported
+        # Both verbs inflect together. Inflecting only the first produced
+        # "1 session runs an older build and do not report" — reachable as soon
+        # as the fleet is one restart from updated, i.e. the tail of the very
+        # rollout this caveat exists for.
+        one = count == 1
+        body.note(
+            f"{_plural(count, 'session')} {'runs' if one else 'run'} an older build and "
+            f"{'does' if one else 'do'} not report subagents — "
+            "the fleet total is a lower bound."
+        )
+    if sessions.wedged:
+        one = sessions.wedged == 1
+        # The possessive inflects with the subject too: "1 session is wedged;
+        # their counts" switched number mid-sentence.
+        body.note(
+            f"{_plural(sessions.wedged, 'session')} {'is' if one else 'are'} wedged; "
+            f"{'its' if one else 'their'} counts are as of "
+            f"{'its' if one else 'their'} last heartbeat."
+        )
+
+
 def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) -> None:
     """Profiles, teams, and this session's subagent tree.
 
@@ -723,27 +838,211 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
     """
     agents = snapshot.agents if snapshot else None
     running = agents.running if agents else live.running
+    # Depth moved OFF the header, which now carries the fleet answer. It is kept
+    # on this session's own row rather than dropped: the tree's indentation
+    # shows shape but not how much of it the render cap folded away.
     depth = agents.max_depth if agents else live.max_depth
     tree = agents.tree if agents else live.tree
     deeper = agents.deeper if agents else live.deeper
-    # ``none running`` rather than ``0 running``: a zero in a count column reads
-    # as a failed probe, a word does not.
-    meta = f"{running} running · depth {depth}" if running else "none running"
-    body.header("Agents and subagents", meta, f"{running} running" if running else "none running")
+    unread = agents.roster_unread if agents else live.roster_unread
+    sessions = snapshot.sessions if snapshot else None
+    # The fleet half comes from the WORKER snapshot (~900 ms) while the tree
+    # comes from the live capture, so the two arrive on different frames. The
+    # header shows this session's number immediately and says ``checking…`` for
+    # the fleet half rather than printing a zero it will revise upward — the
+    # screen's one loading word, reused rather than joined by a fourth
+    # vocabulary (see ``_env_section``).
+    own = UNKNOWN if unread else str(running)
+    # Widest-first rungs for the header's short form, empty unless a state has
+    # a narrower spelling to offer. Only the queued state needs one today: it
+    # is the only short form whose width grows with its digits.
+    shorts: tuple[str, ...] = ()
+    if sessions is None or not sessions.available:
+        meta = f"this session: {own} running · fleet checking…"
+        # The hedge sheds LAST, not first. The bare ``{own} running`` short
+        # form dropped ``fleet checking…`` entirely, so for the ~900 ms before
+        # the worker returns a narrow frame showed a number that is about to be
+        # revised upward as though it were settled — the same "unmeasured
+        # rendered as measured" fault the rest of this section exists to
+        # prevent. ``fleet …`` keeps the fact that a second half is still
+        # coming; only its wording is compressed.
+        short = f"{own} running"
+        shorts = (short + " · fleet checking…", f"{own}r · fleet …", short)
+    else:
+        runtimes = _runtimes(sessions)
+        # ``≥`` — and the reason it is not simply the total — is the whole of
+        # D1/D2. ``fleet_trajectories`` sums only over runtimes that REPORTED,
+        # so when some did not, every term of the sum is a floor rather than a
+        # measurement. Rendering that through the measured branch printed
+        # ``none running`` — a word chosen precisely because it asserts more
+        # confidently than a bare ``0`` — on a frame that was simultaneously
+        # drawing this session's running children four rows below. The record
+        # layer honours "None is not 0" and the header dropped it.
+        #
+        # The hedge rides the FIGURE rather than waiting for the caveat line
+        # because at the real 100x30 viewport the caveat is a page-turn away
+        # from the header, and a qualifier the reader must scroll to is not a
+        # qualifier. The caveat still says how many terms are missing; this
+        # says, where the number is, that it is a floor.
+        bound = "≥" if sessions.subagents_unreported else ""
+        total = sessions.fleet_trajectories
+        if total:
+            meta = f"{_plural(runtimes, 'runtime')} · {bound}{_plural(total, 'trajectory')}"
+            # BOTH halves survive the shed. The operator's question is
+            # explicitly two-part ("how many runtimes and how many
+            # trajectories"), so dropping the denominator leaves the count
+            # unanchored — N trajectories across how many processes? The
+            # abbreviation is what makes keeping both affordable.
+            short = f"{runtimes}rt · {bound}{total}tj"
+        elif bound:
+            # Nothing measured AND nothing known: ``0`` here would be pure
+            # fabrication, so the count is refused outright rather than hedged.
+            # ``—`` is the screen's existing "we looked and could not tell",
+            # not a fourth vocabulary.
+            meta = f"{_plural(runtimes, 'runtime')} · trajectories {UNKNOWN}"
+            short = f"{runtimes}rt · tj {UNKNOWN}"
+        elif sessions is not None and sessions.fleet_subagents_queued:
+            # Measured, and measured as zero RUNNING — but not as nothing.
+            # ``fleet_trajectories`` deliberately excludes queued children
+            # (a child waiting on a capacity slot spends no tokens, which is
+            # what a trajectory count is for), so the total is honestly 0 while
+            # the tree below draws ``⏳ queued`` rows. Saying only ``none
+            # running`` there is the header contradicting a picture the same
+            # frame is showing — the exact failure the three states above
+            # exist to prevent, reached through arithmetic rather than
+            # through an unmeasured term.
+            queued = sessions.fleet_subagents_queued
+            meta = f"{_plural(runtimes, 'runtime')} · none running · {queued} queued"
+            # Two rungs, because this short form is the first whose width grows
+            # with its DIGITS: a fleet-wide queued sum is not bounded by
+            # ``max_running``, so two digits are ordinary on a busy host and
+            # they pushed the one-rung form past the ``_MIN_CARD_WIDTH`` floor.
+            # ``0r`` is what sheds — it restates the ``0 running`` the reader
+            # can already infer from a queued-only header, whereas dropping a
+            # count would lose a measured fact. The ``truncate`` in ``header``
+            # is the backstop beneath both.
+            short = f"{runtimes}rt · 0r · {queued}q"
+            shorts = (short, f"{runtimes}rt · {queued}q")
+        else:
+            # Every runtime reported, every one reported zero, and nothing is
+            # waiting either. This is the one state in which the bare word is
+            # earned: it is a measurement, and ``none running`` reads better
+            # than ``0``.
+            meta = f"{_plural(runtimes, 'runtime')} · none running"
+            # ``none`` and not ``0tj``: the bare-zero rule does not relax on a
+            # narrow frame, and the word costs one cell more than the digit.
+            short = f"{runtimes}rt · none"
+    body.header("Agents and subagents", meta, short, shorts=shorts)
+    if sessions is not None and sessions.available:
+        # The header's runtime count broken down. Both numbers name a live
+        # pid — that is why the header adds them — and the split is what tells
+        # the reader how much of the tally is coming from quiet processes.
+        body.kv(
+            "Runtimes",
+            f"{sessions.live} live" + (f" · {sessions.wedged} wedged" if sessions.wedged else ""),
+        )
+        # Same rule as the header, one row down. Three zeros in a row
+        # (``0 total — 0 sessions + 0 subagents``) under a visible running tree
+        # is the "a bare zero reads as a failed probe" rule firing three times,
+        # and here it would be firing over terms nobody measured. When nothing
+        # reported, the addends are not shown at all rather than shown as
+        # zeros: the note column names WHY the value is a floor, which is the
+        # only fact the row actually has.
+        if sessions.subagents_unreported and not sessions.fleet_trajectories:
+            body.kv(
+                "Trajectories",
+                UNKNOWN,
+                notes=(
+                    f"{sessions.subagents_unreported} of "
+                    f"{_runtimes(sessions)} runtimes did not report",
+                    f"{sessions.subagents_unreported} did not report",
+                    "not reported",
+                ),
+            )
+        else:
+            bound = "≥" if sessions.subagents_unreported else ""
+            addends = (
+                f"{_plural(sessions.fleet_session_trajectories, 'session')} + "
+                f"{_plural(sessions.fleet_subagents_running, 'subagent')}"
+            )
+            # Queued rides the ADDENDS, not the total: it is not a trajectory
+            # (nothing is being spent yet), so adding it to the sum would
+            # inflate the very number the section exists to state precisely.
+            # But a row reading ``0 total — 0 sessions + 0 subagents`` above a
+            # visible queued tree is the three-zeros failure again, so the
+            # waiting work is named beside the total rather than folded into
+            # it.
+            waiting = (
+                f" · {sessions.fleet_subagents_queued} queued"
+                if sessions.fleet_subagents_queued
+                else ""
+            )
+            # The waiting clause sheds LAST, after the addends it sits beside.
+            # Ordering matters because the state that needs it most is the one
+            # where the addends carry no information: at ``0 total`` they are
+            # ``0 sessions + 0 subagents``, three zeros whose only honest
+            # companion is the queued count. A ladder that dropped ``queued``
+            # first restored the contradiction at every narrow width while the
+            # wide frame looked fixed.
+            # Two extra rungs when work is waiting, because the note column is
+            # only ~2 cells wide at 50 columns: ``3 queued`` alone would shed
+            # wholesale there and leave ``0 total`` asserting nothing-in-flight
+            # over a queued tree. ``3q`` fits that budget and is decoded by the
+            # ``queued`` rows directly beneath it, the same bargain ``5rt·9tj``
+            # makes in the header.
+            terse: tuple[str, ...] = (
+                (f"{sessions.fleet_subagents_queued} queued", f"{sessions.fleet_subagents_queued}q")
+                if sessions.fleet_subagents_queued
+                else (f"{sessions.fleet_session_trajectories}+{sessions.fleet_subagents_running}",)
+            )
+            body.kv(
+                "Trajectories",
+                f"{bound}{sessions.fleet_trajectories} total",
+                notes=(
+                    addends
+                    + waiting
+                    + (
+                        f" · {sessions.subagents_unreported} did not report"
+                        if sessions.subagents_unreported
+                        else ""
+                    ),
+                    addends + waiting,
+                    *terse,
+                ),
+            )
     if agents is not None:
         body.kv("Agent profiles", _counted(agents.profiles, "agents.profiles", snapshot))
         body.kv("Teams", _counted(agents.teams, "agents.teams", snapshot))
     queued = agents.queued if agents else live.queued
     settled = agents.settled if agents else live.settled
-    if running or queued or settled:
+    if unread:
+        # The roster was never read, so every count derived from it is absent
+        # rather than zero. ``UNKNOWN`` and a named reason, the same treatment
+        # ``_counted`` gives a failed probe — the alternative is the screen
+        # asserting "no subagents" about a session it could not ask.
+        body.kv("This session", UNKNOWN, notes=("could not read the roster",))
+    elif running or queued or settled:
         # Only when there is something to count. On a fresh session a
         # ``0 running · 0 queued`` row directly above "No subagents have been
         # launched" says the same thing twice, and a row of zeros reads as a
         # failed probe rather than as an idle session — the same reason the
         # header meta says ``none running`` instead of ``0 running``.
         body.kv(
-            "Subagents",
-            f"{running} running · {queued} queued",
+            # ``This session`` and not ``Subagents``: with a fleet total two
+            # rows above it, an unqualified label is ambiguous about which of
+            # the two numbers it belongs to.
+            "This session",
+            f"{running} running · {queued} queued" + (f" · depth {depth}" if depth else ""),
+            # ``depth`` sheds FIRST, before ``queued``: it is context about the
+            # tree's shape, while the two counts are the answer. Without a rung
+            # of its own the suffix was cropped mid-word at 60-64 columns,
+            # ending the row on the bare label "depth" — a regression against
+            # the pre-fleet row, which was shorter but always complete.
+            values=(
+                f"{running} running · {queued} queued" + (f" · depth {depth}" if depth else ""),
+                f"{running} running · {queued} queued",
+                f"{running}r · {queued}q",
+            ),
             # "settled (retained)" and not "settled": ``_evict_overflow`` drops
             # settled records past a cap, so this under-reports by design, and a
             # count that silently under-reports inside a bug report is worse
@@ -760,11 +1059,19 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
             value_style="warning" if at_capacity else "fg",
         )
     if not tree:
-        # The empty state pairs a statement of FACT with a statement of why it
-        # is fine, matching ``/analytics``' own empty shape. The section header
-        # above is the evidence that the screen looked.
-        body.note("No subagents have been launched in this session.")
-        body.note("Subagents appear here while a task is running.")
+        if unread:
+            # NOT "none have been launched": that is a statement of fact about
+            # a roster nobody managed to read. The empty tree here is the
+            # absence of an answer, and saying otherwise is the exact lie the
+            # UNKNOWN row above exists to prevent.
+            body.note("This session's subagent roster could not be read.")
+        else:
+            # The empty state pairs a statement of FACT with a statement of why
+            # it is fine, matching ``/analytics``' own empty shape. The section
+            # header above is the evidence that the screen looked.
+            body.note("No subagents have been launched in this session.")
+            body.note("Subagents appear here while a task is running.")
+        _fleet_caveats(body, sessions)
         return
     body.blank()
     for node in tree:
@@ -812,14 +1119,22 @@ def _agents_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState)
         body.lines.append(row)
     body.blank()
     # The honesty boundary, stated rather than implied: a tree on screen would
-    # otherwise read as a fleet-wide view. Nothing about another session's
-    # subagents is observable — ``SessionRecord`` carries no subagent field —
-    # and reaching for one would need a new control-socket op and a protocol
-    # bump.
-    body.note(
-        "Subagent trees are in-process state, so only this session's is visible. "
-        "Other sessions report busy, pending and memory."
-    )
+    # otherwise read as a fleet-wide view. The COUNTS above are fleet-wide, the
+    # TREE is not, and which is which has to be said in words.
+    if agents is not None and agents.cross_session_known:
+        body.note(
+            "Subagent trees are in-process state, so only this session's is drawn. "
+            "Other sessions report counts."
+        )
+    else:
+        # Nobody else reported, so the older text is still exactly right: this
+        # screen genuinely knows nothing about other windows' children, and
+        # promising counts it does not have would be the worse error.
+        body.note(
+            "Subagent trees are in-process state, so only this session's is visible. "
+            "Other sessions report busy, pending and memory."
+        )
+    _fleet_caveats(body, sessions)
 
 
 def _env_section(body: _Body, snapshot: InfoSnapshot | None, live: LiveState) -> None:

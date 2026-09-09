@@ -54,6 +54,7 @@ from local_operator.harness.types import (
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 
 FRONTEND_STATE_VERSION = 1
@@ -2307,6 +2308,33 @@ class SnapshotSubagentComms:
             prompt=job.prompt or "",
             agent_role=job.agent_role or "",
             effort=job.effort or "",
+            # The LIFECYCLE fields, not merely the graph ones. Every consumer
+            # that asks "what is running" reads these off the node through a
+            # defaulted ``getattr`` — ``info.collect``'s tally and
+            # ``build_subagent_tree``'s status column both do — so omitting
+            # them does not raise, it silently answers "0 running" over a
+            # roster of live children and renders every row as ``unknown``.
+            # That is a wrong number that passes a "the tree appears now"
+            # check, which is why the projection carries them even though the
+            # hierarchy navigation this facade was built for never asked.
+            #
+            # ``queued`` has to be folded IN rather than read alongside: a
+            # queued child's ``JobState.status`` is still ``"running"`` and the
+            # distinction lives in the separate ``queued`` flag, so projecting
+            # the raw status counts a child that has not started as one that is
+            # spending tokens. The owner reconstructs the same split in
+            # ``SubagentComms._describe``; this is that derivation, on the
+            # follower's side of the wire, so a follower and an owner looking
+            # at the same child agree on its word.
+            status=_snapshot_status(job),
+            # Derived from the RESULTING status, not from the raw one, so a
+            # queued child is never stamped live. Note this ``live`` means
+            # "counts as a running trajectory", which on the owner is
+            # ``record.child is not None`` (child attached) — the two coincide
+            # for every state either side can report, but they are not the same
+            # question, and a future divergence belongs in one of these two
+            # comments rather than being discovered from a wrong total.
+            live=_snapshot_status(job) in RUNNING_SUBAGENT_STATUSES,
             # Launch-row reconciliation, read off the node by
             # ``_refresh_subagent_view`` exactly as it is on an owner. Defaulted
             # rather than conditional: an older owner sends neither field, and
@@ -2342,6 +2370,24 @@ class SnapshotSubagentComms:
             # placeholder tier 2 would have sent.
             launch_prompts=_restore_elided_launch_prompts(job),
         )
+
+    def nodes(self) -> list[Any]:
+        """The complete roster, matching ``SubagentComms.nodes()``.
+
+        The facade's docstring claims it answers the SAME methods the app calls
+        on ``_subagent_comms``, and this one was missing — the hierarchy view it
+        was built for always starts from a known job id, so nothing needed a
+        roster until ``/info`` asked one for its tally. Its absence was not a
+        crash but a fabricated zero: ``collect_live`` skipped the whole branch
+        and a follower window reported "no subagents" for a session that had
+        several, with nothing named as degraded.
+
+        One flat list including nested descendants, like the owner's: the
+        canonical jobs stream carries every depth tagged with its true
+        ``parent_job_id``, so consumers count with ``len()`` over a filter and
+        never a recursive walk.
+        """
+        return list(self._nodes.values())
 
     def node(self, job_id: str) -> Any | None:
         return self._nodes.get(self._aliases.get(job_id, job_id))
@@ -2521,6 +2567,25 @@ def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> boo
         _DERIVED_OWNERSHIP.pop(next(iter(_DERIVED_OWNERSHIP)))
     _DERIVED_OWNERSHIP[key] = verdict
     return verdict
+
+
+def _snapshot_status(job: JobState) -> str:
+    """The projected job's status in the ROSTER vocabulary a follower renders.
+
+    ``JobState.status`` is the job manager's word, and it does not distinguish a
+    child parked behind the capacity gate from one that is spending tokens:
+    both carry ``"running"``, with the difference held in the separate
+    ``queued`` flag. Every "what is running" surface wants them apart — a queued
+    child is delegated, not working — so the split is reconstructed here exactly
+    as the owner reconstructs it in ``SubagentComms._describe``.
+
+    Kept as a named function rather than an inline expression because it is the
+    follower's half of a derivation whose two halves must agree; a reader
+    changing one needs to be able to find the other.
+    """
+    if job.queued and job.status == "running":
+        return "queued"
+    return job.status
 
 
 def _snapshot_session_dir(job: JobState) -> Path | None:

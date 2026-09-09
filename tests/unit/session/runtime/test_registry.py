@@ -185,3 +185,74 @@ def test_the_heartbeat_republishes_the_build_stamp(tmp_path: Path) -> None:
         assert found[0].conversation_name == "renamed", "the rewrite really happened"
     finally:
         publisher.close()
+
+
+def test_the_subagent_counts_round_trip_and_absent_means_none_not_zero() -> None:
+    """``None`` and ``0`` are DIFFERENT FACTS and the record must keep them apart.
+
+    A runtime that predates these fields has not told us it has no subagents.
+    Defaulting the absent case to 0 would let ``/info`` sum a fleet total whose
+    missing terms are invisible — the caveat line ("the total is a lower bound")
+    exists precisely because this distinction survives the wire.
+    """
+    record = make_record()
+    record.subagents_running = 3
+    record.subagents_queued = 1
+    payload = record.to_json()
+    assert SessionRecord.from_json(payload).subagents_running == 3
+    assert SessionRecord.from_json(payload).subagents_queued == 1
+
+    payload.pop("subagents_running")
+    payload.pop("subagents_queued")
+    restored = SessionRecord.from_json(payload)
+    assert restored.subagents_running is None, "absent must not become 0"
+    assert restored.subagents_queued is None
+
+
+def test_the_heartbeat_republishes_the_subagent_counts(tmp_path: Path) -> None:
+    """They ride every rewrite, like the build stamp, for the same reason.
+
+    A field published once at startup and dropped by the first rewrite would be
+    wrong 15 seconds later — and these change far more often than the stamp.
+    """
+    record = make_record()
+    record.subagents_running = 2
+    record.subagents_queued = 1
+    publisher = registry.RecordPublisher(record, root=tmp_path)
+    try:
+        publisher.heartbeat(conversation_name="renamed")
+        found = [rec for rec, _ in registry.scan(root=tmp_path) if rec.pid == record.pid]
+        assert found and found[0].subagents_running == 2
+        assert found[0].subagents_queued == 1
+        assert found[0].conversation_name == "renamed", "the rewrite really happened"
+    finally:
+        registry.unpublish(record.pid, root=tmp_path)
+
+
+def test_the_protocol_version_did_not_move_for_the_subagent_counts() -> None:
+    """Pinned WITH ITS REASON, because the tempting change is to bump it.
+
+    ``subagents_running``/``subagents_queued`` are purely additive: an older
+    reader drops them in ``from_json`` and behaves exactly as before, and a
+    newer reader sees ``None`` for a record an older runtime wrote. Meanwhile
+    peers read ``record.protocol`` as a pre-dial promise about which FRAMES a
+    runtime speaks (``attach_client`` refuses below 2, the TUI takeover path
+    and ``session_factory`` below 4, ``remote``'s canonical attach below 5).
+    Two JSON integers that ride in no frame change nothing those readers ask
+    about, so bumping would spend the one number that carries that promise and
+    leave nothing to mark a build whose frames really did change.
+    """
+    from local_operator.session.runtime.types import PROTOCOL_VERSION
+
+    assert PROTOCOL_VERSION == 5
+
+
+def test_a_record_with_unknown_future_keys_still_parses() -> None:
+    """Forward-compat in the other direction: a NEWER runtime's record.
+
+    The same tolerance the counts rely on, asserted from the far side so a
+    future field cannot be added in a way that breaks this build mid-upgrade.
+    """
+    payload = make_record().to_json()
+    payload["a_field_from_the_future"] = {"nested": True}
+    assert SessionRecord.from_json(payload).pid == make_record().pid
