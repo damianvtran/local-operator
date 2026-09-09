@@ -855,8 +855,9 @@ def replay_tool_call(
         # duration onto fails this guard and takes the plain error arm below.
         #
         # So `duration_s` is passed for faithfulness, not for a population we
-        # can point at today. `_error(...)` sets no `duration_s`, and only
-        # `loop.py::_append_results` writes the `provider_payload` this reads
+        # can point at today. `_error(...)` sets no `duration_s`, and the only
+        # producer that MEASURES one is the agent loop (`loop.py::park`, which
+        # stamps `result.duration_s` from its own `time.monotonic()` span)
         # — review round 2 swept 37 real aborted runs (model-issued bash,
         # parallel-batch races, eval kernel aborts) and produced the
         # `aborted (` + `duration_s` conjunction zero times. The arm is
@@ -870,9 +871,14 @@ def replay_tool_call(
         #
         # Not covered here: a bang-mode `! cmd` the user stopped. That row
         # persists through `session/shell_record.py` →
-        # `Message.tool_result`, which copies content/ids/`is_error` and
-        # never writes `provider_payload` at all — so it replays blank, as a
-        # successful `! echo hi` also does. Pre-existing and out of scope.
+        # `Message.tool_result`, which DOES carry a `provider_payload` when
+        # the result has one (a spilled capture writes `details['spill']`).
+        # It still replays blank, for a different reason: nothing measures a
+        # bang command, so `duration_s` is `None`. The terminal runs it
+        # outside a turn, so the loop's `park()` — the only caller that
+        # stamps an interval — never sees it, and `execute_bash` reports no
+        # duration of its own. A successful `! echo hi` replays blank for the
+        # same reason. The producer gap is upstream and out of scope.
         card.restore(state="interrupted", duration_s=duration_s)
         return
     if getattr(result, "is_error", False):

@@ -7056,10 +7056,17 @@ class OperatorApp(App[None]):
         screen was a list of questions with no answers, which reads as a
         session that never ran rather than one being continued.
 
-        Tool rows are replayed settled, never running, and with no duration:
-        see :meth:`ToolCard.restore`. A call whose result is missing from the
-        transcript is shown ``interrupted`` rather than complete — that is what
-        a session killed mid-turn actually left behind.
+        Tool rows are replayed settled, never running, and carry the interval
+        the executor MEASURED — restored from ``provider_payload.duration_s``
+        rather than recomputed from when this row was mounted (see
+        :func:`session_presentation.replay_tool_call`). A row written before
+        durations were persisted has no such key and paints a blank duration
+        column, which is the honest answer when the interval is unknown \u2014 as
+        does a bang-mode `! cmd` receipt, which carries the key but never a
+        measured value, because nothing times a command run outside a turn. A call
+        whose result is missing from the transcript is shown ``interrupted``
+        rather than complete — that is what a session killed mid-turn actually
+        left behind, and it is the only arm with no interval to restore.
 
         Guarded: a fresh session has an empty history, and a /clear already
         retired the splash — this must not fight either.

@@ -2780,21 +2780,18 @@ class AgentLoop:
             # keep their blocks untouched (never text-flatten).
             if not content:
                 content = [TextContent(text=EMPTY_TOOL_RESULT_TEXT)]
-            message = Message(
-                role="tool",
-                content=content,
-                tool_call_id=result.tool_call_id,
-                tool_name=result.tool_name,
-                is_error=result.is_error,
-            )
-            # Compaction and transcript presenters read tool-only metadata from
-            # here; wire clients deliberately ignore these harness keys.
-            if result.details is not None or result.useless or result.duration_s is not None:
-                message.provider_payload = {
-                    "details": result.details,
-                    "useless": result.useless,
-                    "duration_s": result.duration_s,
-                }
+            # The bookkeeping stamp lives in ``Message.tool_result`` rather
+            # than here. Stamping it at this call site is what let the OTHER
+            # callers of that constructor lose it: the viewer's live row
+            # (``RemoteSession._remember_live``) went through the same
+            # constructor and silently carried no duration, so a resumed card
+            # painted a blank column. One definition, so every producer of a
+            # tool row agrees by construction.
+            #
+            # ``content`` rides in on a copy of the result because the
+            # redaction and empty-result backfill above have already rewritten
+            # it; the ToolResult itself must not be mutated.
+            message = Message.tool_result(result.model_copy(update={"content": content}))
             context.messages.append(message)
             new_messages.append(message)
 
