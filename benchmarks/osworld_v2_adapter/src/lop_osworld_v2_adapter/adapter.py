@@ -44,7 +44,7 @@ import os
 import time
 from importlib.metadata import distribution
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from lop_osworld_v2_adapter import actions
 from lop_osworld_v2_adapter import cleanup as cleanup_mod
@@ -700,20 +700,53 @@ class OSWorldV2Adapter:
         assert current.frames, "current observation carries no screen frame"
         geometry = current.frames[0].geometry
         statements = actions.compile_batch(params.action_batch, geometry)
+        # Split into ORDERED runs rather than two unordered buckets. A batch
+        # like [click, wait 2000, paste_text] means "click, let the UI settle,
+        # then paste": partitioning it into all-guest-lines-then-all-waits
+        # executed the paste against a UI that had not finished responding and
+        # slept afterwards, when the sleep could no longer do anything. That
+        # silently disobeyed the model in 425 of 1746 wait-bearing batches
+        # (24%) on a benchmark whose tasks are largely about pacing slow UIs.
+        #
+        # Each run is a maximal group of consecutive guest statements or a
+        # single wait, so the guest still receives batched statements (one
+        # round trip per run, not per action) while the model's ordering is
+        # honoured exactly.
+        runs: list[tuple[str, list[str] | int]] = []
+        for statement in statements:
+            if statement.startswith("WAIT "):
+                runs.append(("wait", int(statement.split(" ", 1)[1])))
+            elif runs and runs[-1][0] == "exec":
+                cast(list[str], runs[-1][1]).append(statement)
+            else:
+                runs.append(("exec", [statement]))
         guest_lines = [s for s in statements if not s.startswith("WAIT ")]
-        waits = [int(s.split(" ", 1)[1]) for s in statements if s.startswith("WAIT ")]
         # RESUME: the parent is re-reading the state THIS batch already
         # produced, after a previous attempt committed the actions and then
         # failed to read the screen back. Re-running the guest statements here
         # would apply the click or the keystroke a second time, so the mutation
         # is skipped and only the read-back below runs. The parent sets this
         # flag solely after we declared the commit via ObservationPhaseError.
-        if not params.resume_observation and (guest_lines or waits):
-            if guest_lines:
-                await self._provider.execute(guest_lines)
-            for wait_ms in waits:
-                await asyncio.sleep(wait_ms / 1000.0)
-            if not guest_lines and waits:
+        if not params.resume_observation and runs:
+            # Only the LAST guest run settles. The provider pauses
+            # ``action_delay_s`` after each execute() so the desktop can
+            # repaint; splitting a batch into ordered runs would otherwise pay
+            # that pause once per run, multiplying it and stacking it on top of
+            # the wait the model asked for (a requested 2 s becoming 5 s). One
+            # settle per batch keeps the pacing identical to what a batch cost
+            # before ordering was honoured.
+            last_exec = max(
+                (index for index, (kind, _) in enumerate(runs) if kind == "exec"),
+                default=-1,
+            )
+            for index, (kind, payload) in enumerate(runs):
+                if kind == "exec":
+                    await self._provider.execute(
+                        cast(list[str], payload), settle=index == last_exec
+                    )
+                else:
+                    await asyncio.sleep(cast(int, payload) / 1000.0)
+            if not guest_lines:
                 # A pure-wait batch still advances the environment's clock.
                 await self._provider.execute([])
 

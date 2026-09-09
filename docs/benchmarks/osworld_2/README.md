@@ -168,12 +168,19 @@ follow-up `create_tags` would leave a window in which the instance exists
 untagged and therefore outside both the lease's authority and the leak audit.
 
 Lease length: `OSWORLD_TTL_SECONDS` if the operator sets it, otherwise
-`DEFAULT_TTL_SECONDS = 7200`, floored at `TTL_SLACK_SECONDS = 900`.
-`ttl_seconds_for` can derive `wall_budget + 900 s` from a capped wall budget,
-but **the wall budget is not on the adapter wire today**: the adapter passes
-`None` for it and only the override or the 7200 s default is ever in force.
-Setting `OSWORLD_TTL_SECONDS` to the wall budget plus 900 is therefore the
-operator's job, and is what bounds a leaked instance's worst-case cost.
+derived by `run_episode.py` as **wall budget + 900 s**
+(`_ensure_lease_outlasts_wall`), floored at `TTL_SLACK_SECONDS = 900` by the
+provider.
+
+The derivation happens in the runner rather than the provider because **the
+wall budget is not on the adapter wire**: `ttl_seconds_for` receives `None`
+and would otherwise fall back to `DEFAULT_TTL_SECONDS = 7200`. That fallback
+was harmless while the wall default was 1800 s and became a defect when it
+rose to 18000 s — a lease shorter than the wall means an episode past two
+hours dies on a terminated instance rather than at a budget boundary, losing
+the episode instead of ending it. An explicit `OSWORLD_TTL_SECONDS` still
+wins and is never shortened; it is what bounds a leaked instance's worst-case
+cost.
 
 ### Burstable credit exhaustion, and `AWS_INSTANCE_TYPE`
 
@@ -870,7 +877,7 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | `--route` | required | `<provider>/<model>`; the paid episode used `openrouter/deepseek/deepseek-v4-flash-vision-exp` |
 | `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50 |
 | `--max-usd` | 0.50 | hard provider spend cap |
-| `--max-wall-s` | 1800 | wall clock; **not** propagated to the TTL lease (§2) |
+| `--max-wall-s` | 18000 | runaway guard only; the 500-step budget binds first. The TTL lease is derived from it (`_ensure_lease_outlasts_wall`), see BUDGETS_AND_LATENCY.md |
 | `--max-cycle-usd` | none | per-cycle cost-rate guard |
 | `--keep-recent-frames` | 3 | frame retention |
 | `--benchmark-release` | `osworld-v2-2026.08.08` | |
@@ -1085,6 +1092,11 @@ $PY ~/local-operator/scripts/run_episode.py \
     --max-steps 25 --max-usd 0.50 --max-wall-s 1800 --keep-recent-frames 3 \
     | tee "$RUN/outcome.json"
 ```
+
+This is a SMOKE command: 25 steps, $0.50, and a matching short wall and lease.
+A scored run uses the standard 500-step budget and the 18000 s default wall,
+and lets the lease derive from it -- see `BUDGETS_AND_LATENCY.md`. Do not copy
+these caps into a run whose numbers you intend to report.
 
 Exit 0 means `completed`; 1 is any other terminal state; 2 is a missing or
 unusable secret (named on stderr, value never printed) or a volatile run root.

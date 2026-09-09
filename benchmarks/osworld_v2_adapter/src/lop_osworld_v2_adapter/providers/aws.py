@@ -815,7 +815,7 @@ class AwsProvider:
         raw = await asyncio.to_thread(env._get_obs)
         return dict(raw)
 
-    async def execute(self, statements: list[str]) -> None:
+    async def execute(self, statements: list[str], *, settle: bool = True) -> None:
         env = self._require_env()
 
         def run() -> None:
@@ -845,7 +845,14 @@ class AwsProvider:
             # Let the desktop settle after the batch, exactly as OSWorld's
             # own ``step(pause=...)`` does. An empty batch still settles so a
             # pure WAIT advances the guest clock.
-            self._sleep(self._action_delay_s)
+            #
+            # ``settle=False`` is for a NON-FINAL run of an interleaved batch.
+            # Such a batch is delivered as several ordered runs, and settling
+            # after every one would both multiply the pause and stack it on
+            # top of the wait the model explicitly asked for -- turning a
+            # requested 2 s into 5 s. One settle per batch, on the last run.
+            if settle:
+                self._sleep(self._action_delay_s)
 
         await asyncio.to_thread(run)
 
