@@ -2413,6 +2413,11 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     each caller about the manager. The manager is also exposed as
     ``mcp_manager`` for diagnostics.
     """
+    # BEFORE the disconnect hook, deliberately: dispose runs hooks in
+    # REGISTRATION order, and ``disconnect_all`` bumps the manager's epoch, so
+    # the revalidation poller has to be cancelled first or a tick could register
+    # a connection into a manager that is tearing down.
+    _attach_mcp_auth_revalidation(session, manager)
     session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
     if hasattr(session, "_frontend_state_store"):
@@ -2429,6 +2434,58 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     # the bug. Subagents deliberately do NOT reach this function (they BORROW
     # the parent's manager), so a child never overwrites the parent's sink.
     manager.on_recovery = session._on_mcp_recovery
+
+
+def _attach_mcp_auth_revalidation(session: Session, manager: McpManager) -> None:
+    """Poll the SHARED credential store for servers this session gave up on.
+
+    The credential store is shared by every running process; propagation of a
+    fresh grant was not. A session that hit an auth failure held the server
+    blocked for its entire lifetime, so completing ``/mcp reauth`` in one
+    session left every other running session dead — measured on this machine as
+    sessions booted at 08:52 still reporting ``notion [disconnected]`` at 13:30
+    against a grant re-authed at 12:31 with eight hours of life left.
+
+    It lives HERE, beside ``on_incident``/``on_recovery``, for the reason those
+    do: this is the composition root every host goes through, so the CLI,
+    headless, exec and server hosts heal too. Bolting it onto the TUI would
+    cover one of six routes. Subagents deliberately never reach this function
+    (they BORROW the parent's manager), so a child starts no second poller
+    against its parent's servers — adding the task anywhere else loses that.
+
+    Degrades to "this host does not revalidate" rather than failing the boot
+    when there is no running loop, exactly as ``attach_config_watch`` does: a
+    synchronous embedding is left as it was before this seam existed.
+    """
+    # Imported here rather than at module scope: ``McpManager`` itself is a
+    # TYPE_CHECKING-only import in this module, and the MCP package is an
+    # optional extra, so an install without it must still import the factory.
+    from local_operator.mcp.manager import AUTH_REVALIDATE_INTERVAL_S
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("no running loop: MCP auth revalidation not attached")
+        return
+
+    async def _revalidate_forever() -> None:
+        while True:
+            await asyncio.sleep(AUTH_REVALIDATE_INTERVAL_S)
+            try:
+                healed = await manager.revalidate_auth_blocked()
+            except Exception:  # noqa: BLE001 — a poll must never kill the session
+                logger.debug("MCP auth revalidation tick failed", exc_info=True)
+                continue
+            if healed:
+                logger.info("MCP servers recovered after a peer re-auth: %s", ", ".join(healed))
+
+    task = loop.create_task(_revalidate_forever())
+    # Cancelled through the SAME dispose helper the boot wiring uses, which
+    # AWAITS the task's quietus so a tick already inside a connect finishes its
+    # own cleanup. ``revalidate_auth_blocked`` also re-checks ``_disposed`` and
+    # the epoch after its await, as every other reconnect path does, so the
+    # ordering above is defence in depth rather than the only guard.
+    session.add_dispose_hook(_cancel_task(task))
 
 
 def _cancel_task(task: "asyncio.Task[Any]") -> Callable[[], Awaitable[None] | None]:

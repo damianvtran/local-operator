@@ -547,6 +547,61 @@ class McpTokenStorage:
         creds.pop(GRANT_DEAD_AT_KEY, None)
         self._write(creds)
 
+    def grant_marker(self) -> tuple[float, bool] | None:
+        """``(tokens_obtained_at, grant_is_dead)``, or ``None`` if unreadable.
+
+        The identity of the grant currently stored for this server, read in ONE
+        row fetch. Callers use it to answer "has somebody obtained a different
+        grant since I last looked?" without caring what the grant is.
+
+        ``None`` means the store could not be read, and is deliberately NOT a
+        tuple: a sentinel VALUE would compare unequal to the real marker either
+        side of a transient failure, so an unreadable store would look exactly
+        like a peer's re-auth. For a caller that retries on movement that turns
+        a broken store into a refresh-token retry storm — which, against a
+        provider running reuse detection, revokes the whole token family (see
+        :data:`GRANT_DEAD_AT_KEY`). Unknown has to be representable as unknown.
+
+        Read-only, and the single row read is the point: deriving both fields
+        from one fetch costs a third of what calling ``_read_row`` and
+        :meth:`grant_is_dead` separately does, and it means the two halves
+        describe the SAME instant rather than two reads a write may fall
+        between.
+
+        It reads the store directly rather than through :meth:`_read_row`, which
+        cannot serve this caller: ``_read_row`` deliberately converts a store
+        FAILURE into the same ``None`` it returns for a row that is simply
+        ABSENT, and every other caller wants that (a missing grant and an
+        unreadable one both mean "start a fresh flow"). Here the two must stay
+        distinguishable — absent is the stable, knowable marker ``(0.0, False)``
+        that moves when a peer writes a grant, while unreadable is no
+        information at all. Collapsing them is what turns a broken store into a
+        retry storm.
+        """
+        store = self._store
+        if store is None:
+            # No store configured is a KNOWN state, not a failed read: there is
+            # no grant, and there never will be one until a store appears.
+            return (0.0, False)
+        try:
+            rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        except Exception:  # noqa: BLE001 — an unreadable store is "unknown", never a value
+            logger.debug("MCP grant marker read failed for %s", self.credential_id, exc_info=True)
+            return None
+        row = next((r for r in rows if r.identity_key == self.server_url), None)
+        data = row.data if row is not None and isinstance(row.data, dict) else {}
+        if not isinstance(data, dict):
+            return (0.0, False)
+        obtained = data.get(TOKENS_OBTAINED_AT_KEY)
+        obtained_at = (
+            float(obtained)
+            if isinstance(obtained, (int, float)) and not isinstance(obtained, bool)
+            else 0.0
+        )
+        dead = data.get(GRANT_DEAD_AT_KEY)
+        is_dead = isinstance(dead, (int, float)) and not isinstance(dead, bool) and dead > 0
+        return (obtained_at, is_dead)
+
     def grant_is_dead(self) -> bool:
         """Whether this row's refresh token is a known-dead grant.
 
