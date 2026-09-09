@@ -8011,12 +8011,53 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _mark_pending_tool_rows(blocks: list[Any], session: Any) -> None:
+        """Repaint replayed rows whose calls have NOT finished.
+
+        A replayed call row carries no result for two quite different reasons,
+        and ``replay_tool_call`` cannot tell them apart — it sees an absent
+        result and paints ``⊘ interrupted``, which is right only for a call
+        that genuinely stopped mid-flight. The session knows which it is, so
+        the correction is applied here, against the canonical state, rather
+        than by weakening that default:
+
+        * ``waiting`` — a gate is parked in front of the call;
+        * ``running`` — the tool is EXECUTING right now.
+
+        The second is why this method exists in this shape. A long tool
+        (``wait``, a background ``bash``, a ``task``) parks the turn inside
+        execution with no gate open, so the pending scan is empty while the
+        call is alive; switching to that conversation through the sidebar
+        painted ``⊘ interrupted`` on a tool that was still running, under a
+        band that said "working". Neither set is a guess: both are derived
+        from the session's own tail scan, so a call that really did stop keeps
+        its ``⊘``.
+        """
         pending = getattr(session, "pending_display_tool_ids", None)
+        call_ids: set[str] = set()
         if callable(pending):
             call_ids = cast(set[str], pending())
             for block in blocks:
                 if isinstance(block, ToolCard) and block.tool_call_id in call_ids:
                     block.mark_waiting()
+        executing = getattr(session, "executing_display_tool_ids", None)
+        if callable(executing):
+            # A gated turn is also a streaming one, so the two scans overlap on
+            # exactly the call the gate is holding. `waiting` WINS: it is the
+            # more specific fact (the turn is parked on the user, not on a
+            # tool), and letting `running` land on top would repaint the
+            # approval row as though the call the user has not authorised were
+            # already executing.
+            live_ids = cast(set[str], executing()) - call_ids
+            for block in blocks:
+                if isinstance(block, ToolCard) and block.tool_call_id in live_ids:
+                    # `restore`, not `mark_running`: the row was mounted by
+                    # replay, so its `_started` is when this view painted it,
+                    # not when the tool began. `restore(state="running")`
+                    # clears that stamp, which is what keeps the card live
+                    # while refusing to invent an elapsed time it cannot know
+                    # — the same reason `subagent_view` restores a child's
+                    # in-flight row this way.
+                    block.restore(state="running")
 
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
