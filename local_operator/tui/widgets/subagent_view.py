@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import math
 import reprlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -138,6 +137,12 @@ INSTRUCTION_ROWS = 3
 #: more lines from fifty, and that is the difference between bothering and not.
 EXPAND_HINT = tool_card.EXPAND_HINT
 COLLAPSE_AFFORDANCE = tool_card.COLLAPSE_HINT
+
+#: Producer durations arrive here from a child's trajectory and, in the parent
+#: transcript, from a persisted ``provider_payload``. Both restore the same
+#: ToolCard, so both validate through the one parser that lives beside the
+#: formatter it feeds — see :func:`tool_card.parse_duration`.
+_duration = tool_card.parse_duration
 
 #: Cells the body's scrollbar gutter occupies, named after the
 #: ``scrollbar-size-vertical: 1`` the ``TranscriptView`` rule declares. The
@@ -429,20 +434,6 @@ def _first_line(text: str) -> str:
         if line.strip():
             return line.strip()
     return ""
-
-
-def _duration(value: Any) -> float | None:
-    """A trustworthy elapsed time, or ``None`` for malformed producer data.
-
-    JSON accepts numbers that Python also treats as booleans, while in-memory
-    trajectories can carry NaN or infinities that JSON would reject. None of
-    those values, nor a negative interval, describes elapsed wall time; letting
-    one reach ToolCard can print nonsense or fail while formatting a replay.
-    """
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    duration = float(value)
-    return duration if math.isfinite(duration) and duration >= 0 else None
 
 
 @dataclass(frozen=True)

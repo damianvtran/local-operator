@@ -10521,8 +10521,11 @@ class TestResumeReplaysTheWholeConversation:
 
     @pytest.mark.asyncio
     async def test_a_replayed_card_reports_no_duration(self) -> None:
-        """The transcript records what a tool did, never how long it took.
-        ``0.0s`` on every row is a wrong number, not a missing one."""
+        """A result with no persisted ``duration_s`` — a legacy row — has no
+        interval to restore. Replay must not fall back to timing the row from
+        when it was mounted: ``0.0s`` on every row is a wrong number, not a
+        missing one. (A row that DOES carry the key is covered in
+        ``test_resume_render``.)"""
         from local_operator.harness.types import Message, ToolCall
         from local_operator.tui.widgets.tool_card import ToolCard
 

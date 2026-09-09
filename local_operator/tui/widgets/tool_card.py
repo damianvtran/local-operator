@@ -85,6 +85,7 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -333,6 +334,29 @@ def _format_bytes(count: int) -> str:
     if count < 1024 * 1024:
         return f"{count / 1024:.1f} KB"
     return f"{count / (1024 * 1024):.1f} MB"
+
+
+def parse_duration(value: Any) -> float | None:
+    """A trustworthy elapsed time, or ``None`` for malformed producer data.
+
+    Lives beside :func:`format_duration` because every duration that reaches a
+    ToolCard from OUTSIDE this process — a persisted ``provider_payload``, a
+    child agent's trajectory event — has to pass through here first. Both the
+    parent transcript replay and :mod:`subagent_view` call it, so there is one
+    definition of what counts as a usable interval rather than a second,
+    divergent parser next to the first.
+
+    JSON accepts numbers that Python also treats as booleans, while in-memory
+    trajectories can carry NaN or infinities that JSON would reject. None of
+    those values, nor a negative interval, describes elapsed wall time; letting
+    one reach ToolCard can print nonsense or fail while formatting a replay.
+    ``None`` is the degraded answer, and it paints the same blank column a row
+    written before durations were persisted paints.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    duration = float(value)
+    return duration if math.isfinite(duration) and duration >= 0 else None
 
 
 def format_duration(seconds: float) -> str:
@@ -1122,8 +1146,14 @@ class ToolCard(ExpandableActionBlock):
         row mounted during replay is the moment the row was mounted. That is
         not how long the tool took, it is how long ago the app painted the row,
         and it renders as ``0.0s`` on every card in a resumed conversation.
-        The transcript does not record durations, so replay leaves
-        ``_duration`` at ``None`` and the column paints blank.
+
+        ``duration_s`` is the executor's MEASURED interval, which the harness
+        persists under the tool result's ``provider_payload`` and replay reads
+        back, so a resumed row shows the same receipt the live row showed.
+        Callers must pass it through :func:`parse_duration`; the column paints
+        blank only where there is genuinely no number to show — a legacy row
+        written before durations were persisted, a malformed value, or a call
+        whose result never reached the transcript.
 
         ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
         for a call whose result is not in the transcript, which is what a
@@ -2374,11 +2404,12 @@ class ToolCard(ExpandableActionBlock):
         """
         dim = bindings.style("tool.status.duration")
         if self._duration is None:
-            # A REPLAYED row: the transcript records what a tool did, never how
-            # long it took. `self._duration or 0.0` rendered that as `0.0s`,
-            # which is not a missing number, it is a wrong one — it says every
-            # tool in a resumed conversation returned instantly. Blank keeps
-            # the column aligned and says nothing, which is the truth.
+            # No interval to show: a legacy row written before the harness
+            # persisted `duration_s`, a value that failed `parse_duration`, or
+            # a call whose result never reached the transcript. `self._duration
+            # or 0.0` rendered those as `0.0s`, which is not a missing number,
+            # it is a wrong one — it says the tool returned instantly. Blank
+            # keeps the column aligned and says nothing, which is the truth.
             duration = " " * DURATION_COL
         else:
             elapsed = self._duration

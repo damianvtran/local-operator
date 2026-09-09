@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 from textual.events import Key, MouseScrollUp
 
 import local_operator.tui.app as app_module
@@ -26,7 +27,7 @@ from local_operator.tui.app import (
 )
 from local_operator.tui.session_presentation import OlderHistoryNotice
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.tool_card import ToolCard
+from local_operator.tui.widgets.tool_card import DURATION_COL, ToolCard
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 
 from .test_app_pilot import FakeSession, _factory, _transcript_text
@@ -1585,3 +1586,166 @@ async def test_a_tail_following_insert_holds_no_anchor() -> None:
         "clamps a not-yet-scrollable frame to row 0 and the resume opens on "
         "the OLDEST row instead of the newest"
     )
+
+
+def _durable_turn(
+    call_id: str,
+    *,
+    payload: Any,
+    is_error: bool = False,
+    with_result: bool = True,
+    text: str | None = None,
+) -> list[Any]:
+    """An assistant call plus its persisted result, carrying ``payload`` verbatim.
+
+    ``payload`` is placed on the result unmodified so a test can hand replay the
+    exact shape a transcript row holds — including shapes a well-behaved harness
+    never writes, which is the point of the malformed cases below.
+    """
+    rows: list[Any] = [
+        SimpleNamespace(
+            role="assistant",
+            id=f"a-{call_id}",
+            text="",
+            tool_calls=[SimpleNamespace(id=call_id, name="bash", arguments={"command": "ls"})],
+            custom_type=None,
+            stop_reason=None,
+            provider_payload=None,
+        )
+    ]
+    if with_result:
+        rows.append(
+            SimpleNamespace(
+                role="tool",
+                id=f"t-{call_id}",
+                tool_call_id=call_id,
+                text=text if text is not None else ("boom" if is_error else "exit code: 0"),
+                is_error=is_error,
+                provider_payload=payload,
+                content=[],
+                custom_type=None,
+            )
+        )
+    return rows
+
+
+async def _replayed_cards(rows: list[Any]) -> list[ToolCard]:
+    """Every ToolCard a resume of ``rows`` paints, in transcript order."""
+    session = FakeSession()
+    session._history = rows
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _wait_for_resume(pilot, app, min_blocks=1)
+        for _ in range(60):
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+            if len(cards) == len([r for r in rows if getattr(r, "tool_calls", None)]):
+                break
+            await pilot.pause()
+        return [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+
+
+@pytest.mark.asyncio
+async def test_a_persisted_duration_is_restored_onto_the_replayed_card() -> None:
+    """The harness measures the interval and persists it under
+    ``provider_payload``; a resumed row showed a blank column because replay
+    read ``details`` out of that payload and dropped ``duration_s`` beside it."""
+    cards = await _replayed_cards(_durable_turn("c1", payload={"duration_s": 2.4}))
+    assert len(cards) == 1
+    assert cards[0]._duration == pytest.approx(2.4)
+    assert "2.4s" in cards[0]._build_row(100).plain
+
+
+@pytest.mark.asyncio
+async def test_a_restored_duration_uses_the_live_grammar_and_column() -> None:
+    """A restored value goes through the SAME formatting the live card uses —
+    sub-second precision only below ten seconds, then whole seconds, then
+    ``format_duration``. The column is width-reserved rather than measured, so
+    a wide restored value is the case that could push its row over the
+    terminal — which is why the sample includes ``59m59s`` and ``23h59m``,
+    ``format_duration``'s widest strings. An earlier version of this test
+    sampled only values of four cells or fewer and so asserted a width bound
+    the genuinely worst case violates (review round 1, MINOR-2)."""
+    for seconds, expected in (
+        (2.4, "2.4s"),
+        (36.4, "36s"),
+        (3599.0, "59m59s"),
+        (3725.0, "1h2m"),
+        (86_399.0, "23h59m"),
+    ):
+        cards = await _replayed_cards(_durable_turn("c1", payload={"duration_s": seconds}))
+        rendered = cards[0]._build_row(100).plain
+        assert expected in rendered, (seconds, rendered)
+        # DURATION_COL is the rjust MINIMUM, not a cap: `format_duration` is
+        # bounded at six cells and `rjust(5)` on a six-cell string is a no-op,
+        # so the real invariant is the formatter's documented bound plus the
+        # row fitting the terminal — not `<= DURATION_COL`, which `59m59s`
+        # and `23h59m` legitimately exceed by one.
+        assert DURATION_COL <= 6
+        assert len(expected) <= 6, expected
+        # The row is built for a 100-cell terminal and must not exceed it.
+        assert cell_len(rendered) <= 100, (seconds, rendered)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_restores_its_duration_too() -> None:
+    """A tool that failed still took time, and the error arm restores it from
+    the same key the success arm reads."""
+    cards = await _replayed_cards(_durable_turn("c1", payload={"duration_s": 1.5}, is_error=True))
+    assert cards[0]._state == "error"
+    assert cards[0]._duration == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_row_without_a_duration_still_paints_blank() -> None:
+    """Rows written before durations were persisted carry no key at all. The
+    honest answer is a blank column, never a fabricated ``0.0s``."""
+    for payload in (None, {}, {"details": {"path": "x"}}):
+        cards = await _replayed_cards(_durable_turn("c1", payload=payload))
+        assert cards[0]._duration is None, payload
+        assert "0.0s" not in cards[0]._build_row(100).plain, payload
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_duration_degrades_to_blank_instead_of_raising() -> None:
+    """A transcript is an on-disk file another process may have written, so the
+    value is validated rather than trusted. Each of these would either crash the
+    formatter or print nonsense; all must land on the legacy blank column."""
+    for bad in ("2.4", -1.0, float("nan"), float("inf"), True, [2.4], {"s": 2.4}):
+        cards = await _replayed_cards(_durable_turn("c1", payload={"duration_s": bad}))
+        assert len(cards) == 1, bad
+        assert cards[0]._duration is None, bad
+        assert "0.0s" not in cards[0]._build_row(100).plain, bad
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_call_never_invents_a_duration() -> None:
+    """A session killed between the call and its answer has no recorded result
+    and therefore no measured interval. Nothing to restore, nothing to show."""
+    cards = await _replayed_cards(_durable_turn("c1", payload=None, with_result=False))
+    assert cards[0]._state == "interrupted"
+    assert cards[0]._duration is None
+    assert "0.0s" not in cards[0]._build_row(100).plain
+
+
+@pytest.mark.asyncio
+async def test_a_user_aborted_call_restores_the_duration_it_ran_for() -> None:
+    """The other interrupted arm, and the opposite answer. A bang command the
+    user stopped DOES have a recorded result: the harness parks a synthetic
+    aborted result carrying the interval it ran for, and the live card stamped
+    that same elapsed time via ``mark_interrupted()``. Blanking it on replay
+    dropped a number the live frame showed, on the row where "how long did it
+    run before I killed it" is the whole question (review round 1, MAJOR-2).
+
+    The dim ``interrupted ⊘`` presentation is unchanged — a user's own Esc
+    must not reopen as a red error (design round 1, D1)."""
+    cards = await _replayed_cards(
+        _durable_turn(
+            "c1",
+            payload={"duration_s": 2.5},
+            is_error=True,
+            text="aborted (interrupted by user)",
+        )
+    )
+    assert cards[0]._state == "interrupted"
+    assert cards[0]._duration == pytest.approx(2.5)
+    assert "2.5s" in cards[0]._build_row(100).plain
