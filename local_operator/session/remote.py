@@ -158,10 +158,21 @@ COLD_FALLBACK_S = 8.0
 #: A bare literal would silently stop tracking that contract if the heartbeat
 #: moved.
 #:
+#: SCOPED TO A RECORD HAVING BEEN SEEN. This bound answers "an owner is there
+#: and will not answer", never "no owner is there": the latter is the DEAD
+#: shape, whose contract is to keep chasing a successor through the takeover
+#: arm, and it keeps that contract unchanged. ``_recover_owner`` tracks the
+#: sighting across passes (``record_seen``) because the deadline is necessarily
+#: evaluated before the pass reads a record.
+#:
 #: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
 #: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_owner``), so the
 #: transcript stays on screen, ``_owner_ready`` is set, and the next prompt
 #: re-engages through ``_ensure_bound`` against this very same live record.
+#: That rebind is the whole repair, and it is why no user-facing copy was added
+#: for this state: a typed ``/model p/id`` on the resulting facade is diverted
+#: by ``OperatorApp._needs_runtime_first`` into ``_bind_then_dispatch``, which
+#: performs exactly that retry and reports its outcome.
 RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
 
 #: Backoff ceiling for ``_recover_owner``'s DIAL-FAILURE arm specifically.
@@ -657,15 +668,6 @@ class RemoteSession:
         self._gate_key: tuple[str, str, int] | None = None
         self._disposed = False
         self._recovering = False
-        #: Recovery ran to ``RECOVERY_GIVE_UP_S`` without ever getting usable
-        #: state out of an owner that stayed DISCOVERABLE the whole time. It
-        #: is the difference between the two ways a viewer can be cold, which
-        #: the user has to be told apart: ordinarily cold means no runtime is
-        #: running and "send a message to start one" is the lever, but here a
-        #: runtime IS running and merely never answered — so that sentence is
-        #: false in its premise. Read through ``exhausted_recovery`` rather
-        #: than directly; see it for why this is public at all.
-        self._recovery_exhausted = False
         self._recovery_task: asyncio.Task[None] | None = None
         #: Generation of the turn that was live when the socket dropped, or
         #: ``None`` when nothing was streaming. Recovery uses this to decide
@@ -1439,28 +1441,6 @@ class RemoteSession:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
 
-    @property
-    def exhausted_recovery(self) -> bool:
-        """Cold because the owner never answered — not because none is running.
-
-        PUBLIC because the TUI has to pick a sentence and the two cold states
-        need different ones. The generic cold copy ("no runtime is running for
-        this session; send a message to start one") is true for a fresh viewer
-        and for one whose runtime exited, and FALSE here: recovery gave up
-        against a record that stayed discoverable, so a runtime is alive and
-        simply busy. A predicate rather than another ``getattr(session,
-        "_recovering")`` private read at the call site, because the app already
-        reaches into this facade's privates in several places and each one is a
-        rename away from silently reading ``False`` forever.
-
-        Latches until the facade next binds, which is the honest lifetime: the
-        state it describes is "the last recovery attempt gave up", and any
-        successful bind is the evidence that it no longer holds. Never true on
-        a local ``Session`` — callers use ``getattr(session, ...)`` for the
-        same reason they do for ``is_cold``.
-        """
-        return self._recovery_exhausted
-
     async def attach_existing(self) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
@@ -2193,11 +2173,6 @@ class RemoteSession:
             self._finish_sync()
             self._deliberate_stop = False
             self._stopped_announced = False
-            # A bind is the evidence that the last give-up no longer describes
-            # this facade. Cleared on the success tail (not at entry) so a
-            # failed retry leaves the flag — and the sentence it selects —
-            # standing, which is the state that is still true.
-            self._recovery_exhausted = False
             self._owner_ready.set()
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
@@ -3865,7 +3840,31 @@ class RemoteSession:
         # The second, longer bound for the surface that cannot take the branch
         # above. See ``RECOVERY_GIVE_UP_S`` for why it is derived from the
         # heartbeat contract rather than calibrated here.
+        #
+        # READ ONCE HERE, DELIBERATELY, and not re-derived per pass. A deadline
+        # recomputed inside the loop is a deadline that resets every pass and
+        # therefore never fires — the exact never-terminates shape this bound
+        # exists to remove. The cost is that monkeypatching the constant after
+        # the loop has started does not reach a running recovery, which is
+        # correct: the constant is static in production, and a live change to a
+        # bound already being waited on has no defined meaning (review round 1,
+        # R4).
         give_up_deadline = time.monotonic() + RECOVERY_GIVE_UP_S
+        # Whether ANY pass of this loop has found a discoverable owner record.
+        #
+        # The give-up exit below is scoped to the live-but-silent shape — an
+        # owner that keeps publishing a record and never answers — and must not
+        # fire for an owner that is genuinely DEAD, whose contract is to keep
+        # chasing a successor through the takeover arm. The check has to sit at
+        # the top of the pass (that is where a deadline can be evaluated before
+        # the pass spends its time on a dial that may block), which is BEFORE
+        # ``find_owner_record`` runs, so the exit cannot consult this pass's
+        # record. It consults the previous passes' instead: one sighting is
+        # enough, because a record seen at all is what distinguishes "an owner
+        # is there and silent" from "nothing is there". Without this the exit
+        # fired for a no-record viewer too, marking a dead runtime as merely
+        # unresponsive (QA round 1 Q849-1, review round 1 R3).
+        record_seen = False
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
@@ -3911,6 +3910,15 @@ class RemoteSession:
                     # ``/model`` and every other mutation seam refused forever
                     # and ``prompt`` parked silently on ``_owner_ready``.
                     #
+                    # SCOPED TO ``record_seen``, which is what makes the
+                    # paragraph below true rather than merely intended. The
+                    # condition cannot be "this pass found a record" — the
+                    # deadline is evaluated before ``find_owner_record`` runs —
+                    # so it is "some pass did", which selects the same class:
+                    # an owner that is discoverable at all is the live-but-
+                    # silent shape, and one that never was is the dead shape the
+                    # takeover arm below is written for.
+                    #
                     # Going cold here does not weaken the chase contract, which
                     # is written for a DEAD owner and is vacuous for a live one:
                     # ``acquire_session_lease`` raises ``SessionLeaseHeldError``
@@ -3923,7 +3931,7 @@ class RemoteSession:
                     # armed for a LATER genuine death — a subsequent owner loss
                     # re-enters this loop and, with the record gone by then,
                     # takes the else-branch exactly as it always has.
-                    if time.monotonic() >= give_up_deadline:
+                    if record_seen and time.monotonic() >= give_up_deadline:
                         logger.info(
                             "no usable state from the runtime for %s after %.0fs; "
                             "unbinding — the conversation stays and the next action "
@@ -3958,11 +3966,22 @@ class RemoteSession:
                         # reintroduce it silently. Cleared locally rather than
                         # inside ``_go_cold`` to keep this off the desktop path.
                         self._runtime_pid = None
-                        # Set BEFORE ``_go_cold``: the went-cold callback fires
-                        # inside it, and a notice handler that asks the facade
-                        # why it went cold must not read a flag that is still
-                        # being written.
-                        self._recovery_exhausted = True
+                        # NO "recovery was exhausted" FLAG IS STAMPED HERE, and
+                        # the absence is deliberate. An earlier revision set one
+                        # so the TUI could pick a different sentence for this
+                        # cold state; the sentence turned out to be unreachable
+                        # (see the note in ``OperatorApp._activate_resolved_
+                        # model``), which left the flag with no consumer — and a
+                        # consumerless flag that LATCHES is not inert. It was
+                        # cleared only on ``_bind_to``'s success tail, while
+                        # this loop's own reattach arm below rebinds inline
+                        # without going through ``_bind_to``, so a viewer that
+                        # gave up once and then recovered still reported the
+                        # give-up verdict against every later, genuinely dead
+                        # owner (review round 1, R2). Deleted rather than fixed
+                        # with two more clear-sites: state whose only defence is
+                        # remembering to clear it everywhere is state that will
+                        # latch again the next time an exit is added.
                         self._go_cold()
                         # ``finally`` clears ``_recovering``: the refusals lift
                         # and the parked prompt is released by ``_owner_ready``.
@@ -3985,6 +4004,14 @@ class RemoteSession:
                     and record.protocol >= 5
                     and FRONTEND_CAPABILITY in record.capabilities
                 ):
+                    # Stamped on the SAME condition that selects the reattach
+                    # arm, not on ``record is not None``: a record this viewer
+                    # cannot use (an older protocol, no frontend capability)
+                    # falls through to the takeover ``else`` and belongs to the
+                    # dead-owner contract, so counting it as a sighting would
+                    # let the give-up exit fire for a chase that never had a
+                    # reattach to give up ON.
+                    record_seen = True
                     try:
                         pending_sync = await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):

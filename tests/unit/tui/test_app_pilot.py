@@ -9713,46 +9713,65 @@ async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
     assert _unwrapped("(this session)") not in text, text
 
 
-class _ExhaustedRecoveryLabelSession(_ColdAsyncLabelSession):
-    """Cold because recovery GAVE UP on an owner that stayed discoverable.
+class _GaveUpRecoveryLabelSession(_ColdAsyncLabelSession):
+    """The facade shape ``_recover_owner``'s give-up exit actually produces.
 
-    The state ``RemoteSession._recover_owner`` reaches at
-    ``RECOVERY_GIVE_UP_S``: a runtime is alive and simply never answered, so
-    the generic cold sentence is false in its premise.
+    CARRIES ``_ensure_bound``, and that attribute is the entire point of this
+    stub. ``_needs_runtime_first`` routes a cold, non-recovering, non-stopped
+    session on ``callable(getattr(session, "_ensure_bound", None))``, so a fake
+    that omits it takes a route the real ``RemoteSession`` — which always
+    defines it — cannot. An earlier revision of this file pinned a cold-arm
+    notice with such a fake and was green against a branch that never executed
+    in production (review round 1 R1, design round 1 D1).
     """
 
-    @property
-    def exhausted_recovery(self) -> bool:
-        return True
+    def __init__(self) -> None:
+        super().__init__()
+        self.bind_attempts = 0
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        # The give-up exit leaves the viewer REBINDABLE against the same live
+        # record, so the repair path really does redial. It raises here because
+        # the owner in this scenario is still silent — the honest outcome, and
+        # the one `_bind_then_dispatch` has a dedicated sentence for.
+        self.bind_attempts += 1
+        error = ConnectionError("the runtime is not responding")
+        setattr(error, "runtime_alive", True)
+        raise error
 
 
 @pytest.mark.asyncio
-async def test_switch_after_recovery_gave_up_does_not_claim_no_runtime_is_running() -> None:
-    """The generic cold copy asserts something FALSE on this path.
+async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> None:
+    """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
-    A viewer whose owner is live but silent unbinds at ``RECOVERY_GIVE_UP_S``
-    and is then cold — but "no runtime is running for this session; send a
-    message to start one" tells the user to start a runtime that is already
-    running, which is the dead end the operator hit: no number of /model
-    retries or /resumes would switch the model. The honest sentence names the
-    busy runtime, reassures about the transcript (the screen is about to look
-    like a fresh session) and ends in the next step, which really does repair
-    it now that the facade is rebindable.
+    The state ``RemoteSession._recover_owner`` reaches at
+    ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
+    exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
+    So the cold ladder in ``_activate_resolved_model`` is never consulted from
+    this state, and the sentence the user reads comes from the bind attempt's
+    own outcome. This pins that route: the command must reach a real rebind
+    (the repair) and report the live-runtime sentence, and must NOT print the
+    generic "no runtime is running" premise, which is false while the owner is
+    discoverable.
     """
-    session = _ExhaustedRecoveryLabelSession()
+    session = _GaveUpRecoveryLabelSession()
     ctrl = _AccessController(stored=("openrouter", "anthropic"))
     app = OperatorApp(lambda: _factory(session), provider_controller=ctrl)
     async with app.run_test(size=(110, 24)) as pilot:
         await _await_session(app, pilot)
         app._run_slash_command("/model anthropic/claude-fable-5-1")
         await pilot.pause()
+        await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("no runtime is running for this session") not in text, (
-        "the false premise is still printed for a live-but-silent owner: " + text
+    assert session.bind_attempts >= 1, (
+        "the typed /model never reached a rebind — the repair, not the copy, "
+        "is what this state needs"
     )
-    assert _unwrapped("this session's runtime is busy and stopped responding") in text, text
-    assert _unwrapped("the conversation is intact") in text, text
-    assert _unwrapped("try /model again to reconnect") in text, text
+    assert _unwrapped("could not reach this session's runtime in time") in text, text
+    assert _unwrapped("it is still running") in text, text
+    assert _unwrapped("no runtime is running for this session") not in text, (
+        "the false premise is printed for a live-but-silent owner: " + text
+    )
     # Still a refusal, not a receipt: nothing was switched.
     assert _unwrapped("(this session)") not in text, text
 

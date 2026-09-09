@@ -23479,29 +23479,22 @@ class OperatorApp(App[None]):
                     "try /model again in a moment",
                     "warning",
                 )
-            elif bool(getattr(session, "exhausted_recovery", False)):
-                # Cold, but NOT because no runtime is running: recovery gave up
-                # against an owner that stayed discoverable the whole time and
-                # simply never answered. The generic sentence below asserts
-                # something false there — "send a message to start one" tells
-                # the user to start a runtime that is already alive, which is
-                # exactly the dead end the operator reported when no number of
-                # /model retries or /resumes would switch the model.
-                #
-                # Says what is true and ends in the next step, the pattern
-                # `_MODEL_INTENT_PENDING` and `_SYNC_UNRESPONSIVE_REASON` both
-                # follow: the retry itself is the reconnect, because the facade
-                # is rebindable again (`_can_go_cold` was flipped at that exit)
-                # and `_ensure_bound` rediscovers the same live record.
-                # Deliberately avoids runtime vocabulary the user cannot act on
-                # — "owner", "viewer", "cold" — and names the transcript,
-                # because the screen is about to look like a fresh session.
-                self._system_notice(
-                    "this session's runtime is busy and stopped responding — "
-                    "the conversation is intact; try /model again to reconnect",
-                    "warning",
-                )
             else:
+                # NO give-up-specific arm here, and that is deliberate — see
+                # `RECOVERY_GIVE_UP_S` in `session/remote.py`. A viewer that
+                # gave up on a
+                # live-but-silent owner is cold with a callable `_ensure_bound`,
+                # which is exactly the shape `_needs_runtime_first` diverts into
+                # `_bind_then_dispatch`, so a typed `/model p/id` never reaches
+                # this ladder from that state at all. An arm added here would be
+                # unreachable code carrying user-facing copy — and worse than
+                # unreachable, because `_bind_then_dispatch` does not merely
+                # print a better sentence, it RETRIES THE BIND against the same
+                # live record and reports the outcome ("could not reach this
+                # session's runtime in time — it is still running; try that
+                # again in a moment"). Diverting a give-up facade away from that
+                # path to print a nicer string would trade the repair for copy
+                # (review round 1 R1, design round 1 D1).
                 self._system_notice(
                     "no runtime is running for this session; "
                     "send a message to start one, then run /model again",

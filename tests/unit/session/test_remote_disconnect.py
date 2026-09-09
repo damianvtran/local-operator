@@ -8,6 +8,7 @@ turn. These pin that ``_on_disconnected`` no longer synthesises an
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -553,13 +554,11 @@ async def test_the_give_up_exit_leaves_a_viewer_that_can_bind_again(tmp_path, mo
     remote, _ = _silent_owner_facade(tmp_path, monkeypatch)
     remote._on_disconnected("send timeout")
     await _await_verdict(remote)
-    exhausted = remote.exhausted_recovery
     can_go_cold = remote._can_go_cold
     runtime_pid = remote.runtime_pid
     await _cancel_recovery(remote)
 
     assert can_go_cold is True, "the viewer can never bind again"
-    assert exhausted is True, "the cold state is not distinguishable from 'no runtime'"
     # `runtime_pid` promises None while cold. Today `_discard_rejected_client`
     # already clears it on every failure path, so this pins the INVARIANT at
     # the exit rather than a defect: a stale live pid would let
@@ -652,9 +651,19 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
 ) -> None:
     """Guard against over-reach: the chase contract survives for a DEAD owner.
 
-    The give-up exit is scoped to the record-present branch. With no record
-    the loop must still reach `_takeover_factory` and keep chasing, exactly as
+    The give-up exit is scoped to a record having been SEEN (`record_seen` in
+    `_recover_owner`). With no record the loop must still reach
+    `_takeover_factory` and keep chasing, exactly as
     ``test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer`` pins.
+
+    WATCHES PAST ITS OWN BOUND, and that is the whole guard. Sampling at an
+    attempt COUNT is what made the first version of this test unable to fail:
+    three takeover attempts arrive at ~0.28 s against a monkeypatched 0.3 s
+    `RECOVERY_GIVE_UP_S`, so it stopped watching ~20 ms before the deadline it
+    exists to prove is never reached, and it stayed green against a tree that
+    took the exit (QA round 1, Q849-2). The wait below is therefore expressed
+    as a multiple of the bound rather than as a number of attempts, and the
+    assertions are read after it has comfortably elapsed.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
@@ -677,17 +686,77 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
     remote.set_went_cold_callback(lambda: went_cold.append("cold"))
 
     remote._on_disconnected("owner exited")
-    for _ in range(80):
-        if len(attempts) >= 3:
+    # Watch WELL PAST the bound, never to an attempt count. Three attempts land
+    # before the deadline, so breaking on them samples a loop that has not yet
+    # had the chance to take the exit — the blindness Q849-2 measured. The wait
+    # is a multiple of the monkeypatched bound, so compressing the bound
+    # compresses the test with it and no wall-clock literal is asserted on.
+    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    while time.monotonic() < deadline:
+        if not remote._recovering:
+            break  # the loop returned: the exit was taken, which is the failure
+        await asyncio.sleep(0.01)
+    still_chasing = remote._recovering
+    cold_calls = list(went_cold)
+    attempt_count = len(attempts)
+    await _cancel_recovery(remote)
+
+    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
+    assert still_chasing is True, "the no-record branch took the give-up exit"
+    assert cold_calls == [], "a dead owner took the give-up cold exit"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
+    tmp_path, monkeypatch
+) -> None:
+    """A record this viewer cannot ATTACH to belongs to the dead-owner contract.
+
+    `record_seen` is stamped on the same condition that selects the reattach
+    arm — protocol >= 5 with `FRONTEND_CAPABILITY` — rather than on `record is
+    not None`. A record failing either check falls through to the takeover
+    `else`, so counting it as a sighting would arm the give-up exit for a chase
+    that never had a reattach to give up on: the loop would go cold instead of
+    chasing a successor, which is the over-reach Q849-1 measured wearing a
+    different hat.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
+
+    stale = _live_record()
+    stale.protocol = 4  # a pre-frontend owner: discoverable, not attachable
+    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (stale, None))
+    attempts: list[int] = []
+
+    async def failing_takeover() -> Any:
+        attempts.append(1)
+        raise RuntimeError("the lease is held by another follower")
+
+    remote = RemoteSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=failing_takeover,
+    )
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    went_cold: list[str] = []
+    remote.set_went_cold_callback(lambda: went_cold.append("cold"))
+
+    remote._on_disconnected("owner exited")
+    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    while time.monotonic() < deadline:
+        if not remote._recovering:
             break
         await asyncio.sleep(0.01)
     still_chasing = remote._recovering
     cold_calls = list(went_cold)
+    attempt_count = len(attempts)
     await _cancel_recovery(remote)
 
-    assert len(attempts) >= 3, f"the loop stopped chasing a successor: {len(attempts)}"
-    assert still_chasing is True, "the no-record branch took the give-up exit"
-    assert cold_calls == [], "a dead owner took the give-up cold exit"
+    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
+    assert still_chasing is True, "an unattachable record armed the give-up exit"
+    assert cold_calls == [], "an unattachable record took the give-up cold exit"
 
 
 @pytest.mark.asyncio
@@ -738,6 +807,17 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
         f"the backoff ceiling is {max(observed)}, not _RECOVERY_DIAL_CAP_S "
         f"({remote_module._RECOVERY_DIAL_CAP_S}) — sequence={observed[:12]}"
     )
-    assert (
-        remote_module._RECOVERY_DIAL_CAP_S > remote_module._BIND_RETRY_DELAY_CAP_S
-    ), "the two backoff shapes are meant to have diverged"
+    # BOTH VALUES, not the ordering. `>` alone stays green if someone raises
+    # `_BIND_RETRY_DELAY_CAP_S` to 1.9 — which is the re-unification the two
+    # constants' comments explicitly forbid, and is the change this assertion
+    # exists to catch (review round 1, R5). Pinning the pair asserts what those
+    # comments promise: 2.0 s of pacing on the storm-capable loop, 0.5 s on the
+    # attempt-bounded one a caller waits through.
+    assert remote_module._RECOVERY_DIAL_CAP_S == 2.0, (
+        "the recovery dial ceiling moved; see _RECOVERY_DIAL_CAP_S for why it "
+        "is 2.0 and must not be re-unified with the bind cap"
+    )
+    assert remote_module._BIND_RETRY_DELAY_CAP_S == 0.5, (
+        "the bind retry ceiling moved; a longer cap here only adds latency to "
+        "a bind a caller is waiting on"
+    )
