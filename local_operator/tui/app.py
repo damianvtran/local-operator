@@ -7610,6 +7610,23 @@ class OperatorApp(App[None]):
         """
         view = self._transcript_view()
         viewport = view.container_size.height or view.size.height
+        # ONE PAGE, NOT A LOOP TO THE GOAL. A page mounted here cannot be
+        # measured here: `insert_blocks` schedules the settle that lets each
+        # block author its real height, and that needs refresh hops this
+        # synchronous section does not have. Measured at 100x100: the transcript
+        # grew 51 -> 75 blocks while `scroll_y`, `max_scroll_y` and
+        # `virtual_size.height` all stayed exactly where they started, so a loop
+        # here is measuring a ruler that cannot move and every extra iteration
+        # is a page mounted blind. It also left the paging lease HELD on exit —
+        # `_mount_older_resume_page` releases it from that same deferred settle
+        # — which made the ordinary fill stand down against a gate the commit
+        # had taken and never returned.
+        #
+        # One page is what this can honestly do: it is the page that closes the
+        # under-fill the reveal would otherwise show (21 blocks against a
+        # 27-row viewport), it is the page whose absence caused the visible
+        # 14 -> 62 scroll jump, and the `_start_resume_fill` below still reaches
+        # the real goal by the settling route that owns it.
         if not viewport and self._resume_pending_head and not self._resume_paging:
             # A FIRST-VISIT (`display_only`) presentation is mounted without the
             # in-prepare layout round trip -- `_prepare_sidebar_session` skips it
@@ -7631,46 +7648,53 @@ class OperatorApp(App[None]):
             return
         self._resume_fill_active = True
         self._resume_fill_serial += 1
+        chained = False
         try:
-            for _ in range(RESUME_FILL_MAX_PAGES):
-                notice = self._resume_head_notice
-                prefix = (
-                    notice.virtual_region.bottom
-                    if notice is not None and notice.parent is view
-                    else 0
-                )
-                if view.scroll_y >= viewport + prefix or not self._resume_pending_head:
-                    break
-                pending_before = len(self._resume_pending_head)
-                # `on_settled=None`: the continuation IS this loop. The page's
-                # own settle callback still releases the paging lease and
-                # reconciles the head notice on its normal schedule.
-                self._mount_older_resume_page()
-                if len(self._resume_pending_head) >= pending_before:
-                    break  # Cursor did not advance; do not spin.
-                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED, before measuring
-                # again or handing the view to the gate. A mounted block only
-                # authors its real height during a layout pass, so without this
-                # the loop re-measures against a stale `scroll_y` and, worse,
-                # the view is revealed with its tail block not yet in the
-                # compositor's painted map -- which the readiness gate reads as
-                # NOT READY and pays a recovery relayout for. Measured: 12
-                # TAIL_BLOCK refusals across 4 cold switches without this call,
-                # 0 with it. Synchronous, for the same reason as above: this
-                # commit may not await.
+            notice = self._resume_head_notice
+            prefix = (
+                notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
+            )
+            if view.scroll_y < viewport + prefix:
+                # CHAIN THE ORDINARY FILL TO THIS PAGE'S SETTLE, rather than
+                # scheduling it beside one. `_mount_older_resume_page` holds the
+                # single-flight paging lease until the settle callback
+                # `insert_blocks` schedules releases it, and
+                # `_fill_resume_attempt` stands down immediately while that gate
+                # is held. So a fill started independently of this page raced it
+                # and lost -- it saw `_resume_paging` true, returned, and the
+                # goal was never reached: `test_real_sidebar_projection_runs_
+                # rendered_fill` measured the view stranded at `scroll_y=0`
+                # against a 91-row viewport. Handing the continuation to
+                # `on_settled` is the seam that method documents for exactly
+                # this, and it is why the `finally` below only starts a fill
+                # when no page was mounted here.
+                chained = True
+                self._mount_older_resume_page(on_settled=self._start_resume_fill)
+                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
+                # handed to the readiness gate. A mounted block authors its real
+                # height during a layout pass, so without this the view is
+                # revealed with its tail block not yet in the compositor's
+                # painted map -- which the gate reads as NOT READY and pays a
+                # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
+                # 4 cold switches without this call, 0 with it. Synchronous, for
+                # the same reason as above: this commit may not await.
                 self.screen._refresh_layout()
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.
             logger.debug("pre-reveal resume fill failed; deferring", exc_info=True)
         finally:
-            # ALWAYS follow with the ordinary scheduled fill. It re-measures
-            # against real laid-out geometry, tops up anything this synchronous
-            # pass could not reach (a page behind a network fetch), and settles
-            # `_resume_fill_active` / the head notice through the one path that
-            # owns them. When the goal is already met its first attempt exits
-            # immediately, which is the normal case after this pre-fill.
-            self._start_resume_fill()
+            # Start the ordinary fill only when no page was mounted above; when
+            # one was, it is chained to that page's settle instead (see there),
+            # so the two can never race for the same paging lease.
+            # That fill re-measures against real laid-out geometry, tops up
+            # anything this synchronous pass could not reach (a page behind a
+            # network fetch), and settles `_resume_fill_active` and the head
+            # notice through the one path that owns them. When the goal is
+            # already met its first attempt exits immediately, which is the
+            # normal case after this pre-fill.
+            if not chained:
+                self._start_resume_fill()
 
     def _start_resume_fill(self, *, target: float | None = None) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
