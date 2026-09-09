@@ -28,7 +28,11 @@ from local_operator.harness.types import (
 )
 from local_operator.model.registry import ModelInfo
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome, SessionProtocol
+from local_operator.session.protocol import (
+    CompactionOutcome,
+    RuntimeLocality,
+    SessionProtocol,
+)
 from local_operator.tui.costs import turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
@@ -84,6 +88,13 @@ class FakeApp:
 
 class FakeSession:
     """Minimal SessionProtocol that can emit events synchronously."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self) -> None:
         self._handlers: list[Any] = []

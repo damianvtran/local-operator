@@ -19,6 +19,7 @@ import pytest
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.config_watch import _reset_for_tests, process_watcher
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
@@ -811,6 +812,11 @@ async def test_only_the_owning_process_prints_the_keep_notice(monkeypatch, tmp_p
 
     class AttachedSession(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
     app = OperatorApp(lambda: _factory(AttachedSession()))
     async with app.run_test(size=(100, 24)) as pilot:
@@ -950,6 +956,11 @@ async def test_only_the_process_that_owns_the_gate_prints_the_value(monkeypatch,
 
     class AttachedSession(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
     app = OperatorApp(lambda: _factory(AttachedSession()))
     async with app.run_test(size=(100, 24)) as pilot:

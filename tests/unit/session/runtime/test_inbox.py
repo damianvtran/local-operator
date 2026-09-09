@@ -15,6 +15,7 @@ import os
 import threading
 from pathlib import Path
 
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.inbox import (
     MAX_INBOX_ROWS,
     InboxLine,
@@ -196,6 +197,13 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     transcript.directory.mkdir(parents=True, exist_ok=True)
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         pass
 
     # A bare stand-in would re-create the defect's blind spot; the point is

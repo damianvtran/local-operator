@@ -40,6 +40,7 @@ from local_operator.imaging import (
     rebound_oversize_image,
 )
 from local_operator.media import ImageInfo, sniff_image
+from local_operator.session.protocol import RuntimeLocality
 
 #: The stricter per-image dimension limit a provider applies once a request
 #: carries more than twenty images. NOT imported from the module under test:
@@ -246,6 +247,13 @@ def test_unreadable_exif_metadata_does_not_fail_the_image() -> None:
     source = _oriented_jpeg((800, 600), orientation=6)
 
     class Exploding:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         def __getattr__(self, name):
             raise OSError("corrupt EXIF")
 

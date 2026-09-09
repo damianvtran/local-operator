@@ -30,7 +30,7 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
@@ -325,6 +325,13 @@ async def test_terminal_loss_reaps_independently_of_remote_viewers(
 
 class FakeSession:
     """Records prompts/aborts; satisfies SessionProtocol."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def context_breakdown(self) -> dict[str, int]:
         return getattr(self, "_context_breakdown", {})
@@ -1756,6 +1763,11 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
 
     class RemoteishSession(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
         frontend_state: FrontendSessionState
 
         def __init__(self) -> None:
@@ -1965,6 +1977,11 @@ async def test_takeover_preserves_the_status_band_verbatim() -> None:
 
     class Remoteish(StatefulSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
         def set_takeover_callback(self, callback: Any) -> None:
             self.takeover_callback = callback
@@ -2110,6 +2127,11 @@ async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, t
 
     class _RemoteFake(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
         def __init__(self) -> None:
             super().__init__()

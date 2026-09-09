@@ -23,7 +23,7 @@ from textual.app import App, ComposeResult
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import SubagentEnded, SubagentStarted
@@ -85,6 +85,13 @@ async def test_todo_panel_reads_selected_child_snapshot_without_root_leakage(tmp
 
 class FakeSession:
     """Minimal SessionProtocol the app can boot against."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []

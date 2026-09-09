@@ -30,7 +30,7 @@ from textual.color import Color
 
 from local_operator.harness.types import AgentMessage, ImageContent
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import SLASH_COMMANDS, OperatorApp
 from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
@@ -522,6 +522,13 @@ def test_the_glow_cannot_change_the_blocks_height_at_any_size() -> None:
 class FakeSession:
     """Satisfies SessionProtocol including the naming members StatusSlice
     added to the protocol; the welcome tests never drive naming itself."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self, model_label: str = "openrouter/deepseek/deepseek-chat") -> None:
         self.prompts: list[str] = []

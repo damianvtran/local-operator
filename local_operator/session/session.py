@@ -152,7 +152,7 @@ from local_operator.session.naming import (
     ConversationName,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
@@ -3076,6 +3076,33 @@ class Session:
             loop = asyncio.get_running_loop()
             delay_s = max(0.0, (self._resume_grace_ends_ms - int(time.time() * 1000)) / 1000.0)
             loop.call_later(delay_s + 0.05, self._handle_missed_wakes)
+
+    # -- runtime role (SessionProtocol) --------------------------------------
+    # This class IS the runtime: it holds the harness loop, the lease and the
+    # transcript writer. All three answers are therefore constants here, and
+    # the constants are the point — the predicates exist so a host can ask the
+    # question by name instead of inferring it from a transport flag that no
+    # longer distinguishes anything (see ``SessionProtocol.owns_runtime``).
+
+    @property
+    def owns_runtime(self) -> bool:
+        """Always True: this object runs the loop and writes the transcript."""
+        return True
+
+    @property
+    def outcome_is_synchronous(self) -> bool:
+        """Always True: :meth:`prompt` returns after the pipeline's ``finally``.
+
+        ``prompt`` awaits the turn to completion, so the caller holds the
+        outcome when it returns — which is why the TUI's in-process path may
+        mark a turn failed from its own stack.
+        """
+        return True
+
+    @property
+    def runtime_locality(self) -> RuntimeLocality:
+        """Always ``"this-process"``: the loop runs on this event loop."""
+        return "this-process"
 
     # -- identity / state (SessionProtocol) ----------------------------------
     @property

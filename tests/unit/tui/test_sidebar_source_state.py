@@ -11,6 +11,7 @@ from PIL import Image
 from textual.widgets.text_area import Selection
 
 from local_operator.harness.types import AskOption, AskQuestion, ImageContent
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import SessionDraft
@@ -207,6 +208,11 @@ async def test_pending_choice_snapshot_restores_typed_and_checked_state():
 async def test_hidden_stopped_callback_cannot_answer_selected_sources_gate(gate_kind):
     class Watched(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
         def set_stopped_callback(self, callback):
             self.stopped_callback = callback

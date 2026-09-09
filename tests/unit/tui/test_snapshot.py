@@ -51,7 +51,7 @@ from local_operator.harness.types import (  # noqa: E402
     Usage,
 )
 from local_operator.session.naming import ConversationName  # noqa: E402
-from local_operator.session.protocol import CompactionOutcome  # noqa: E402
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from local_operator.tui.widgets.welcome import WelcomeView  # noqa: E402
@@ -73,6 +73,13 @@ MARKDOWN = (
 
 class FakeSession:
     """Records prompts/aborts; satisfies SessionProtocol."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []

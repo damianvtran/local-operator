@@ -29,6 +29,7 @@ import os
 import pytest
 
 from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.toast import Toast
 from tests.unit.tui.test_app_pilot import (
@@ -74,6 +75,13 @@ class _IdentifiedMcpSession(McpSession):
     fakes are indistinguishable to the per-session notice key — which is
     exactly the distinction these tests are about.
     """
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self, manager, startup, session_id: str) -> None:
         super().__init__(manager, startup)

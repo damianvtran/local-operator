@@ -26,6 +26,7 @@ from local_operator.mcp.manager import (
     stdio_start_new_session,
 )
 from local_operator.mcp.tool_cache import McpToolCache, config_digest
+from local_operator.session.protocol import RuntimeLocality
 
 
 def _stdio_digest(command: str) -> str:
@@ -43,6 +44,13 @@ def _tool(name: str, schema: dict[str, Any] | None = None) -> Tool:
 
 class FakeSession:
     """ClientSession stand-in: records calls, returns canned results."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(
         self,
