@@ -269,8 +269,33 @@ UserBlock {
     color: $lo-fg;
 }
 
-/* The prompt's half of `display.comfortable_rows`, so a prompt and an action
- * row keep one vertical rhythm rather than the setting splitting them.
+/* The prompt's half of `display.comfortable_rows`. TOP ONLY, and unlike the
+ * action row's rule next door that is not an oversight waiting to be
+ * symmetric — the two widgets are asked for different things because they
+ * paint different grounds.
+ *
+ * The pitch is therefore UNEVEN on purpose: with prompts and cards
+ * alternating, a prompt to the card under it is 2 blank rows and a card to the
+ * prompt under it is 3. Even pitch is not the goal; a visible bracket around
+ * the thing that was reported jammed against its own edge is.
+ *
+ * What makes the card's case different is FILL, not shape. `UserBlock`
+ * declares no background and paints none: its rows measure `$lo-bg` at every
+ * column, the same ground the transcript underneath it paints. So a padding
+ * row here is a row of plain GROUND, while a padding row on
+ * `.comfortable-rows ToolCard` is a row of the card's OWN `$lo-surface`. That
+ * is the whole asymmetry. The card's bottom pad BRACKETS its summary inside a
+ * visible slab, which is exactly the reported bug ("a row above the tool call
+ * but not below") fixed; a prompt's bottom pad would land against the
+ * `.gap-above` ground row already under it, in the same fill, and be
+ * indistinguishable from it — one row taller for no visible change.
+ *
+ * So `padding: 1 0 1 0` here was measured and rejected. It buys nothing the
+ * adaptive gap is not already carrying (the prompt's separation from what
+ * follows is that rule's job, and it does it in the same color the pad would
+ * be), and it spends a row on every prompt in the transcript, against the
+ * density cost this setting already admits to. Symmetry that no reader can
+ * see is not symmetry.
  *
  * VERTICAL ONLY, and that is a constraint rather than a preference. The block
  * wraps its own text (the gutter bar has to land on every wrapped row) and
@@ -382,8 +407,14 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
  * a naive blank-row count returns 2, and only one of them is the
  * transcript's:
  *
- *     row 24: fill=$lo-surface owner=grep            <- the card's OWN bottom pad
- *     row 25: fill=$lo-bg      owner=TranscriptView  <- the dock's one ground row
+ *     ...   fill=$lo-surface owner=grep            <- the card's OWN bottom pad
+ *     ...   fill=$lo-bg      owner=TranscriptView  <- the dock's one ground row
+ *
+ * (The two rows above the composer, in order; the absolute indices are
+ * deliberately not written down because they move with the terminal height
+ * and a reader who tried to reproduce a fixed pair would find them at no
+ * size. What reproduces at every size is the ORDER and the two fills, and
+ * that is what `test_composer_seam` asserts.)
  *
  * (Fills named by TOKEN rather than by the hex they resolved to: this sheet
  * carries no literal hex anywhere, comments included, and

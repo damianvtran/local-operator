@@ -50,7 +50,13 @@ from local_operator.tui.widgets.aside_panel import AsidePanel
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    PeerMessageBlock,
+    TranscriptView,
+    UserBlock,
+    WakeBlock,
+)
 from local_operator.tui.widgets.welcome import WelcomeView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_aside import AsideSession
@@ -369,10 +375,36 @@ async def _comfortable(pilot: Any, app: OperatorApp, turns: int = 6) -> None:
 
 
 def _last_card(app: OperatorApp) -> ToolCard:
-    """The bottom-most tool row that is fully on screen."""
-    cards = [c for c in app.query(ToolCard) if c.region.y >= 0 and c.region.bottom <= app.size.height]
+    """The bottom-most tool row lying fully inside the TRANSCRIPT's viewport.
+
+    Bounded by the transcript rather than by ``app.size.height``, which is the
+    screen: the dock is on screen too, so a card scrolled under the dock still
+    satisfied the screen bound and came back as "fully visible" — measured at
+    ``y=35``/``bottom=38`` against a viewport ending at 34. Every caller here
+    reads fills off the composed frame, and a row the transcript is not
+    painting answers a different question than the one being asked.
+    """
+    view = app.query_one(TranscriptView).region
+    cards = [
+        c for c in app.query(ToolCard) if c.region.y >= view.y and c.region.bottom <= view.bottom
+    ]
     assert cards, "no tool card is fully visible"
     return cards[-1]
+
+
+#: The three widgets `.comfortable-rows` names in ONE selector, each built the
+#: way the app builds it. They are pinned together for the reason
+#: `test_minimalism.py` already pins their height contract together ("so the
+#: three cannot drift"): a wake receipt and an inbound peer receipt are ledger
+#: rows, they ride this rule through the same combined selector, and a fix
+#: verified on `ToolCard` alone is a fix verified on one third of the rule.
+ACTION_ROWS: dict[str, Any] = {
+    "tool": lambda: _card("grep"),
+    "wake": lambda: WakeBlock("(alarm) Scheduled wake w1 (1).\n\ncheck the build"),
+    "peer": lambda: PeerMessageBlock(
+        "ship the release note", {"pid": 7, "conversation_name": "peer-a"}
+    ),
+}
 
 
 @pytest.mark.asyncio
@@ -411,6 +443,103 @@ async def test_comfortable_rows_pads_a_card_above_AND_below(size: tuple[int, int
         assert _fill_at(app, top, 2) == own, frame[top - 1 : bottom + 1]
         assert _fill_at(app, bottom, 2) == own, frame[top - 1 : bottom + 1]
         assert own != _fill_at(app, card.region.bottom, 2), "the card's fill must end with the card"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("kind", sorted(ACTION_ROWS))
+async def test_every_action_row_kind_is_padded_above_AND_below(
+    kind: str, size: tuple[int, int]
+) -> None:
+    """The same promise for all three widgets on the selector, not just the card.
+
+    ``.comfortable-rows`` names ``ToolCard``, ``WakeBlock`` and
+    ``PeerMessageBlock`` in one rule, and ``test_minimalism`` pins their height
+    contract as one for the same reason. The padding fix was measured on the
+    tool card; a wake and a peer receipt reach the frame by a different builder
+    and this is what says they land the same way. Both were checked by hand
+    before being pinned, so this locks a passing property rather than chasing a
+    defect.
+    """
+    app, _session = _app()
+    async with app.run_test(size=size) as pilot:
+        app.query_one(Editor).cursor_blink = False
+        app.screen.add_class(COMFORTABLE_ROWS_CLASS)
+        await _settle(pilot)
+        block = ACTION_ROWS[kind]()
+        app._append_block(UserBlock("what happened"))
+        app._append_block(block)
+        await _settle(pilot, 4)
+
+        assert block.region.height == 3, (block.region, _frame(app)[-8:])
+        top, summary, bottom = block.region.y, block.region.y + 1, block.region.y + 2
+        frame = _frame(app)
+        assert not frame[top].strip(), frame[top - 1 : bottom + 1]
+        assert frame[summary].strip(), frame[top - 1 : bottom + 1]
+        assert not frame[bottom].strip(), frame[top - 1 : bottom + 1]
+
+        # The pad rows are the WIDGET's own surface on both sides, which is what
+        # makes them air inside a slab rather than the slab shrinking.
+        own = _fill_at(app, summary, 2)
+        assert _fill_at(app, top, 2) == own, frame[top - 1 : bottom + 1]
+        assert _fill_at(app, bottom, 2) == own, frame[top - 1 : bottom + 1]
+        assert own != _fill_at(app, block.region.bottom, 2), "the fill must end with the widget"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("kind", sorted(ACTION_ROWS))
+async def test_an_expanded_action_row_keeps_its_padding_without_clipping(
+    kind: str, size: tuple[int, int]
+) -> None:
+    """The expanded rule pairs the new bottom pad with ``height: auto``, and
+    nothing exercised that pairing.
+
+    This is the failure the stylesheet warns about one rule up: Textual sizes a
+    fixed-height widget INCLUDING its padding, so on the collapsed rule the
+    three numbers move together or the summary clips. The expanded rule escapes
+    that arithmetic by being content-sized — but only if ``height: auto``
+    actually grows to carry the two pad rows. If it did not, the row that fell
+    off would be the LAST line of revealed output, which is the one a reader
+    opened the card for.
+
+    So this measures the payload's final row, not merely the widget's height: a
+    card 2 rows taller than its content with the last output line still on the
+    frame is the whole contract.
+    """
+    app, _session = _app()
+    async with app.run_test(size=size) as pilot:
+        app.query_one(Editor).cursor_blink = False
+        app.screen.add_class(COMFORTABLE_ROWS_CLASS)
+        await _settle(pilot)
+        block = ACTION_ROWS[kind]()
+        app._append_block(block)
+        await _settle(pilot, 4)
+
+        collapsed = block.region.height
+        assert collapsed == 3, (block.region, _frame(app)[-8:])
+        assert block.toggle_expanded() is True, f"{kind} refused to expand"
+        await _settle(pilot, 4)
+
+        region = block.region
+        assert region.height > collapsed, (region, "expanding gained no rows")
+        frame = _frame(app)
+        top, bottom = region.y, region.bottom - 1
+        # Padding survives `height: auto`: still a blank row on each edge, still
+        # in the widget's own fill.
+        own = _fill_at(app, region.y + 1, 2)
+        assert not frame[top].strip(), frame[top : bottom + 1]
+        assert not frame[bottom].strip(), frame[top : bottom + 1]
+        assert _fill_at(app, top, 2) == own, frame[top : bottom + 1]
+        assert _fill_at(app, bottom, 2) == own, frame[top : bottom + 1]
+
+        # NOTHING clipped: the content rows are the interior, and the last of
+        # them still carries ink. A pad row that stole a row of payload would
+        # leave this one blank.
+        content = list(range(top + 1, bottom))
+        assert content, (region, "no content rows between the pads")
+        assert frame[content[-1]].strip(), frame[top : bottom + 1]
+        assert region.height == len(content) + 2, (region, len(content))
 
 
 @pytest.mark.asyncio
