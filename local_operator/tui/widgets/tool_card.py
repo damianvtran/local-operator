@@ -1110,7 +1110,23 @@ class ToolCard(ExpandableActionBlock):
         self.finalize()
 
     def mark_interrupted(self) -> None:
-        """Turn ended before this tool completed: dim 'interrupted' state."""
+        """Turn ended before this tool completed: dim 'interrupted' state.
+
+        Takes NO ``measured_s``, unlike :meth:`mark_done` and
+        :meth:`mark_failed`, and the asymmetry is a property of the path rather
+        than an omission (design round 2, D7). Those two settle a card because
+        an END EVENT arrived, and that event carries the executor's measured
+        interval; this one settles a card because the turn died with no end
+        event for it at all. ``_retire_live_tool_cards`` reaches exactly the
+        cards still in the live registry, and ``on_tool_ended`` removes a card
+        from that registry the instant its result lands \u2014 so a card arriving
+        here has by construction never been told how long its call ran, and
+        there is no number available to fall back to. A blank duration on a row
+        adopted mid-execution is therefore the honest reading rather than a lost
+        one: nothing on this surface ever knew that call's zero. A row that
+        watched its own start still prints its own elapsed below, which is the
+        one clock here that is true.
+        """
         was_composing = self._state == "composing"
         self._settle_live()
         if was_composing:
@@ -1173,6 +1189,19 @@ class ToolCard(ExpandableActionBlock):
         number that says the tool returned instantly.
         """
         return None if self._started is None else time.monotonic() - self._started
+
+    @property
+    def dates_itself(self) -> bool:
+        """Whether this card knows when its call actually began.
+
+        False for a row this viewer ADOPTED mid-execution: the page painted it
+        after the tool started, so it has no zero and deliberately blanks its
+        own duration (see :meth:`restore`). Exposed because the band above the
+        transcript keys its clock to the phase these cards decide, and a phase
+        derived from a card that cannot date itself must not print a number
+        counted from the moment the phase changed (design round 2, D6).
+        """
+        return self._started is not None
 
     def restore(
         self,

@@ -2487,7 +2487,13 @@ class WorkingBlock(TranscriptBlock):
     #: Pinned by ``test_the_line_holds_one_row_whatever_the_clock_says``.
     _CLOCK_COL = 8
 
-    def __init__(self, activity: str = DEFAULT_ACTIVITY, phase: str = DEFAULT_ACTIVITY) -> None:
+    def __init__(
+        self,
+        activity: str = DEFAULT_ACTIVITY,
+        phase: str = DEFAULT_ACTIVITY,
+        *,
+        clock: bool = True,
+    ) -> None:
         super().__init__()
         self.add_class("working-block")
         self._frame_ms: float = 0.0
@@ -2496,6 +2502,8 @@ class WorkingBlock(TranscriptBlock):
         self._timer = None
         self._activity = activity or DEFAULT_ACTIVITY
         self._phase = phase
+        # Whether this phase's zero is the WORK's zero. See :meth:`set_activity`.
+        self._clock_known = clock
         # The clock times the CURRENT PHASE, not the turn and not the label: how
         # long the agent has been busy altogether is the status band's
         # `duration` segment, and the question this line answers is the other
@@ -2509,8 +2517,23 @@ class WorkingBlock(TranscriptBlock):
         """The label currently on the line (what the turn is doing)."""
         return self._activity
 
-    def set_activity(self, activity: str, phase: str | None = None) -> None:
+    def set_activity(self, activity: str, phase: str | None = None, *, clock: bool = True) -> None:
         """Name what the turn is doing now.
+
+        ``clock=False`` says the caller knows the LABEL but not when the work it
+        names began, and the number is then withheld rather than counted from
+        this moment. The case that forced it: a sidebar switch adopts a tool the
+        owner has been executing for half an hour, so the phase becomes
+        ``running <tool>`` here — at the instant of the switch. The clock is
+        phase-keyed, so it restarted, and the band read ``running await_job 2s``
+        beside a card that had deliberately blanked its own duration for exactly
+        this reason (design review round 2, D6). Naming the tool is what makes
+        the adjacent number read as a claim ABOUT that tool, so the label is
+        kept and the clock is dropped: this row's whole contract is that every
+        number on it was derived from an event the app received, and a clock
+        started from the wrong zero is worse than no clock. There is no honest
+        alternative reading available — the start event carries no timestamp, so
+        the true age is not recoverable on this surface at any price.
 
         The clock restarts only when the PHASE changes, not whenever the label
         does. Keying it to the rendered string made the row refute itself: one
@@ -2526,9 +2549,10 @@ class WorkingBlock(TranscriptBlock):
         if phase != self._phase:
             self._phase = phase
             self._phase_started = time.monotonic()
-        elif activity == self._activity:
+        elif activity == self._activity and clock == self._clock_known:
             return
         self._activity = activity
+        self._clock_known = clock
         self._paint()
 
     def on_mount(self) -> None:
@@ -2605,8 +2629,9 @@ class WorkingBlock(TranscriptBlock):
             return
         # With shimmer off the spinner is frozen too (D26 pins a still frame),
         # so the clock is the only thing that can change and a repaint landing
-        # on the same second is one nobody can see.
-        if self._clock_text() != self._clock:
+        # on the same second is one nobody can see. A phase with no clock has
+        # nothing left that can change at all, so it repaints never.
+        if self._clock_known and self._clock_text() != self._clock:
             self._paint()
 
     def _clock_text(self) -> str:
@@ -2627,11 +2652,15 @@ class WorkingBlock(TranscriptBlock):
         # the band stuttering. Focused, `motion_enabled()` is exactly
         # `shimmer_enabled()`, so nothing about the looked-at frame changes.
         animated = motion_enabled()
-        # ALWAYS shown, from the first frame. It is the one fact this row has
-        # that nothing else on screen does — a running tool's own card carries
-        # no duration until it settles, and the band's clock is the session's
-        # cumulative active time, not this phase's age.
-        self._clock = self._clock_text()
+        # Shown from the first frame WHENEVER the phase's zero is the work's
+        # zero. It is the one fact this row has that nothing else on screen does
+        # — a running tool's own card carries no duration until it settles, and
+        # the band's clock is the session's cumulative active time, not this
+        # phase's age. Withheld only where the caller says the zero is unknown
+        # (`set_activity(clock=False)`), because the alternative is a number
+        # counted from the wrong instant beside the name of the work it appears
+        # to describe.
+        self._clock = self._clock_text() if self._clock_known else ""
         # A frozen frame rather than no glyph when shimmer is off: the braille
         # head is unique to this row either way, which is what a still terminal
         # needs to tell it from an info notice.
@@ -2665,7 +2694,12 @@ class WorkingBlock(TranscriptBlock):
         # from `100h4m` and `100h45m`, and this number matters most exactly when
         # it is largest. That is why the fix for the overflow review round 15
         # found is a days branch in the formatter, not a clip here.
-        line.append(f"  {truncate_cells(self._clock, self._CLOCK_COL - 2)}", style=dim)
+        # The clock's cells stay RESERVED above even when the number is
+        # withheld, so a phase that cannot date itself clips its label at the
+        # same column as one that can — dropping the number must not reflow the
+        # text beside it.
+        if self._clock:
+            line.append(f"  {truncate_cells(self._clock, self._CLOCK_COL - 2)}", style=dim)
         # `layout=False`: this row is ONE row by construction (see above — the
         # label is clipped, never wrapped), so its footprint cannot move and the
         # update is a repaint. The default laid the whole screen out again on

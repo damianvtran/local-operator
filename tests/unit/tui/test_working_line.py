@@ -385,6 +385,79 @@ async def test_the_line_holds_one_row_whatever_the_clock_says() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
+    """Design round 2, D6. A phase whose zero is not the work's zero says no number.
+
+    The clock is keyed to the PHASE, and a sidebar switch into a session with a
+    tool already executing changes the phase at the moment the viewer arrives —
+    not at the moment the tool started. So the band counted from the switch
+    while NAMING the tool: an operator switching into a thirty-minute ``wait``
+    at minute twenty-eight read ``running await_job  2s``, the one number on
+    screen, attached to the tool's name, understating its age by half an hour.
+
+    That is the same wrong-zero the row itself refuses one line above — an
+    adopted card clears ``_started`` and shows the word ``running`` with no
+    duration, because "a clock started from the wrong zero is worse than no
+    clock". Naming the tool is exactly what turns an adjacent generic clock
+    into a claim about it, so the label is kept and the number is dropped.
+
+    The number is not recoverable by trying harder: ``ToolExecutionStartEvent``
+    carries no timestamp, so the true age of an adopted call does not exist on
+    this surface at any price. Withholding it is the only honest rendering.
+
+    Asserted on the text ``_paint`` COMPOSES rather than on the rendered strip,
+    for the reason the width test above documents: Textual clips a strip to the
+    widget box before it is cached, so a strip assertion cannot tell a withheld
+    clock from a clipped one.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.post_message(TurnStarted())
+        app.post_message(_started("c0", "await_job", job_id="7a73c97ffc54"))
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+
+        composed: list[str] = []
+        original = line.set_content
+
+        def spy(content: RenderableType, **kw: Any) -> None:
+            assert isinstance(content, Text), type(content)
+            composed.append(content.plain)
+            original(content, **kw)
+
+        line.set_content = spy  # type: ignore[method-assign]
+
+        # A tool this viewer WATCHED start: the phase's zero is the work's zero,
+        # so the clock is true and must still be shown. Wound back rather than
+        # slept, the way the sibling clock tests do it.
+        card = app._tool_cards["c0"]
+        assert card.dates_itself
+        line._phase_started = time.monotonic() - 30.0
+        line._paint()
+        assert composed[-1].rstrip().endswith(format_duration(30)), composed[-1]
+
+        # Now the adopted row: same call, same label, but the card no longer
+        # knows when it began — which is precisely the state a sidebar switch
+        # leaves behind (`restore(state="running")` clears `_started`).
+        card.restore(state="running")
+        assert not card.dates_itself
+        app._refresh_working_activity()
+        line._phase_started = time.monotonic() - 30.0
+        line._paint()
+        painted = composed[-1]
+
+        assert "await_job" in painted, "the label is the part worth keeping"
+        # No number at all, rather than a different number: the failure this
+        # pins is a plausible-looking clock, so any digits are the defect.
+        assert not any(ch.isdigit() for ch in painted.rsplit("await_job", 1)[-1]), painted
+        assert format_duration(30) not in painted, painted
+
+        line.set_content = original  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
 async def test_a_dictated_call_is_reported_before_it_runs() -> None:
     """The longest silence in a turn is a large call streaming its arguments."""
     app = OperatorApp(lambda: _factory(FakeSession()))

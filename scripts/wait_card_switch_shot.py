@@ -13,6 +13,12 @@ Run from the worktree root:
 Writes ``<outdir>/switch.svg`` (the moment after the switch, tool still
 parked) and ``<outdir>/settled.svg`` (the same row once the tool returns) —
 the pair that shows whether the row moved when its outcome arrived.
+
+The tool is deliberately AGED on a real wall clock before the switch (see
+``AGE_S``), because the band under the row keys its elapsed clock to the phase
+and the phase changes at the moment the viewer arrives. Without a visible age
+the band's number and the tool's true age are indistinguishable in the frame,
+which is exactly how D6 survived round 1.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -43,6 +50,11 @@ from tests.unit.tui.test_sidebar_live_tool_card import (  # noqa: E402
     _switch,
     live_owners,
 )
+
+#: Seconds to let the tool genuinely execute before the viewer switches in.
+#: Large enough that a clock restarted at the switch reads visibly differently
+#: from the tool's real age — the whole point of the capture.
+AGE_S = 12.0
 
 
 async def main() -> None:
@@ -85,15 +97,33 @@ async def main() -> None:
                         e.get("type") == "tool_execution_start" for e in state.live_events
                     ):
                         break
-                for _ in range(40):
+                # AGE the call on a real clock while the viewer is elsewhere.
+                # `pilot.pause()` alone yields without advancing wall time, so
+                # the tool would be milliseconds old at the switch and a band
+                # clock counting from the wrong zero would look correct.
+                aged_from = time.monotonic()
+                while time.monotonic() - aged_from < AGE_S:
                     await pilot.pause()
+                    await asyncio.sleep(0.05)
 
                 await _switch(app, "busy01", pilot)
                 app._set_sidebar_open(False)
                 await pilot.pause()
+                real_age = time.monotonic() - aged_from
                 save_capture(app, outdir / "switch.svg")
                 cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
                 print("switch  :", cards[0]._state, [t for t, _s in cards[0]._status_runs()])
+                # The D6 evidence: the tool's REAL age beside what the band says
+                # about it. A number here that is not `real_age` is the finding.
+                band = app._working_block
+                # Asserted, not assumed: a switch that left no band mounted
+                # would otherwise print `None` and read as "no clock shown",
+                # i.e. as the fix working.
+                assert band is not None, "no working line is mounted after the switch"
+                print(f"tool real age    : {real_age:.1f}s")
+                print(f"band label       : {band._activity!r} (phase {band._phase!r})")
+                print(f"band clock shown : {band._clock!r}")
+                print(f"card dates itself: {cards[0].dates_itself}")
 
                 released.set()
                 for _ in range(MAX_PUMP_TURNS):

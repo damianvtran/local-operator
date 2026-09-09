@@ -17792,7 +17792,7 @@ class OperatorApp(App[None]):
         Asks the SAME deriver the working line and the title use, so the three
         cannot disagree about whether a turn is parked.
         """
-        _, phase = self._current_activity()
+        _, phase, _ = self._current_activity()
         if phase != ACTIVITY_APPROVAL:
             return
         asking = self._ask_pending is not None and not self._ask_pending.done()
@@ -32085,7 +32085,8 @@ class OperatorApp(App[None]):
         """
         if self._working_block is not None:
             return
-        self._working_block = WorkingBlock(*self._current_activity())
+        label, phase, clock = self._current_activity()
+        self._working_block = WorkingBlock(label, phase, clock=clock)
         self._append_block(self._working_block, ends_empty_state=ends_empty_state, pin_tail=True)
 
     def _dismiss_working_block(self) -> None:
@@ -32114,9 +32115,9 @@ class OperatorApp(App[None]):
         a stop reaches this hook without either of those paths knowing a title
         exists.
         """
-        label, phase = self._current_activity()
+        label, phase, clock = self._current_activity()
         if self._working_block is not None:
-            self._working_block.set_activity(label, phase)
+            self._working_block.set_activity(label, phase, clock=clock)
         waiting = phase == ACTIVITY_APPROVAL
         if self._status is not None:
             self._status.set_attention(waiting)
@@ -32151,8 +32152,17 @@ class OperatorApp(App[None]):
         elif not waiting:
             self._waiting_kind = None
 
-    def _current_activity(self) -> tuple[str, str]:
-        """What the agent is doing right now: ``(label, phase)``.
+    def _current_activity(self) -> tuple[str, str, bool]:
+        """What the agent is doing right now: ``(label, phase, clock)``.
+
+        ``clock`` is whether the phase's zero is the WORK's zero, i.e. whether
+        the elapsed number the band draws would be true. It is False only for a
+        ``running`` phase every one of whose cards was adopted mid-execution by
+        a sidebar switch: the phase changes when the viewer arrives, not when
+        the tool started, so the clock would count from the switch while naming
+        a tool that may be half an hour old (design round 2, D6). Derived here
+        rather than latched at the switch for the same reason the label is — one
+        deriver, so the band cannot disagree with the ledger under it.
 
         DERIVED from the same state the transcript is drawn from rather than
         latched by each handler, so the line cannot disagree with the ledger
@@ -32177,14 +32187,23 @@ class OperatorApp(App[None]):
             # FIRST, above the approval prompt: the picker is a modal drawn over
             # everything, so it is what the user is looking at even if a card
             # underneath is also waiting.
-            return ("waiting for your answer", ACTIVITY_APPROVAL)
+            return ("waiting for your answer", ACTIVITY_APPROVAL, True)
         if self._approval is not None and not self._approval.answered:
             # Nothing is running: the turn is parked on the question on screen,
             # and "thinking" under an unanswered prompt blames the model for a
             # wait that belongs to the user.
-            return ("waiting for approval", ACTIVITY_APPROVAL)
+            return ("waiting for approval", ACTIVITY_APPROVAL, True)
         if self._tool_cards:
-            return (self._batch_phrase(list(self._tool_cards.values())), "running")
+            cards = list(self._tool_cards.values())
+            # ANY card that dates itself is enough. The clock measures the phase,
+            # and the phase began when the first of these calls started, so one
+            # card this viewer watched start puts a true floor under the number;
+            # it is only when EVERY card was adopted that the zero is unknown.
+            return (
+                self._batch_phrase(cards),
+                "running",
+                any(card.dates_itself for card in cards),
+            )
         if self._composing_cards:
             # The tool's NAME is deliberately absent. It arrives in fragments —
             # `wr` then `write` — and the ledger row above follows those because
@@ -32192,10 +32211,10 @@ class OperatorApp(App[None]):
             # and `composing wr` reads as a typo rather than as a state.
             count = len(self._composing_cards)
             noun = "a call" if count == 1 else f"{count} calls"
-            return (f"composing {noun}", "composing")
+            return (f"composing {noun}", "composing", True)
         if self._streaming_block is not None:
-            return (ACTIVITY_RESPONDING, ACTIVITY_RESPONDING)
-        return (self._working_fallback, self._working_fallback)
+            return (ACTIVITY_RESPONDING, ACTIVITY_RESPONDING, True)
+        return (self._working_fallback, self._working_fallback, True)
 
     @staticmethod
     def _batch_phrase(cards: list[ToolCard]) -> str:
@@ -32818,7 +32837,18 @@ class OperatorApp(App[None]):
         # different receipts, decided only by whether the viewer was watching.
         # Not a second stamp: this is #858's own number, read where it already
         # arrives, and a card with its own clock ignores it.
+        # Read BOTH halves. `ToolExecutionEndEvent` syncs `is_error` with
+        # `result.is_error` through a validator, but has no equivalent for
+        # `duration_s`, so the two can drift and an emitter that fills only the
+        # nested one ships an event whose live consumer reads `None` while a
+        # replay of the same call reads the number off the persisted payload —
+        # the two-receipts asymmetry this whole path exists to close. The
+        # sibling consumer of this wire shape (`subagent_view`, which folds a
+        # child's trajectory) already falls back the same way; this is the
+        # second reader of the same field and is no more entitled to assume.
         measured_s = getattr(event, "duration_s", None)
+        if measured_s is None:
+            measured_s = getattr(getattr(event, "result", None), "duration_s", None)
         if event.is_error:
             card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:
