@@ -86,6 +86,7 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_GREP_ENGINE": "rg vs python grep",
     "LOCAL_OPERATOR_MCP_TIMEOUT_MS": "a timeout",
     "LOCAL_OPERATOR_SPILL_MAX_BYTES": "a size limit",
+    "LOCAL_OPERATOR_INTERNAL_READ_LIMIT": "a size limit; 0 disables internal-URL shaping",
     "LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS": "a timeout",
     "LOCAL_OPERATOR_CONTEXT_FILES": "extra context file names, read relative to cwd",
     "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS": "extra skill roots; read-only directories",

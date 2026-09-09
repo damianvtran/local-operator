@@ -58,10 +58,10 @@ import time
 import traceback
 import unicodedata
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -206,6 +206,50 @@ READ_LINE_CAP = 2000
 #: spill handle, because spilling a copy of a file that is already on disk
 #: would double the bytes for nothing.
 READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+
+#: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
+#: before it is shaped into a map. DELIBERATELY 16 KiB rather than
+#: :data:`READ_OUTPUT_LIMIT_CHARS`, and the asymmetry is the point.
+#:
+#: Instructional markdown is not a log tail. A guide the model is REQUIRED to
+#: read (``prompts_md/system.md``) delivered whole in one call beats the same
+#: guide split into an outline it must then expand twice, so the threshold is
+#: set to return mid-sized documents untouched and intervene only on the few
+#: pathological ones. Measured over the 43 skill/guide docs on the authoring
+#: machine: 8 KiB returns 23/43 whole, 16 KiB returns 34/43, 32 KiB returns
+#: 37/43 while halving the saving. 16 KiB is where the intervention lands on
+#: the four 46-80 KB documents that are the entire problem.
+#:
+#: The threshold is not the output size: shaping compresses an 80 KB skill to
+#: ~7 KB either way, so raising it from 8 to 16 KiB costs almost nothing on the
+#: oversized docs and only decides which mid-sized docs stay whole.
+#:
+#: Overridable via :data:`INTERNAL_READ_LIMIT_ENV` for rollout; ``0`` disables
+#: shaping entirely.
+INTERNAL_READ_LIMIT_CHARS = 16 * 1024
+#: Kill switch for the shaping above. Read per call, never cached at import, so
+#: the operator (or a test) can turn it off in one variable without waiting for
+#: a release — the same discipline :func:`_grep_engine` uses.
+INTERNAL_READ_LIMIT_ENV = "LOCAL_OPERATOR_INTERNAL_READ_LIMIT"
+#: Head kept when an internal document is shaped, cut at a heading boundary.
+#: Sized to cover the ROUTING sections rather than an arbitrary prefix: in the
+#: largest skill on the authoring machine the frontmatter, title and the two
+#: "what you must go read next" sections are 70 lines / 4,645 chars, so 6 KiB
+#: keeps them plus slack and stops before the body rules the outline indexes.
+INTERNAL_READ_HEAD_CHARS = 6 * 1024
+#: Ceiling on the heading outline. Bounded separately from the head so a
+#: heading-dense document cannot turn the map back into the dump it replaced;
+#: the depth fallback in :func:`_heading_outline` spends this budget by
+#: dropping DEPTH (### then ##), which keeps every remaining entry complete,
+#: before it resorts to eliding entries and saying how many it dropped.
+INTERNAL_READ_OUTLINE_CHARS = 4 * 1024
+#: Minimum headings for the outline shape to be worth building. Below this a
+#: document has no addressable structure to index, so it degrades to the plain
+#: uniform :func:`spill_truncate` head+tail every other oversized output gets.
+INTERNAL_READ_MIN_HEADINGS = 3
+#: Slack the bound tests allow over :data:`INTERNAL_READ_LIMIT_CHARS` for a
+#: shaped result: head + outline + banner + footer framing.
+INTERNAL_READ_SHAPE_SLACK_CHARS = 4 * 1024
 #: Lines a footer suggests per expansion call. Sized so one page of ordinary
 #: log text lands inside :data:`TOOL_OUTPUT_LIMIT_CHARS` (~55 head + ~55 tail
 #: lines measured at 8 KiB, so 200 lines of typical 40-char output is the
@@ -2224,6 +2268,305 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     )
 
 
+#: Markdown ATX headings, depth 1-3, at line start. Depth 4+ is deliberately
+#: out: a document deep enough to need them has more headings than an outline
+#: budget can carry, and the depth fallback would drop them first anyway.
+_HEADING_RE = re.compile(r"^(#{1,3}) +(\S.*?)\s*$")
+
+#: A fenced-code delimiter. Both markdown fence styles, and only ever tested
+#: against an already-lstripped line, so an indented fence inside a list item
+#: still toggles.
+_FENCE_PREFIXES = ("```", "~~~")
+
+#: An opening or closing code fence: at least three backticks or tildes,
+#: optionally indented. The run length and the character are both captured
+#: because CommonMark closes a fence only on the SAME character at the SAME
+#: length or longer — a parity toggle that ignores them lets a nested ``` close
+#: an enclosing ````markdown block, and lets ``~~~`` close a ``` block.
+_FENCE_RE = re.compile(r"^(?P<fence>(?P<char>`|~)(?P=char){2,})(?P<info>.*)$")
+
+
+def _internal_read_limit() -> int:
+    """The shaping threshold in force, honouring the kill switch.
+
+    Read per call rather than cached at import so the override can be set
+    after this module is imported — the same reason :func:`_grep_engine` and
+    :func:`spill_dir` resolve late. A malformed or negative value falls back to
+    the default instead of raising: a bad environment variable must not turn
+    every ``read skill://`` into a failed tool call.
+    """
+    raw = os.environ.get(INTERNAL_READ_LIMIT_ENV)
+    if not raw:
+        return INTERNAL_READ_LIMIT_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        return INTERNAL_READ_LIMIT_CHARS
+    return value if value >= 0 else INTERNAL_READ_LIMIT_CHARS
+
+
+class _Heading(NamedTuple):
+    """One outline entry: ``depth`` hashes, ``text``, and the 1-based line span
+    it covers in the SPILLED copy (``end`` inclusive, up to the next heading of
+    any depth or EOF)."""
+
+    depth: int
+    text: str
+    start: int
+    end: int
+
+
+def _collect_headings(lines: Sequence[str]) -> list[_Heading]:
+    """Every depth-1..3 heading OUTSIDE a fenced code block, with its span.
+
+    Scans line by line rather than running the pattern over the whole document,
+    and takes the caller's already-``splitlines()`` list so the line numbers
+    here are the SAME basis the spill store serves ranges on. That shared basis
+    is the invariant the advertised ``[lines N-M]`` spans depend on; a parallel
+    offset counter is how those numbers silently drift apart (notably on CRLF,
+    where a ``len(line) + 1`` accounting under-counts by one char per line).
+
+    Fenced blocks are skipped, and that is a correctness fix rather than
+    tidiness. These documents are full of shell examples, so a ``# comment``
+    inside a fence used to parse as a heading — 19 phantoms across 6 bundled
+    guides. The cosmetic harm is a junk index entry; the harm that matters is
+    that a section's ``end`` is the next heading's start minus one, so a phantom
+    INSIDE a real section silently truncates that section's advertised range.
+    ``guide://browser``'s "0. Make sure the paired browser is actually open"
+    advertised lines 151-157 against a true 151-191, so an agent following the
+    footer's own instruction got a fragment with no signal that 34 lines were
+    missing — the exact "expansion returns the wrong text" failure this whole
+    shape exists to prevent.
+    """
+    total = len(lines)
+    found: list[tuple[int, str, int]] = []
+    # The OPEN fence's delimiter, or None outside a fence. Tracking the
+    # character and length rather than a bare parity bit is what makes nesting
+    # safe: these documents embed fenced examples inside ````markdown blocks,
+    # so a toggle would treat the inner ``` as a close, resume indexing inside
+    # the block and reintroduce the phantom-heading defect this scan exists to
+    # prevent — and a phantom does not merely add a junk entry, it truncates
+    # the advertised span of the section containing it. Live example: the msd
+    # skill's ````markdown block at 812-826 wraps a nested ``` at 817-822, and
+    # an unindented `# ...` inside it would cut `### Comment format` from
+    # 763-855 to 763-817, hiding the review-gate comment template.
+    open_fence: str | None = None
+    for index, line in enumerate(lines):
+        match = _FENCE_RE.match(line.lstrip())
+        if match:
+            delimiter = match.group("fence")
+            if open_fence is None:
+                # An info string ("```sh", "````markdown") is allowed on an
+                # opener only, so a line carrying one can never be a closer.
+                open_fence = delimiter
+                continue
+            # CommonMark: a closer matches the opener's character and is at
+            # least as long, and carries no info string.
+            if delimiter[0] == open_fence[0] and len(delimiter) >= len(open_fence):
+                if not match.group("info").strip():
+                    open_fence = None
+                    continue
+            # Otherwise it is ordinary content inside the open fence.
+        if open_fence is not None:
+            # An unclosed fence keeps everything after it out of the index,
+            # which is the safe direction: a phantom corrupts a real section's
+            # span, while a missed heading only costs one index entry and the
+            # enclosing section still covers those lines (its end is ``total``).
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            found.append((len(heading.group(1)), heading.group(2), index + 1))
+    return [
+        _Heading(depth, text, start, (found[i + 1][2] - 1) if i + 1 < len(found) else total)
+        for i, (depth, text, start) in enumerate(found)
+    ]
+
+
+def _heading_outline(headings: list[_Heading], handle: str, budget: int) -> str:
+    """The section index, complete unless the budget physically forbids it.
+
+    COMPLETENESS IS THE FEATURE, not a nicety, and this is the part a future
+    reader is most likely to "simplify" away. A head-only truncation of an
+    instructional document is a silent behavioural regression: in the largest
+    skill on the authoring machine the binding ``## Mandatory Agent Review
+    Gate`` sits at char offset 30,343 and the human-reviewer decision tree at
+    60,012, while the frontmatter phrase "agent-review round" at offset 420
+    survives any head cap. The result therefore READS complete while every
+    operative rule has been deleted, and an agent acting on it merges without a
+    review round. Cheaper and wrong is worse than expensive and right.
+
+    So no rule may become invisible. Budget pressure is spent on DEPTH first —
+    drop ``###`` entries, then ``##`` — because a shallower outline still names
+    every region of the document and its ranges still cover every line. Only if
+    depth-1 alone overflows does it elide entries, and then it says how many it
+    dropped and how to list them.
+    """
+    for min_depth in (3, 2, 1):
+        kept = [h for h in headings if h.depth <= min_depth]
+        if not kept:
+            continue
+        lines = [f"{'#' * h.depth} {h.text}  [lines {h.start}-{h.end}]" for h in kept]
+        rendered = "\n".join(lines)
+        if len(rendered) <= budget:
+            return rendered
+        if min_depth > 1:
+            continue
+        # Depth-1 alone still overflows: keep the prefix that fits and name the
+        # escape hatch, so the dropped sections are one call away rather than
+        # unknowable.
+        head_lines: list[str] = []
+        used = 0
+        for line in lines:
+            if used + len(line) + 1 > budget - 120:
+                break
+            head_lines.append(line)
+            used += len(line) + 1
+        dropped = len(lines) - len(head_lines)
+        # Names what the call ACTUALLY returns. Spill search caps at
+        # SPILL_SEARCH_MATCH_LIMIT and its ``range`` pages through MATCHES, not
+        # lines, so a promise to "list every heading" is false past that cap and
+        # a footer that over-promises teaches the model expansion does not work.
+        head_lines.append(
+            f"[+{dropped} more sections not listed; "
+            f'read(path="{handle}?q=^#") lists the first '
+            f"{SPILL_SEARCH_MATCH_LIMIT} headings]"
+        )
+        return "\n".join(head_lines)
+    return ""
+
+
+def _shape_internal_document(
+    content: str, target: str, context: ToolContext | None
+) -> tuple[str, dict[str, Any] | None]:
+    """``(display_text, spill_details)`` for one internal-URL document.
+
+    This branch serves the LARGEST documents in the system (skills and guides
+    run to 80 KB) and was the one ``read`` outcome with no bound at all, so a
+    single ``read skill://…`` injected ~27k billed tokens that ``_is_prunable``
+    then pinned for the life of the session.
+
+    Shape is head + COMPLETE heading outline, not head-only — see
+    :func:`_heading_outline` for why that distinction is load-bearing rather
+    than stylistic. Documents under the threshold are returned byte-identical:
+    most guides fit, and the MUST-read guide rule stays untouched for them.
+
+    The caller must keep the ORIGINAL ``skill://`` URL in ``details['url']``.
+    ``_is_prunable`` (compaction/pruning.py) matches on that prefix to exempt
+    skill reads from pruning, and post-shaping the exempted result carries the
+    spill handle the agent needs to expand — rewriting ``url`` to the handle
+    would silently disable the exemption and blank the address of the very
+    expansion the footer just promised.
+    """
+    limit = _internal_read_limit()
+    # ``0`` is the documented kill switch, not a zero-length budget.
+    if limit == 0 or len(content) <= limit:
+        return content, None
+
+    # ONE line basis for the heading scan, the head cut and the spill store
+    # alike. Splitting the document once and passing the list down is what
+    # keeps the advertised ``[lines N-M]`` spans in the same coordinate space
+    # the handle resolves in.
+    lines = content.splitlines()
+
+    meta = _spill(content, "read", context)
+    if meta is None:
+        # Same degradation contract as the rest of the module: losing
+        # expansion is an inconvenience, failing the call is a bug. The banner
+        # still leads the result: this is the path where the agent has LESS
+        # recourse (no handle to expand), so the statement that it has not read
+        # the whole document matters more here, not less.
+        degraded_banner = (
+            f"[{target} — {len(lines)} lines, {len(content)} chars. This is a PARTIAL "
+            f"view and the full text could not be saved for expansion. You have NOT "
+            f"read the whole document; re-read it to see any section not shown.]"
+        )
+        budget = max(limit - len(degraded_banner) - 2, 0)
+        return f"{degraded_banner}\n\n{truncate_output(content, budget)}", None
+
+    headings = _collect_headings(lines)
+    if len(headings) < INTERNAL_READ_MIN_HEADINGS:
+        # No addressable structure to index — fall through to the plain uniform
+        # head+tail every other oversized output gets.
+        body, span = _elide_inline(content, limit)
+        return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
+
+    # Cut the head at a heading boundary so it never ends mid-rule: the last
+    # heading that starts at or under the budget wins, and everything from it
+    # onward belongs to the outline. Offsets come from one prefix scan over the
+    # SAME line list, using the real line lengths, so the accounting does not
+    # under-count a CRLF document by one char per line.
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    head_end_line = 0
+    for heading in headings:
+        if offsets[heading.start - 1] > INTERNAL_READ_HEAD_CHARS:
+            break
+        head_end_line = heading.start - 1
+    if head_end_line == 0:
+        # First heading is already past the budget (a long frontmatter): cut on
+        # a line boundary rather than emitting an empty head.
+        head_end_line = 0
+        for index in range(len(lines)):
+            if offsets[index + 1] > INTERNAL_READ_HEAD_CHARS:
+                break
+            head_end_line = index + 1
+        head_end_line = max(head_end_line, 1)
+    head_text = "\n".join(lines[:head_end_line])
+
+    # Never empty by construction: ``head_end_line`` is the last FITTING
+    # heading's start minus one, so that heading always lands here. That is
+    # what makes the tail addressable no matter how the headings are
+    # distributed — a document with three headings at the top and 4,000 lines
+    # of prose after them indexes the prose under its last heading's span
+    # rather than dropping it. Pinned by
+    # test_the_outline_covers_every_line_past_the_head.
+    remaining = [h for h in headings if h.start > head_end_line]
+
+    # A document whose first heading sits far below the head cut (a long
+    # frontmatter) would otherwise leave every line between the two addressable
+    # by NOTHING — measured at 109 orphaned lines on a 200-line frontmatter —
+    # while the banner asserts the index is complete. Cover the gap with an
+    # explicit entry so the completeness claim stays true by construction.
+    if remaining and remaining[0].start > head_end_line + 1:
+        remaining = [
+            _Heading(
+                1,
+                "(unindexed lines before the first section)",
+                head_end_line + 1,
+                remaining[0].start - 1,
+            )
+        ] + remaining
+
+    outline = _heading_outline(remaining, meta.handle, INTERNAL_READ_OUTLINE_CHARS)
+
+    # The banner goes at the TOP, not only in the footer. The model reads a
+    # result top-down and may act on the head before it ever reaches a trailing
+    # footer, so the statement "you have NOT read this whole document" has to
+    # arrive before the content it qualifies.
+    banner = (
+        f"[{target} — {len(lines)} lines, {len(content)} chars. This is a PARTIAL "
+        f"view: the head below plus an index of every remaining section (headings "
+        f"of depth 1-3). You have NOT read the whole document. Expand any section "
+        f"you intend to act on before acting on it.]"
+    )
+    # A concrete call derived from a REAL outline entry, following the
+    # _spill_footer discipline: a footer that describes an expansion instead of
+    # spelling one out teaches the model that expansion does not work.
+    example = remaining[0]
+    example_end = min(example.end, example.start + SPILL_PAGE_LINES - 1)
+    footer = (
+        f"\n[The FULL document ({meta.lines} lines) is saved at {meta.handle}. "
+        f"The [lines N-M] spans above are coordinates INTO that handle:\n"
+        f'  read(path="{meta.handle}", range="{example.start}-{example_end}")'
+        f"  -> the '{example.text}' section\n"
+        f'  read(path="{meta.handle}?q=<regex>")  -> find a section by name first]'
+    )
+    body = f"{banner}\n\n{head_text}\n\n[... {len(remaining)} further sections not shown; "
+    body += f"indexed below ...]\n\n{outline}\n{footer}"
+    return body, {"spill": _spill_detail(meta)}
+
+
 def _joined_capped_list_body(
     full_items: list[str],
     shown_items: list[str],
@@ -2682,7 +3025,13 @@ async def execute_read(
         # gets re-read in a loop. Declaring a key would be inert for those and
         # would add avoidable risk for the rest, since a resolver result is not
         # always the same content under the same URL.
-        return _text(tool_call_id, "read", content, details={"url": target})
+        #
+        # ``url`` MUST stay the original internal URL. ``_is_prunable`` keys the
+        # skill exemption off ``details['url'].startswith('skill://')``;
+        # substituting the spill handle here would silently disable it and let
+        # compaction blank the result that carries the expansion handle.
+        body, spill_details = _shape_internal_document(content, target, context)
+        return _text(tool_call_id, "read", body, details={"url": target, **(spill_details or {})})
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
@@ -2715,11 +3064,21 @@ async def execute_read(
         # output) is tens of thousands of stat calls, and the loop this
         # coroutine rides is the one rendering the TUI.
         entries = await asyncio.to_thread(_list_dir_entries, path)
+        # Bounded like every other read outcome: a directory with tens of
+        # thousands of entries (a node_modules, a build output) joined raw is
+        # the same unbounded-result defect the internal-URL branch had, and the
+        # entries beyond the cap are what a spill handle is for.
+        listing, spill_details = spill_truncate(
+            f"Directory listing of {path} ({len(entries)} entries):\n" + "\n".join(entries),
+            "read",
+            context,
+            READ_OUTPUT_LIMIT_CHARS,
+        )
         return _text(
             tool_call_id,
             "read",
-            f"Directory listing of {path} ({len(entries)} entries):\n" + "\n".join(entries),
-            details={"path": str(path)},
+            listing,
+            details={"path": str(path), **(spill_details or {})},
         )
 
     # Stat, content sniff and body read are one worker-thread transaction.
