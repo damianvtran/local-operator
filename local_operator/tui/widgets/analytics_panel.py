@@ -1679,9 +1679,15 @@ class AnalyticsScreen(ModalScreen[None]):
         The hint is ``height: 2`` with ``padding-top: 1`` (see
         ``#analytics-hint`` in the stylesheet), i.e. exactly ONE content line.
         Anything wider wraps to a second line that is never painted — which is
-        why the width has to be measured rather than assumed. Falls back to the
-        card width before the widget is mounted, which is within a cell of the
-        real box at every terminal size measured (50→39/40, 120→102/101).
+        why the width has to be measured rather than assumed.
+
+        The pre-mount fallback to the card width is deliberately approximate and
+        is not load-bearing (review R8). It is reached only from ``compose``,
+        where the layout carries no rows yet, so the only candidates are
+        ``esc back · t cost/tokens`` (24 cells) and ``esc back`` — both inside
+        the 40-cell floor ``_card_width`` cannot go below — and ``_sync_hint``
+        replaces the text after the first refresh, before the frame the reader
+        sees. It only has to be sane, not exact.
         """
         hint = getattr(self, "_hint", None)
         if hint is not None and hint.is_mounted:
@@ -1719,7 +1725,14 @@ class AnalyticsScreen(ModalScreen[None]):
             candidates = [
                 "esc back · t cost/tokens · ↑↓ row · enter expand · e all",
                 "esc back · ↑↓ row · enter expand · e all",
-                "esc back · ↑↓ row · enter · e all",
+                # ``esc back`` goes BEFORE ``expand`` is abbreviated away — the
+                # rule two lines up, which the ladder used to contradict at its
+                # own third rung (review D5). A 33-cell box took
+                # ``esc back · ↑↓ row · enter · e all``, leaving ``enter · e
+                # all`` to be read as two unexplained keys, while the 29-cell
+                # tier below keeps ``enter expand`` and fits every box in the
+                # 44-50 column band (measured: 33-39 cells).
+                "↑↓ row · enter expand · e all",
                 "↑↓ row · enter · e all",
                 "enter · e all",
             ]
@@ -2222,8 +2235,29 @@ class AnalyticsScreen(ModalScreen[None]):
         """
         expandable = {node.session_id for node in _iter_nodes(self._forest()) if node.has_children}
         collapsing = bool(expandable) and expandable <= self._expanded
-        # Same reason as ``_set_expanded``: collapse-all hides every child row,
-        # so the cursor's ancestry has to be read while it is still painted.
+        # Read BEFORE the repaint, for two independent reasons.
+        #
+        # ``chain``: collapse-all hides every child row, so the cursor's
+        # ancestry has to be read while it is still painted (same as
+        # ``_set_expanded``).
+        #
+        # ``anchored``: whether to reveal the cursor afterwards at all. ``e`` is
+        # a GLOBAL action — it acts on every row, not on the row under the
+        # caret — so it must not move the viewport of a reader who is not
+        # standing in the table. Reviews D6/U8: the cursor is placed at MOUNT
+        # (D2), and the reveal below then dragged the opening frame down to
+        # table row 0, silently replacing the totals block the screen exists to
+        # show (+34 lines at 120x40, +43 at 120x30, +51 at 110x20, and pressing
+        # ``e`` again did not bring it back). On base the same call was a no-op
+        # only because no cursor existed yet, so the mount cursor turned a
+        # dormant call into a teleport.
+        #
+        # Revealing is still right when the cursor IS on screen: the reader is
+        # working in the table, expand-all moves their row hundreds of lines
+        # down the body, and keeping it in frame is what preserves their place.
+        # Same rule ``_move_cursor`` already uses — a cursor the reader cannot
+        # see is not a place to return to.
+        anchored = self._cursor_on_screen()
         chain = self._ancestor_chain() if collapsing else []
         if collapsing:
             self._expanded.clear()
@@ -2233,7 +2267,8 @@ class AnalyticsScreen(ModalScreen[None]):
         if chain:
             self._rehome_to_ancestor(chain)
             self._repaint()
-        self._scroll_cursor_into_view()
+        if anchored:
+            self._scroll_cursor_into_view()
         self.call_after_refresh(self._sync_hint)
 
     def _forest(self) -> list["SessionNode"]:

@@ -1596,12 +1596,35 @@ def test_the_cursor_is_on_screen_from_the_first_frame():
     import asyncio
 
     async def run():
+        # 1. Table ON screen at mount: the caret must be genuinely VISIBLE.
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(110, 40)) as pilot:
             screen = await _push(pilot, app, _nested_screen_agg())
             assert screen._cursor == screen._layout.session_rows[0].session_id
             assert screen._scroll.scroll_offset.y == 0, "placing the cursor scrolled the report"
+            # Against the SCREEN, not the body. ``render_lines_for_test()`` is
+            # the whole 654-line report on the real ledger, so a caret painted
+            # far below the fold satisfied ``_ROW_CURSOR in body`` and this test
+            # passed while the thing it is named for was false (review R6).
+            assert screen._cursor_on_screen(), "the cursor is painted below the fold"
             assert _ROW_CURSOR in "\n".join(screen.render_lines_for_test())
+
+        # 2. Table BELOW the fold: the cursor is parked unpainted rather than
+        #    scrolled to. This leg is what kills the mutation R6 reported —
+        #    re-adding ``_scroll_cursor_into_view()`` to ``_place_initial_cursor``
+        #    reintroduces the exact D2/U2 teleport, and leg 1 cannot see it
+        #    because the small fixture's table is already on screen at 110x40.
+        for height in (30, 24, 20):
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(110, height)) as pilot:
+                screen = await _push(pilot, app, _tall_report_agg())
+                assert not screen._table_on_screen(), f"h={height} does not put the table below"
+                assert screen._cursor == screen._layout.session_rows[0].session_id
+                assert screen._scroll.scroll_offset.y == 0, (
+                    f"placing the cursor at mount scrolled the report to y="
+                    f"{screen._scroll.scroll_offset.y} at h={height}, costing the reader the "
+                    "totals block they opened the screen to read"
+                )
 
     asyncio.run(run())
 
@@ -1865,7 +1888,7 @@ def test_the_row_keys_work_on_a_report_too_tall_to_fit():
     asyncio.run(run())
 
 
-def _tall_report_agg(roots: int = 40) -> UsageAggregate:
+def _tall_report_agg(roots: int = 40, kids: int = 1) -> UsageAggregate:
     """A report shaped like the operator's real ledger: a table far BELOW the fold.
 
     The defect these tests pin is only visible when the session table starts
@@ -1873,24 +1896,44 @@ def _tall_report_agg(roots: int = 40) -> UsageAggregate:
     the totals block, both bar charts and the input attribution. The small
     ``_nested_screen_agg`` fixture puts the table 17 lines down, which fits a
     40-row terminal whole and hid the bug from every existing test.
+
+    Two details are load-bearing rather than incidental, and both were added
+    because a mutation survived without them:
+
+    ``unpricedses`` draws the ``+ lower bound`` legend, which is what puts BODY
+    BELOW the last table row (measured: 2 lines, exactly as the real ledger).
+    Without it the table is the last thing in the report, so revealing the last
+    row already lands the viewport on ``max_scroll_y`` and ``action_move_down``'s
+    last-row fallthrough has nothing left to do — deleting it kept the suite
+    green (QA mutation M3).
+
+    ``kids`` hangs children off the PRICIEST root, which sorts first, so
+    expanding pushes every row below it down. At the default 1 the shift is one
+    line and a cursor parked anywhere stays on screen regardless, which makes
+    expand-all's cursor reveal unobservable; pass ~30 to move it off screen.
     """
 
-    def scope(micro, calls=1):
+    def scope(micro, calls=1, known=None):
         return UsageAggregate(
             calls=calls,
             ok_calls=calls,
             context_tokens=micro,
             cost_micro=micro,
-            cost_known_calls=calls,
+            cost_known_calls=calls if known is None else known,
         )
 
     agg = scope(1_000_000 * (roots + 2), calls=roots + 2)
     by_session = {f"root{i:08d}": scope(1_000_000 * (roots - i)) for i in range(roots)}
-    # One expandable root so the disclosure gutter and the expand hints are live,
+    # Expandable roots so the disclosure gutter and the expand hints are live,
     # exactly as on the real ledger where 103 of 595 roots have children.
-    by_session["kid00000001"] = scope(500_000)
+    parents = {}
+    for kid in range(kids):
+        by_session[f"kid{kid:08d}"] = scope(500_000)
+        parents[f"kid{kid:08d}"] = "root00000000"
+    # An unpriced session, so the report has a tail below the table (see above).
+    by_session["unpricedses"] = scope(0, calls=1, known=0)
     agg.by_session = by_session
-    setattr(agg, "session_parents", {"kid00000001": "root00000000"})
+    setattr(agg, "session_parents", parents)
     setattr(agg, "session_names", {f"root{i:08d}": f"Session number {i}" for i in range(roots)})
     agg.components = {k: 0 for k in COMPONENT_KEYS}
     agg.components["conversation"] = 1_000
@@ -1951,6 +1994,76 @@ def test_the_top_of_the_report_is_reachable_with_the_arrow_keys():
     asyncio.run(run())
 
 
+def test_the_bottom_of_the_report_is_reachable_with_the_arrow_keys():
+    """The mirror of the top-reachability test, and it had NO coverage.
+
+    ``action_move_down`` line-scrolls past the LAST table row for the same
+    reason ``action_move_up`` line-scrolls above the first: the body continues
+    below the table (the rollup note, and whatever sections follow), so an arrow
+    that clamped on the last row would leave the tail of the report unreachable
+    by the key that got the reader there.
+
+    Pinned because deleting that fallthrough left **79 tests passing** (QA
+    mutation M3): real behaviour with zero coverage is exactly what a future
+    cleanup removes against a green suite.
+    """
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 24)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg())
+            scroll = screen._scroll
+            assert scroll.max_scroll_y > 0, "fixture is not taller than the viewport"
+
+            body = screen.render_lines_for_test()
+            rows = screen._layout.session_rows
+            last_table_line = screen._layout.session_first_line + len(rows) - 1
+            assert len(body) - 1 > last_table_line, (
+                "the fixture's table is the LAST thing in the report, so revealing its "
+                "last row already reaches max_scroll_y and this test cannot see the "
+                "fallthrough it exists to pin"
+            )
+
+            await pilot.press("home")
+            await pilot.pause()
+            assert scroll.scroll_offset.y == 0
+
+            # Walk down until the cursor is standing on the LAST row. Up to here
+            # the cursor's own reveal is what moves the viewport.
+            for _ in range(int(scroll.max_scroll_y) + len(rows) + 10):
+                if screen._cursor_index() == len(rows) - 1 and screen._cursor_on_screen():
+                    break
+                await pilot.press("down")
+            await pilot.pause()
+            parked = scroll.scroll_offset.y
+            assert parked < scroll.max_scroll_y, (
+                "the cursor's own reveal already reached the bottom, so the remaining "
+                "presses prove nothing"
+            )
+
+            # From here only the fallthrough can move the viewport: the cursor
+            # has nowhere left to go, and the tail of the report is still below.
+            for _ in range(int(scroll.max_scroll_y - parked) + 10):
+                if scroll.scroll_offset.y >= scroll.max_scroll_y:
+                    break
+                await pilot.press("down")
+            await pilot.pause()
+            assert scroll.scroll_offset.y == scroll.max_scroll_y, (
+                "the bottom of the report is unreachable by arrow: the cursor clamped on "
+                f"the last row at y={scroll.scroll_offset.y} of {scroll.max_scroll_y}"
+            )
+            # And the last body line is genuinely painted, not merely the scroll
+            # offset agreeing with itself.
+            last = next(line for line in reversed(body) if line.strip())
+            painted = "\n".join(
+                body[int(scroll.scroll_offset.y) : int(scroll.scroll_offset.y) + scroll.size.height]
+            )
+            assert last in painted, "the last body line never entered the viewport"
+
+    asyncio.run(run())
+
+
 def test_the_hint_fits_one_line_at_every_width():
     """U3 — the hint grew 36→56 cells but its ``Static`` is ONE content line.
 
@@ -1987,6 +2100,41 @@ def test_the_hint_fits_one_line_at_every_width():
                     f"the expand keys are undocumented at {width}x{height} while the ▸ glyphs "
                     f"remain on screen: {text!r}"
                 )
+
+    asyncio.run(run())
+
+
+def test_the_hint_sheds_esc_before_it_abbreviates_the_expand_key():
+    """D5 — the ladder contradicted its own documented rule at its third rung.
+
+    The rule beside the tiers is that ``esc back`` is shed BEFORE the expand
+    keys: ``esc`` is the one key a reader tries unprompted on a modal, and
+    ``enter``/``e`` are the ones they cannot guess. The 44-50 column band broke
+    it — boxes of 33-39 cells took ``esc back · ↑↓ row · enter · e all`` (33
+    cells) and left ``enter · e all`` to be read as two unexplained keys, while
+    ``↑↓ row · enter expand · e all`` is 29 cells and fits every box in the band.
+
+    Pinned as the rule rather than as a string: any tier that keeps ``esc back``
+    while abbreviating ``expand`` away is the inversion, at any width.
+    """
+    import asyncio
+
+    async def run():
+        seen_short_tier = False
+        for width in range(40, 76, 2):
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(width, 24)) as pilot:
+                screen = await _push(pilot, app, _tall_report_agg())
+                text = screen._hint_text(scrollable=True).plain
+                assert cell_len(text) <= screen._hint.content_size.width, text
+                if "esc back" in text:
+                    assert "enter expand" in text, (
+                        f"at {width} columns the hint keeps 'esc back' but abbreviates the "
+                        f"expand key away, inverting the ladder's documented rule: {text!r}"
+                    )
+                else:
+                    seen_short_tier = True
+        assert seen_short_tier, "no width in the band exercised a tier below 'esc back'"
 
     asyncio.run(run())
 
@@ -2046,5 +2194,103 @@ def test_collapsing_keeps_the_cursor_on_the_visible_ancestor():
             assert screen._cursor_index() is not None, "the cursor was orphaned on a hidden row"
             assert screen._cursor_row().depth == 0  # type: ignore[union-attr]
             assert screen._cursor == "rootsession", screen._cursor
+
+    asyncio.run(run())
+
+
+def test_expand_all_from_the_opening_frame_leaves_the_viewport_alone():
+    """D6/U8 — ``e`` scrolled the totals block off the OPENING frame.
+
+    ``e`` is a GLOBAL action, so it must not move the viewport of a reader who
+    is not standing in the table. The mount-placed cursor (D2) met
+    ``action_toggle_all``'s pre-existing ``_scroll_cursor_into_view()``, which
+    on base was a no-op because no cursor existed yet; on the round-2 head it
+    dragged the opening frame down to table row 0 — measured on the operator's
+    ledger at +34 lines (120x40), +43 (120x30), +48 (120x24 and 80x24) and +51
+    (110x20 and 100x20) — and a second ``e`` did not bring it back.
+
+    Heights chosen so the cursor is BELOW the fold at mount: at 110x40 the
+    small fixture's table fits on the opening screen, which is the geometry
+    that hid this from the round-2 frames. Asserted on ``scroll_offset``, which
+    the sibling collapse test never looked at.
+    """
+    import asyncio
+
+    async def run():
+        for height in (30, 24, 20):
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(110, height)) as pilot:
+                screen = await _push(pilot, app, _tall_report_agg())
+                scroll = screen._scroll
+                assert not screen._cursor_on_screen(), (
+                    f"h={height} puts the cursor on the opening frame, so it cannot pin D6 "
+                    "(that is the geometry the defect hid behind)"
+                )
+                before = scroll.scroll_offset.y
+                rows = len(screen._layout.session_rows)
+
+                await pilot.press("e")
+                await pilot.pause()
+                assert len(screen._layout.session_rows) > rows, "'e' did not expand anything"
+                assert scroll.scroll_offset.y == before, (
+                    f"'e' moved the viewport {scroll.scroll_offset.y - before} lines at "
+                    f"h={height}: a global action is teleporting the reader to the cursor"
+                )
+
+                # The reverse press must not move it either — the reader who
+                # undoes an expansion is owed the frame they started from.
+                await pilot.press("e")
+                await pilot.pause()
+                assert len(screen._layout.session_rows) == rows, "'e' did not collapse back"
+                assert scroll.scroll_offset.y == before, (
+                    f"collapse-all moved the viewport {scroll.scroll_offset.y - before} lines "
+                    f"at h={height}"
+                )
+
+    asyncio.run(run())
+
+
+def test_expand_all_keeps_a_cursor_the_reader_can_see_in_frame():
+    """The other half of D6: the reveal is right when the cursor IS on screen.
+
+    A reader working IN the table has a place in it; expand-all pushes their row
+    hundreds of lines down the body, and keeping it in frame is what preserves
+    that place. Without this, "skip the scroll" would be over-applied into
+    "never scroll", which loses the reader in the other direction.
+    """
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 24)) as pilot:
+            # 30 children on the priciest root, so expanding shifts every row
+            # below it by 30 lines — more than the viewport is tall, which is
+            # what makes the reveal observable at all (at the default 1 child the
+            # cursor stays on screen whether or not anything reveals it).
+            screen = await _push(pilot, app, _tall_report_agg(kids=30))
+            scroll = screen._scroll
+            rows = screen._layout.session_rows
+
+            # Park the reader in the MIDDLE of the table, below the expandable
+            # root, and reveal them — this is a reader working in the table.
+            park = rows[len(rows) // 2].session_id
+            screen._cursor = park
+            screen._repaint()
+            screen._scroll_cursor_into_view()
+            await pilot.pause()
+            assert screen._cursor_on_screen()
+            before = scroll.scroll_offset.y
+
+            await pilot.press("e")
+            await pilot.pause()
+            assert screen._cursor == park, "expand-all moved the cursor off the reader's row"
+            assert scroll.scroll_offset.y > before, (
+                "the viewport did not follow the reader's row, so 'skip the scroll' has "
+                "been over-applied from 'the cursor is off screen' to 'never scroll'"
+            )
+            assert screen._cursor_on_screen(), (
+                "expand-all left the reader's own row off screen: the cursor was visible "
+                "before the press and 30 rows appeared above it"
+            )
 
     asyncio.run(run())
