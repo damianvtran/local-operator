@@ -1,6 +1,7 @@
 """Desktop stream algebra, resource bounds and durable retry invariants."""
 
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -463,3 +464,298 @@ async def test_served_list_order_is_the_catalogs_rank(tmp_path):
     assert served == [entry.id for entry in rank_entries(catalog[::-1])]
     # And concretely: the armed row leads despite being the oldest.
     assert served == ["armed", "newest", "middle"]
+
+
+@pytest.mark.asyncio
+async def test_durable_attachment_is_readable_without_starting_an_owner(tmp_path):
+    """A digest from a history row resolves to bytes on a cold conversation.
+
+    This is the read that makes durable images renderable at all: `/history`
+    serves rows verbatim, and an image block over the externalisation floor is a
+    digest with the payload stripped, so a reader that cannot resolve a digest
+    can only ever know an image WAS there.
+
+    It deliberately does NOT go through `DesktopSessions.session`. A finished
+    conversation's screenshot must be readable without starting an owner
+    process, which is the same argument `acknowledge_attention` already makes
+    for a read receipt -- and the assertion that no bridge was created is what
+    keeps a later refactor from quietly acquiring one per image.
+    """
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    raw = b"\x89PNG\r\n\x1a\nnot-a-real-png-but-real-bytes"
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put(base64.b64encode(raw).decode("ascii"), "image/png")
+    assert ref is not None
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+
+    pool = DesktopSessions(tmp_path)
+    data, mime_type = await pool.attachment("0123456789ab", ref.digest)
+    assert data == raw and mime_type == "image/png"
+    assert pool.bridges == {}
+
+    # A miss is ordinary, not a fault: the store's own contract is that an
+    # interrupted write or a hand-pruned store degrades to a placeholder, and
+    # `errors()` maps KeyError to 404 rather than letting it reach a 500.
+    with pytest.raises(KeyError):
+        await pool.attachment("0123456789ab", "f" * 32)
+    # A well-formed id whose directory is simply absent. This reaches the
+    # `is_dir()` check ONLY -- `ffffffffffff` already satisfies `SESSION_ID`,
+    # so it says nothing about either gate. The two tests below carry those.
+    with pytest.raises(KeyError):
+        await pool.attachment("ffffffffffff", ref.digest)
+
+
+@pytest.mark.asyncio
+async def test_attachment_refuses_a_session_id_that_is_not_the_session_shape(tmp_path):
+    """The shape guard rejects before a path is built, not after.
+
+    `self.root / "sessions" / session_id` turns the id straight into a path, so
+    an id carrying `..` would climb out of the sessions namespace and read a
+    sibling directory's marker. Unlike the digest, the session id has no
+    route-declaration pattern -- `SESSION_ID.fullmatch` inside the read IS the
+    whole gate, which is why it needs a case that a merely-absent directory
+    cannot satisfy: this id is one `is_dir()` alone would also reject, so the
+    assertion is that the ESCAPE never happens rather than that the read
+    missed. The planted marker is what distinguishes the two -- with the guard
+    removed the traversal resolves onto a real directory.
+    """
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    raw = b"\x89PNG\r\n\x1a\ntraversal-target"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+    # A real directory one level above the sessions namespace, so a guard-free
+    # read would find `is_dir()` true and `is_user_session()` true and serve.
+    outside = tmp_path / "sessions" / ".." / "elsewhere"
+    outside.mkdir(parents=True)
+    pool = DesktopSessions(tmp_path)
+
+    with pytest.raises(KeyError):
+        await pool.attachment("../elsewhere", ref.digest)
+    with pytest.raises(KeyError):
+        await pool.attachment("0123456789AB", ref.digest)
+    assert outside.is_dir(), "the traversal target must exist, or this proves nothing"
+
+
+@pytest.mark.asyncio
+async def test_attachment_refuses_a_subagent_origin_session(tmp_path):
+    """A delegated run's screenshots are not the desktop surface's to serve.
+
+    A subagent session is a machine's own work the user never opened, and the
+    desktop surface does not list it anywhere else either. `is_user_session` is
+    the ONLY thing keeping this route out of those conversations, and it is a
+    one-token edit away from removal -- so the case is an existing directory
+    that differs from the passing one in nothing but its origin marker,
+    written by the production `mark_session_origin` rather than hand-forged.
+
+    Canaried in both directions on purpose: the same digest and an identically
+    built directory WITHOUT the marker must serve, or a passing assertion here
+    would only mean the fixture was broken.
+    """
+    from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    raw = b"\x89PNG\r\n\x1a\nsubagent-screenshot"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+
+    def make(session_id: str) -> Any:
+        directory = tmp_path / "sessions" / session_id
+        directory.mkdir(parents=True)
+        (directory / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+        return directory
+
+    users = make("0123456789ab")
+    child = make("abcdef012345")
+    mark_session_origin(child, ORIGIN_SUBAGENT, label="review", agent="reviewer")
+    pool = DesktopSessions(tmp_path)
+
+    # The marker is the only difference, so the user session must still serve.
+    data, _ = await pool.attachment("0123456789ab", ref.digest)
+    assert data == raw and users.is_dir()
+    with pytest.raises(KeyError):
+        await pool.attachment("abcdef012345", ref.digest)
+
+
+def test_attachment_digest_shape_is_enforced_by_the_route_declaration():
+    """Traversal is unreachable by construction, not by a handler check.
+
+    The store turns a digest straight into `<root>/<digest>.bin`, so the only
+    safe place for the constraint is the path declaration: FastAPI rejects a
+    non-matching path before the handler runs, and no later edit inside the
+    handler can route around it. Asserting on the published schema rather than
+    on a string literal is what keeps this true if the annotation moves.
+    """
+    from local_operator.server.app import app
+
+    schema = app.openapi()
+    path = "/v1/desktop/sessions/{session_id}/attachments/{digest}"
+    digest = next(
+        parameter
+        for parameter in schema["paths"][path]["get"]["parameters"]
+        if parameter["name"] == "digest"
+    )
+    assert digest["schema"]["pattern"] == r"^[a-f0-9]{32}$"
+    # And the response is raw bytes rather than the CRUD envelope: a JSON
+    # envelope has nowhere to put an image.
+    assert "application/json" not in schema["paths"][path]["get"]["responses"]["200"].get(
+        "content", {}
+    )
+
+
+@pytest.mark.asyncio
+async def test_attachment_route_sets_no_cache_control_of_its_own(tmp_path):
+    """Caching belongs to the boundary, and this asserts the layer that owns it.
+
+    An earlier draft set `public, max-age=31536000, immutable` on this route.
+    That header never reached the wire, because `managed_desktop_boundary`
+    overwrites `Cache-Control` for everything under `/v1/desktop/` -- which is
+    exactly why an assertion made THROUGH the middleware cannot pin this down:
+    the effective value is `no-store` on the fixed tree AND on a tree where the
+    route re-adds `immutable`, so such a test passes on both and detects
+    nothing. The regression is a claim the route makes about caching, so the
+    assertion has to read the route's OWN response before anything rewrites it.
+
+    Calling the endpoint function directly is what makes that possible. The
+    wire-level companion below keeps the effective header covered too; neither
+    assertion substitutes for the other.
+    """
+    from local_operator.server.routes.desktop_sessions import attachment
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    raw = b"\x89PNG\r\n\x1a\nuncached"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+
+    state = SimpleNamespace(
+        desktop_sessions=DesktopSessions(tmp_path),
+        config_manager=SimpleNamespace(config_dir=tmp_path),
+    )
+    request = cast(Any, SimpleNamespace(app=SimpleNamespace(state=state)))
+    response = await attachment("0123456789ab", ref.digest, request)
+
+    assert response.body == raw
+    assert "cache-control" not in response.headers
+    # And the header the route DOES own is on that same pre-middleware response.
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_attachment_bytes_are_not_cached_by_any_shared_cache(tmp_path, monkeypatch):
+    """The digest is content-addressed, and the response is still `no-store`.
+
+    An `immutable` header would be correct about the BYTES and wrong about the
+    RESPONSE: `managed_desktop_boundary` marks everything under `/v1/desktop/`
+    no-store because it is bearer-gated session data. This is the WIRE half --
+    it proves the boundary is in force for this path, which is what makes the
+    route's silence above the correct behaviour rather than an omission.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    raw = b"\x89PNG\r\n\x1a\nbytes"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}",
+            headers={"Authorization": "Bearer token"},
+        )
+    assert response.status_code == 200
+    assert response.content == raw
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_stored_mime_is_allowlisted_before_it_becomes_a_header(tmp_path):
+    """A sidecar cannot choose this response's `Content-Type`.
+
+    The store records the mime its CALLER supplied and never verifies the
+    sidecar: `transcript._externalize_attachments` copies `block["mime_type"]`
+    verbatim with no allowlist of its own. No ingress puts a non-image mime in
+    the store today, but that is a property of callers upstream, and this
+    boundary is what pays if one changes -- so it is asserted HERE rather than
+    assumed there.
+
+    Three cases, each a real failure rather than a hypothetical:
+
+    - `text/html` and `image/svg+xml` round-trip out of the store and, unfixed,
+      are served as active content from an authenticated local port. `svg+xml`
+      is in `routes/static.py`'s broader list and deliberately NOT in this one.
+    - A CRLF-bearing mime is not merely wrong, it is unserveable: h11 rejects
+      the header and the client gets no response at all, which contradicts this
+      route's documented "404, never 500".
+
+    Every one must degrade to opaque bytes while the BODY still arrives intact
+    -- the fix is a refusal to label, not a refusal to serve.
+    """
+    from local_operator.server.routes.desktop_sessions import (
+        ATTACHMENT_FALLBACK_MIME,
+        attachment,
+    )
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    state = SimpleNamespace(
+        desktop_sessions=DesktopSessions(tmp_path),
+        config_manager=SimpleNamespace(config_dir=tmp_path),
+    )
+    request = cast(Any, SimpleNamespace(app=SimpleNamespace(state=state)))
+
+    hostile = {
+        "text/html": b"<script>alert(document.domain)</script>",
+        "image/svg+xml": b"<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>",
+        "image/png\r\nX-Injected: yes": b"\x89PNG\r\n\x1a\ncrlf",
+        "application/x-msdownload": b"MZ\x90\x00executable",
+    }
+    for mime, raw in hostile.items():
+        ref = store.put(base64.b64encode(raw).decode("ascii"), mime)
+        assert ref is not None
+        # The store really did keep the hostile value -- otherwise this test
+        # would be asserting against an input that never reaches the boundary.
+        assert store.get(ref.digest) == (base64.b64encode(raw).decode("ascii"), mime)
+        response = await attachment("0123456789ab", ref.digest, request)
+        assert response.media_type == ATTACHMENT_FALLBACK_MIME, mime
+        assert "\r" not in response.headers["content-type"], mime
+        assert "html" not in response.headers["content-type"], mime
+        # Refusing the label must not corrupt the bytes.
+        assert response.body == raw, mime
+
+    # And the allowlisted types still pass through untouched, or the fix would
+    # be a blanket downgrade that breaks every real screenshot.
+    for mime in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+        raw = b"\x89PNG\r\n\x1a\n" + mime.encode("ascii")
+        ref = store.put(base64.b64encode(raw).decode("ascii"), mime)
+        assert ref is not None
+        response = await attachment("0123456789ab", ref.digest, request)
+        assert response.media_type == mime
+        assert response.body == raw

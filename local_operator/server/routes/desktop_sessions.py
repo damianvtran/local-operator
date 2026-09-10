@@ -10,8 +10,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -22,6 +22,7 @@ from pydantic import (
 )
 from starlette.background import BackgroundTask
 
+from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
@@ -51,6 +52,29 @@ router = APIRouter(tags=["Desktop sessions"], dependencies=[Depends(require_desk
 RequestID = Annotated[
     str, Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
 ]
+#: The attachment store names files ``<digest>.bin``, so the digest reaches a
+#: filesystem path directly. Constraining the shape HERE rather than in the
+#: handler is what makes traversal unreachable by construction: FastAPI rejects
+#: a non-matching path before the handler runs, and a later edit inside the
+#: handler cannot route around a declaration. 32 hex characters is
+#: ``attachments._DIGEST_CHARS``.
+AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
+#: What a stored attachment may claim to be on the wire. The store records the
+#: mime its CALLER supplied — ``transcript._externalize_attachments`` copies
+#: ``block["mime_type"]`` verbatim with no allowlist — and the sidecar carrying
+#: it is not digest-verified, so neither the value's shape nor its meaning is
+#: guaranteed at this boundary. Two failures follow from trusting it, and both
+#: were measured on this route: a mime containing CRLF makes h11 reject the
+#: header and the client gets NO response at all, contradicting the docstring's
+#: "404, never 500"; and ``text/html``/``image/svg+xml`` round-trip out of here
+#: as active content served from an authenticated local port. Today no live
+#: ingress stores a non-image mime, but that is a property of callers upstream
+#: that nothing HERE enforces, and this is the boundary that pays for it
+#: changing. ``routes/static.py`` already establishes the allowlist convention
+#: for image bytes over HTTP; the narrower ``media`` set is used because it is
+#: exactly what the ingress can produce (``sniff_image`` returns these four)
+#: and it excludes ``image/svg+xml``, which is script-bearing.
+ATTACHMENT_FALLBACK_MIME = "application/octet-stream"
 
 
 class Input(BaseModel):
@@ -250,6 +274,89 @@ async def history(
 ):
     async with errors(), host(request).session(session_id) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/attachments/{digest}",
+    # The image's own mime type is the response type, so the published contract
+    # must not claim the CRUD JSON envelope its neighbours return. Declaring the
+    # class is what keeps the schema honest; without it FastAPI documents
+    # `application/json` for a route that never sends any.
+    response_class=Response,
+)
+async def attachment(session_id: str, digest: AttachmentDigest, request: Request):
+    """Raw bytes of one content-addressed attachment referenced by a history row.
+
+    ``/history`` serves durable rows verbatim, and a durable image block is
+    ``{"attachment": <digest>, "mime_type": ...}`` with the payload stripped
+    (``transcript._externalize_attachments``). Without this route a frontend can
+    see that an image was in the conversation and can never render it after a
+    reload — the live event stream carries the base64, the durable transcript
+    does not.
+
+    Three deliberate choices:
+
+    - **Keyed by digest, not by (entry, index).** The history row hands the
+      caller the digest directly, so nothing has to re-fold history per image,
+      and identical screenshots across a whole conversation collapse to one
+      request and one cache entry.
+    - **The digest pattern is the traversal gate.** ``_DIGEST_CHARS`` is 32 hex
+      characters and the store turns a digest straight into a filename, so the
+      shape is validated in the path declaration rather than inside the handler
+      where a later edit could route around it. FastAPI answers a non-matching
+      path with 422 before any disk access.
+    - **No HTTP caching, deliberately.** The digest IS the sha256 of the
+      content, so an ``immutable`` response would be correct about the BYTES —
+      and it is still the wrong header here. ``managed_desktop_boundary``
+      applies ``Cache-Control: no-store`` to everything under ``/v1/desktop/``
+      because these responses are bearer-gated session data, and a route that
+      set ``public, max-age=31536000`` would either be silently overridden (it
+      was: measured ``no-store`` on the wire) or, if the middleware were
+      carved out for it, would invite a shared cache to retain one user's
+      screenshots. The mobile daemon's equivalent route can afford
+      ``immutable`` because it is a different process behind different auth;
+      copying the header without the surrounding argument would not be reuse.
+      Dedup belongs to the client, which already holds a digest-keyed cache
+      for exactly this reason — and the digest being content-addressed is what
+      makes that cache safe.
+
+    A missing attachment is 404, never 500: the store's contract is that an
+    unresolvable reference is ordinary (interrupted write, hand-pruned store)
+    and the reader degrades to a placeholder. A corrupt-but-parseable sidecar
+    is the same class of ordinary, which is why the mime is allowlisted rather
+    than trusted (see :data:`ATTACHMENT_FALLBACK_MIME`).
+
+    Two scopes this route does NOT have, stated because the URL shape implies
+    otherwise:
+
+    - ``session_id`` is an EXISTENCE check, not a binding. It proves *a* user
+      conversation by that name is on this machine; it does not prove this
+      attachment belongs to it. The store is content-addressed and shared
+      across conversations by design, so any valid user session id resolves
+      any digest in it. That is not an escalation — the bearer already
+      authorises the whole desktop surface, ``/history`` included — but a
+      future reader must not mistake the path segment for authorization.
+    - The served ``Content-Type`` is not guaranteed to equal the ``mime_type``
+      on the history row. The store dedups by content digest and the FIRST
+      sidecar wins, so identical bytes stored once as ``image/png`` and later
+      as ``image/gif`` keep the original sidecar while the newer row reports
+      ``image/gif``. Harmless for real images (the bytes decide what renders),
+      but the two values are not a matched pair.
+    """
+    async with errors():
+        data, mime_type = await host(request).attachment(session_id, digest)
+    return Response(
+        content=data,
+        media_type=(
+            mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
+        ),
+        # Defence in depth on the one response here that can carry a type the
+        # caller did not choose: with the allowlist above, an unexpected mime
+        # is served as opaque bytes, and nosniff stops a browser from
+        # re-deciding that for itself. `tunnels/gateway.py` sets the same
+        # header on this repo's other byte-serving surface.
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post(
