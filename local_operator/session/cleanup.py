@@ -550,11 +550,34 @@ def _picker_rows(config_dir: Path) -> list[str]:
     recent guard; the whole list is the unit ``max_sessions`` counts in. A
     picker that cannot be listed is a guard that cannot be evaluated:
     :class:`GuardUnavailable`, never an empty list.
+
+    ``revalidate=True`` IS THE GUARD, NOT AN OPTIMISATION KNOB. The scan
+    normally serves an armed fast path that can report a session as hidden for
+    up to ``REVALIDATE_EVERY`` polls after its marker was removed — cheap and
+    correct for a sidebar that re-polls every 2 seconds and self-heals. But
+    the recent-N guard IS this listing, so a session missing from it is not
+    merely invisible here: it is UNPROTECTED, and this module deletes. Agent
+    review round 1 (R2) reproduced it in production order — the TUI's first
+    poll arms the path, the operator deletes ``origin.json`` by hand (the
+    supported un-hide gesture), and startup maintenance 0.75 s later chose
+    that session for removal while a fresh scan protected it as "one of the
+    10 most recent". Deletion is irreversible; a stale display is not.
+
+    The cost is deliberate and measured: this scan is 4,101 syscalls against
+    an armed scan's 151 on a 4,000-directory store, paid ONCE per cleanup run
+    — startup maintenance and periodic sweeps — rather than every 2 seconds,
+    which is the poll this optimisation exists to make cheap. The sidebar's
+    own steady-state poll is unchanged at 266 and still flat across a 40x
+    store. It also makes the guard independent of whichever poll happened to
+    precede it, which is the property that makes this decidable at all, and it
+    does not starve the sidebar's repair: a forced revalidation rewrites the
+    verdict cache, so a hand-un-hidden session becomes visible at that scan
+    rather than later.
     """
     try:
         from local_operator.resume import recent_sessions
 
-        return [name for name, _stamp in recent_sessions(config_dir, limit=None)]
+        return [name for name, _stamp in recent_sessions(config_dir, limit=None, revalidate=True)]
     except Exception as exc:  # noqa: BLE001 — re-raised as the typed refusal
         raise GuardUnavailable(f"recent-session picker: {type(exc).__name__}: {exc}") from exc
 

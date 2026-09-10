@@ -507,14 +507,18 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     """
     from dataclasses import replace
 
-    from local_operator.resume import _recent_sessions_with_origin
+    from local_operator.resume import _scan_sessions
     from local_operator.session.attention import AttentionStore, conversation_identity
     from local_operator.session.retention import (
         DESKTOP_MARKER_NAME,
         TRANSCRIPT_FILENAME,
     )
 
-    candidates = _recent_sessions_with_origin(directory)
+    # The scan's second return value is every directory it established is not
+    # the user's own session. Taken here rather than recomputed because it is
+    # what removes this function's own O(store) stat; see the desktop-probe loop
+    # below for why a hidden directory cannot carry a desktop marker.
+    candidates, hidden = _scan_sessions(directory)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
@@ -548,6 +552,18 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
         with entries:
             for entry in entries:
                 if entry.name in source:
+                    continue
+                # A directory the scan established is a subagent/hidden session
+                # cannot carry a desktop marker, so the stat below asks a
+                # question whose answer is already known. ``desktop.json`` has
+                # exactly ONE writer — ``DesktopSessions.create`` in
+                # ``server/utils/desktop_sessions.py`` — which mints a fresh
+                # ``uuid4`` directory and never writes an origin marker into it;
+                # nothing anywhere adds a desktop marker to a directory that
+                # already exists. Skipping these is HALF the saving of the
+                # inode-qualified scan, because the hidden population is ~91% of
+                # the store and every one of them landed here.
+                if entry.name in hidden:
                     continue
                 try:
                     # No ``is_dir()`` guard: a successful stat of a file INSIDE
