@@ -3732,11 +3732,20 @@ class OperatorApp(App[None]):
         typed, source.compaction.held_typed = source.compaction.held_typed, ""
         images, source.compaction.held_images = source.compaction.held_images, {}
         blocks, source.compaction.held_blocks = source.compaction.held_blocks, None
+        notice, source.compaction.held_notice = source.compaction.held_notice, None
         accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
         message_id, source.compaction.accepted_message_id = (
             source.compaction.accepted_message_id,
             "",
         )
+        # BEFORE the turn paints, so the queue's own row is gone by the time
+        # the prompt's echo appears under it — the notice narrates the hold,
+        # and the hold ends here (design round 3, D15). Same current-view
+        # guard as `_withdraw_user_echo_for`: a background source's notice
+        # lives in a view this app can no longer reach, and its teardown is
+        # the view's own business.
+        if notice is not None and self._is_current(source):
+            self._transcript_view().remove_block(notice)
         if held or images:
             # HANDED TO THE TURN, so the rows this prompt painted at submit are
             # withdrawable by the worker that dispatches it. Set BEFORE
@@ -3881,14 +3890,18 @@ class OperatorApp(App[None]):
         SILENT ON THE COMMON CASE, deliberately. The composer already bounds
         every paste to ``IMAGE_INGEST_MAX_EDGE`` (1024px), so an ordinary
         message meets the refit's first rung — a re-encode at unchanged
-        dimensions — and every pixel survives. Measured on composer-bounded
-        continuous-tone captures, **one and two** attachments are a codec swap
-        and nothing else; at three the ladder already gives up pixels. (An
-        earlier version of this note claimed one to six, which overstated the
-        rung's reach — design round 2 measured it, and it is what makes the row
-        below reachable often enough to be worth one line rather than five.) A
-        row on every paste would be pure noise on a routine gesture (design
-        round 1, D2).
+        dimensions — and every pixel survives. How far past that the silence
+        holds depends on CONTENT and SHAPE, not on a count: measured on
+        composer-bounded continuous-tone captures, a 16:9 retina screenshot
+        stays a codec swap through five attachments, a 4:3 capture through
+        four and a square through three, so the common one-or-two-image paste
+        is silent and the row below is reachable from six mixed screenshots
+        on. Silence is a predicate on ``downscaled``, never on a count, so
+        this cannot mislead — but a count in this note would. (Earlier
+        versions claimed "one to six", then "one and two"; both were
+        square-fixture artifacts — design round 2 and round 3, D16.) A row on
+        every paste would be pure noise on a routine gesture (design round 1,
+        D2).
 
         THE DOWNSCALE RUNG IS DIFFERENT IN KIND. Once the ladder gives up
         pixels the loss is not subtle — measured at ~40% edge energy at 768px,
@@ -3915,23 +3928,53 @@ class OperatorApp(App[None]):
         meaningless on screen, so a user scanning for "what happened to #1"
         read six clauses before finding it (design round 2, D9).
 
-        THE GLYPH BINDS TO THE COUNT, not to a trailing clause. Appended once
-        after the last clause it read as the mark on that image and said
-        nothing about the others, while the chips in the composer already carry
-        their own ``↓`` from the ingest bound — so two different shrinks shared
-        one glyph and neither was adjacent to what it qualified (design round
-        2, D10). Here it sits on ``N images``, which is exactly what it is
-        claiming: these lost pixels.
+        NO GLYPH ON THIS ROW AT ALL (design round 3, D14; round 2's D10 had
+        bound it to the count). The chips carry their own ``↓`` for the INGEST
+        bound, and this row's ``↓`` named the TRANSPORT refit — two different
+        shrinks sharing one glyph, and on a partial refit they collided a row
+        apart: five chips marked ``↓`` by ingest while the caption read
+        ``2 images ↓ resized`` about the two the transport touched, with
+        nothing on screen to say which count was which. ``resized to fit``
+        does the work the glyph was doing, and the mark stays where it is
+        unambiguous — on the chips, next to the size it qualifies.
 
-        COUNTS RATHER THAN MARKERS, which is what makes the row a fixed cost.
-        Naming the chips reads better at eight attachments and grows without
-        bound past it — measured, a marker list is 3 rows at 100 cols and 4 at
-        60 by 28 attachments, which is the same defect one step smaller. The
-        number of distinct delivered sizes is bounded by the ladder's rungs
-        (``IMAGE_WIRE_REFIT_EDGES``), so the count form is one row at 100 cols
-        and two at 60 for ANY number of attachments. The chips themselves are
-        on screen directly above this row, so "which of mine" is answerable by
-        looking; "how much did I lose" is not, and that is what this says.
+        COUNTS RATHER THAN MARKERS, which is what makes the row a bounded
+        cost. Naming the chips reads better at eight attachments and grows
+        without bound past it — measured, a marker list is 3 rows at 100 cols
+        and 4 at 60 by 28 attachments, which is the same defect one step
+        smaller.
+
+        THE BOUND IS RUNGS x ASPECT RATIOS, not rungs alone, and an earlier
+        version of this note claimed the latter. A rung caps the LONG edge and
+        the refit preserves aspect ratio, so grouping on the exact delivered
+        ``WxH`` splits once per distinct SHAPE in the paste — and an
+        operator's paste is 16:9 windows, 9:19.5 phone shots, square crops
+        and 3:2 captures at once. The test that pinned the false claim built
+        every fixture as a square, so ``(w, h)`` collapsed onto the rung count
+        by construction and passed vacuously (review round 3, MAJOR-5).
+
+        Measured through the real fitter over a five-aspect composer-bounded
+        paste, n=10 to 30: **4-9 clauses, 97-168 characters, 1-2 rows at 100
+        cols and 2-3 at 60**. The count does not trend upward with n — it
+        moves within that envelope (8 clauses at 24, 7 at 28, 8 at 30) because
+        which rung each shape lands on depends on the per-image budget, not on
+        how many attachments there are. The round-3 reviewer's twelve-aspect
+        mix measured the same class: 9 clauses, 165 characters, 2 rows at 100
+        and 4 at 60. Against the marker list's 28 clauses at n=28, that is the
+        difference between a bounded note and one that eats the scrollback.
+
+        THE COMMON PASTE IS NARROWER STILL: a run of same-shape screenshots
+        reaches one clause per rung, so 1 row at 100 cols and 2 at 60 at any
+        count — QA round 3 measured it holding to 300 attachments. That is
+        because a composer-bounded paste can never be downscaled TO the 1024
+        rung (the ingest bound already applied), leaving only the three below
+        it in ``IMAGE_WIRE_REFIT_EDGES``. The dependency is named here rather
+        than left implicit: raise ``IMAGE_INGEST_MAX_EDGE`` and the reachable
+        rung count rises with it (QA round 3, Q2).
+
+        The chips themselves are on screen directly above this row, so "which
+        of mine" is answerable by looking; "how much did I lose" is not, and
+        that is what this says.
 
         At ``note`` weight, not ``warning``: nothing is wrong and nothing needs
         acting on — the message was delivered — but it answers something the
@@ -3941,7 +3984,6 @@ class OperatorApp(App[None]):
         # Function-local for the reason the other `attach_client` references in
         # this file give: the startup path must not import the transport.
         from local_operator.mobile.attach_client import taken_refit_report
-        from local_operator.tui.widgets.editor import RESIZED_MARK
 
         # CONSUMED whatever the outcome, so a report never outlives its send:
         # reading it without taking it would let the next, untouched message
@@ -3956,12 +3998,17 @@ class OperatorApp(App[None]):
         grouped: dict[tuple[int, int], int] = {}
         for entry in sorted(lost, key=lambda item: item.marker):
             grouped[(entry.width, entry.height)] = grouped.get((entry.width, entry.height), 0) + 1
-        clauses = [f"{count} to {width}x{height}" for (width, height), count in grouped.items()]
+        # "down" on the FIRST clause only, carrying the verb the count needs
+        # now that the glyph is gone (design round 3, D14); the ellipsis on
+        # the rest is how English reads a list of parallel clauses.
+        clauses = [
+            f"{count} {'down ' if not index else ''}to {width}x{height}"
+            for index, ((width, height), count) in enumerate(grouped.items())
+        ]
         plural = "s" if len(lost) != 1 else ""
         self._notice_for(
             source,
-            f"{len(lost)} image{plural}{RESIZED_MARK} resized to fit this message: "
-            + ", ".join(clauses),
+            f"{len(lost)} image{plural} resized to fit this message: " + ", ".join(clauses),
             "note",
         )
 
@@ -8453,8 +8500,11 @@ class OperatorApp(App[None]):
         # DROPPED, never dispatched: this is the hand-back, and `clear_blocks()`
         # below removes the very rows the tuple points at. Carrying it past here
         # would leave a later refusal holding widgets that are no longer mounted
-        # (review round 2, MAJOR-3).
+        # (review round 2, MAJOR-3). The held notice is dropped for the same
+        # reason — reference only, no removal: `clear_blocks()` takes the row
+        # with the whole view (design round 3, D15).
         self._interaction.compaction.held_blocks = None
+        self._interaction.compaction.held_notice = None
         if held:
             # The TYPED line goes back, not the payload: handing a user the
             # expanded body of a `$skill` they invoked would make them delete a
@@ -18023,7 +18073,14 @@ class OperatorApp(App[None]):
             # so re-reading it here saw an empty map and queued the prompt
             # without its screenshot (review round 19).
             self._images_held_for_compaction = dict(attachments or {})
-            self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
+            # The queued NOTICE travels with the hold for the same reason the
+            # blocks do: its message ("sends when compaction finishes") is only
+            # true while the hold has the prompt, so the dispatch that ends the
+            # hold also ends the notice — see `CompactionInteraction.held_notice`
+            # (design round 3, D15).
+            queued_notice = NoticeBlock("queued — sends when compaction finishes", "note")
+            self._append_block(queued_notice)
+            self._interaction.compaction.held_notice = queued_notice
             self._maybe_name_conversation(named)
             return
         # HELD ACROSS THE DISPATCH so a refusal can take the echo back down.

@@ -34,12 +34,14 @@ from local_operator.harness.types import ImageContent, ModelSpec, ToolResult, Us
 from local_operator.media import sniff_image
 from local_operator.mobile.attach_client import (
     _FRAME_ENCODING_SLACK_BYTES,
+    _MIN_VIABLE_IMAGE_BUDGET_BYTES,
     _READ_LIMIT_BYTES,
     AttachClient,
     OversizedRequest,
     _frame_overhead_bytes,
     _megabytes,
     _RefitReport,
+    _text_is_the_bulk_refusal,
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -2376,6 +2378,71 @@ async def test_a_large_pasted_image_is_refitted_and_actually_arrives(
 
 
 @pytest.mark.asyncio
+async def test_the_refit_log_names_the_payload_and_the_frame_as_what_they_are(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """QA round 3, Q1: the one fix in the round-2 delta that had no test.
+
+    The refit log line carries TWO quantities, and round 2 fixed the second
+    one reporting the first: the clause reading ``to N bytes of image payload``
+    said ``refitted_size`` — the WHOLE frame, the user's text included — which
+    understated-by-conflation was harmless beside a fixed 64 KiB reserve and
+    became a 3.25x-16.75x overstatement of the attachments once up to 1 MiB of
+    text sat inside the number. Every other fix in that delta gained a test
+    that goes red when reverted; this one did not, so the conflation could
+    silently return. This pins the logged payload figure against the bytes
+    the owner actually received — exact, not approximate, because both sides
+    of the comparison are measured on the same send.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    # Substantial text is the regime the old conflation overstated: the frame
+    # figure must dwarf the payload figure, or the assertion below could pass
+    # with the two quantities swapped back together.
+    text = "context: " + ("the model must read this. " * 12_000)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1400, 1400)
+        assert _line_bytes({"op": "prompt", "text": text, "images": [image]}) > _MAX_LINE_BYTES
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.mobile.attach_client"):
+            assert await client.prompt(text, images=[image]) == "prompt ok"
+        assert client.connected, "the send severed the connection"
+    finally:
+        client.close()
+        registrant.close()
+
+    refit = [record for record in caplog.records if "bytes of image payload" in record.getMessage()]
+    assert len(refit) == 1, f"expected one refit line, got {len(refit)}"
+    logged = refit[0].getMessage()
+    match = re.search(
+        r"resized \d+ image\(s\) to (\d+) bytes of image payload and the frame "
+        r"is now (\d+) bytes",
+        logged,
+    )
+    assert match is not None, f"the refit line does not carry both figures: {logged!r}"
+    logged_payload, logged_frame = (int(match.group(1)), int(match.group(2)))
+
+    _prompt_text, delivered = handle.received[-1]
+    assert len(delivered) == 1, "the attachment was dropped instead of resized"
+    payload = getattr(delivered[0], "data", None) or delivered[0].get("data_b64")
+    assert isinstance(payload, str) and payload, "no image payload reached the owner"
+    assert logged_payload == len(payload), (
+        f"the log's image-payload figure is {logged_payload:,} bytes but what "
+        f"arrived is {len(payload):,} — the line is reporting the frame again"
+    )
+    assert logged_frame > logged_payload, (
+        "the frame and payload figures agree, so the two quantities the line "
+        "exists to distinguish have collapsed back into one"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["prompt", "steer", "slash"])
 async def test_every_image_bearing_op_is_guarded_not_just_prompt(
     tmp_path: Path, monkeypatch, op: str
@@ -2505,6 +2572,79 @@ async def test_an_unsendable_message_is_refused_by_name_not_silently_lost(
 
         # Nothing was delivered, and the session still works.
         assert handle.received == []
+        assert await client.prompt("a normal message") == "prompt ok"
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_attachment_keeps_its_own_sentence_when_the_text_is_the_bulk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review round 3, NIT-1: two failures, two remedies, and the rewrite must
+    not collapse them.
+
+    When the text has eaten the frame's budget, :func:`fit_request_frame`
+    re-blames a SIZE failure on the text — the copy call review round 2
+    (MAJOR-4) argued for, because a per-image share rounding to ``0.0 MB``
+    points at a screenshot when only shortening the prompt can help.
+
+    That rewrite used to catch the UNREADABLE refusal too, since it is also an
+    ``OversizedRequest``. So a corrupt attachment on a text-heavy frame told
+    the user to "shorten the text or send the images on their own" — advice
+    that cannot work, because those bytes are not an image at any size and no
+    amount of shortening makes them one. The remedy there is always "remove
+    it", whatever the budget looks like, which is why the refusal got its own
+    class (``UnreadableImageRequest``) rather than a message check.
+
+    The sibling test above covers the same junk payload with a ROOMY budget;
+    this one is the text-dominated budget, the only regime where the rewrite
+    runs. Both must produce the same sentence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # THE FIXTURE MUST REACH THE REWRITE, or this asserts nothing: the
+        # text has to leave less than `_MIN_VIABLE_IMAGE_BUDGET_BYTES` for the
+        # images, which is the only condition under which the text-blaming
+        # sentence is selected at all.
+        text = "x" * 1_015_000
+        junk = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(b"\x00" * 40_000).decode("ascii"),
+        }
+        probe = {"op": "prompt", "req": 1, "text": text, "images": [junk]}
+        assert (
+            len(json.dumps(probe).encode()) + 1 > _READ_LIMIT_BYTES
+        ), "the fixture no longer crosses the line limit, so the refit never runs"
+        overhead = _frame_overhead_bytes(probe)
+        budget = _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES
+        assert 0 < budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES, (
+            f"the fixture leaves {budget} bytes for its images; the rewrite "
+            "under test only runs below the text-is-the-bulk gate"
+        )
+
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt(text, images=[junk])
+        sentence = str(refusal.value)
+        assert "not a readable image" in sentence, (
+            f"the unreadable attachment was re-blamed on the text, sending the "
+            f"user off shortening a prompt that was never the problem: {sentence}"
+        )
+        assert "image 1" in sentence, f"the refusal does not name the chip: {sentence}"
+        assert "text alone fills" not in sentence, f"the text rewrite replaced it: {sentence}"
+        assert client.connected, "reporting the refusal killed the connection"
+        assert handle.received == []
+
+        # And the session still works afterwards.
         assert await client.prompt("a normal message") == "prompt ok"
     finally:
         client.close()
@@ -2901,8 +3041,8 @@ def _refit_report(entries: tuple[_RefitReport, ...]):
         _REFIT_REPORT.reset(token)
 
 
-def test_the_refit_caption_is_one_row_whatever_the_attachment_count() -> None:
-    """The caption's cost must not grow with the number of images.
+def test_the_refit_caption_saturates_on_a_mixed_aspect_paste() -> None:
+    """The caption's cost is bounded by SHAPES, not by the attachment count.
 
     ``_report_wire_refit_for`` used to join one ``#N WxH -> WxH`` clause per
     downscaled image, in ``_refit_images``' internal smallest-first walk. The
@@ -2913,12 +3053,27 @@ def test_the_refit_caption_is_one_row_whatever_the_attachment_count() -> None:
     see, with six of eight clauses the identical string (design round 2, D9;
     QA round 2, Q5).
 
-    Grouping by delivered size bounds the row by the ladder's RUNGS rather than
-    by the attachment count, so this asserts the property rather than a
-    specific sentence: the clause count can never exceed the number of edges
-    the refit can produce, whatever the user pastes.
+    The honest bound is RUNGS x ASPECT RATIOS, not rungs alone. A rung caps
+    the LONG edge and the refit preserves aspect ratio, so grouping on the
+    exact delivered ``WxH`` splits once per distinct shape in the paste — and
+    this test's earlier version built every fixture as a SQUARE, which
+    collapsed ``(w, h)`` onto the rung count by construction and passed
+    vacuously against a docstring promising "one row at 100 cols for ANY
+    number of attachments" (review round 3, MAJOR-5). Re-fixtured with the
+    aspect mix an operator actually pastes, that claim failed at every count
+    above two.
+
+    What this asserts is the property that survives, and it is the one that
+    distinguishes the count form from the per-image enumeration D9 killed:
+    given a fixed set of delivered SHAPES, the clause count does not grow
+    with the attachment count. The fixture cycles ten real delivered sizes,
+    so at 300 attachments the row is the same length as at 10 — where the
+    enumeration form would have 300 clauses. Through the real fitter the
+    clause count moves within a measured envelope rather than holding exactly
+    (4-9 clauses over n=10..30 on a five-aspect paste, because which rung a
+    shape lands on tracks the per-image budget); ``_report_wire_refit_for``'s
+    docstring carries those figures and the row budget they imply.
     """
-    from local_operator.imaging import IMAGE_WIRE_REFIT_EDGES
     from local_operator.tui.app import OperatorApp
 
     def caption(entries: list[Any]) -> str:
@@ -2930,57 +3085,130 @@ def test_the_refit_caption_is_one_row_whatever_the_attachment_count() -> None:
             OperatorApp._report_wire_refit_for(app, source)
         return captured[0] if captured else ""
 
-    for count in (1, 2, 8, 20, 60):
-        # Two rungs, interleaved by marker, so the grouping cannot pass by
-        # accident on a single-size fixture.
-        entries = [
-            _RefitReport(
-                marker=index + 1,
-                width=384 if index % 3 else 512,
-                height=384 if index % 3 else 512,
-                source_width=1400,
-                source_height=1400,
-            )
-            for index in range(count)
-        ]
+    # Delivered sizes the ladder really produces for composer-bounded source
+    # shapes — 16:9 window captures, 9:19.5 phone shots, squares, 3:2 and 4:3
+    # photos. NINE of them, because that is the most the real fitter produced
+    # over a five-aspect paste swept from n=10 to 30 (measured: 4-9 clauses,
+    # 97-168 characters). A fixture wider than reality would make the row
+    # budget below a guess rather than a measurement.
+    mixed_delivered = (
+        (768, 432),
+        (512, 288),
+        (354, 768),
+        (236, 512),
+        (768, 768),
+        (512, 512),
+        (768, 512),
+        (512, 342),
+        (512, 384),
+    )
+
+    def entry(index: int, size: tuple[int, int]) -> _RefitReport:
+        width, height = size
+        # The composer-bounded source that produced this delivered size: the
+        # same aspect at the 1024px ingest edge, so every entry really lost
+        # pixels (a paste is bounded BEFORE the transport refit sees it).
+        if width >= height:
+            source_width, source_height = 1024, round(height * 1024 / width)
+        else:
+            source_width, source_height = round(width * 1024 / height), 1024
+        return _RefitReport(
+            marker=index + 1,
+            width=width,
+            height=height,
+            source_width=source_width,
+            source_height=source_height,
+        )
+
+    # SATURATION: past the point where every shape in the mix has appeared,
+    # adding attachments — a hundred, three hundred — adds no clause and keeps
+    # the row inside the measured budget.
+    for count in (10, 24, 60, 300):
+        entries = [entry(i, mixed_delivered[i % len(mixed_delivered)]) for i in range(count)]
         row = caption(entries)
         assert row.startswith(
             f"{count} image"
         ), f"the caption does not lead with the count it is claiming: {row!r}"
         clauses = row.split(": ", 1)[1].split(", ")
-        assert len(clauses) <= len(IMAGE_WIRE_REFIT_EDGES), (
-            f"{count} attachments produced {len(clauses)} clauses; the caption "
-            f"grows with the attachment count again: {row!r}"
+        assert len(clauses) == len(mixed_delivered), (
+            f"{count} attachments produced {len(clauses)} clauses where the mix "
+            f"has {len(mixed_delivered)} shapes — the caption is grouping by "
+            f"something other than the delivered size, or growing again: {row!r}"
         )
-        assert len(row) < 100, (
-            f"the caption is {len(row)} characters at {count} attachments, which "
-            f"wraps past one row at 100 columns: {row!r}"
+        # THE CLAIM GUARD, in the idiom `test_ten_jobs_at_the_cap_overflow_the_
+        # line_limit_without_the_fix` sets: assert the shape that DISPROVES the
+        # old docstring, so "bounded by the ladder's rungs" can never silently
+        # return. A composer-bounded paste reaches three rungs (768/512/384 —
+        # never the 1024 one, because the ingest bound already applied), and
+        # this paste produces nine clauses from them (review round 3, MAJOR-5).
+        from local_operator.imaging import IMAGE_WIRE_REFIT_EDGES
+
+        reachable_rungs = sum(
+            1 for edge in IMAGE_WIRE_REFIT_EDGES if edge is not None and edge < 1024
+        )
+        assert len(clauses) > reachable_rungs, (
+            f"{len(clauses)} clauses from {reachable_rungs} reachable rungs no "
+            "longer exceeds the rung count, so this fixture has stopped being "
+            "the mixed-aspect paste it exists to be"
+        )
+        # A CHARACTER-COUNT PROXY for the rendered row count, not the row count
+        # itself: the notice's own glyph and spine indent cost a couple of
+        # columns this does not model, and the authority on real geometry is
+        # the rendered frames in the design and QA rounds. The budget is the
+        # measured envelope — the real fitter over a five-aspect paste swept
+        # n=10..30 topped out at 9 clauses and 168 characters, 2 rows at 100
+        # cols and 3 at 60, and this fixture reproduces that shape at 167-178
+        # characters — so the headroom is measurement, not luck.
+        assert len(row) <= 2 * 98, (
+            f"the caption is {len(row)} characters at {count} attachments, past "
+            f"the measured 2-row budget at 100 columns: {row!r}"
+        )
+        assert len(row) <= 4 * 58, (
+            f"the caption is {len(row)} characters at {count} attachments, past "
+            f"the measured 4-row budget at 60 columns: {row!r}"
         )
 
-    # THE GLYPH BINDS TO THE COUNT, not to a trailing clause. Appended once
-    # after the last clause it read as the mark on that image alone, while the
-    # composer chips already carry their own for the ingest bound — two shrinks
-    # sharing one glyph, neither adjacent to what it qualified (design round 2,
-    # D10).
+    # THE COMMON PASTE is a run of same-shape screenshots, and it stays ONE
+    # row at 100 cols at any count — the single-shape collapse QA measured to
+    # 300 attachments, which the mixed fixtures above must not be read as
+    # replacing.
+    for count in (2, 8, 300):
+        entries = [
+            entry(i, (512, 288) if i % 2 else (768, 432))  # one shape, two rungs
+            for i in range(count)
+        ]
+        row = caption(entries)
+        clauses = row.split(": ", 1)[1].split(", ")
+        assert len(clauses) == 2, f"one shape reached {len(clauses)} rungs: {row!r}"
+        assert len(row) < 98, f"a single-shape paste wraps at 100 columns: {row!r}"
+
+    # NO GLYPH ON THIS ROW AT ALL (design round 3, D14 — round 2's D10 had it
+    # bound to the count). The chips carry their own ``↓`` for the INGEST
+    # bound, and a caption ``↓`` for the TRANSPORT refit put two shrink counts
+    # within one glyph of each other on a partial refit.
+    #
+    # Asserted on the BARE arrow, not on ``RESIZED_MARK`` (which is ``" ↓"``,
+    # space included): the finding is that this row shares no glyph with the
+    # chips, so any spelling of the arrow is a regression. Pinning the exact
+    # constant would let a space-less one back in — a canary caught precisely
+    # that, a mutation restoring ``\u2193`` without the leading space sailing
+    # through an assertion written against ``RESIZED_MARK``.
     from local_operator.tui.widgets.editor import RESIZED_MARK
 
     row = caption(
         [
-            _RefitReport(marker=1, width=512, height=512, source_width=1400, source_height=1400),
-            _RefitReport(marker=2, width=384, height=384, source_width=1400, source_height=1400),
+            entry(0, (512, 512)),
+            entry(1, (384, 384)),
         ]
     )
-    assert row.startswith(
-        f"2 images{RESIZED_MARK} "
-    ), f"the resize glyph is not bound to the count it qualifies: {row!r}"
-    assert not row.endswith(RESIZED_MARK), f"the glyph is still trailing the last clause: {row!r}"
+    assert RESIZED_MARK.strip() not in row, f"the resize glyph is back on the caption: {row!r}"
 
     # IN THE USER'S ORDER: groups appear by their lowest chip number, not in
     # the refit's internal smallest-first walk.
     row = caption(
         [
-            _RefitReport(marker=9, width=384, height=384, source_width=1400, source_height=1400),
-            _RefitReport(marker=2, width=512, height=512, source_width=1400, source_height=1400),
+            entry(8, (384, 384)),
+            entry(1, (512, 512)),
         ]
     )
     assert row.index("512x512") < row.index(
@@ -2995,12 +3223,15 @@ def test_the_size_scale_never_prints_a_smaller_number_in_a_bigger_unit() -> None
     boundary mid-KB: ``104,857`` printed ``102 KB`` and ``104,858`` printed
     ``0.1 MB``, so a one-byte step showed a smaller number in a larger unit and
     a user comparing two refusals a minute apart read them backwards (review
-    round 2, NIT-2).
+    round 2, NIT-2). Round 3 added the same guard one scale DOWN: below a full
+    KB the raw byte count prints, because ``1023 B`` reading ``0 KB`` repeats
+    the "did not fit in nothing" defect on the per-image share path the split
+    can genuinely reach (review round 3, NIT-2).
     """
 
     def as_bytes(rendered: str) -> float:
         figure, unit = rendered.split()
-        return float(figure) * (1024 if unit == "KB" else 1024 * 1024)
+        return float(figure) * 1024 ** {"B": 0, "KB": 1, "MB": 2}[unit]
 
     previous = -1.0
     for size in range(0, 3 * 1024 * 1024, 311):
@@ -3011,9 +3242,46 @@ def test_the_size_scale_never_prints_a_smaller_number_in_a_bigger_unit() -> None
         )
         previous = current
 
-    # The boundary is a whole megabyte, so both sides read as the same quantity.
+    # The boundaries are whole units, so both sides of each read as the same
+    # quantity.
+    assert _megabytes(1023) == "1023 B"
+    assert _megabytes(1024) == "1 KB"
     assert _megabytes(1024 * 1024 - 1) == "1024 KB"
     assert _megabytes(1024 * 1024) == "1.0 MB"
+
+
+def test_the_text_bulk_refusal_compares_like_with_like() -> None:
+    """Design round 3, D17: the two figures the sentence compares share a unit.
+
+    "fills 1000 KB of the 1.0 MB limit" asked the user to convert units
+    mid-sentence between exactly the two figures the sentence exists to
+    compare. The text figure now renders in the limit's scale — MB — which is
+    safe ONLY because of where this sentence fires: the budget precondition
+    (under `_MIN_VIABLE_IMAGE_BUDGET_BYTES`, asserted below rather than
+    assumed) puts the overhead within a few KB of the whole limit, so its MB
+    figure can never round below 0.9 and the ``0.0 MB`` class `_megabytes`
+    exists to avoid is unreachable here. The ROOM figure keeps `_megabytes`'
+    own scale because it is genuinely small — KB is the honest unit for a few
+    KB, and "no room" already covers a sub-KB remainder.
+    """
+
+    def figures(overhead: int, budget: int) -> tuple[str, str]:
+        sentence = str(_text_is_the_bulk_refusal(overhead, budget))
+        text_figure = sentence.split(" fills ", 1)[1].split(" of the", 1)[0]
+        limit_figure = sentence.split("the ", 1)[1].split(" limit", 1)[0]
+        return text_figure, limit_figure
+
+    # The reachable band for this sentence, both edges: a budget just under
+    # the gate with the text a hair under the limit, and one past it.
+    for overhead, budget in ((1_000_000, 30_000), (1_011_713, 1_023), (1_100_000, 0)):
+        assert budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES, (
+            f"the fixture ({overhead:,} overhead, {budget:,} budget) is not in "
+            "the band this sentence fires in, so the 0.9-MB-floor argument "
+            "does not hold for it"
+        )
+        text_figure, limit_figure = figures(overhead, budget)
+        both_mb = text_figure.endswith("MB") and limit_figure.endswith("MB")
+        assert both_mb, f"the compared figures mix units: {text_figure!r} vs {limit_figure!r}"
 
 
 @pytest.mark.asyncio

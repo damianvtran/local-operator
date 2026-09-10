@@ -91,6 +91,26 @@ class CompactionInteraction:
     #: to torn-down rows behind on the hand-back, which is the stale-reference
     #: hazard ``run_prompt``'s ``finally`` exists to prevent.
     held_blocks: tuple[Any, list[Any]] | None = None
+    #: The ``queued — sends when compaction finishes`` notice painted when the
+    #: hold took the prompt. Held for the same reason ``held_blocks`` is: the
+    #: notice narrates the QUEUE, and the hold's dispatch exit ends that queue
+    #: — by then the prompt's own echo is painted right under where the notice
+    #: sits, so a row announcing a send that is visibly happening (or, on a
+    #: refusal, a send that will never happen) narrates nothing. Without the
+    #: reference the notice had no owner and outlived both exits (design round
+    #: 3, D15).
+    #:
+    #: Withdrawn at DISPATCH rather than at the refusal's withdrawal: the
+    #: dispatch is the earlier of the two and the notice is wrong from that
+    #: moment on whichever path follows, so one removal point covers both. The
+    #: hand-back clears the reference without removing the block — its
+    #: ``clear_blocks()`` tears the whole view down anyway. (The queued-STEER
+    #: notices are restated to a past-tense receipt instead of removed; that is
+    #: right for them because a steer paints no row of its own and the restated
+    #: notice is its only receipt. A held prompt paints its own ``UserBlock``,
+    #: so the message itself is the receipt and the queued row has nothing
+    #: left to say on either path.)
+    held_notice: Any = None
     accepted_message_id: str = ""
     accepted_draft: SessionDraft | None = None
 

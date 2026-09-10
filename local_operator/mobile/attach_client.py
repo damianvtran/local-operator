@@ -109,6 +109,32 @@ class OversizedRequest(ValueError):
     """
 
 
+class UnreadableImageRequest(OversizedRequest):
+    """The refusal for an attachment that is not a decodable image AT ALL.
+
+    A SUBCLASS so every existing handler keeps working unchanged — the TUI's
+    prompt worker matches on ``isinstance(error, OversizedRequest)`` and the
+    relay's 422 path on ``ValueError``, and both still catch this.
+
+    It exists because the two refusals have DIFFERENT REMEDIES, and one place
+    in :func:`fit_request_frame` rewrites a refusal's sentence: when the text
+    has eaten the frame's budget, a SIZE failure is re-blamed on the text,
+    which is the copy call review round 2 (MAJOR-4) argued for. That rewrite
+    used to catch this one too, so a corrupt attachment on a text-heavy frame
+    told the user to "shorten the text or send the images on their own" —
+    advice that cannot work, because these bytes are not an image at any size
+    and no amount of shortening makes them one. The remedy here is always
+    "remove it", whatever the budget looks like (review round 3, NIT-1).
+
+    Narrow, and deliberately still fixed: no in-tree producer emits an
+    undecodable payload today (the owner content-sniffs and drops unusable
+    blocks on the far side), but a truncated paste or a file that is not
+    really a PNG reaches ``refit_image_to_budget`` from the client side first,
+    and a sentence that sends the user off fixing the wrong thing is the exact
+    defect ``ImageUnreadable`` was split out from ``None`` to prevent.
+    """
+
+
 class _RefitReport(NamedTuple):
     """What the wire refit did to ONE image, for the surface that must say so.
 
@@ -289,6 +315,12 @@ async def fit_request_frame(frame: dict[str, Any]) -> dict[str, Any]:
     text_is_the_bulk = budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES
     try:
         fitted, report = await asyncio.to_thread(_refit_images, images, budget)
+    except UnreadableImageRequest:
+        # NOT a size failure, so the text-is-the-bulk rewrite below must not
+        # replace it: the remedy is removing the attachment, and shortening the
+        # text cannot make an undecodable payload decodable (review round 3,
+        # NIT-1). Caught before `OversizedRequest` because it subclasses it.
+        raise
     except OversizedRequest:
         if not text_is_the_bulk:
             raise
@@ -346,9 +378,20 @@ def _text_is_the_bulk_refusal(overhead: int, budget: int) -> OversizedRequest:
     ending "leaving only 0 KB" reads as a bug in the message.
     """
     room = f"only {_megabytes(budget)}" if budget >= 1024 else "no room"
+    # The text figure in the LIMIT'S scale rather than the honest-for-its-size
+    # scale, because the mixed scale broke comparability: "fills 1000 KB of the
+    # 1.0 MB limit" asked the user to convert units mid-sentence between the
+    # two figures the sentence exists to compare (design round 3, D17).
+    #
+    # Safe ONLY because of where this sentence fires: the budget precondition
+    # (under `_MIN_VIABLE_IMAGE_BUDGET_BYTES`) puts the overhead within a few
+    # KB of the whole limit, so its MB figure can never round below 0.9 and the
+    # "0.0 MB" class `_megabytes` exists to avoid is unreachable HERE. The ROOM
+    # figure keeps `_megabytes`' own scale because it is genuinely small — KB
+    # is the honest unit for a few KB, and "no room" covers a sub-KB remainder.
     return OversizedRequest(
-        f"this message's text alone fills {_megabytes(overhead)} of the "
-        f"{_megabytes(_READ_LIMIT_BYTES)} limit, leaving {room} for its "
+        f"this message's text alone fills {overhead / (1024 * 1024):.1f} MB of "
+        f"the {_megabytes(_READ_LIMIT_BYTES)} limit, leaving {room} for its "
         "attachments; shorten the text or send the images on their own"
     )
 
@@ -396,11 +439,18 @@ def _megabytes(size_bytes: int) -> str:
     refusals raised from the same function asked the user to compare figures in
     different scales (design round 1, D1).
 
-    MB down to 0.1 and KB below it, because a one-decimal MB renders every small
+    MB at and above a full megabyte, KB below it, and the raw byte count below
+    one KB. The KB floor is there because a one-decimal MB renders every small
     figure as ``0.0 MB`` — and the figures that go small here are exactly the
     per-image budgets a refusal is trying to explain. A budget the sentence
     prints as zero tells the user their image did not fit in nothing, which is
-    not a fact they can act on.
+    not a fact they can act on; the same applies one scale down, where a
+    ``1023 B`` share must not read ``0 KB``: the split walks smallest-first, so
+    the LAST image of a many-attachment message can face a sub-KB share while
+    its tightest rung is still over a KB, and that sentence has to state a
+    budget the user can act on (review round 3, NIT-2 — previously only the
+    exact-zero case had been noticed, which is unreachable; the share path is
+    not).
 
     THE SWITCH IS AT 1024 KB, not at 0.1 MB, so the two scales cannot cross.
     Keyed on the rounded MB figure the sentence would actually print, the
@@ -410,6 +460,8 @@ def _megabytes(size_bytes: int) -> str:
     in the larger unit (review round 2, NIT-2). Below a full megabyte the
     KB figure is the honest one; at or above it the MB figure is.
     """
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
     kilobytes = size_bytes / 1024
     if kilobytes < 1024:
         return f"{kilobytes:.0f} KB"
@@ -508,8 +560,10 @@ def _refit_images(
         except ImageUnreadable as exc:
             # A DIFFERENT SENTENCE FROM "too large", deliberately: these bytes
             # would not have been sendable at any size, so telling the user to
-            # shrink them sends them off fixing the wrong thing.
-            raise OversizedRequest(
+            # shrink them sends them off fixing the wrong thing. A distinct
+            # CLASS too, so `fit_request_frame` cannot rewrite this sentence
+            # into the text-blaming one — see `UnreadableImageRequest`.
+            raise UnreadableImageRequest(
                 f"image {markers[position]} could not be sent because {exc}; "
                 "remove it and send again"
             ) from exc

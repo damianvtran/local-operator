@@ -1343,12 +1343,16 @@ class RuntimeServer:
                     # survives to carry the user's NEXT message, which is the
                     # behaviour the operator actually missed.
                     #
-                    # LOUDLY, at error, but ONCE PER FRAME: the frame is gone
-                    # and whoever sent it is owed the reason. ``AttachClient``
-                    # now refits images before sending (``fit_request_frame``),
-                    # so a line reaching this point means an old client, a
-                    # non-attach peer, or a bug — each of which is worth one
-                    # greppable line rather than a vanished session.
+                    # LOUDLY, at error: the frame is gone and whoever sent it
+                    # is owed the reason. ``AttachClient`` now refits images
+                    # before sending (``fit_request_frame``), so a line
+                    # reaching this point means an old client, a non-attach
+                    # peer, or a bug — each of which is worth one greppable
+                    # line rather than a vanished session. (How OFTEN it fires
+                    # is the next paragraph's subject — once per run of
+                    # consecutive discards, not once per frame; an earlier
+                    # version of this paragraph claimed the latter and was
+                    # wrong, review round 3, MINOR-2.)
                     #
                     # ONCE PER RUN of consecutive discards, not once per frame,
                     # and it names the limit rather than the size because it is

@@ -757,6 +757,22 @@ async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -
 
         assert _rows() == (1, 1), f"the echo was never painted: {_rows()}"
 
+        def _queued_notice() -> NoticeBlock | None:
+            return next(
+                (
+                    block
+                    for block in app.query_one(TranscriptView).blocks()
+                    if isinstance(block, NoticeBlock)
+                    and block._text == "queued — sends when compaction finishes"
+                ),
+                None,
+            )
+
+        # The queued notice is ON the transcript while the hold has the prompt
+        # — the state D15 filed against must be reached before its fix is
+        # asserted, or the withdrawal below would pass vacuously.
+        assert _queued_notice() is not None, "the fixture never painted the queued notice"
+
         # The pass ends and the held prompt is dispatched — into a refusal.
         app._compacting = False
         app._consume_compaction_input(app._interaction)
@@ -769,6 +785,14 @@ async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -
         assert _rows() == (0, 0), (
             "the refused prompt's rows are still on the transcript, so the "
             f"scroll-back asserts a message that never went: {_rows()}"
+        )
+        # And the QUEUED notice went with them (design round 3, D15): a row
+        # announcing a send that will never happen, sitting where the message
+        # it described used to be, is the same durable lie the withdrawal
+        # exists to remove.
+        assert _queued_notice() is None, (
+            "the queued notice outlived the refusal it was narrating; the "
+            "transcript still promises a send that will not happen"
         )
 
 
@@ -818,3 +842,12 @@ async def test_a_held_prompt_that_is_delivered_keeps_its_echo(tmp_path) -> None:
         assert (users, images) == (1, 1), (
             "a delivered post-compaction turn lost its transcript rows: " f"{(users, images)}"
         )
+        # The CONTROL for the notice withdrawal: the message's own row is the
+        # receipt, so the `queued` row must be gone here too — a removal that
+        # only fired on the refusal path would leave it announcing a send the
+        # message below it already proved happened (design round 3, D15).
+        assert not any(
+            isinstance(block, NoticeBlock)
+            and block._text == "queued — sends when compaction finishes"
+            for block in blocks
+        ), "the queued notice still narrates a hold that ended in delivery"
