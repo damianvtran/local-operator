@@ -13,6 +13,19 @@ Anthropic OAuth port. Traps preserved:
 - Expiry skew is 5 minutes at mint.
 - The refresh-token family dies **30 days after authorization** regardless
   of rotation — the deadline is surfaced in the identity payload.
+
+What this flow is, recorded so it does not get re-litigated from scratch:
+it is a first-party-style, device-local sign-in. The user authenticates
+directly with Anthropic through Anthropic's own flow; the resulting
+credential is stored on that user's own device, exactly as Claude Code
+stores it, and is used only for that same user's own inference.
+local-operator does not proxy, resell, or intermediate the subscription, and
+no Local Operator or Radient service sits between the user and Anthropic.
+That distinction is the substance of the terms at
+https://code.claude.com/docs/en/legal-and-compliance (verified 2026-09-09),
+which address offering Claude.ai login inside a third-party product and
+routing other users' requests through plan credentials — neither of which
+this does.
 """
 
 from __future__ import annotations
@@ -79,6 +92,17 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
             CallbackFlowOptions(
                 preferred_port=CALLBACK_PORT,
                 callback_path=CALLBACK_PATH,
+                # Anthropic allowlists this exact redirect URI, so 54545 is a
+                # requirement and not a preference. Inheriting the default
+                # `allow_port_fallback=True` meant a busy 54545 bound a random
+                # OS port and cheerfully advertised it — which the allowlist
+                # rejects, at the IdP, after the browser has already opened,
+                # with an error the user cannot act on ("Redirect URI
+                # http://localhost:<port>/callback is not supported by
+                # client"). Failing locally instead is the whole point: the
+                # module docstring has always claimed 54545 is required, and
+                # this is the line that makes that true.
+                allow_port_fallback=False,
                 manual_input_only=manual_input_only,
                 provider_label="Anthropic",
             ),
@@ -101,7 +125,15 @@ class AnthropicOAuthFlow(OAuthCallbackFlow):
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "scope": SCOPES,
-            # The IdP uses this to select the code flow variant.
+            # Makes Anthropic render the authorization code as a `code#state`
+            # copy target on the page, which is what the paste fallback
+            # consumes when the browser cannot reach this machine's loopback
+            # port (remote/SSH/WSL sessions, and the reported case where the
+            # browser lands in the claude.ai portal instead of redirecting).
+            # It does NOT select a flow variant — the flow is already pinned by
+            # `response_type=code` above. See `_parse_pasted_callback` in
+            # callback_server.py, which parses exactly that `code#state` shape
+            # alongside a bare code and a full pasted redirect URL.
             "code": "true",
         }
         return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"

@@ -3,11 +3,14 @@
 OpenAI Codex OAuth port:
 
 - **Browser flow** (provider id ``openai``): authorization code + PKCE,
-  loopback port **1455** pinned (``/auth/callback``). OpenAI allowlists the
-  redirect URI, so there is NO port fallback — a busy port must fail before
-  the browser opens.
+  loopback ``/auth/callback`` on port **1455**, falling back to **1457** when
+  1455 is busy. Those two ports and no others: OpenAI allowlists the redirect
+  URI server-side, so an OS-assigned port must still fail before the browser
+  opens. The advertised URI names whichever of the two actually bound.
 - **Device flow** (provider id ``openai-device``): OpenAI-private
-  ``deviceauth`` endpoints (NOT RFC 8628). Both store under ``openai``.
+  ``deviceauth`` endpoints (NOT RFC 8628) — JSON-encoded, and the poll body
+  carries ``user_code``; a bare 403/404 means "still pending". Both store
+  under ``openai``.
 - Identity comes from **JWT claims decoded without signature verification**
   (no PyJWT — the IdP already validated it): ``https://api.openai.com/auth``
   → ``chatgpt_account_id``/``chatgpt_plan_type``, ``.../profile`` → email.
@@ -51,14 +54,33 @@ SCOPES = "openid profile email offline_access api.connectors.read api.connectors
 ORIGINATOR = "local-operator"
 
 CALLBACK_PORT = 1455
+# Second server-side allowlisted port for this client id. Upstream Codex added
+# it (commit 8d5da3f, 2026-04-29) because Cursor and Codex Desktop squat on
+# 1455, which made an otherwise-correct login fail intermittently with nothing
+# the user could act on. Its E2E asserts the exchanged
+# redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback, so 1457 is
+# known-good against the live IdP rather than merely plausible.
+#
+# This is an ALLOWLIST, not a fallback range: OpenAI validates the redirect URI
+# exactly, so a third, OS-assigned port would be rejected at the IdP after the
+# browser had already opened. 1455 and 1457, in that order, and nothing else.
+CALLBACK_FALLBACK_PORT = 1457
 CALLBACK_PATH = "/auth/callback"
+#: The redirect URI of the PREFERRED port. No longer the pinned value the flow
+#: advertises — the live one is built from whichever allowlisted port actually
+#: bound (see `OpenAIOAuthFlow`), so read `flow.redirect_uri()` for that.
+#: Retained because it is the canonical form of the allowlist entry and is
+#: what tests and docs quote.
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}{CALLBACK_PATH}"
 
 AUTH_CLAIM_KEY = "https://api.openai.com/auth"
 PROFILE_CLAIM_KEY = "https://api.openai.com/profile"
 
-DEVICE_MAX_POLLS = 120
-DEVICE_SAFETY_MARGIN_SECONDS = 3
+#: Hard cap on the device flow, matching upstream Codex's `max_wait`
+#: (`device_code_auth.rs`) and the 15-minute expiry the device page prints to
+#: the user. Bounding in time rather than in poll count keeps our deadline and
+#: the code's real lifetime in step when the provider changes `interval`.
+DEVICE_EXPIRY_SECONDS = 15 * 60
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -141,7 +163,7 @@ def _credentials_from_token(token: dict[str, Any]) -> dict[str, Any]:
 
 
 class OpenAIOAuthFlow(OAuthCallbackFlow):
-    """ChatGPT browser login; pinned port 1455, no fallback."""
+    """ChatGPT browser login; bounded port allowlist 1455 then 1457."""
 
     def __init__(
         self,
@@ -154,9 +176,19 @@ class OpenAIOAuthFlow(OAuthCallbackFlow):
         super().__init__(
             CallbackFlowOptions(
                 preferred_port=CALLBACK_PORT,
+                fallback_ports=(CALLBACK_FALLBACK_PORT,),
                 callback_path=CALLBACK_PATH,
-                # Pinned: OpenAI allowlists this exact URI.
-                redirect_uri=REDIRECT_URI,
+                # `redirect_uri` is deliberately NOT pinned to a literal here,
+                # even though OpenAI allowlists the URI exactly. Both ports are
+                # on that allowlist, so the URI has to name whichever one we
+                # actually bound; the base class builds it from the bound port.
+                # Pinning the 1455 string would advertise a closed socket on
+                # every 1457 login. `allow_port_fallback=False` still forbids
+                # an OS-assigned port, which is what the allowlist cares about.
+                #
+                # The advertised host stays `localhost` (not `127.0.0.1`) to
+                # match the allowlist entry and upstream; the socket itself
+                # binds the IP literal, which is what RFC 8252 §8.3 requires.
                 allow_port_fallback=False,
                 provider_label="OpenAI",
             ),
@@ -239,14 +271,34 @@ async def login_openai_device(
 
     1. ``POST deviceauth/usercode`` → ``{device_auth_id, user_code, interval}``.
     2. User opens the device page and types the code.
-    3. Poll ``POST deviceauth/token`` (≤120 polls, interval + 3 s margin).
+    3. Poll ``POST deviceauth/token`` until authorized (15-minute cap).
     4. Success returns ``{authorization_code, code_verifier}``, exchanged
        against ``redirect_uri = https://auth.openai.com/deviceauth/callback``.
+
+    These are OpenAI-PRIVATE endpoints, so RFC 8628 is not the specification
+    they follow — upstream Codex
+    (`codex-rs/login/src/device_code_auth.rs`) is, and the shapes below are
+    matched to it field by field:
+
+    - **JSON, not form-encoded.** Both requests set
+      `Content-Type: application/json` upstream (`UserCodeReq`,
+      `TokenPollReq`). Form-encoding was silently wrong here.
+    - **The poll carries `user_code`.** Upstream's `TokenPollReq` is
+      `{device_auth_id, user_code}`; omitting `user_code` cannot identify the
+      pending authorization.
+    - **403/404 means "still waiting", not "failed".** This endpoint signals
+      pending authorization with a bare status and no OAuth error body, so the
+      RFC 8628 `authorization_pending` classification never matched and the
+      FIRST poll — always pending, since the user has not typed the code yet —
+      aborted the login. That defect made this flow unusable end to end.
+
+    oh-my-pi's `packages/ai/src/registry/oauth/openai-codex.ts` agrees
+    independently on all three.
     """
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=30.0)
     try:
-        start = await http.post(DEVICE_USERCODE_URL, data={"client_id": CLIENT_ID})
+        start = await http.post(DEVICE_USERCODE_URL, json={"client_id": CLIENT_ID})
         if start.status_code != 200:
             raise LoginError(f"OpenAI device auth start failed ({start.status_code}): {start.text}")
         device = start.json()
@@ -264,12 +316,21 @@ async def login_openai_device(
         async def _poll() -> DevicePollResult[dict[str, Any]]:
             response = await http.post(
                 DEVICE_TOKEN_URL,
-                data={"client_id": CLIENT_ID, "device_auth_id": device_auth_id},
+                # `user_code` is REQUIRED (upstream `TokenPollReq`); the
+                # endpoint identifies the pending authorization by the pair.
+                # `client_id` is not part of that struct and is not sent.
+                json={"device_auth_id": device_auth_id, "user_code": user_code},
             )
             if response.status_code == 200:
                 payload = response.json()
                 if payload.get("authorization_code"):
                     return DevicePollResult.complete(payload)
+                return DevicePollResult.pending()
+            # A bare 403/404 is how this endpoint says "not authorized yet" —
+            # there is no OAuth error body to classify. Treating it as terminal
+            # meant the first poll ended the login before the user could
+            # possibly have entered the code.
+            if response.status_code in (403, 404):
                 return DevicePollResult.pending()
             try:
                 payload = response.json()
@@ -285,7 +346,12 @@ async def login_openai_device(
                 or f"Device authorization failed ({response.status_code})"
             )
 
-        expires_in = DEVICE_MAX_POLLS * (interval + DEVICE_SAFETY_MARGIN_SECONDS)
+        # Bound the wait in TIME, matching upstream's 15-minute cap, rather
+        # than in poll count: the server-provided `interval` sets the cadence,
+        # so a count-based budget silently changes the deadline whenever the
+        # provider changes the interval. The user-facing code expires in 15
+        # minutes, so that is the honest deadline to hold ourselves to.
+        expires_in = DEVICE_EXPIRY_SECONDS
         token = await poll_device_code_flow(
             _poll,
             interval_seconds=interval,
@@ -317,13 +383,25 @@ async def login_openai_device(
 async def refresh_openai_token(
     creds: dict[str, Any], *, http_client: httpx.AsyncClient | None = None
 ) -> dict[str, Any]:
-    """Form-encoded refresh; org fields are never rewritten."""
+    """JSON-encoded refresh; org fields are never rewritten.
+
+    **The encoding asymmetry here is deliberate: do not "tidy" it.** The
+    authorization-code exchange above posts FORM-encoded to this same URL,
+    while refresh posts JSON. That looks like an inconsistency and is not one —
+    it is what upstream Codex does (`codex-rs/login/src/auth/manager.rs`
+    `request_chatgpt_token_refresh`, which sets `Content-Type: application/json`
+    and `.json(&RefreshRequest)`, against the same
+    `https://auth.openai.com/oauth/token` the form-encoded exchange uses).
+    Matching the client the endpoint is actually built around is the whole
+    point; making the two calls consistent with each other would make both of
+    them inconsistent with the server.
+    """
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=30.0)
     try:
         response = await http.post(
             TOKEN_URL,
-            data={
+            json={
                 "grant_type": "refresh_token",
                 "refresh_token": creds.get("refresh"),
                 "client_id": CLIENT_ID,
