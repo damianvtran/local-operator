@@ -36,6 +36,8 @@ from local_operator.evaluation.runner.provider_client import (
     parse_decision,
 )
 from local_operator.evaluation.runner.public_reply import (
+    _MAX_EXTRA_KEY_CHARS,
+    _MAX_EXTRA_KEYS_SHOWN,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     decode_public_reply,
@@ -538,3 +540,179 @@ async def test_old_fake_client_does_not_claim_a_new_reply_contract(
     assert "model_reply_contract" not in manifest["metadata"]
     assert payloads(root, ModelResponsePayload)[0].redacted_response is None
     assert decode_public_reply(envelope(type_payload(observation())))
+
+
+@pytest.mark.parametrize(
+    ("body", "carried", "omitted"),
+    [
+        (
+            '{"action_batch": {"actions": []}}',
+            ["'action_batch'"],
+            ["'public_observations'", "'reply_version'"],
+        ),
+        (
+            '{"reply_version": "1.0", "action_batch": {"actions": []}}',
+            ["'action_batch'", "'reply_version'"],
+            ["'public_observations'"],
+        ),
+    ],
+)
+def test_a_partial_envelope_is_told_which_keys_it_missed(
+    body: str, carried: list[str], omitted: list[str]
+) -> None:
+    """Validation is unchanged; what the model is TOLD is what changed.
+
+    Reserving every envelope key means touching one of them commits the reply
+    to strict decoding, so the common failure is a near-miss: the model emits
+    ``{"action_batch": {...}}`` and used to be told only the rule it had
+    already half-followed, never which half it missed.
+
+    That difference decides whether the correction lands. Measured on
+    ``minimax/minimax-m3``, which produces this exact shape in ~1 of 10
+    replies: re-prompting with the bare rule recovered 4/10, while naming the
+    keys present and missing recovered 9/10 -- the gap between an episode that
+    continues and one that spends its retry bound and seals as a model
+    failure.
+    """
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(body)
+
+    message = str(info.value)
+    for key in carried:
+        assert key in message.split("omitted")[0]
+    for key in omitted:
+        assert key in message
+    # Both legal shapes are offered, so the model can pick the cheaper one
+    # rather than guessing which half of the contract to repair.
+    assert '{"actions": [...]}' in message
+    assert "reply_version, action_batch, public_observations" in message
+
+
+def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
+    """The other near-miss: every required key present, plus one more."""
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(
+            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
+            '"public_observations": "", "notes": "x"}'
+        )
+
+    assert "added 1 unexpected key(s): 'notes'" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"X" * 50_000: "y"},
+        {f"key{index}" * 20: index for index in range(60)},
+        {"\U000e0001" * 40: 1},
+        {"SECRET-" + "z" * 60: 1},
+        # Every key here is individually SAFE to quote, so only the count cap
+        # stands between the model's payload and the prompt. Without a case
+        # like this the cap is unpinned: the other fixtures withhold every key
+        # on safety grounds and never exercise it.
+        {f"k{index}": index for index in range(60)},
+    ],
+    ids=[
+        "one-enormous-key",
+        "many-long-keys",
+        "repr-expanding-key",
+        "long-secret-key",
+        "many-short-safe-keys",
+    ],
+)
+def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object]) -> None:
+    """Model-supplied key names never reach the model again reshaped.
+
+    ``present`` and ``missing`` intersect a fixed set, so they can only name
+    the three reserved keys. ``extra`` is arbitrary model output, and echoing
+    it whole turned a 50,000-character key into a 50,000-character retry
+    prompt -- intercepted by neither ``MAX_REJECTED_REPLY_CHARS`` nor
+    ``_diagnostic``'s cap.
+
+    Quoted WHOLE or not at all. The two cases beyond mere size are why
+    truncating was not good enough:
+
+    ``repr-expanding-key`` -- ``repr`` expands escapes AFTER a cut, so a bound
+    applied to the raw key does not bound the rendered output, and the limit
+    silently depends on the input's alphabet.
+
+    ``long-secret-key`` -- and this is the one that matters: cutting converts a
+    LOUD failure into a SILENT one. ``_assert_redacted`` is substring-based, so
+    a secret longer than the cut survives as a prefix that no longer matches
+    the canary. The leak stops tripping the alarm that exists to catch it.
+    """
+
+    payload = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {"actions": []},
+            "public_observations": "",
+            **extra,
+        }
+    )
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(payload)
+
+    message = str(info.value)
+    # Tight, and deliberately so. A loose ceiling passes while an unsafe key is
+    # quoted in ESCAPED form -- the raw key is absent from the message, so a
+    # substring assertion alone cannot see it, and the 702-character escape
+    # expansion this replaces slipped under a 1,000-char ceiling.
+    #
+    # 600 is chosen against the CODE's reachable worst case, not against these
+    # fixtures. Five 40-character keys are all quotable; adding a carried
+    # reserved key and the " and N more" suffix pushes the rendered maximum to
+    # 539, established by brute-forcing every carried/omitted split against the
+    # real decoder (review round 5) after two narrower measurements -- 513 and
+    # 518 -- each missed a term. Growth is logarithmic in the key count, so the
+    # template stays under ~550 for any input at all.
+    #
+    # A bound below 539 would assert a property the code does not have and
+    # would fail on a legitimate input. These fixtures top out around 344
+    # because every key in them is withheld, which is the point: the margin
+    # between that and this ceiling is the room an escaped quote would need.
+    assert len(message) < 600, f"diagnostic grew to {len(message)} characters"
+    # No fragment of an unsafe key escapes: whole-or-nothing, so a redaction
+    # canary still matches and nothing is rendered in a reshaped form.
+    quoted = sum(1 for key in extra if repr(key) in message)
+    assert quoted <= _MAX_EXTRA_KEYS_SHOWN, f"{quoted} keys quoted"
+    for key in extra:
+        if repr(key) in message:
+            # A quoted key must appear WHOLE and unreshaped, never as a cut.
+            continue
+        assert key not in message
+        assert key[:_MAX_EXTRA_KEY_CHARS] not in message
+    # The count is still reported, so the model learns how many keys to drop
+    # even when their names are withheld entirely.
+    assert f"added {len(extra)} unexpected key(s)" in message
+
+
+def test_a_short_plain_unexpected_key_is_still_named() -> None:
+    """Withholding is for unsafe keys only; the useful case stays useful.
+
+    The 9/10 recovery this diagnostic was measured for came from naming keys,
+    so a bound that withheld every name would protect the prompt by making it
+    useless.
+    """
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(
+            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
+            '"public_observations": "", "notes": "x", "extra": 1}'
+        )
+
+    message = str(info.value)
+    assert "'extra'" in message and "'notes'" in message
+    assert "not shown" not in message
+
+
+def test_a_non_object_reply_keeps_the_plain_rule() -> None:
+    """A JSON array names no keys, so there is no defect to describe."""
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply("[1, 2]")
+
+    assert "requires exactly" in str(info.value)

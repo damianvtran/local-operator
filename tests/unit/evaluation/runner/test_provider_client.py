@@ -2585,3 +2585,79 @@ async def test_byte_trigger_does_not_fire_under_the_trigger(tmp_path: Path) -> N
     for previous, following in zip(stream.requests, stream.requests[1:]):
         assert len(following.messages) > len(previous.messages)
         assert all(a is b for a, b in zip(previous.messages, following.messages))
+
+
+@pytest.mark.parametrize("stop_reason", ["toolUse", "stop", "length"])
+@pytest.mark.asyncio
+async def test_a_silent_reply_is_a_correctable_rejection(stop_reason: str) -> None:
+    """The model ended its turn without saying anything on either channel.
+
+    Parametrised over every NORMAL stop reason because the defect is the
+    SILENCE, not the marker. All three shapes were observed against
+    ``minimax/minimax-m3``: ``toolUse`` with zero tool calls in ~8% of replies
+    on a routine screen and 6 of 10 on a screen that looks already-complete,
+    and ``stop`` with no content in 1 of 12 of the same probe and in a real
+    episode's third call. An abnormal marker with empty text is already handled
+    by the guard above this one, so together they cover the whole set.
+
+    Such a reply used to reach ``parse_decision`` as an empty string and be
+    reported as "decision is not valid JSON". The runner then re-prompted the
+    model to fix JSON it had never written; the correction could not land
+    because it named a defect that did not exist, and the retry bound sealed
+    the episode as a MODEL failure.
+
+    It must be a ``DecisionRejected`` (the correctable path that appends a
+    corrective turn), NOT a ``ProviderStreamAbortedError``: an abort seals the
+    episode as an infrastructure failure with no retry at all, which would be
+    strictly worse than the behaviour this replaces.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason=stop_reason,
+        usage=Usage(input_tokens=48, output_tokens=299),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert isinstance(info.value.__cause__, DecisionParseError)
+    # The diagnostic must name what actually happened, and must NOT claim the
+    # model wrote malformed JSON -- that is the misdiagnosis this replaces.
+    cause = str(info.value.__cause__)
+    assert "no tool call and no text" in cause
+    assert stop_reason in cause
+    assert "not valid JSON" not in cause
+    # Billed: the prompt was read and the reasoning tokens were charged.
+    assert info.value.stop_reason == stop_reason
+
+
+@pytest.mark.asyncio
+async def test_a_tool_use_stop_that_carried_text_is_still_parsed_normally() -> None:
+    """The guard must not swallow a model that answers in prose under ``toolUse``.
+
+    Some providers report ``toolUse`` while the batch itself arrives as text.
+    Keying the guard on the stop reason alone would reject those valid replies,
+    so it also requires the content to be empty.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "wait",
+                        "observation_id": current.observation_id,
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        stop_reason="toolUse",
+    )
+
+    decision = await _client(stream).decide(current, _turns(current))
+
+    assert [action.kind for action in decision.action_batch.actions] == ["wait"]
