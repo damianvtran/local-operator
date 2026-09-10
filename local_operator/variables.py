@@ -126,17 +126,42 @@ class CredentialCommand:
 #:
 #: The INLINE gesture leads, because it is the one an operator reaches for and
 #: the one that used to fail silently: typing `/credential <secret>` fell
-#: through to the `<KEY>` form below with the secret as its key argument, and
-#: the value landed in the transcript in plaintext. Naming the space and the
+#: through to the `<KEY>` form with the secret as its key argument, and the
+#: value landed in the transcript in plaintext. Naming the space and the
 #: terminating Enter here is what makes the mode discoverable from the error an
 #: operator sees when they get it wrong.
+#:
+#: THE TYPED ``<KEY>`` FORM IS NOT LISTED, because it can no longer be TYPED and
+#: help that cannot be followed is worse than help that is missing. The space
+#: after the token now always opens a masked capture, so a hand-typed key name
+#: is minted as a short secret rather than reaching the prompt — measured on
+#: this branch, ``/credential MYKEY`` produced ``[Credential #1, 5 chars]`` (QA
+#: round 1, Q1). The form itself still EXISTS and is still parsed: a pasted
+#: whole line reaches it, and it is the route a viewer session uses to hand a
+#: secret to its owner. It is simply not something to advertise as typable.
+#: Naming a credential yourself is what was lost; the generated ``LOP_SECRET_``
+#: name in the chip is what ``--persist`` and ``--forget`` take instead.
+#:
+#: ONE ALIGNED COMMENT COLUMN, and a lead short enough not to wrap. The previous
+#: first line was 74 cells and folded in the notice column, splitting
+#: ``# masked; Enter`` from ``chips it`` and leaving the rest of the block at a
+#: different indent, with the ``#`` column unaligned across three different
+#: offsets (design round 1, D6).
+#:
+#: THE FIRST LINE IS BUDGETED FOR ITS CALLER'S PREFIX, which is what the earlier
+#: attempt missed. ``format_credential_list`` prepends
+#: ``No credentials stored for this session. `` (40 cells) before this string, so
+#: the lead is measured against that too: ``NoticeBlock.body_budget(100)`` is 94
+#: cells, leaving ~54 for line one. Measured in a rendered frame rather than
+#: counted in the source — the first version of this block still wrapped at 100
+#: columns because only the bare string was checked.
 CREDENTIAL_USAGE = (
-    "Usage: /credential <space> then type or paste it  # masked; Enter chips it\n"
-    "       /credential <KEY>         # name it yourself, value via a prompt\n"
-    "       /credential                # list\n"
-    "       /credential --persist <KEY>  # also save to the encrypted long-term store\n"
-    "       /credential --forget <KEY>\n"
-    "       /credential --forget-all"
+    "Usage: /credential <space> then the secret\n"
+    "       Enter chips it, Esc cancels     # it never enters the line\n"
+    "       /credential                     # list\n"
+    "       /credential --persist <KEY>     # also save it long-term\n"
+    "       /credential --forget <KEY>      # forget one\n"
+    "       /credential --forget-all        # forget every one"
 )
 
 

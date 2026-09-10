@@ -212,6 +212,7 @@ from local_operator.tui.widgets.editor import (
     ArgumentHighlightChanged,
     ArgumentQueryOpened,
     CredentialArmChanged,
+    CredentialUnredacted,
     Editor,
     EditorCopied,
     EditorCopyStale,
@@ -1564,13 +1565,40 @@ COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
 #: and the amber ink on the token itself, plus the picker's own notice row
 #: while its list is open. Anything counting channels here must count what
 #: PAINTS — the attribute being set correctly is not the same claim.
+#:
+#: STILL UNREACHABLE after the typed capture, re-measured rather than assumed:
+#: every route drives ``PLACEHOLDER=0`` (design round 1, D4). Retained for the
+#: reason above — it is the armed STATE's field and the swap is what keeps the
+#: aside's placeholder restore correct — and NOT counted as guidance anywhere.
 CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it"
 
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
 #: list that simply vanished would read as the gesture having been dropped —
 #: so the row says what the composer is waiting for instead.
-CREDENTIAL_ARMED_NOTICE = "armed — type or paste the secret; it is never shown"
+#:
+#: UNREACHABLE SINCE THE TYPED CAPTURE, and retained deliberately. Recorded here
+#: because a later round would otherwise 'fix' this copy and see no change on
+#: screen (design round 1, D4). The row it paints in is the ARGUMENT list's, and
+#: that list only opens once the buffer reaches the argument phase — which takes
+#: the space, and the space now opens a TYPING capture in the same edit. So the
+#: two conditions are mutually exclusive by construction: before the space
+#: ``argument_command`` is ``None`` and no list exists to carry a notice; from
+#: the space onward :data:`CREDENTIAL_TYPING_NOTICE_RUNGS` wins the row.
+#: Re-measured on six routes rather than inferred — including the flag disarm,
+#: a caret move out of the span, a backspace back to the token, and a re-arm
+#: after a chip — and this string painted on none of them.
+#:
+#: Kept rather than deleted for the reason its sibling
+#: :data:`CREDENTIAL_PLACEHOLDER` is: it belongs to the ARMED state, the
+#: three-way branch that selects it is what keeps the row's states exhaustive,
+#: and it would begin painting again the day an arming route reaches the
+#: argument list without opening a capture. It must NOT be counted as a
+#: guidance channel while it does not paint — count what PAINTS.
+#:
+#: The space is named in the PICKER DESCRIPTION instead, which is the row that
+#: does paint in the deciding frame (UX round 1, U5).
+CREDENTIAL_ARMED_NOTICE = "armed — add a space, then type or paste the secret"
 
 #: Shown in the same row once the operator has STARTED TYPING a secret and the
 #: composer is masking their keystrokes.
@@ -1582,10 +1610,55 @@ CREDENTIAL_ARMED_NOTICE = "armed — type or paste the secret; it is never shown
 #: says how it ends. So this names the mask, the key that finishes the entry and
 #: the key that backs out — the three facts that cannot be read off the frame.
 #:
-#: Same width budget as the held notice (~82 cells at 120 columns, and the row
-#: ellipsizes its TAIL): the tail here is "Esc cancels", the way out, which is
-#: exactly the half that must not be the part that crops.
-CREDENTIAL_TYPING_NOTICE = "masked as you type — Enter turns it into a chip, Esc cancels"
+#: THE WAY OUT IS KEPT BY A MECHANISM, NOT BY A COMMENT. The previous single
+#: string asserted in this very docstring that "Esc cancels" was the half that
+#: must not crop, and it was the FIRST thing to crop: the picker's notice row
+#: ellipsizes its tail, so measured on the real app `Esc cancels` was lost at 68
+#: columns and `chip` at 56, and at 45 the row read `masked as you type — Enter
+#: turns it…` — a row that names neither key (design round 1, D2; UX round 1,
+#: U3; review round 1, R3). 68-80 columns is a split pane, not an exotic
+#: geometry. Prose asserting an invariant is not a mechanism enforcing it.
+#:
+#: So the rungs below are tried WIDEST-FIRST against the row's real budget by
+#: :func:`credential_typing_notice`, which is the same overflow-ladder idiom the
+#: status band and the info panel use. Every rung names BOTH keys; what degrades
+#: is the description of the mode, which the amber marker and the visible mask
+#: cells already carry. The narrowest rung is 22 cells, so the exit survives
+#: every width the picker paints at.
+CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
+    "masked as you type — Enter turns it into a chip, Esc cancels",
+    "masked as you type — Enter chips it, Esc cancels",
+    "masked — Enter chips it, Esc cancels",
+    "Enter chips it, Esc cancels",
+    "Enter chips · Esc cancels",
+)
+
+#: The widest rung, which is what the notice reads at any ordinary width. Named
+#: separately because tests and callers that mean "the full string" should not
+#: index into the ladder.
+CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
+
+#: Said after Esc unredacts a typed secret back into the composer as plaintext.
+#:
+#: The unredact is the only exit that leaves the secret IN the buffer, and the
+#: frame cannot say so on its own — the amber marker reverts and the masking
+#: notice goes, so the composer looks ordinary while holding a credential, and
+#: the next Enter re-commits the exact leak this feature closes (measured
+#: byte-identical to the pre-fix base; design round 1, D1).
+#:
+#: Names what is true NOW and what the next keystroke does, in that order,
+#: because the operator's hand is already moving toward Enter. The length comes
+#: from the message and never the value.
+#:
+#: One line at every ordinary width. The notice block FOLDS rather than crops
+#: (``NoticeBlock.body_budget``), so nothing is lost when it does wrap — but the
+#: sentence is kept inside ~78 cells so the warning reads as one statement on a
+#: single row at 80 columns and up, which is where an operator scanning for what
+#: just happened will find it.
+CREDENTIAL_UNREDACTED_NOTICE = (
+    "{length} characters are now PLAIN TEXT in the composer — Enter will send them"
+)
+
 
 #: Shown where those same rows would be once a capture has LANDED and the
 #: buffer still cites it (design round 3, D9). The armed notice cannot be
@@ -14304,18 +14377,38 @@ class OperatorApp(App[None]):
             # may already have moved on — the row would then describe a state
             # the operator has left. See `CredentialArmChanged.typing`.
             if message.typing:
-                notice = CREDENTIAL_TYPING_NOTICE
-            elif message.active:
-                notice = CREDENTIAL_ARMED_NOTICE
+                # LADDERED, not a fixed string: the row resolves which phrasing
+                # fits at paint time, so the way out is named at every width and
+                # survives a resize mid-capture (design round 1, D2).
+                editor.picker.set_notice_rungs(CREDENTIAL_TYPING_NOTICE_RUNGS)
             else:
-                notice = CREDENTIAL_HELD_NOTICE if editor.credential_cited() else ""
-            editor.picker.set_notice(notice)
+                if message.active:
+                    notice = CREDENTIAL_ARMED_NOTICE
+                else:
+                    notice = CREDENTIAL_HELD_NOTICE if editor.credential_cited() else ""
+                editor.picker.set_notice(notice)
         if not message.active and message.reason == "argument":
             self._notice(
                 "credential capture disarmed — that is an argument to "
                 "/credential, so the next paste is NOT captured",
                 "warning",
             )
+
+    def on_credential_unredacted(self, message: CredentialUnredacted) -> None:
+        """Say that Esc put the secret back in the composer as PLAIN TEXT.
+
+        The exit that needs words, because the frame after it carries none. The
+        unredact reverts the amber marker and drops the masking notice, leaving
+        a composer that looks entirely ordinary while holding a credential the
+        next Enter will send — measured on this branch, that Enter reproduced the
+        pre-fix leak byte for byte (design round 1, D1).
+
+        Warning rather than info, and for the same reason the ``argument`` disarm
+        above is: this is a state the operator did not ask to be IN (they asked
+        to cancel), and it is the one where the next keystroke discloses a
+        secret. The length comes off the message; the value is never seen here.
+        """
+        self._notice(CREDENTIAL_UNREDACTED_NOTICE.format(length=message.length), "warning")
 
     def session_credential_names(self) -> tuple[str, ...]:
         """Names the session store already holds, for the composer's key guard.
@@ -28114,8 +28207,13 @@ class OperatorApp(App[None]):
             # transition being reported, only a list being filled over whatever
             # state already holds, so the widget is the authority.
             if editor.credential_typing():
-                notice = CREDENTIAL_TYPING_NOTICE
-            elif armed:
+                # Laddered here too, and for the same reason: this route reaches
+                # the row independently of the transition route above, so a fixed
+                # string here would crop the exit away at exactly the widths D2
+                # measured.
+                picker.set_notice_rungs(CREDENTIAL_TYPING_NOTICE_RUNGS)
+                return
+            if armed:
                 notice = CREDENTIAL_ARMED_NOTICE
             else:
                 notice = CREDENTIAL_HELD_NOTICE if cited else ""

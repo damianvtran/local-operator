@@ -501,7 +501,18 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # own verb. So the two words that tell the operator the mode exists
         # ("Type or") have to come before the guarantee, because the guarantee is
         # the half that survives cropping either way.
-        "Type or paste a secret the agent can use but never reads",
+        #
+        # AND IT IS SHORT ENOUGH TO SURVIVE. The first attempt at this copy still
+        # cropped before its own promise at EVERY width measured, 120 included
+        # ("…can use but never rea…" — a truncated reassurance dangling mid-word,
+        # which an operator completes wrongly). Measured, not estimated: the row
+        # keeps ~31 cells at 60 columns and ~47 at 100, and the budget is not
+        # monotonic in width because the transcript gutter indents it more as the
+        # terminal grows (design round 1, D5; QA round 1, Q2). At 44 cells this
+        # one paints whole from 80 columns up and still leads with the gesture
+        # everywhere below that. The SPACE is named because it is what arms the
+        # mode and nothing else on screen says so (UX round 1, U5).
+        "Type or paste a secret after a space; masked",
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.credential",

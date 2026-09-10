@@ -84,10 +84,19 @@ def promote_session_credential(
         return PromotionResult(False, key, "This session's credential store could not be read.")
     value = values.get(key)
     if not value:
+        # NAMES THE GESTURE THAT STILL WORKS. This used to advise
+        # `/credential {key}`, which the typed capture retired: the space after
+        # the token opens a masked span, so typing a key name mints it as a short
+        # secret instead of reaching the `<KEY>` prompt (QA round 1, Q1). Advice
+        # an operator cannot follow is worse than none — they would have typed it
+        # and watched their key name become a credential. The inline gesture
+        # generates the name, so the way to persist is to hand the secret over
+        # and then persist the name the chip reports.
         return PromotionResult(
             False,
             key,
-            f"No session credential named {key}. Hand it over with /credential {key} first.",
+            f"No session credential named {key}. Hand one over with /credential "
+            "followed by a space and the secret, then --persist the name its chip reports.",
         )
     try:
         target = open_store(base, create=True)

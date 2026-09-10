@@ -625,10 +625,22 @@ def test_promote_refuses_to_clobber_an_existing_long_term_secret(isolated: Path)
     assert open_store().get("SHARED") == b"the-original", "promotion overwrote a secret"
 
 
-def test_promote_of_an_unknown_key_says_what_to_do(isolated: Path) -> None:
+def test_promote_of_an_unknown_key_advises_a_gesture_that_still_works(isolated: Path) -> None:
+    """The advice must name something the operator can actually DO.
+
+    It used to say ``/credential NOPE``, which the typed capture retired: the
+    space after the token opens a masked span, so typing a key name mints it as
+    a short secret instead of reaching the ``<KEY>`` prompt (QA round 1, Q1).
+    Advice that cannot be followed is worse than none — the operator would have
+    typed it and watched their key name become a credential. So this pins the
+    property (the message routes them to a working gesture) rather than the old
+    literal, and explicitly refuses the retired one.
+    """
     result = promote_session_credential(VariableStore(), "NOPE")
     assert not result.ok
-    assert "/credential NOPE" in result.message
+    assert "NOPE" in result.message, "it still names the key they asked for"
+    assert "/credential" in result.message, "and the command that hands one over"
+    assert "/credential NOPE" not in result.message, "but never the untypable form"
 
 
 def test_credential_command_parses_the_persist_verb() -> None:

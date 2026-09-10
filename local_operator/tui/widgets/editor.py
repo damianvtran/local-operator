@@ -1436,6 +1436,33 @@ class CredentialArmChanged(Message):
         self.typing = typing
 
 
+class CredentialUnredacted(Message):
+    """Posted when Esc restored a typed secret into the composer as plaintext.
+
+    The one exit that ENDS with the secret in the document. Every other way out
+    of a capture either mints a chip or leaves inert mask cells, so this is the
+    only transition after which the buffer holds something the operator must be
+    told is now visible and sendable.
+
+    It exists because the frame cannot say it on its own: the unredact reverts
+    the amber marker and drops the masking notice, so the composer looks
+    ORDINARY at exactly the moment it is holding a plaintext credential — and
+    the next Enter, the single most likely keystroke, submits it. Measured on
+    this branch, that Enter reproduced the pre-fix leak byte for byte (design
+    round 1, D1).
+
+    Carries the LENGTH and never the value, the same discipline the chip label
+    and the journal follow: the app needs to say how much came back, not what.
+
+    Editor owns the state, app owns the voice — the split
+    :class:`CredentialArmChanged` and :class:`ShellModeChanged` already draw.
+    """
+
+    def __init__(self, length: int) -> None:
+        super().__init__()
+        self.length = length
+
+
 class ShellModeChanged(Message):
     """Posted when bang-mode is entered or left.
 
@@ -2162,7 +2189,32 @@ class Editor(TextArea):
         self._credential_typing: int | None = None
         #: The characters typed into the open masked span, in order. The ONLY
         #: place a typed secret lives before it becomes a `PastedCredential`.
+        #:
+        #: POSITIONALLY MIRRORED against the mask cells by :meth:`edit`, not
+        #: appended to. An append-only value plus a caret-positioned mask is the
+        #: one arrangement that can disagree SILENTLY: the count stays right
+        #: while the order goes wrong, so the chip's length — documented as an
+        #: integrity check — passes on a value that is not what was typed, and
+        #: the value can never be shown again to catch it (UX round 1, U1).
         self._credential_typed: str = ""
+        #: The true character a mask cell about to be inserted stands for.
+        #:
+        #: Set by :meth:`_type_credential_char` for exactly the length of one
+        #: edit and read by the mirror in :meth:`edit`, because the buffer edit
+        #: carries :data:`CREDENTIAL_MASK_CHAR` and the mirror needs the
+        #: character it replaced. A field rather than a parameter because the
+        #: edit funnel is Textual's, reached through ``insert``/``replace``.
+        self._credential_pending_char: str | None = None
+        #: Set while a credential exit is performing its OWN buffer edit.
+        #:
+        #: The cancel replaces the mask cells with the restored plaintext, and
+        #: that replacement re-enters the edit funnel — which re-derived the arm
+        #: from a buffer still ending in ``/credential `` and re-opened the
+        #: capture the cancel had just closed, making Esc inert on an empty span
+        #: (review round 1, R1; UX round 1, U2). The same suspend idiom
+        #: ``_suspend_picker_sync`` uses, and for the same reason: a handler's
+        #: own edit must not be read as the operator's.
+        self._suspend_credential_sync: bool = False
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -2807,11 +2859,14 @@ class Editor(TextArea):
                 # the draft already held, not a silent disarm.
             elif key in ("backspace", "ctrl+h"):
                 if self._credential_typed:
-                    # Backspace inside the span retracts the last character from
-                    # the held value AND removes its mask cell, so the two can
-                    # never disagree about how long the secret is. Falls through
-                    # to TextArea's own delete for the cell itself.
-                    self._credential_typed = self._credential_typed[:-1]
+                    # Falls through to TextArea's own delete, and the MIRROR in
+                    # `edit` retracts the held character the deleted cell stood
+                    # for. It used to drop the LAST character here regardless of
+                    # where the caret was, so a backspace mid-span removed the
+                    # wrong one silently (UX round 1, U1) — the mirror answers
+                    # positionally and covers `delete` and select-and-replace by
+                    # the same rule.
+                    pass
                 else:
                     # Backspace at the START of the span deletes the delimiting
                     # space, which un-terminates the token — the operator is
@@ -5975,7 +6030,25 @@ class Editor(TextArea):
     #                                           in the composer (state: ARMED
     #                                           ends, composer keeps the draft)
     #     (5) Esc while TYPING              ->  CANCEL: the typed characters are
-    #                                           restored as ordinary text
+    #                                           restored as ordinary text, and
+    #                                           the app SAYS SO (they are now
+    #                                           plaintext in the composer)
+    #     (5a) Esc on an EMPTY span         ->  the same cancel, ending the mode
+    #                                           with `/credential ` left inert.
+    #                                           Called out because it is the case
+    #                                           the table's prose covered and the
+    #                                           code did not: with no characters
+    #                                           to restore, the cancel's own
+    #                                           `replace()` re-entered the edit
+    #                                           funnel and re-armed, so Esc was
+    #                                           INERT and the prose typed next
+    #                                           became a credential (R1/U2).
+    #     (5b) an EDIT INSIDE the span      ->  applied POSITIONALLY to the held
+    #                                           value by the mirror in `edit()`:
+    #                                           arrow-then-type, backspace,
+    #                                           delete and select-and-replace all
+    #                                           land where the operator sees them
+    #                                           land (U1)
     #     (6) Paste while ARMED             ->  chip in place, unchanged
     #
     # (1), (2) and (6) already existed or are one predicate each; (3), (4) and
@@ -6049,6 +6122,73 @@ class Editor(TextArea):
         self.post_message(CredentialArmChanged(True, typing=True))
         return True
 
+    def _credential_edit_mirror(self, edit: Edit) -> str | None:
+        """The held secret after ``edit``, or ``None`` to leave it alone.
+
+        THE HELD VALUE IS A MIRROR OF THE MASK CELLS, and this is the one place
+        the two are kept in step. Every buffer mutation funnels through
+        :meth:`edit`, so an edit that moves, removes or splits mask cells is
+        applied to :attr:`_credential_typed` at the SAME index — which makes
+        arrow-then-type, backspace, delete and select-and-replace all correct by
+        one rule instead of four agreeing key handlers.
+
+        Why a mirror and not an append (UX round 1, U1). The mask cell was
+        always inserted AT THE CARET while the value appended to the END, and
+        `_credential_caret_left_span` deliberately keeps the capture open
+        anywhere inside the span — so the interaction INVITES the edit that the
+        value then mis-applies. Measured: typed ``ABCDEFGH``, ``←←``, typed
+        ``xy`` stored ``ABCDEFGHxy`` for an intended ``ABCDEFxyGH``. The chip
+        reported the right LENGTH with the wrong ORDER, so the documented
+        integrity check passed on a wrong value that can never be displayed
+        again to catch it; it surfaces days later as an auth failure with
+        nothing tying it to the keystroke. Ending the capture on any caret move
+        was the other acceptable fix and is rejected here: mid-secret typo
+        correction is exactly what an operator does with a 40-character token,
+        and taking the mask away mid-value fails toward plaintext.
+
+        Computed from OLD offsets, before ``super().edit()`` runs, because the
+        mapping from a buffer position to an index in the held value only exists
+        while the buffer still holds the cells the value stands for.
+
+        ``None`` for every edit that cannot touch the span — no capture open, an
+        edit entirely outside it — so the common keystroke pays one comparison.
+        """
+        start = self._credential_typing
+        if start is None:
+            return None
+        held = self._credential_typed
+        end = start + len(held)
+        top = self._offset_at(*edit.top)
+        bottom = self._offset_at(*edit.bottom)
+        # Wholly outside the span, on either side. `>` and `<` rather than `>=`
+        # and `<=`: an edit that merely ABUTS the span (a character typed at its
+        # end, the commonest keystroke of all) does touch it.
+        if top > end or bottom < start:
+            return None
+        inserted = edit.text
+        # What the inserted text stands for in the HELD value. A mask cell being
+        # painted carries its true character in `_credential_pending_char`;
+        # anything else reaching the span is literal text, which only happens on
+        # a route that has already closed the capture.
+        pending = self._credential_pending_char
+        if pending is not None and inserted == CREDENTIAL_MASK_CHAR:
+            replacement = pending
+        elif inserted == "":
+            replacement = ""
+        else:
+            # Text arriving into an open span that is NOT a mask cell would put
+            # real characters among the bullets and desynchronise the two. No
+            # such route exists (every printable key is masked, and the exits
+            # close the capture first), so this is a guard rather than a case:
+            # leave the value untouched rather than silently corrupting it.
+            return None
+        # Clamped into the span, so an edit STRADDLING its edge (a selection
+        # begun in the token and dragged into the secret) removes only the part
+        # that was actually held.
+        cut_from = max(top, start) - start
+        cut_to = min(bottom, end) - start
+        return held[:cut_from] + replacement + held[cut_to:]
+
     def _type_credential_char(self, char: str) -> None:
         """Absorb one typed character into the secret; paint one mask cell.
 
@@ -6061,13 +6201,33 @@ class Editor(TextArea):
         ``text``, so the mask cells participate in the document exactly as typed
         text does — the caret advances, the width recomputes, and the arm
         re-syncs — while the value itself accumulates out of band.
+
+        THE VALUE IS NOT APPENDED HERE. ``char`` is handed to the mirror in
+        :meth:`edit` through :attr:`_credential_pending_char`, which splices it
+        in at the position the mask cell lands — so a character typed after an
+        arrow key goes where the operator watched it appear, not on the end (UX
+        round 1, U1). ``finally`` because the value must not survive the edit:
+        a stale pending character would be spliced in by an unrelated later
+        edit.
         """
-        self._credential_typed += char
-        # Insertion at the caret, which is by construction the end of the masked
-        # span: `_credential_typing` + len(typed) is where the caret must be, and
-        # any key that could have moved it away has already closed the capture
-        # (see `_credential_caret_left_span`).
-        self.insert(CREDENTIAL_MASK_CHAR)
+        self._credential_pending_char = char
+        try:
+            # REPLACES THE SELECTION when there is one, exactly as TextArea's own
+            # printable-key path does (`_replace_via_keyboard(insert, *selection)`).
+            # `insert()` alone ignores the selection, so selecting two mask cells
+            # and typing left them in the buffer and appended a third — the
+            # buffer and the held value then disagreed on the secret's LENGTH,
+            # not merely its order. The span the caret sits in is the one the
+            # mirror maps, so a replacement inside it is spliced positionally.
+            start, end = self.selection
+            self.replace(
+                CREDENTIAL_MASK_CHAR,
+                start,
+                end,
+                maintain_selection_offset=False,
+            )
+        finally:
+            self._credential_pending_char = None
 
     def _mint_typed_credential(self) -> bool:
         """Enter while TYPING: turn token + masked span into a chip.
@@ -6144,6 +6304,16 @@ class Editor(TextArea):
         is still swallowed as a credential after the operator has visibly backed
         out. That is the false-POSITIVE direction, which costs one backspace;
         the alternative (staying armed) is the direction D2 calls unrecoverable.
+
+        AND IT WORKS ON AN EMPTY SPAN, which it did not. The `replace()` below
+        re-entered the edit funnel, which re-derived the arm from a buffer still
+        ending in ``/credential `` with the caret still at its end and RE-OPENED
+        the capture this method had just closed — so Esc was inert before any
+        character was typed, on the exact key the on-screen notice advertises,
+        and the prose the operator then wrote was captured as a secret (review
+        round 1, R1; UX round 1, U2). Every one of the file's 95 tests passed
+        with that live, because the Esc test typed characters first. The suspend
+        below is the mechanism; the empty-span regression test is the guard.
         """
         if self._credential_typing is None:
             return False
@@ -6156,28 +6326,55 @@ class Editor(TextArea):
         # is the ONLY route by which the typed secret enters the document, and
         # it is the operator explicitly asking for it — at which point it is
         # their prose, not a credential.
-        self.replace(
-            secret,
-            self._offset_to_location(start),
-            self._offset_to_location(end),
-            maintain_selection_offset=False,
-        )
-        self.move_cursor(self._offset_to_location(start + len(secret)))
+        #
+        # Suspended across THIS WIDGET'S OWN edit so the cancel cannot re-arm
+        # itself. Restored in `finally`: an exception mid-replace that left the
+        # flag set would silently stop every later keystroke from arming, which
+        # is the unrecoverable direction (a paste landing in plaintext).
+        self._suspend_credential_sync = True
+        try:
+            self.replace(
+                secret,
+                self._offset_to_location(start),
+                self._offset_to_location(end),
+                maintain_selection_offset=False,
+            )
+            self.move_cursor(self._offset_to_location(start + len(secret)))
+        finally:
+            self._suspend_credential_sync = False
+        # THE EXIT ANNOUNCES ITSELF, because it is the one exit that puts a
+        # plaintext secret in the composer. After the unredact the frame looks
+        # completely ordinary — the amber marker reverts, the masking notice
+        # goes — while the buffer now holds the secret and the very next Enter
+        # re-commits the original leak this feature exists to close; measured,
+        # HEAD-after-Esc-then-Enter was byte-identical to BASE-after-Enter
+        # (design round 1, D1). The word `cancels` promises the gesture is off,
+        # so the state it actually leaves has to be said out loud. Only when
+        # there were characters to restore: an empty cancel puts nothing in the
+        # buffer and owes no warning.
+        if secret:
+            self.post_message(CredentialUnredacted(len(secret)))
         return True
 
-    def _close_credential_typing(self) -> None:
+    def _close_credential_typing(self, reason: str = "") -> None:
         """Drop the typed-capture state and the secret it held.
 
         Called by every exit from the TYPING state. The value is cleared here
         and nowhere else, so there is exactly one place a secret stops being
         held — a second clearing site is how one path comes to leave it behind.
+
+        ``reason`` rides the message, matching the sibling
+        :meth:`_disarm_credential`. It used to stop at
+        :meth:`_abandon_credential_typing`'s signature, which accepted four
+        distinct reasons from four call sites and read none of them — a channel
+        that existed only in the parameter list (review round 1, R4).
         """
         if self._credential_typing is None:
             return
         self._credential_typing = None
         self._credential_typed = ""
         self._invalidate_slash_runs()
-        self.post_message(CredentialArmChanged(self._credential_arm is not None))
+        self.post_message(CredentialArmChanged(self._credential_arm is not None, reason=reason))
 
     def _abandon_credential_typing(self, reason: str) -> None:
         """End a typed capture WITHOUT restoring the secret, leaving the mask.
@@ -6212,7 +6409,8 @@ class Editor(TextArea):
         # the same answer.
         if getattr(self, "_credential_typing", None) is None:
             return
-        self._close_credential_typing()
+        # `reason` reaches the message rather than stopping here (R4).
+        self._close_credential_typing(reason)
 
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
@@ -6549,6 +6747,19 @@ class Editor(TextArea):
         # Measured BEFORE the edit for the same reason the citation spans are:
         # afterwards there is no way to tell a first keystroke from the tenth.
         was_empty = not self.text.strip()
+        # THE HELD SECRET IS MIRRORED ON THE SAME EDIT THAT MOVES ITS MASK
+        # CELLS. Computed from OLD offsets (the mapping only exists while the
+        # buffer still holds the cells the value stands for) and applied BEFORE
+        # the edit runs, which is load-bearing rather than tidy: `super().edit()`
+        # sets the selection inside `edit.after()`, which fires
+        # `_credential_caret_left_span` — so a value updated afterwards would be
+        # measured against the NEW caret while still the OLD length, and the
+        # watcher would read the caret as having left the span and abandon the
+        # capture. Measured when this was ordered the other way: every character
+        # after the first landed in the buffer as PLAINTEXT.
+        mirror = self._credential_edit_mirror(edit)
+        if mirror is not None:
+            self._credential_typed = mirror
         result = super().edit(edit)
         if stale_receipt:
             self._copied = False
@@ -6562,20 +6773,28 @@ class Editor(TextArea):
         # is derived from the buffer, so deriving it anywhere but here would
         # leave it a message-loop tick behind the text — and that tick is the
         # one in which a paste decides whether it is a secret.
-        self._sync_credential_arm()
-        # THE OPENING SPACE, asked on the funnel BOTH routes converge on. The
-        # hand-typed space and the trailing space `_apply_command` appends when
-        # a picker row is accepted are the same insertion at the same offset, so
-        # asking here is what makes the two routes identical by construction
-        # rather than by two call sites agreeing. Asking in `_on_key` instead
-        # would have covered only the typed route and left the completion route
-        # silently unmasked — which is exactly the shape of the defect being
-        # fixed, one level down.
         #
-        # After `_sync_credential_arm`, because the arm's span is what the open
-        # is checked against and the space is the character that just extended it.
-        if self._credential_typing is None and self._credential_arm is not None:
-            self._open_credential_typing()
+        # SUSPENDED while a credential exit performs its own edit: the cancel's
+        # `replace()` funnels through here, and re-deriving from the buffer it
+        # is halfway through rewriting re-armed and re-opened the capture the
+        # cancel had just closed (R1/U2). Skipped rather than reordered, because
+        # the arm must still be derived on the operator's own edits.
+        if not self._suspend_credential_sync:
+            self._sync_credential_arm()
+            # THE OPENING SPACE, asked on the funnel BOTH routes converge on. The
+            # hand-typed space and the trailing space `_apply_command` appends when
+            # a picker row is accepted are the same insertion at the same offset, so
+            # asking here is what makes the two routes identical by construction
+            # rather than by two call sites agreeing. Asking in `_on_key` instead
+            # would have covered only the typed route and left the completion route
+            # silently unmasked — which is exactly the shape of the defect being
+            # fixed, one level down.
+            #
+            # After `_sync_credential_arm`, because the arm's span is what the
+            # open is checked against and the space is the character that just
+            # extended it.
+            if self._credential_typing is None and self._credential_arm is not None:
+                self._open_credential_typing()
         if touched:
             self._release_uncited(touched)
         return result

@@ -910,16 +910,47 @@ characters: every disclosure seam (history, the draft store, undo, `ctrl+o`,
 the submit path) reads the buffer, so a document that never held the secret
 closes all of them at once rather than one at a time.
 
-**Esc unredacts rather than discards.** Retyping a secret from memory is exactly
-what an operator cannot do, so the recoverable reading is the only safe one. Esc
-also ends the arm: the operator has visibly backed out, so the next paste must
-not still be swallowed.
+**Esc unredacts rather than discards, and says so.** Retyping a secret from
+memory is exactly what an operator cannot do, so the recoverable reading is the
+only safe one. Esc also ends the arm: the operator has visibly backed out, so
+the next paste must not still be swallowed. But the unredact is the one exit
+that *ends with the secret in the buffer*, and the frame after it looks entirely
+ordinary — the amber marker reverts, the masking notice goes — while the next
+Enter re-commits the original leak; measured, the post-Esc-then-Enter outcome
+was byte-identical to the pre-fix base. So it posts `CredentialUnredacted` and
+the app warns that N characters are now plain text (design round 1, D1).
 
-**The masked span is positional.** It is open exactly while the caret is inside
-it, asked on `watch_selection` — `move_cursor`, a mouse click and an app-set
-selection all move the caret without a caret key being pressed, and a capture
-left open after the caret moved would append to the value in one place while
-painting its cell in another.
+**Esc works on an EMPTY span too**, which took a mechanism rather than a
+comment. The cancel's own `replace()` re-enters the edit funnel, which
+re-derived the arm from a buffer still ending in `/credential ` and re-opened
+the capture the cancel had just closed — so Esc was inert before any character
+was typed, on the exact key the on-screen notice advertises, and the prose typed
+next was captured as a secret. `_suspend_credential_sync` scopes the
+re-derivation out across the widget's own edit, the same idiom
+`_suspend_picker_sync` uses (review round 1, R1; UX round 1, U2).
+
+**The masked span is positional — and so is the held value.** The span is open
+exactly while the caret is inside it, asked on `watch_selection` — `move_cursor`,
+a mouse click and an app-set selection all move the caret without a caret key
+being pressed. Because the capture deliberately stays open *anywhere* in the
+span ("the operator may be mid-word"), the interaction invites an edit inside it,
+so `_credential_typed` is a **positional mirror** of the mask cells rather than
+an append-only buffer: `Editor.edit` maps every insertion, deletion and
+selection-replacement onto the held value at the same index. An append-only
+value beside a caret-positioned cell is the one arrangement that fails
+*silently* — the count stays right while the order goes wrong, so the chip's
+length (documented as an integrity check) passes on a value that is wrong and
+can never be displayed again to catch it. Measured before the fix: `ABCDEFGH`,
+`←←`, `xy` stored `ABCDEFGHxy` for an intended `ABCDEFxyGH` (UX round 1, U1).
+
+**The typed `/credential <KEY>` form is retired.** The space always opens a
+masked capture, so a hand-typed key name is minted as a short secret rather than
+reaching the `<KEY>` prompt. The command is still *parsed* — a pasted whole line
+reaches it, and it stays the route a viewer session uses to hand a secret to its
+owner — but nothing advertises it as typable any more: `CREDENTIAL_USAGE` and
+the `--persist` advice both name the inline gesture and the generated
+`LOP_SECRET_` name instead. Usage text and behaviour have to agree (QA round 1,
+Q1).
 
 **A leading `-` escapes the mask**, so `--forget-all` stays typable. The
 credential verbs are flag-shaped precisely so they cannot collide with a key
