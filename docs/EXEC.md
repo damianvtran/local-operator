@@ -30,7 +30,7 @@ lop --resume SESSION_ID
 | `--loop-goal TEXT` | Run continuation/judge iterations until achieved. No fixed iteration cap; repeated undecidable judge results fail safely. Mutually exclusive with `--loop`. |
 | `--name TEXT` | Set the persisted conversation title. |
 | `--effort LEVEL` | Set reasoning effort using the selected model's existing validation. Unsupported levels fail before a turn. |
-| `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless owner is refused rather than raced; `lop --resume ID` attaches the TUI to that owner instead. |
+| `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless runtime is refused rather than raced; `lop --resume ID` attaches the TUI to that runtime instead. |
 | `--background` | Detach a worker. The launcher prints a bounded readiness receipt, not a claim that the work completed. |
 | `--status JOB_ID` | Print the durable job record as JSON, including terminal outcome and canonical session ID. Does not run a model; cannot combine with a prompt or run options. |
 | `--control` | Install supervisor approval/question gates. These may wait for an attached user. Runtime discovery and live TUI attachment work without this flag too. |
@@ -92,7 +92,7 @@ bounded wait); its exit code is **not** the eventual execution result. Follow
 `cancelled` or `interrupted`, and inspect its log. Worker termination disposes
 the session before writing the terminal result. Abrupt death cannot truthfully
 report success: status reconciliation compares the PID's process-start identity
-and marks a proven-dead owner interrupted. It never restarts a loop or cleans
+and marks a proven-dead runtime interrupted. It never restarts a loop or cleans
 up a successor's resources.
 
 The job ID identifies the execution receipt; the session ID identifies the

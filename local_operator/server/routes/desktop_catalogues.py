@@ -268,7 +268,7 @@ async def entities(
             finally:
                 controller.close()
         elif spec.name == "effort":
-            # Owner-resolved capabilities can differ from the static model-id
+            # Runtime-resolved capabilities can differ from the static model-id
             # registry (aggregator listings and explicit model overrides).
             rows = [{"value": value} for value in remote.model.reasoning_efforts]
             current = remote.model.reasoning_effort

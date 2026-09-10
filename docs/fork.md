@@ -33,8 +33,8 @@ a dead end that keeps being re-billed, `/new` and rebuilding from scratch, or
 3. **The original's work keeps running in its runtime.** Tools, subagents, wakes,
    and unanswered approvals stay with the original, even when
    `runtime.background_on_resume` is false. The receipt gives `/resume <parent-id>`
-   to return in this same terminal, attaching to the same active owner rather
-   than restarting it. An idle owner can naturally reap; its saved conversation
+   to return in this same terminal, attaching to the same active runtime rather
+   than restarting it. An idle runtime can naturally reap; its saved conversation
    remains resumable. This is not a promise to keep an idle process alive forever.
 4. If you passed a message, the fork starts working on it as its first turn.
    Normal reattachment does not replay that opening instruction. This does not

@@ -947,7 +947,7 @@ can never be displayed again to catch it. Measured before the fix: `ABCDEFGH`,
 masked capture, so a hand-typed key name is minted as a short secret rather than
 reaching the `<KEY>` prompt. The command is still *parsed* — a pasted whole line
 reaches it, and it stays the route a viewer session uses to hand a secret to its
-owner — but nothing advertises it as typable any more: `CREDENTIAL_USAGE` and
+runtime — but nothing advertises it as typable any more: `CREDENTIAL_USAGE` and
 the `--persist` advice both name the inline gesture and the generated
 `LOP_SECRET_` name instead. Usage text and behaviour have to agree (QA round 1,
 Q1).
@@ -1094,7 +1094,7 @@ lifeline — it is consulted per retrieval. So:
 > registered one** (only tests did). After `harden` the correct passphrase was
 > refused and even `status` failed, with the plaintext key already deleted. The
 > tier had therefore never worked end to end in either direction: unreachable
-> for its owner, and bypassable by anyone else (§2.1's amendment).
+> for its runtime, and bypassable by anyone else (§2.1's amendment).
 >
 > Three changes, which have to land together:
 >

@@ -82,7 +82,7 @@ self._recovery_task = asyncio.create_task(self._recover_owner())
 ```
 
 `_end_turn_locally` (`remote.py:1859-1918`) exists for three genuinely
-terminal outcomes (killed owner, stopped owner, going cold) but it is called
+terminal outcomes (killed runtime, stopped runtime, going cold) but it is called
 *before* recovery has learned which of those — if any — applies. The
 synthesised end reaches `EventController._handle_agent_end` and the app's
 turn-end path, which calls `_retire_live_tool_cards` (`app.py:24152`, each
@@ -136,7 +136,7 @@ never retrieved" — 12 such rows in the operator's log today (10:28).
 
 ### 2.1 Where the refresh decision lives
 
-**A. Viewer-side only.** `_check_build_skew` sends `stop` when the owner is
+**A. Viewer-side only.** `_check_build_skew` sends `stop` when the runtime is
 stale and idle, then re-engages. Rejected as the *primary* mechanism: a
 runtime with no viewer attached (the phone's SSE daemon attach is `daemon`
 kind; a `send`-woken session) is never looked at by a TUI, so it would stay
@@ -162,7 +162,7 @@ the price of an idle exit (`process.py:57-66`).
 ### 2.2 Should an attached viewer block the refresh?
 
 The operator says no, and the code agrees it need not: a viewer already
-survives owner exit (`_recover_owner` → `_go_cold` after `COLD_FALLBACK_S`,
+survives runtime exit (`_recover_owner` → `_go_cold` after `COLD_FALLBACK_S`,
 `remote.py:2056-2066`) and a cold viewer already re-engages on the next
 prompt (`_ensure_bound`, `remote.py:1074-1144`). What is missing is only
 (a) an announcement so the viewer does not spend 8 s chasing a record and
@@ -188,7 +188,7 @@ So: **an attached viewer does not block retirement**; it receives a
 
 ### 2.4 Disconnect handling: synthesise the abort now, or defer?
 
-- *Now* (status quo): honest for owner death, false for transient drops.
+- *Now* (status quo): honest for runtime death, false for transient drops.
 - *Defer until recovery's verdict* (recommended): `_on_disconnected` marks
   the turn *suspect* and starts recovery; the synthesised end fires only when
   recovery goes cold, learns the stop, or re-binds to a snapshot whose
@@ -348,7 +348,7 @@ Emitted by `RuntimeServer.announce_retiring(reason)`, a sibling of
 do. Additive: an old viewer ignores the unknown op, sees EOF, runs the
 existing `_recover_owner`, and goes cold after 8 s — the pre-PR behaviour, so
 no `PROTOCOL_VERSION` bump. Not sent to `daemon` clients (the phone's
-projection path stays byte-identical; the daemon already handles owner exit
+projection path stays byte-identical; the daemon already handles runtime exit
 by re-adopting on the next record).
 
 `attach_client.py::_pump` (`:373-381`): add `elif op == "retiring": reason =
@@ -359,7 +359,7 @@ next to `STOPPED_REASON` (`:61`). `_ClientConn` needs nothing new.
 
 ```python
 if _reason == RETIRING_REASON:
-    # A planned refresh, not owner death and not a stop: the runtime
+    # A planned refresh, not runtime death and not a stop: the runtime
     # left so the next engage runs the build now on disk. Nothing to
     # recover — the successor does not exist yet — and nothing was
     # interrupted (the runtime retires only when idle). Go cold NOW
@@ -389,7 +389,7 @@ def _on_runtime_refreshed(self) -> None:
 ```
 
 `_start_runtime_engage` (`app.py:8501-8555`) already re-runs
-`_check_build_skew` after the bind; with a fresh runtime the owner stamp
+`_check_build_skew` after the bind; with a fresh runtime the runtime stamp
 equals the disk stamp and notice C is silent. If the *window* itself is stale
 (notice A), the fresh runtime is newer than the window — that is the
 incident class `design-build-skew.md` §4.1 (B) already repairs, and A's
@@ -404,15 +404,15 @@ line of prose for a background housekeeping event is the pattern
 overrule; if it does, the copy is one dim line:
 `updated to 0.49.9@f4a70b9` — never a warning.
 
-### 3.3 Viewer-side belt: resume/bind against a stale idle owner
+### 3.3 Viewer-side belt: resume/bind against a stale idle runtime
 
 `_check_build_skew`'s C branch (`app.py:14957-15011`) becomes:
 
 ```
-owner stale?
-  ├─ owner idle (frontend_state.streaming False AND no running jobs AND
+runtime stale?
+  ├─ runtime idle (frontend_state.streaming False AND no running jobs AND
   │  no pending gate)  → request refresh; NO notice
-  └─ owner busy       → notice C′ (copy below), once per session
+  └─ runtime busy     → notice C′ (copy below), once per session
 ```
 
 "Request refresh" = `session.request_refresh()` → new `AttachClient.
@@ -643,8 +643,8 @@ Unit — `tests/unit/session/test_remote_refresh.py`:
 9. `_on_disconnected(STOPPED_REASON)` unchanged (regression guard).
 
 Unit — `tests/unit/tui/test_build_skew.py` (extend):
-10. Stale + idle owner → `request_refresh` called, no notice.
-11. Stale + busy owner → C′ info notice, no `/stop` substring anywhere in
+10. Stale + idle runtime → `request_refresh` called, no notice.
+11. Stale + busy runtime → C′ info notice, no `/stop` substring anywhere in
     the ledger (`assert "/stop" not in transcript_text(app)`).
 12. Refresh callback → `_start_runtime_engage(reason="refresh")` and
     `_warm_engage_started` reset.

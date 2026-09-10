@@ -1457,7 +1457,7 @@ not a stub.
 
 ## The seam between the conversation and the composer (2026-08-11)
 
-Reported from the owner's own frame: the last two rows of a turn (`✕ name
+Reported from the runtime's own frame: the last two rows of a turn (`✕ name
 'CompactionOutcome' is not defined` / `✕ interrupted`) sitting directly on the
 composer's fill, so the ledger and the input read as one slab. "There needs to
 be one line of space between the thinking/tool calls/message text and the top

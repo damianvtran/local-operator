@@ -65,9 +65,9 @@ The UI runs that read off the event loop and updates only the loading screen
 that owns it; it never pushes a second screen on completion. Closing/unmounting
 invalidates that presentation even if the bounded read finishes in the background.
 Before displaying the result it checks the captured session object, ID and
-(when exposed) mirrored owner epoch, so
+(when exposed) mirrored runtime epoch, so
 `/new` or `/resume` cannot surface a stale report over another session, including
-an owner replacement behind the same remote facade.
+a runtime replacement behind the same remote facade.
 
 Remote terminal frontends use the same shared local analytics database and
 mirrored session identity/runtime scalars. The command is frontend-local, like

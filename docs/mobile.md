@@ -72,7 +72,7 @@ the daemon itself publishes a record at startup and removes it at exit:
 
 The daemon scans this directory every 2 s and validates each record by pid
 liveness — a SIGKILLed session leaves its record behind, and the heartbeat
-catches a live pid whose owner wedged. Publication is staged-write + rename.
+catches a live pid whose runtime wedged. Publication is staged-write + rename.
 
 ### The control socket
 
@@ -190,8 +190,8 @@ UUID and the daemon de-duplicates an already-admitted instruction instead of
 running it twice. The rule (source of truth: `web/src/continuation-command.ts`):
 
 - **Keep** across anything that leaves the outcome ambiguous — transport failure,
-  HTTP **502/504/408** (acknowledgement loss *after* the daemon drained the owner
-  frame, not rejection), page reload, SSE reconnect, and navigating between the
+  HTTP **502/504/408** (acknowledgement loss *after* the daemon drained the frame
+  to the runtime, not rejection), page reload, SSE reconnect, and navigating between the
   owner's own conversations. Envelopes are scoped **per session** and bounded by
   **count** (oldest evicted, never the active route), so an ordinary conversation
   switch never silently drops the recovery affordance.

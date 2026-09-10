@@ -1,7 +1,7 @@
 """HTTP viewers of canonical runtimes, never a second execution host.
 
 One bridge is shared by concurrent HTTP operations and event subscribers. Its
-receipt sequence is deliberately independent of the owner's frontend revision:
+receipt sequence is deliberately independent of the runtime's frontend revision:
 a snapshot covers paint state, not semantic receipts such as steering delivery.
 The last reader detaches; neither socket disposal nor HTTP shutdown stops work.
 """
@@ -104,7 +104,7 @@ class DesktopSessionBridge:
                     )
                     self.remote = remote
                     # A detached interval has no receipt feed. A new epoch makes
-                    # that gap explicit even when the owner itself never died.
+                    # that gap explicit even when the runtime itself never died.
                     self.epoch = uuid.uuid4().hex
                     self.sequence = 0
                     self.replay.clear()
@@ -145,10 +145,10 @@ class DesktopSessionBridge:
         # LAST, and suppressing the task's OWN failure rather than only
         # CancelledError: awaiting a task that already died re-raises its
         # exception, and with this block ahead of `dispose()` a store error
-        # aborted teardown midway -- leaking the owner session and its
+        # aborted teardown midway -- leaking the runtime's session and its
         # subscriptions while `users` had already reached 0, so a later
         # `acquire()` reused a half-torn bridge. A read receipt must never
-        # strand a session owner.
+        # strand a session runtime.
         if self.attention_task is not None:
             self.attention_task.cancel()
             with contextlib.suppress(BaseException):
@@ -199,12 +199,12 @@ class DesktopSessionBridge:
         self.publish("event", event.model_dump(mode="json"))
 
     def _frontend(self, update: FrontendUpdate) -> None:
-        # Keep the owner's field deltas, not a full snapshot per streamed token.
+        # Keep the runtime's field deltas, not a full snapshot per streamed token.
         # Trajectories are intentionally opt-in on the runtime and absent here;
         # large roster/usage fields still pass through the shared wire budget.
         payload = update.model_dump(mode="json")
-        # Receipt revisions outlive an owner epoch. Only the independent durable
-        # projection below may update them; a delayed owner delta must not undo
+        # Receipt revisions outlive a runtime epoch. Only the independent durable
+        # projection below may update them; a delayed runtime delta must not undo
         # a read made through another process while this stream stays mounted.
         payload["changes"].pop("attention", None)
         payload["job_trajectory_appends"] = {}
@@ -229,14 +229,14 @@ class DesktopSessionBridge:
             previous = self.attention
             self.attention = state
             # The initial snapshot owns the baseline; later changes have their
-            # own receipt clock rather than borrowing a runtime owner sequence.
+            # own receipt clock rather than borrowing a runtime sequence.
             if previous:
                 self.publish("attention", state)
         return state
 
     async def _poll_attention(self) -> None:
         # Read-only polling is shared by every subscriber of this bridge and
-        # independent of watch leases. It also works while no owner is running.
+        # independent of watch leases. It also works while no runtime is running.
         #
         # The body is guarded because this store has other writers: a `database
         # is locked` that outlives its 2 s timeout is routine contention, and
@@ -253,8 +253,8 @@ class DesktopSessionBridge:
                 # than the full per-conversation read; the steady state is a
                 # store nothing has written since the last tick.
                 #
-                # The owner's own state is part of the key because `supported`
-                # is derived from it, not from the store: an owner starting or
+                # The runtime's own state is part of the key because `supported`
+                # is derived from it, not from the store: a runtime starting or
                 # going cold changes that answer while the store is untouched,
                 # so gating on the revision alone would pin `supported` to
                 # whatever happened to be true when the bridge attached.
@@ -387,11 +387,11 @@ class DesktopSessionBridge:
             ]
             if not remaining:
                 # LAST lease has expired. Returning here without a final refresh
-                # left the owner holding whatever presence the previous pass
+                # left the runtime holding whatever presence the previous pass
                 # asserted -- visible, notifiable -- for the rest of the
                 # session, because nothing else recomputes it once the loop is
                 # gone. The expiry that ends the loop is exactly the one the
-                # owner still needs to be told about.
+                # runtime still needs to be told about.
                 with contextlib.suppress(ConnectionError, RuntimeError):
                     await self.refresh_watch()
                 return
@@ -450,7 +450,7 @@ class DesktopSessionBridge:
         finally:
             self.subscribers.pop(sub.id, None)
             # ASGI disconnect runs inside a cancelled anyio scope. Cleanup must
-            # still reach the owner; otherwise a dead renderer leaves presence
+            # still reach the runtime; otherwise a dead renderer leaves presence
             # asserted until TTL expiry and the bridge never releases its socket.
             with CancelScope(shield=True), contextlib.suppress(ConnectionError, RuntimeError):
                 await self.refresh_watch()
@@ -465,11 +465,11 @@ class DesktopSessions:
         self.lock = asyncio.Lock()
 
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
-        """A read receipt never admits work, binds a viewer, or starts an owner.
+        """A read receipt never admits work, binds a viewer, or starts a runtime.
 
         Validate the same durable user-session namespace as the bridge, but do
         not enter its acquire path: a completed cold conversation is readable
-        even when its owner and the mobile daemon are both stopped.
+        even when its runtime and the mobile daemon are both stopped.
         """
 
         def acknowledge() -> dict[str, Any]:
@@ -496,7 +496,7 @@ class DesktopSessions:
 
         Deliberately outside :meth:`session`, exactly like
         :meth:`acknowledge_attention` and for the same reason: reading a
-        screenshot out of a finished conversation must not start an owner
+        screenshot out of a finished conversation must not start a runtime
         process. The session id is still validated against the same durable
         user-session namespace, so the route cannot be used to probe arbitrary
         directories, and the store is shared rather than per-session because

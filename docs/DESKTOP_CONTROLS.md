@@ -20,7 +20,7 @@ its destination; the dispatcher only selects execution handlers.
 
 `POST /v1/desktop/sessions/{id}/commands` accepts the existing stable UUID
 request_id, command, args and optional images. Every canonical name and alias is
-accepted. Owner actions return the real SlashResult. Interactive/native actions
+accepted. Runtime actions return the real SlashResult. Interactive/native actions
 return `kind: native_action`, `destination`, `session_id`, `args`, typed `fields`
 and destination-specific `data` (sources, submit paths, scope and safety flags).
 This is a **presentation request**, not a receipt that the window closed, clipboard
@@ -52,61 +52,61 @@ and rendered verification.
 | Command / aliases | Backend behavior | Frontend responsibility |
 |---|---|---|
 | help | Registry-backed `commands` destination | Searchable palette, aliases/arguments |
-| exit / quit | `window.close`, unsaved guard, detach-only | Native close without stopping owner |
+| exit / quit | `window.close`, unsaved guard, detach-only | Native close without stopping the runtime |
 | clear | `transcript.clear`, view-only/history untouched | Clear painted rows only |
 | copy | `transcript.copy`, history source and message/code/quote choices | Keyboard picker and clipboard |
 | new | `sessions.new`, canonical creation endpoint, cwd field | New conversation, preserve current work |
 | reload | `sessions.reload`, same canonical identity | Reopen/relaunch using installed runtime without resubmitting a turn |
 | update | `updates`, capabilities source and retained identity | Existing updater/compatibility UI |
 | resume / recall | `sessions.resume`, canonical list/source | Cold/live session picker and attach |
-| rename | Owner rename; bare name editor | Form and explicit-name receipt |
+| rename | Runtime rename; bare name editor | Form and explicit-name receipt |
 | fork | `session.fork`, canonical next-safe-boundary fork endpoint | Boundary explanation, child navigation, optional request once |
-| model / models | ProviderController catalogue and owner model change | Search/filter model picker, explicit default scope |
-| effort | Model-specific entities and owner effort change | Current choice/picker, unsupported model explanation |
-| fast | Owner control; native form marks premium pricing | Pricing warning and on/off control |
+| model / models | ProviderController catalogue and runtime model change | Search/filter model picker, explicit default scope |
+| effort | Model-specific entities and runtime effort change | Current choice/picker, unsupported model explanation |
+| fast | Runtime control; native form marks premium pricing | Pricing warning and on/off control |
 | theme / themes | `appearance`, desktop scope | Existing twelve-theme palette; terminal theme separate |
 | provider | `providers`, central provider/auth sources | Provider grid, real states and method choices |
 | settings / config | `settings`, full existing registry | Typed searchable editors, scope/reset |
 | search | `settings.search`, web-search filter | Settings filtering and masked key entry |
 | accounts | Central redacted accounts + account-specific removal | Account selection/confirmation and environment fallback |
-| failovers | Selected/effective owner models + configured default chains | Distinguish actual serving model from selected/default route |
+| failovers | Selected/effective runtime models + configured default chains | Distinguish actual serving model from selected/default route |
 | usage | ProviderController cached/live normalized reports and age/state | Freshness, quotas, partial/error/re-auth views |
-| context | Owner typed context result | Unknown vs estimate, breakdown display |
+| context | Runtime typed context result | Unknown vs estimate, breakdown display |
 | analytics | AnalyticsStore aggregate/daily queries | Query controls and cost-knowledge rendering |
-| goal | Owner show/set/clear | Echo only successful model-facing text |
-| loop | Owner-local cancelable count/goal orchestration, snapshot state | Form, progress/judge state, cancel; never auto-answer gates |
-| btw | Owner completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
-| compact | Existing owner compact control/events | Pending/completed/error from canonical events |
+| goal | Runtime show/set/clear | Echo only successful model-facing text |
+| loop | Runtime-local cancelable count/goal orchestration, snapshot state | Form, progress/judge state, cancel; never auto-answer gates |
+| btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
+| compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
 | stop | Explicit target list/confirmation, canonical stop protocol | Current/selected/all picker; submit exact IDs |
-| approvals | Owner mode; explicit default editor | Session/default scope and confirmation |
+| approvals | Runtime mode; explicit default editor | Session/default scope and confirmation |
 | skills | Effective discovered catalogue and closed skill:// detail resolver | Catalogue/details; distinguish discoverable from selected |
 | mcp | Effective source ownership, configuration, connections and grants | Server panel, forms, transport/downstream auth distinction |
 | login | Central provider/method action and existing auth operation | Browser/input/cancel flow without renderer secrets |
 | logout | Central provider/account selection and removal | Explicit confirmation; no implied environment removal |
-| credential / cred | Masked form, owner VariableStore operations | Secret input only, never composer echo/history |
-| team / teams | Team registry/chart and owner attachment | Team/request form; admission already consumes request once |
-| agent / agents | Shared persona resolver and owner attachment | Profile/request form; admission already consumes request once |
+| credential / cred | Masked form, runtime VariableStore operations | Secret input only, never composer echo/history |
+| team / teams | Team registry/chart and runtime attachment | Team/request form; admission already consumes request once |
+| agent / agents | Shared persona resolver and runtime attachment | Profile/request form; admission already consumes request once |
 
 ## Lifecycle endpoints
 
 All paths start `/v1/desktop/sessions/{id}` unless noted.
 
 - `POST /credentials`: action `list|store|forget`, optional key, secret value only
-  for store, confirmed=true for forget. It calls owner `credential_op`. Values
+  for store, confirmed=true for forget. It calls the runtime's `credential_op`. Values
   never enter the command receipt database or transcript; only key names are
-  journalled by the existing owner. `/credential <anything>` is rejected rather
+  journalled by the existing runtime. `/credential <anything>` is rejected rather
   than accidentally recording a secret. Names-only listing does not expose values.
 - `POST /fork`: stable request_id, optional message, boundary=`next_safe`.
-  The owner refuses compaction and uses `Session.request_fork` during a turn;
+  The runtime refuses compaction and uses `Session.request_fork` during a turn;
   otherwise it uses `fork_session`. This is the canonical complete-history fork
   at a safe boundary, not an arbitrary transcript rewrite. The parent is unchanged.
   The child gets a new canonical ID; optional message is admitted once using the
   same UUID, never both a boot-prompt sidecar and a renderer re-submit.
 - `POST /asides`: request_id, text, optional previous aside_id. Completion runs
-  on the owner but does not enter conversation history. GET `/asides/{aside_id}`
+  on the runtime but does not enter conversation history. GET `/asides/{aside_id}`
   recovers a response after HTTP loss; DELETE closes a settled panel. A continuation
   temporarily owns its prefix so two panels cannot adopt it twice.
-- `POST /asides/{aside_id}/adopt`: request_id and confirmed=true. Owner adoption
+- `POST /asides/{aside_id}/adopt`: request_id and confirmed=true. Runtime adoption
   enforces its idle guard and durable-first ordering. A latch before any await
   prevents distinct request IDs from duplicating adoption. An ambiguous failure
   is not retried under another ID. Already completed receipts replay safely.
@@ -114,18 +114,18 @@ All paths start `/v1/desktop/sessions/{id}` unless noted.
   HTTP shutdown clears them. They are not canonical/durable history until adopted.
 - `POST /v1/desktop/stop`: request_id, exact targets[] and confirmed=true. All
   targets are resolved before stopping any. Cold targets report already_stopped
-  without starting a process. Live targets call the canonical owner stop protocol;
+  without starting a process. Live targets call the canonical runtime stop protocol;
   stop_requested is acknowledgement, not an invented completed-exit receipt.
 
 `/loop <count>` uses the standing goal, max 25 iterations; `/loop <goal>` keeps an
 ephemeral goal and uses the shared terminal judge protocol. The shared prompts,
 verdict parser and count rules now live in `session/goal_loop.py`; terminal imports
-remain compatible. The owner waits for actual turn completion rather than HTTP
+remain compatible. The runtime waits for actual turn completion rather than HTTP
 admission. It never answers gates. `stop|cancel|abort` cancels the driver and only
 its own queued/active iteration; another frontend's manual turn is not cancelled
 as collateral. `/loop status` reads state. The canonical frontend snapshot carries
-loop status/count/reason. A viewer detach does not stop/restart it; owner teardown
-cancels it, and a replaced owner labels a retained active checkpoint interrupted
+loop status/count/reason. A viewer detach does not stop/restart it; runtime teardown
+cancels it, and a replaced runtime labels a retained active checkpoint interrupted
 rather than automatically spending more tokens.
 
 ## Provider and reporting endpoints
@@ -145,7 +145,7 @@ rather than automatically spending more tokens.
 - GET `/v1/desktop/analytics?since_ms=...&until_ms=...&session_id=...&days=...`:
   AnalyticsStore aggregate and daily series. The daily series explicitly reports
   all_sessions scope; it is not mislabelled as the optional aggregate session filter.
-- GET `.../sessions/{id}/failovers`: selected and effective owner models plus the
+- GET `.../sessions/{id}/failovers`: selected and effective runtime models plus the
   configured **default** chains. Defaults are labelled, not represented as a live
   provider's private cooldown/account routing state.
 - GET `/v1/desktop/skills?session_id=...&name=...`: session-cwd discovery and optional
@@ -154,7 +154,7 @@ rather than automatically spending more tokens.
 
 ## MCP controls
 
-GET `.../sessions/{id}/mcp` is a cold-safe effective-config read. A live owner supplies
+GET `.../sessions/{id}/mcp` is a cold-safe effective-config read. A live runtime supplies
 its own manager status. Rows report source, owned scope, transport/tool count and
 separate downstream_authorization=`unknown`. Tool discovery or a healthy MCP
 transport does **not** prove Google Workspace account authorization.
@@ -172,9 +172,9 @@ POST the same path accepts the closed `MCPControl` schema:
 - `probe` resolves actual transport OAuth capability through existing core code.
   A statically incompatible stdio/API-key server reports false; otherwise list
   metadata remains unknown until probed. Do not offer HTTP OAuth as stdio setup.
-- `login|logout|reauth` starts an owner operation; logout and reauth require explicit
+- `login|logout|reauth` starts a runtime operation; logout and reauth require explicit
   confirmation. `status|cancel` takes operation_id. Operations are bounded, one grant
-  at a time per owner, timeout after five minutes, and keep the owner resident.
+  at a time per runtime, timeout after five minutes, and keep the runtime resident.
   Credential deletion during reauth is reported even when the later login is
   cancelled. No grant tokens cross HTTP. Core OAuth owns callbacks, refresh locks
   and auth.db; desktop does not add a second store.

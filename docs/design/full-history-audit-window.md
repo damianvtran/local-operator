@@ -184,7 +184,7 @@ Measured, not assumed, on the operator's real journals:
 
 | operation | `bda7b76d34e0` (231 MB) | `9f8e5b652ac7` (75 MB) |
 |---|---|---|
-| owner `Transcript` ctor (already paid) | 1.37 s | 0.34 s |
+| runtime `Transcript` ctor (already paid) | 1.37 s | 0.34 s |
 | naive full audit replay | 0.29 s, **47 MB peak** | 0.18 s, 33 MB |
 | windowed audit slice (120 rows, tail) | **<1 ms** | 1 ms |
 | windowed audit slice (120 rows, mid-file) | **<1 ms** | <1 ms |
@@ -192,7 +192,7 @@ Measured, not assumed, on the operator's real journals:
 
 Three conclusions the coder must not relitigate:
 
-1. **Serve audit pages from the owner's resident `_entries`, never from a disk
+1. **Serve audit pages from the runtime's resident `_entries`, never from a disk
    re-read.** `Transcript.__init__` already parses the whole file into
    `self._entries` (`transcript.py:557-566`). The rows are in RAM before any
    page is requested; a windowed replay over them is ~1 ms. Using
@@ -202,13 +202,13 @@ Three conclusions the coder must not relitigate:
    call is exactly what budget B forbids. `audit_slice` is the only entry point.
 3. `read_replay_suffix` (`remote.py:99`, `transcript.py:360`) is for the
    *attach* path and stays exactly as it is. Audit paging is a post-attach,
-   reader-driven gesture on an owner that already holds the journal. **The
+   reader-driven gesture on a runtime that already holds the journal. **The
    resume path's cost does not change at all.**
 
 Page residency is bounded by the existing machinery, unchanged:
 `DISPLAY_HISTORY_MESSAGES`/`DISPLAY_HISTORY_BYTES` (`history_window.py:27-28`)
 bound each page; `_DisplayWindowCache` and `_retained_size` (`:82-162`) bound
-per-owner retention; `RESUME_RENDER_MESSAGES` (`app.py:1049`) bounds first
+per-runtime retention; `RESUME_RENDER_MESSAGES` (`app.py:1049`) bounds first
 paint; `SessionPresentation.retainable` (`session_presentation.py:317`) bounds a
 parked view. Audit pages flow through all four untouched — they are ordinary
 `DisplayHistoryWindow` pages carrying an extra boolean.
@@ -372,20 +372,20 @@ should see the vocabulary change with it.
 (`history_window.py:26`) is advertised at `runtime/server.py:659` on the mere
 presence of `history_page`, and negotiated at `mobile/attach_client.py:245`.
 It is a *presence* flag with no version handshake, so it cannot express "this
-owner also pages audit history". Two ways it breaks without a new string:
+runtime also pages audit history". Two ways it breaks without a new string:
 
-- **New viewer, old owner.** The viewer receives `audit_available` absent →
+- **New viewer, old runtime.** The viewer receives `audit_available` absent →
   Pydantic default `False` → it never asks for an audit page. Safe by
   construction. But `extra="forbid"` on the model means the reverse direction
   is not safe:
-- **Old viewer, new owner.** `DisplayHistoryWindow` sets
+- **Old viewer, new runtime.** `DisplayHistoryWindow` sets
   `model_config = ConfigDict(extra="forbid")` (`history_window.py:39`), so an
   old viewer validating a payload carrying `audit`/`audit_available` **raises**,
   and `_fetch_history_page` (`remote.py:2490`) turns that into a failed attach.
   This is a hard cross-version break, and it is the single most likely way this
   change causes an incident during a staged rollout.
 
-So: the owner advertises `display-history-audit-v1` and **only emits the two new
+So: the runtime advertises `display-history-audit-v1` and **only emits the two new
 fields when the attaching viewer negotiated it**, exactly as `display_window` is
 negotiated today (`runtime/server.py:1253`, `attach_client.py:245`). Mixed
 versions on one machine are the norm here — the global `lop` runtime is a
@@ -472,7 +472,7 @@ tests under `env -u NO_COLOR TERM=xterm-256color`.
 
 1. **Cross-version payload rejection (§6)** — the `extra="forbid"` break. Highest
    severity, and entirely preventable by gating the fields on the negotiated
-   capability. Verify with a real old-binary viewer against a new owner, not
+   capability. Verify with a real old-binary viewer against a new runtime, not
    only with a unit test.
 2. **`materialize_history` walking into audit** — would feed 17,000 rows to the
    retitle sampler and to `history()`. Guard it explicitly (§5) and assert it.

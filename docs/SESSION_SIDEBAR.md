@@ -1,7 +1,7 @@
 # In-app session sidebar
 
-The sidebar is an opt-in terminal view over existing session owners, not another
-owner or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
+The sidebar is an opt-in terminal view over existing session runtimes, not another
+runtime or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
 `Ctrl+Shift+↑`/`Ctrl+Shift+↓` attach the previous/next conversation directly — the
@@ -37,10 +37,10 @@ and its pasted secret cannot be retained by sidebar bookkeeping.
 
 ## Opt-in durable display history
 
-An upgraded owner advertises `display-history-window-v1`. Sidebar connections ask
+An upgraded runtime advertises `display-history-window-v1`. Sidebar connections ask
 for `RemoteSession.connect(..., display_window=True)`; ordinary connections retain
 full-history initialization. The window rides the existing atomic frontend sync:
-owner snapshot, durable cursor, window selection and subscription share one
+runtime snapshot, durable cursor, window selection and subscription share one
 no-yield authoritative-loop boundary.
 
 `Transcript.build_llm_history(through_id=...)` selects the journal cut before
@@ -56,12 +56,12 @@ space reserved for metadata. The entire sync still respects the transport's
 truncated**: an explicit `full_required` result selects the existing off-thread
 local full replay at the captured cut. That fallback does not promise low latency.
 
-Signed tokens bind conversation, owner epoch, replay generation, durable cut and
+Signed tokens bind conversation, runtime epoch, replay generation, durable cut and
 message position; clients cannot provide filesystem paths or byte offsets.
 Appends preserve a captured cut. Compaction, pruning and file folding invalidate
 its generation. Paging returns a typed reset rather than mixing generations;
 the viewer obtains a fresh canonical sync without restarting or prompting the
-owner. A missing saved anchor resets to the new canonical tail, never a different
+runtime. A missing saved anchor resets to the new canonical tail, never a different
 row presented as the old anchor.
 
 `display_history_window()` is explicitly partial. `history_message_count`,
@@ -71,7 +71,7 @@ row presented as the old anchor.
 contiguous interval through it for the existing two-direction renderer.
 `materialize_history()` is the explicit full-trajectory API used by background
 naming. Calling `history()` on an unhydrated window raises, rather than silently
-returning a partial conversation. Owner/model/idempotency full-history callers
+returning a partial conversation. Runtime/model/idempotency full-history callers
 are unchanged.
 
 Loaded IDs, painted IDs and pre-cut live-seed IDs are distinct. Canonical live
@@ -83,10 +83,10 @@ a replay-changing generation produces an explicit presentation reset.
 ## Local workflows and compatibility
 
 The invoking TUI schedules `/loop`, while each iteration prompts its captured
-owner. Another conversation's stop cannot cancel it. Bang commands execute in the
-invoking terminal and forward their receipt to the captured owner. Stable IDs
+runtime. Another conversation's stop cannot cancel it. Bang commands execute in the
+invoking terminal and forward their receipt to the captured runtime. Stable IDs
 from the submitted tool-call ID make duplicate receipt delivery idempotent. A
-busy owner queues the receipt behind its turn; acceptance is not a claim that
+busy runtime queues the receipt behind its turn; acceptance is not a claim that
 queued persistence is already durable. Offscreen completion retains its result.
 
 Already-running older owners remain visible and selectable through authenticated

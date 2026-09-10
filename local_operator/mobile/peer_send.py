@@ -56,12 +56,12 @@ def resolve_peer_target(
     record has that pid does the digit string fall through to the substring
     match, so a session id or name that happens to be numeric still works.
 
-    Only ``live`` records are eligible (a ``wedged`` owner will not service
+    Only ``live`` records are eligible (a ``wedged`` runtime will not service
     the socket promptly; ``stale`` is dead) — unless ``include_wedged``,
     which the kill switch passes: a wedged session is exactly the one a user
     needs to be able to STOP, and the stop ladder's signal rungs are built
-    for an owner that will not answer. A send never wants that; a message to
-    a wedged owner is a message nobody reads.
+    for a runtime that will not answer. A send never wants that; a message to
+    a wedged runtime is a message nobody reads.
 
     A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
     rather than resolved. The two name different sessions, and the precedence

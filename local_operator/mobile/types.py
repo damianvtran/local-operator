@@ -45,7 +45,7 @@ from typing import Any, Literal
 # Discovery + control-plane primitives now live in the session runtime package:
 # a record, a heartbeat, a client kind and an attach cap describe one session
 # reachable over a control socket, and the phone is one client of that, not
-# its owner. They are re-exported here (and NOT redefined) so the whole mobile
+# its runtime. They are re-exported here (and NOT redefined) so the whole mobile
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
@@ -96,7 +96,7 @@ class ContinuationCommand:
         This constructor sits on both HTTP and control-socket boundaries. Silent
         ``str(...)`` coercion turns missing, object, and list fields into model
         input and lets malformed UUIDs escape as route-level 500s, so invalid
-        producer data is rejected before any owner is spawned or transcript is
+        producer data is rejected before any runtime is spawned or transcript is
         opened.
         """
         if not isinstance(data, dict):
@@ -223,7 +223,7 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
     elif op == "recall_steer":
         # v4: a follower unsending a queued steer names the message identity it
         # queued (the ContinuationCommand id that became the Message id). The
-        # owner matches by id in its steering queue; a drained or unknown id is
+        # runtime matches by id in its steering queue; a drained or unknown id is
         # an ordinary "no longer queued" error, never a crash.
         if not isinstance(frame.get("command_id"), str) or not frame["command_id"]:
             raise ValueError("command_id must be a non-empty string")
@@ -291,7 +291,7 @@ ControlOp = Literal[
     "unwatch",  # {} — the last phone SSE subscriber left
     # v4 (full-TUI attach): unsend one queued steering message by identity.
     # Follower Esc-recall parity — the TUI matches queue contents by the
-    # Message id it queued, and the owner recalls exactly that entry.
+    # Message id it queued, and the runtime recalls exactly that entry.
     "recall_steer",  # {command_id}
     # Peer-to-peer session messaging (`lop send`): a short-lived sender process
     # from ANOTHER local lop session hands a message to this one. Additive; no
@@ -318,10 +318,10 @@ EventOp = Literal[
     "projection",  # full projection repaint (the only push form — no deltas)
     "ack",  # {req, detail} — a request landed
     "error",  # {req, message} — a request was rejected/failed
-    # v4, event-subscribed attach clients ONLY (never the daemon): the owner
-    # session's raw AgentEvent stream, serialized with model_dump(mode="json").
+    # v4, event-subscribed attach clients ONLY (never the daemon): the session
+    # runtime's raw AgentEvent stream, serialized with model_dump(mode="json").
     # Fidelity by construction — the follower renders the same events the
-    # owner's own EventController consumes, so nothing is inverse-folded.
+    # runtime's own EventController consumes, so nothing is inverse-folded.
     "event",  # {data: <AgentEvent dump>}
     "frontend_sync",  # v5 attach-only atomic FrontendSessionState snapshot
     "frontend_update",  # v5 attach-only ordered state replacement
@@ -639,7 +639,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         for item in items:
             values = {k: v for k, v in item.items() if k in known}
             if cls is TranscriptEntry:
-                # Older owners did not say whether the real row ending survived.
+                # Older runtimes did not say whether the real row ending survived.
                 # Unknown completeness cannot authorize a completion receipt.
                 values["text_complete"] = item.get("text_complete") is True
             result.append(cls(**values))

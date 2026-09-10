@@ -1,4 +1,4 @@
-"""Explicit desktop lifecycle operations through the canonical session owner."""
+"""Explicit desktop lifecycle operations through the canonical session runtime."""
 
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ async def stop(body: Stop, request: Request):
         for target in dict.fromkeys(body.targets):
             async with errors(), host(request).session(target) as bridge:
                 assert bridge.remote is not None
-                # A stop never engages a cold owner merely to shut it down.
+                # A stop never engages a cold runtime merely to shut it down.
                 if bridge.remote.is_cold:
                     rows.append({"session_id": target, "status": "already_stopped"})
                 else:

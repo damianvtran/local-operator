@@ -105,7 +105,7 @@ Harness core contract:
   disposed explicitly and never keep the loop alive (track handles, cancel on
   dispose).
 - `jobs.py`: `AsyncJobManager` — register/running/completed/failed/cancelled,
-  max 15 running, 5 min retention, owner-scoped delivery sink, cancel scoping.
+  max 15 running, 5 min retention, runtime-scoped delivery sink, cancel scoping.
 - `session/session.py`: facade composing loop + tools + transcript + wake +
   jobs + skills + compaction hooks; `prompt(text)`, `steer()`,
   `subscribe(handler)`, `dispose()`. Session-scoped `asyncio.TaskGroup` for
