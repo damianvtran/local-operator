@@ -2036,6 +2036,48 @@ class OpenAICompatClient:
         affinity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:codex-cache:{key}"))
         return {"session-id": affinity, "thread-id": affinity}
 
+    def _grok_conv_headers(self, request: ChatRequest, url: str) -> dict[str, str]:
+        """Keep one conversation on one xAI cache server via ``x-grok-conv-id``.
+
+        xAI caches prompts automatically but stores entries per server; without
+        a routing key the load balancer can spread one conversation's turns
+        across servers, so a request lands on a server that never saw the
+        prefix and pays full input price. xai sat 3-4 points below the
+        affinity-routed providers on this shared client (94.0% cached-input
+        share over 14 days of analytics vs 97.0-97.7% for anthropic/kimi/zai)
+        with no other difference to explain it. The header is xAI's documented
+        routing key for exactly this
+        (docs.x.ai/developers/advanced-api-usage/prompt-caching and its
+        maximizing-cache-hits page); omp ships the same header
+        (``promptCacheSessionHeader`` in packages/catalog/src/compat/openai.ts)
+        and xai-org/grok-build sends it on every request. Measured before/
+        after evidence for this client lives in docs/XAI_CACHING.md.
+
+        Like ``_codex_affinity_headers`` this is a GROUP, not stored history:
+        forks inherit the cache lineage and still replay full input. The value
+        is a UUIDv5 of ``prompt_cache_key`` under a fixed namespace, so it is
+        opaque (never a filesystem/session label) and stable across retries,
+        resumes and fresh client instances -- and, because it derives from the
+        lineage alone, IDENTICAL across the ``xai``/``xai-oauth`` credential
+        flavours, so failover between them keeps a live conversation on its
+        warm server. Requests without a lineage (isolated calls) keep today's
+        credential-agnostic routing: no key, no header.
+
+        Host fallback: a custom OpenAI-compatible provider pointed at
+        api.x.ai is routed by the same xAI fleet, so the HOST gates the header
+        too, mirroring omp's host matching. The URL is the actual request
+        target (OAuth host included), not the registry base.
+        """
+        key = request.prompt_cache_key
+        if not key or not key.strip():
+            return {}
+        if request.model.provider not in {"xai", "xai-oauth"} and httpx.URL(url).host != "api.x.ai":
+            return {}
+        # Same namespace discipline as the Codex pair: never send a
+        # filesystem/session label verbatim in a header.
+        conv_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:grok-cache:{key}"))
+        return {"x-grok-conv-id": conv_id}
+
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
         request = bind_native_context(
@@ -2322,11 +2364,13 @@ class OpenAICompatClient:
         started = False
         response_id: str | None = None
 
+        headers = self._headers(api_key, oauth_access)
+        headers.update(self._grok_conv_headers(request, url))
         async with self._http.stream(
             "POST",
             url,
             json=self._build_body(request, scope=scope),
-            headers=self._headers(api_key, oauth_access),
+            headers=headers,
         ) as response:
             if response.status_code >= 400:
                 await response.aread()
@@ -2508,6 +2552,7 @@ class OpenAICompatClient:
         )
         headers = self._headers(api_key, oauth_access)
         headers.update(self._codex_affinity_headers(request, oauth_access, url))
+        headers.update(self._grok_conv_headers(request, url))
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         tool_call_count = 0
