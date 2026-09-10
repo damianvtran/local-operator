@@ -13,11 +13,20 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
-from local_operator.session.history_window import display_window
+from local_operator.session.history_window import (
+    _AUDIT_TAIL_CURSOR,
+    _audit_entry_cursor,
+    display_window,
+)
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import (
+    ENTRY_COMPACTION,
+    Transcript,
+    context_cut_index,
+    replay_entries,
+)
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
 
@@ -561,3 +570,176 @@ async def test_the_audit_chain_advances_even_when_a_page_delivers_no_rows(tmp_pa
     else:
         raise AssertionError("the audit chain did not terminate")
     assert page.before_token is None
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_compaction_row_above_the_cut_renders_no_marker(tmp_path):
+    """Repeated compaction leaves compaction rows INSIDE the kept suffix.
+
+    Review round 1 (R2) read the omission of these as unreachable markers. It is
+    the opposite: each names a boundary the latest compaction already moved, so
+    the seam it describes no longer exists in the rendered transcript. Rendering
+    them would place ``COMPACTION_MARKER_NOTICE`` — which claims the history
+    above it is outside the model's context — above rows the model can still
+    see, reintroducing the inversion D1 fixed.
+
+    Pinned because the tempting "fix" (emit them from the context phase) also
+    breaks the byte-identical guard below and pushes each marker's
+    ``preserve_data`` into the model's own context.
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    rows = [Message.user(f"row {index}") for index in range(40)]
+    await transcript.append_messages(rows)
+    # Two compactions whose kept windows OVERLAP, so the earlier compaction row
+    # ends up at or above the later one's cut — the shape the real journal
+    # reaches by compacting repeatedly against a short kept suffix.
+    superseded = await transcript.append_compaction("older summary", rows[20].id, 500)
+    latest = await transcript.append_compaction("latest summary", rows[30].id, 500)
+
+    entries = transcript.entries()
+    cut = context_cut_index(entries, quiet=True)
+    positions = {entry.id: index for index, entry in enumerate(entries)}
+    # THE STARTING STATE MUST BE REACHABLE, not merely arranged: assert the
+    # superseded row really does sit at/above the cut, or this test passes
+    # while exercising nothing.
+    assert positions[superseded.id] >= cut, "fixture did not reproduce a superseded marker"
+    assert positions[latest.id] >= cut
+
+    _, pages = _walk(transcript, max_messages=15)
+    marker_ids = [
+        row.id
+        for page in pages
+        for row in page.messages
+        if getattr(row, "custom_type", None) == "compaction_summary"
+    ]
+    assert latest.id in marker_ids, "the live seam must still be rendered"
+    assert superseded.id not in marker_ids, (
+        "a superseded compaction row was rendered as a seam; its notice would "
+        "claim the rows above it are outside the model's context, but they are "
+        "still in the kept window"
+    )
+
+
+@pytest.mark.asyncio
+async def test_emitting_superseded_markers_would_break_the_context_replay_guard(tmp_path):
+    """Why R2's suggested route is rejected, asserted rather than argued.
+
+    The PR's central regression guard is that ``mode="context"`` stays
+    byte-for-byte what ``build_llm_history`` always produced. A context phase
+    that also emitted the superseded markers would violate exactly that.
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    rows = [Message.user(f"row {index}") for index in range(40)]
+    await transcript.append_messages(rows)
+    superseded = await transcript.append_compaction("older summary", rows[20].id, 500)
+    await transcript.append_compaction("latest summary", rows[30].id, 500)
+
+    entries = transcript.entries()
+    assert {e.id for e in entries} >= {superseded.id}
+    replayed = replay_entries(entries, None, mode="context")
+    assert [m.model_dump() for m in replayed] == [
+        m.model_dump() for m in transcript.build_llm_history()
+    ]
+    # Exactly ONE marker at the head: the live seam.
+    markers = [m for m in replayed if getattr(m, "custom_type", None) == "compaction_summary"]
+    assert len(markers) == 1 and markers[0].id != superseded.id
+
+
+@pytest.mark.asyncio
+async def test_full_required_hands_back_an_audit_cursor_and_the_reader_adopts_it(tmp_path):
+    """The DOMINANT real path into the audit phase, which had no coverage.
+
+    All eight reference journals reach audit through this escalation rather
+    than through a plain context drain: a group larger than the frame budget
+    returns ``full_required``, the reader replays the model's history locally,
+    and that replay stops at the context cut. The audit cursor returned
+    alongside the escalation is the only way back to the pre-compaction rows,
+    so a regression here silently restores the original defect for every
+    compacted session while every other test stays green (review round 1, R3).
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    early = [Message.user(f"early {index}") for index in range(6)]
+    await transcript.append_messages(early)
+    cut_row = Message.user("cut row")
+    await transcript.append_message(cut_row)
+    await transcript.append_compaction("summary", cut_row.id, 500)
+    # One group larger than the whole frame budget, which is what forces the
+    # escalation rather than an ordinary page.
+    await transcript.append_message(Message.assistant("oversized prose " * 100_000))
+
+    page = window(transcript)
+    # Reachability of the starting state, again asserted rather than assumed:
+    # this must be the REAL escalation, carrying a REAL audit cursor.
+    assert page.status == "full_required", page.status
+    assert page.audit_available is True
+    assert page.before_token, "the escalation dropped the audit cursor"
+
+    # The reader's half: adopting that cursor must leave the chain live.
+    remote = RemoteSession.__new__(RemoteSession)
+    remote._display_history = page
+    # The state a reader is REALLY in at this moment, not a convenient one:
+    # ``materialize_history`` has just replayed the model's history in full, so
+    # the context half is hydrated and only the audit half is outstanding.
+    # ``history_before_token`` returns None unless BOTH are set, so getting
+    # either wrong would hide the regression this test exists to catch.
+    remote._history_hydrated = True
+    remote._audit_exhausted = True
+    assert remote.history_before_token is None, (
+        "fixture is not in the post-escalation state: the chain must look "
+        "exhausted BEFORE the cursor is adopted, or adopting it proves nothing"
+    )
+    remote._adopt_audit_cursor(page.before_token)
+    assert remote.history_before_token == page.before_token
+    assert remote._audit_exhausted is False
+    assert remote._display_history.has_more is True
+    assert remote._display_history.audit_available is True
+
+    # And the adopted cursor actually fetches pre-compaction rows.
+    resumed = window(transcript, before=page.before_token)
+    assert resumed.status == "ok"
+    assert resumed.audit is True
+    assert {row.id for row in resumed.messages} & {row.id for row in early}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_kept_suffix_pages_the_audit_tail_and_terminates(tmp_path):
+    """``_AUDIT_TAIL_CURSOR``: the cut lands PAST the journal's last row.
+
+    ``context_cut_index`` returns ``len(entries)`` when the newest compaction
+    row carries no ``first_kept_entry_id``, so there is no entry id at the cut
+    for the first audit cursor to name and the sentinel stands in for one. A
+    regression here is a HUNG chain rather than a wrong answer (review round 1,
+    R5).
+
+    REACHABILITY, stated honestly because it decides what this test is worth:
+    the CURRENT writer cannot produce this row. ``append_compaction`` takes
+    ``first_kept_entry_id: str`` as a required argument and always records it,
+    and a scan of 401 real session journals found 280 compaction rows with the
+    field and none without. So the sentinel is defensive — it covers a journal
+    written by a build predating the field, which is exactly the mixed-build
+    situation this PR's capability negotiation exists for. The row is therefore
+    appended through ``_append``, the same primitive ``append_compaction`` uses,
+    rather than by passing a bogus id to the public writer: an unresolvable id
+    is a DIFFERENT branch (it returns 0 and replays everything), and using it
+    here would silently test the wrong path.
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    rows = [Message.user(f"row {index}") for index in range(8)]
+    await transcript.append_messages(rows)
+    await transcript._append(ENTRY_COMPACTION, {"summary": "summary", "tokens_before": 500})
+
+    entries = transcript.entries()
+    cut = context_cut_index(entries, quiet=True)
+    assert cut == len(entries), "fixture did not reproduce an empty kept suffix"
+    # And the sentinel is genuinely the cursor in play, not merely the state.
+    assert _audit_entry_cursor(transcript) == _AUDIT_TAIL_CURSOR
+
+    walked, pages = _walk(transcript, max_messages=30)
+    assert any(p.audit for p in pages), "the tail cursor never entered the audit phase"
+    assert pages[-1].before_token is None, "the chain did not terminate"
+    delivered = {row.id for row in walked}
+    assert delivered >= {row.id for row in rows}, "audit tail paging lost rows"

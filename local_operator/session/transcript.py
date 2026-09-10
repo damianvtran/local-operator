@@ -1375,6 +1375,30 @@ def context_cut_index(entries: Sequence[TranscriptEntry], *, quiet: bool = False
     ``quiet`` suppresses the unresolved-cut error, because the audit pager asks
     this question once per page and a corrupt journal would otherwise log on
     every scroll; the context replay still reports it once per replay.
+
+    COMPACTION ROWS AT OR ABOVE THE CUT ARE DELIBERATELY NOT RENDERED, and the
+    asymmetry is not a gap in the tiling. Review round 1 (R2) read the omission
+    as unreachable markers; measured in RENDERED order on ``2f95e374dd22`` (61
+    compaction rows, cut 1626) it is the opposite. Repeated compaction leaves
+    several *superseded* compaction rows inside the kept suffix: each describes
+    a boundary the latest compaction has already moved, so the seam it names no
+    longer exists in the transcript the reader is looking at. Every compaction
+    row BELOW the cut is emitted in place by the audit phase (55 of 55 there),
+    and the latest one is emitted at the context head as the live seam — 56
+    markers for 56 boundaries that still exist.
+
+    Emitting the remaining 5 would make the marker copy FALSE at each of them.
+    ``COMPACTION_MARKER_NOTICE`` claims the history above it is outside the
+    model's context; those rows land 3-15 LIVE context rows below the seam, so
+    each would sit above rows the agent can still see and assert the reverse —
+    reintroducing the inversion D1 was raised to fix. The two suggested routes
+    are worse than the symptom: emitting them from the CONTEXT phase breaks
+    this PR's central regression guard (``mode="context"`` byte-identical to
+    ``build_llm_history`` on 8/8 journals) and pushes the markers' 680 KB
+    ``preserve_data`` blocks into the model's own context — measured at
+    +3,380,677 bytes, roughly 845k tokens, on this one journal — while
+    extending the audit window's first ``end_index`` past the cut re-delivers
+    16 message rows the context page already sent.
     """
     compaction_index: int | None = None
     for i in range(len(entries) - 1, -1, -1):
@@ -1418,11 +1442,15 @@ def context_preserved_turn_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
             # Resolved through the SAME shed/cap filter the context replay
             # applies, never off the raw payload. The stored block is not what
             # gets emitted: ``replay_preserved_turns`` drops journalled
-            # injections and enforces the cap, so on a real journal the payload
-            # held 295 turns while the replay emitted 104. Suppressing the raw
-            # 295 would have hidden 191 rows that no phase then delivered —
-            # measured, and exactly the class of silent loss this whole change
-            # exists to end.
+            # injections and enforces the cap, so on the reference journal
+            # (``bda7b76d34e0``) the payload held 295 turns while the replay
+            # emitted 105. Suppressing the raw 295 would have hidden 190 rows
+            # that no phase then delivered — measured, and exactly the class of
+            # silent loss this whole change exists to end. The three figures
+            # track a live journal that keeps growing, so treat them as an
+            # order-of-magnitude illustration of the gap rather than a pin;
+            # what is invariant is that the payload count EXCEEDS the emitted
+            # count, which is the whole reason this filter cannot be skipped.
             from local_operator.compaction.cutpoint import replay_preserved_turns
 
             return {

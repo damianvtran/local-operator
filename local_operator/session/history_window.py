@@ -97,10 +97,19 @@ def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[
 
     THE one place that decision is implemented, mutating in place and returning
     the same dict so it composes with either kind of caller. A page reaches the
-    wire by two routes — the attach sync frame and the ``history_page`` RPC —
-    and stripping in only one of them yields a viewer that attaches cleanly and
-    then fails on its first scroll up, which is a worse failure than either
-    route breaking on its own.
+    wire by THREE routes, and every one of them must strip:
+
+    * the attach sync push frame (``server.py``, ``_handle_auth``),
+    * the ``history_page`` RPC (``_dispatch_payload``),
+    * the ``frontend_sync`` RPC (``_dispatch_payload``), which an older viewer
+      calls on every history refresh.
+
+    Stripping in only some of them yields a viewer that attaches cleanly and
+    then fails later — on its first scroll up, or on the first refresh after
+    the owner appends a row — which is a worse failure than any single route
+    breaking on its own. Round 1 review found the third route unstripped after
+    this docstring had asserted there were two: if a fourth is ever added,
+    update this list in the same commit.
     """
     if not audit_capable:
         for name in AUDIT_WIRE_FIELDS:

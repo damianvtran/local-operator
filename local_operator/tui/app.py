@@ -7983,7 +7983,16 @@ class OperatorApp(App[None]):
         # is still the correct thing to say.
         audit = bool(session is not None and getattr(session, "history_is_audit", False))
         if not more:
-            self._restate_head_notice(notice, RESUME_START_NOTICE, "info")
+            # `note` for the same reason the two states below use it, and this
+            # is the state the audit phase made load-bearing: before audit
+            # paging, "start of conversation" appeared at the compaction cut
+            # and was simply false, so its quietness cost nothing. It now
+            # appears only when the journal's first message row has genuinely
+            # been reached, which makes it the definitive answer to "where did
+            # my history go" — and it was the one state of the six still
+            # rendered at `info`/`dim`, 3.77:1 on the light theme against the
+            # 4.5:1 AA floor (design review round 1, D4).
+            self._restate_head_notice(notice, RESUME_START_NOTICE, "note")
         elif not scrollable and self._resume_fill_active:
             # A fill attempt is still in flight, and the frame it is about to
             # produce is the one worth describing. Stating "unreachable" from

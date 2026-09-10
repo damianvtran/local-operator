@@ -1,10 +1,11 @@
 """Rendered frames of the durable audit-history surface.
 
-Captures the head notice in each state of the §4 copy table, plus the
-compaction marker as it renders mid-transcript. Drives the REAL ``OperatorApp``
-against a REAL owner runtime over the real socket, so the stylesheet is applied
-and the pages come back through the same RPC the TUI uses in production — a
-lightweight test host declares no ``CSS_PATH`` and would show none of this.
+Captures the head notice in each state of the §4 copy table in
+``docs/design/full-history-audit-window.md``, plus the compaction marker as it
+renders mid-transcript. Drives the REAL ``OperatorApp`` against a REAL owner
+runtime over the real socket, so the stylesheet is applied and the pages come
+back through the same RPC the TUI uses in production — a lightweight test host
+declares no ``CSS_PATH`` and would show none of this.
 
 Usage::
 
@@ -22,9 +23,17 @@ its scrollable and not-scrollable copy from ``virtual_size`` against
 not reproduce at another. Capture the states you are claiming at more than one
 geometry, and say in the evidence which one each frame is.
 
-Two frames are written per capture, ``<state>.svg`` and ``<state>.settled.svg``,
-taken before and after a further settle. They must be identical for a static
-state; a difference is a reflow the reader sees as motion.
+Two frames are written per capture, ``<state>.<COLS>x<ROWS>.svg`` and
+``<state>.<COLS>x<ROWS>.settled.svg``, taken before and after a further settle.
+They must be identical for a static state; a difference is a reflow the reader
+sees as motion.
+
+The GEOMETRY is in the filename deliberately. It used to name frames by state
+alone, so capturing two geometries into one directory left files that were
+silently all the second run — a design reviewer's settle check "passed" over
+four such overwritten files before the collision was spotted. Since the whole
+point of the geometry argument is to compare sizes, the output names have to
+distinguish them or the script quietly destroys the comparison it exists for.
 """
 
 from __future__ import annotations
@@ -240,13 +249,14 @@ async def capture(out_dir: Path, state: str, size: tuple[int, int] = (100, 34)) 
                 f"| more={bool(remote.history_before_token)}"
             )
             out_dir.mkdir(parents=True, exist_ok=True)
-            save_capture(app, str(out_dir / f"{state}.svg"))
+            stem = f"{state}.{size[0]}x{size[1]}"
+            save_capture(app, str(out_dir / f"{stem}.svg"))
             # Second frame after a further settle. A static state must produce
             # a byte-identical pair; a difference is a reflow the reader sees
             # as motion, and the evidence has to be able to show that.
             for _ in range(30):
                 await pilot.pause()
-            save_capture(app, str(out_dir / f"{state}.settled.svg"))
+            save_capture(app, str(out_dir / f"{stem}.settled.svg"))
     finally:
         await remote.dispose()
         server.close()

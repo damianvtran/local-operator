@@ -36,13 +36,30 @@ from local_operator.tui.widgets.transcript import (
 RETAIN_TEXT_BYTES = 1024 * 1024
 
 #: The in-transcript seam between what the agent still sees and what it does
-#: not. Both halves of that sentence have to be on screen: the rows below the
-#: marker are REAL history (so the reader is not being told anything was lost)
-#: and they are outside the model's context (so the reader is not misled into
+#: not. Both halves of that sentence have to be on screen: the rows it points
+#: at are REAL history (so the reader is not being told anything was lost) and
+#: they are outside the model's context (so the reader is not misled into
 #: thinking the agent can still refer to them).
-COMPACTION_MARKER_NOTICE = (
-    "context compacted here — older messages below are history the agent no longer sees"
-)
+#:
+#: The direction is ABOVE, and it is not interchangeable with "below". A
+#: transcript paints oldest-at-top, so the pre-compaction rows sit above this
+#: marker and the rows below it are the newer ones the model still sees.
+#: Design review round 1 (D1) measured both halves of the original "older
+#: messages below" wording against real mounted block positions and against
+#: ``mode="context"`` membership: rows BELOW a marker were 100% still in
+#: context — exactly what the sentence claimed the agent could not see — while
+#: the rows above were 0-1%. Audit reading is the one task where someone is
+#: reasoning about which rows the agent could have used, so a marker pointing
+#: the wrong way is worse for a trusting reader than the silent nothing it
+#: replaced.
+#:
+#: Keep it UNDER ~76 characters. The glyph prefix costs 2 columns, so a longer
+#: string wraps at an 80-column terminal and orphans its last words on a second
+#: line — at every compaction, 48 times in the reference journal (D2). The
+#: captured evidence geometries (98 and 138 usable columns) cannot show that,
+#: so width is a review-time arithmetic check rather than something a frame
+#: will catch.
+COMPACTION_MARKER_NOTICE = "context compacted here — earlier history above the agent no longer sees"
 
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):

@@ -132,6 +132,97 @@ async def test_a_viewer_that_negotiated_receives_the_audit_keys(tmp_path) -> Non
         server.close()
 
 
+async def _rpc_frontend_sync(server: RuntimeServer, *, announce_audit: bool) -> dict[str, Any]:
+    """Attach, drain the push frames, then CALL the frontend_sync RPC op.
+
+    Deliberately NOT the pushed ``frontend_sync`` FRAME that ``_attach`` above
+    reads. The frame and the op are different code paths, and covering only the
+    frame is why the unstripped op shipped green through round 1 (QA Q1 /
+    review R1).
+    """
+    record = server._record
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port)
+    auth = {
+        "key": record.control_key,
+        "client": "attach",
+        "locality": "local",
+        "frontend_state": True,
+        "display_window": True,
+    }
+    if announce_audit:
+        auth["display_history_audit"] = True
+    writer.write(json.dumps(auth).encode() + b"\n")
+    await writer.drain()
+
+    # Wait for the pushed sync so the connection is fully established, exactly
+    # as a real viewer does before it ever issues a refresh.
+    while True:
+        line = await asyncio.wait_for(reader.readline(), timeout=10)
+        if not line:
+            raise AssertionError("connection closed before the push frame")
+        if json.loads(line).get("op") == "frontend_sync":
+            break
+
+    # The RPC under test.
+    writer.write(json.dumps({"op": "frontend_sync", "req": 1}).encode() + b"\n")
+    await writer.drain()
+    try:
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=10)
+            if not line:
+                raise AssertionError("connection closed before the result frame")
+            frame = json.loads(line)
+            if frame.get("op") == "result" and frame.get("req") == 1:
+                return frame["data"]
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_frontend_sync_rpc_strips_the_keys_for_an_old_viewer(tmp_path) -> None:
+    """An old viewer's history REFRESH must not receive fields it forbids.
+
+    The steady-state path, not a race: ``_refresh_display_history`` calls this
+    op whenever the frontend's ``history_generation`` moves, so an old viewer
+    attached to a new owner hits it as soon as the owner appends a row. The
+    fields serialize on an UNCOMPACTED page too, so a single-row fixture is
+    enough to reproduce it.
+    """
+    server = await _server(tmp_path, [Message.user("row")])
+    try:
+        data = await _rpc_frontend_sync(server, announce_audit=False)
+    finally:
+        server.close()
+    window = data.get("display_history")
+    assert isinstance(window, dict), "the RPC returned no display page"
+    leaked = [field for field in AUDIT_WIRE_FIELDS if field in window]
+    assert not leaked, (
+        f"the frontend_sync RPC leaked {leaked} to a viewer that did not "
+        f"negotiate display-history-audit-v1; its DisplayHistoryWindow sets "
+        f"extra='forbid', so its refresh raises"
+    )
+
+
+@pytest.mark.asyncio
+async def test_frontend_sync_rpc_keeps_the_keys_for_a_new_viewer(tmp_path) -> None:
+    """CANARY (known-positive): the same probe must SEE the fields when the
+    viewer did negotiate. Without this, a pass above could mean the fields are
+    simply never emitted on this route and the test would prove nothing."""
+    server = await _server(tmp_path, [Message.user("row")])
+    try:
+        data = await _rpc_frontend_sync(server, announce_audit=True)
+    finally:
+        server.close()
+    window = data.get("display_history")
+    assert isinstance(window, dict), "the RPC returned no display page"
+    present = [field for field in AUDIT_WIRE_FIELDS if field in window]
+    assert present == list(AUDIT_WIRE_FIELDS), (
+        f"probe is dead: a negotiating viewer saw {present}, so the "
+        f"stripped-case assertion above cannot distinguish a fix from a "
+        f"route that never carries these fields at all"
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_history_page_rpc_strips_the_keys_for_an_old_viewer(tmp_path) -> None:
     """The second emission point. Stripping only the sync frame would produce a

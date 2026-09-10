@@ -1318,10 +1318,11 @@ class RuntimeServer:
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
             # The sync frame carries the FIRST display page, so it is one of
-            # the two places the audit fields reach the wire (the other is the
-            # ``history_page`` RPC below). Both strip through the same helper;
-            # stripping in only one would produce a viewer that attaches
-            # cleanly and then fails on its first scroll.
+            # the THREE places the audit fields reach the wire (the others are
+            # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
+            # through the same helper; stripping in only some would produce a
+            # viewer that attaches cleanly and then fails on its first scroll
+            # or on its first post-append refresh.
             if isinstance(sync_payload.get("display_history"), dict):
                 strip_audit_fields(
                     sync_payload["display_history"], audit_capable=conn.audit_history
@@ -2403,6 +2404,7 @@ class RuntimeServer:
                 oversized_frame_report,
                 sync_wire_payload,
             )
+            from local_operator.session.history_window import strip_audit_fields
 
             capture = getattr(h, "subscribe_frontend", None)
             if not callable(capture):
@@ -2413,22 +2415,38 @@ class RuntimeServer:
             )
             try:
                 payload = sync_wire_payload(subscription.sync)
+                # The THIRD wire route, and the one an old viewer uses most:
+                # ``RemoteSession._refresh_display_history`` calls this op on
+                # every history refresh, which fires whenever the frontend's
+                # ``history_generation`` moves — i.e. as soon as a new owner
+                # appends a row. ``audit``/``audit_available`` are ordinary
+                # model fields, so they serialize on an UNCOMPACTED page too;
+                # missing the strip here is a hard ValidationError on the
+                # viewer's nested ``DisplayHistoryWindow`` (``extra='forbid'``)
+                # rather than a compaction-only or a racy failure.
+                if isinstance(payload.get("display_history"), dict):
+                    strip_audit_fields(payload["display_history"], audit_capable=audit_capable)
                 # Keep the existing live subscription. This temporary capture
                 # only supplies an atomic cut; it must not multiply observers.
                 response = {"op": "result", "req": frame.get("req"), "data": payload}
                 if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                     window = subscription.sync.display_history
                     if window is not None:
-                        payload["display_history"] = window.model_copy(
-                            update={
-                                "status": "full_required",
-                                "messages": [],
-                                "durable_seed_ids": [],
-                                "durable_seed_tool_ids": [],
-                                "before_token": None,
-                                "snapshot_token": None,
-                            }
-                        ).model_dump(mode="json")
+                        # Re-serialized from the model, so it needs the same
+                        # strip as the page above rather than inheriting it.
+                        payload["display_history"] = strip_audit_fields(
+                            window.model_copy(
+                                update={
+                                    "status": "full_required",
+                                    "messages": [],
+                                    "durable_seed_ids": [],
+                                    "durable_seed_tool_ids": [],
+                                    "before_token": None,
+                                    "snapshot_token": None,
+                                }
+                            ).model_dump(mode="json"),
+                            audit_capable=audit_capable,
+                        )
                     if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                         raise ValueError("canonical refresh exceeds the transport frame limit")
                 return payload
