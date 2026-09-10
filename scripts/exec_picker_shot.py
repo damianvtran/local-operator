@@ -21,6 +21,15 @@ gone from the scan, and shoots the frame the user actually sees when a one-shot
 ends underneath them. It also prints ``plan_columns`` before and after, because
 the stills show the symptom and only the numbers show whether the column moved.
 
+``--scroll`` seeds enough cold conversations to push the list past
+``PAGE_ROWS_MAX``, which is the ORDINARY shape rather than a stress case: the
+picker scrolls at eleven sessions and this repo's author has ~500 of them, so
+every picker they open is in this state. It exists because design round 2 (D2)
+found the exec legend structurally unreachable there while every short-list
+frame showed it painting — the five-row default this script shipped with was
+itself an instrument that could not observe the common case. It prints the
+footer row and whether the legend survived, so a frame is backed by the string.
+
 Rows are seeded through the real transcript writer and the real record
 publisher, so the picker's own scan/decorate path fills the live state — the
 same code the app runs. Nothing here fabricates a ``SessionRow``.
@@ -41,7 +50,11 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.session_picker import SessionPickerScreen, plan_columns
+from local_operator.tui.widgets.session_picker import (
+    EXEC_MARKER,
+    SessionPickerScreen,
+    plan_columns,
+)
 from scripts.visual_capture import save_capture
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -57,8 +70,10 @@ SEEDED: list[tuple[str, str, Literal["tui", "exec", "daemon"] | None, bool]] = [
 
 
 async def main() -> None:
-    argv = [arg for arg in sys.argv[1:] if arg != "--reap"]
+    flags = {"--reap", "--scroll"}
+    argv = [arg for arg in sys.argv[1:] if arg not in flags]
     reap = "--reap" in sys.argv
+    scroll = "--scroll" in sys.argv
     out = Path(argv[0])
     size = argv[1] if len(argv) > 1 else "100x30"
     cols, rows = (int(part) for part in size.lower().split("x"))
@@ -71,7 +86,7 @@ async def main() -> None:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]) for _ in SEEDED
     ]
     try:
-        await _seed_and_shoot(cfg, holders, out, cols, rows, reap=reap)
+        await _seed_and_shoot(cfg, holders, out, cols, rows, reap=reap, scroll=scroll)
     finally:
         for holder in holders:
             holder.terminate()
@@ -82,7 +97,22 @@ async def main() -> None:
                 holder.kill()
 
 
-async def _seed_and_shoot(cfg, holders, out, cols, rows, *, reap: bool = False) -> None:
+async def _seed_and_shoot(
+    cfg, holders, out, cols, rows, *, reap: bool = False, scroll: bool = False
+) -> None:
+    if scroll:
+        # Plain cold conversations, seeded through the same real transcript
+        # writer: they need no live record, and their only job is to make the
+        # list longer than one page so `scrolls=True` reaches the footer.
+        for filler in range(12):
+            sid = f"f{filler:011d}"
+            directory = cfg / "sessions" / sid
+            transcript = Transcript(directory)
+            await transcript.append_message(Message.user(f"routine follow-up {filler}"))
+            stamp = 1_700_000_000 - (len(SEEDED) + filler) * 900
+            (directory / "created_at.json").write_text(str(stamp))
+            os.utime(transcript.path, (stamp, stamp))
+
     for index, (sid, title, kind, busy) in enumerate(SEEDED):
         directory = cfg / "sessions" / sid
         transcript = Transcript(directory)
@@ -155,6 +185,37 @@ async def _seed_and_shoot(cfg, holders, out, cols, rows, *, reap: bool = False) 
                 seeded_kinds.get(sid) == expected
             ), f"{sid} scanned back as {seeded_kinds.get(sid)!r}, expected {expected!r}"
         print(f"precondition OK: {seeded_kinds}")
+
+        if scroll:
+            # ASSERT THE SHAPE, not just the screen. A scrolling frame is only
+            # evidence about the scrolling shed order if the list actually
+            # scrolls, and the whole point of D2 is that the short-list frame
+            # looks correct while the common one does not. So state the shape
+            # and read the footer BACK off the painted card — the legend's
+            # presence is the finding, and a grep over the whole frame would
+            # match the `[exec]` in the LIST rather than the one in the footer
+            # (a false pass QA hit this round with exactly that instrument).
+            page = screen._page_rows()
+            assert len(screen.visible_rows) > page, (
+                f"list does not scroll: {len(screen.visible_rows)} rows against page={page} "
+                "— this frame cannot show the scrolling shed order"
+            )
+            lines = screen.render_lines_for_test()
+            # The legend lives on the META row (the counter's), NOT the key row
+            # below it — that placement is the D2 fix. Read the exact row rather
+            # than grepping the frame: the list is drawing `[exec]` too, so a
+            # whole-frame search reports a legend that is not there.
+            meta, keys = lines[-2], lines[-1]
+            assert any(
+                EXEC_MARKER.strip() in line for line in lines[:-2]
+            ), "no [exec] row in the list: the legend has nothing to explain"
+            print(
+                f"shape: rows={len(screen.visible_rows)} page={page} "
+                f"scrolls=True width={screen._card_width()}"
+            )
+            print(f"meta : {meta}")
+            print(f"keys : {keys}")
+            print(f"LEGEND ON META ROW: {EXEC_MARKER.strip() in meta}")
 
         if not reap:
             save_capture(app, str(out))

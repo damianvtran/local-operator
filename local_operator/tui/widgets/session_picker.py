@@ -1461,6 +1461,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
     # field must be classified as either signature or documented exclusion.
     # A new `SessionRow` field therefore fails HERE, at the moment it is added,
     # rather than in a frame someone has to notice is stale.
+    #
+    # THIS ASSERTION AND THE PINNED TESTS ARE BOTH LOAD-BEARING; neither
+    # subsumes the other, so do not simplify one away as redundant. This one
+    # catches an UNCLASSIFIED field — the omission — at import. It cannot catch
+    # a MISCLASSIFIED one: moving `kind` into `_SIGNATURE_EXCLUDED` keeps the
+    # union equal and passes here, and only `tests/unit/tui/test_session_picker.py`
+    # (which asserts `kind` drives a repaint, and that the exclusions are the
+    # two fields whose immutability is argued above) fails. Verified by making
+    # exactly that mutation: import succeeds, two tests go red.
     assert set(_SIGNATURE_FIELDS) | set(_SIGNATURE_EXCLUDED) == set(SessionRow._fields), (
         "picker signature is out of step with SessionRow — "
         f"unknown names: {sorted(set(_SIGNATURE_FIELDS) - set(SessionRow._fields))}; "
@@ -1617,28 +1626,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     len(rows),
                 )
 
-        # Body, then one quiet row, then the card's META — the position and the
-        # key hints, which are the same KIND of row (statements ABOUT the list,
-        # not entries in it) and so travel together at the bottom. This is the
-        # usage card's grammar; the two overlays differ only by whether the
-        # position row is there at all. The counter is EMITTED only when the
-        # list scrolls: printing an empty line in its place left two blank rows
-        # and pushed the keys away from the block they belong to.
+        # Body, then one quiet row, then the card's META — the position, the
+        # legends and the key hints, which are the same KIND of row (statements
+        # ABOUT the list, not entries in it) and so travel together at the
+        # bottom. This is the usage card's grammar; the two overlays differ only
+        # by whether the position row is there at all. The counter is EMITTED
+        # only when the list scrolls: printing an empty line in its place left
+        # two blank rows and pushed the keys away from the block they belong to.
         out.append("\n\n")
-        if counter is not None:
-            # Numerals carry the fact at the readable ``dim`` step; grammar can
-            # stay quiet at ``faint`` because it is adjacent to those anchors.
-            first, last, total = counter
-            out.append("showing ", style=faint)
-            out.append(f"{first:,}–{last:,}", style=dim)
-            out.append(" of ", style=faint)
-            out.append(f"{total:,}", style=dim)
-            out.append("\n")
-        # Key NAMES at `dim` and their labels at `faint`, matching the usage
-        # card: at `faint` on this ground the keys themselves were 1.49:1.
-        # Hints DROP to fit, in reverse order of need — the same discipline the
-        # columns use. A footer that overflowed the card was the one row that
-        # could not afford to: it is the only statement of how to get out.
         # The marker legend appears only when a marked row is actually on
         # screen, so an empty query or a pure name match never advertises a mark
         # the user cannot see (D2: teach the glyph where it is used, not always).
@@ -1648,15 +1643,70 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # with no legend, is the footer and the list disagreeing about what the
         # user is looking at. One source, so they cannot.
         has_exec = self._exec_column_latched(rows)
+        # LEGENDS SHARE THE COUNTER'S ROW, and that placement is the fix for
+        # design round 2's D2 rather than a tidier arrangement. They used to sit
+        # at the front of the key row, where the arithmetic made three of the
+        # four list shapes unreachable: the full key row is 69 cells against a
+        # card capped at PICKER_MAX_WIDTH = 74, so a 24-cell `[exec]` legend
+        # could only appear by evicting a key — and the shed order rightly makes
+        # the keys win, because keys OPERATE the card and a legend only teaches.
+        # The result was a legend that painted only on a list short enough not to
+        # scroll, i.e. never on this repo's own store of ~500 sessions, at any
+        # terminal width including 200 columns.
+        #
+        # This row is the one place with the width to spare and it costs no
+        # height: CARD_CHROME_ROWS reserves it UNCONDITIONALLY (so the card
+        # cannot change height as the user types, which is why the reservation
+        # is unconditional in the first place), and it is drawn empty on a list
+        # that fits one page. The counter is ~19 cells when present, leaving
+        # ~52 for legends against the 43 both together need.
+        #
+        # It is also the better home on the merits: a legend states what a mark
+        # in the list MEANS, which is a statement about the list — exactly what
+        # this row already carries — while the row below it is how the card is
+        # driven. The two kinds no longer compete for the same cells.
+        legends = _meta_legends(
+            width,
+            has_marked=has_marked,
+            has_exec=has_exec,
+            counter_cells=_counter_cells(counter),
+        )
+        if counter is not None or legends:
+            if counter is not None:
+                # Numerals carry the fact at the readable ``dim`` step; grammar
+                # can stay quiet at ``faint`` because it is adjacent to those
+                # anchors.
+                first, last, total = counter
+                out.append("showing ", style=faint)
+                out.append(f"{first:,}–{last:,}", style=dim)
+                out.append(" of ", style=faint)
+                out.append(f"{total:,}", style=dim)
+            for index, (glyph, meaning) in enumerate(legends):
+                if index or counter is not None:
+                    out.append(" · ", style=faint)
+                # The GLYPH at `dim` and its gloss at `faint`, the same split
+                # the keys below use: the thing being explained is the anchor,
+                # the explanation is subordinate to it.
+                out.append(glyph, style=dim)
+                out.append(f" {meaning}", style=faint)
+            out.append("\n")
+        # Key NAMES at `dim` and their labels at `faint`, matching the usage
+        # card: at `faint` on this ground the keys themselves were 1.49:1.
+        # Hints DROP to fit, in reverse order of need — the same discipline the
+        # columns use. A footer that overflowed the card was the one row that
+        # could not afford to: it is the only statement of how to get out.
+        #
+        # This row carries KEYS ONLY since D2 — the legends moved up to the
+        # counter's row. ``scrolls`` still matters here because it reorders the
+        # shed between ``pgup/pgdn`` and ``type``: paging must not be the first
+        # thing sacrificed on a list that actually pages (round 1, D3).
         # ``counter`` is set exactly when the list is longer than a page, so it
         # is already the "does this scroll" fact the shed order needs.
         for index, (key, what) in enumerate(
             _footer_hints(
                 width,
-                has_marked=has_marked,
                 scrolls=counter is not None,
                 empty=not rows and bool(self._query),
-                has_exec=has_exec,
             )
         ):
             if index:
@@ -1696,24 +1746,16 @@ _FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "↑↓")
 #: so the legend and the mark are unmistakably the same thing.
 _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 
-#: Drop priority once the legend is in play. The full key-hint row is ~69 cells
-#: against a ~74-cell card, so a legend can only appear by DISPLACING a hint —
-#: dropping it "first" would make it never show, i.e. no fix at all. So it
-#: outranks the two genuinely disposable hints (``pgup/pgdn``, ``type``, which
-#: describe conveniences a user discovers anyway) and is shed BEFORE the
-#: movement and action keys. Because it is dropped before the bare-key stage,
-#: it never survives as an unlabelled glyph — a lone ``"`` in the footer would
-#: be exactly the artifact-looking mark D2 flagged.
-_FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
-
-#: Drop order once the list actually SCROLLS: the marker legend goes before the
-#: paging keys. With the fixed order above, a list that grew past one page shed
-#: ``pgup/pgdn`` to make room for the legend — so the picker advertised paging
-#: in the state where paging does nothing and withdrew it in the state where it
-#: is the fastest way through the list (design round 1, D3). Uncapping the store
-#: is what made scrolling the normal case rather than the rare one, so the shed
-#: order has to know whether there is anything to page through.
-_FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "↑↓")
+#: Where the legends do NOT live: the key row below. The full key-hint row is 69
+#: cells against a card capped at :data:`PICKER_MAX_WIDTH` (74), so a 24-cell
+#: legend could only appear there by evicting a key — and the keys must win,
+#: because they OPERATE the card while a legend teaches. Design round 1 resolved
+#: that by ranking the legend above the two disposable hints, which made it
+#: paint on a list that FITS one page and never on one that scrolls; with
+#: :data:`PAGE_ROWS_MAX` at 10 and real stores in the hundreds, that is the
+#: ordinary case, at any terminal width (design round 2, D2). The legends
+#: therefore share the position counter's row and shed against their own budget
+#: — see :func:`_meta_legends`.
 
 #: The same treatment for :data:`EXEC_MARKER`, and for a sharper reason than the
 #: body-match mark needed. `[exec]` is legible as a WORD — nobody mistakes it for
@@ -1740,50 +1782,34 @@ _FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "
 _EXEC_LEGEND: tuple[str, str] = (EXEC_MARKER.strip(), "one-shot, may end")
 
 
-def _footer_drop_order(*, legends: Sequence[str], scrolls: bool) -> tuple[str, ...]:
-    """The shed order for whichever legends are in play.
+def _footer_drop_order(*, scrolls: bool) -> tuple[str, ...]:
+    """The shed order for the key hints, which is the only thing this row holds.
 
-    DERIVED rather than enumerated because a second legend turns four hand-kept
-    constants into eight, and the eighth is the one that gets it wrong. The four
-    above stay as the documentation of the rule — and the assertion below proves
-    this function still reproduces them byte for byte, so the prose and the code
-    cannot drift apart.
+    DERIVED rather than enumerated so the two documented constants above cannot
+    drift from the rule they state; the assertion below proves this function
+    still reproduces them byte for byte.
 
-    The rule they encode, stated once:
+    The rule, stated once:
 
     * the genuinely disposable hints shed first (``pgup/pgdn`` and ``type``,
-      conveniences a user discovers anyway), EXCEPT that a scrolling list moves
-      ``pgup/pgdn`` below the legends — paging is the fastest way through a list
-      that has more than one page, so it must not be the first thing sacrificed
-      to explain a mark;
-    * legends shed next, since a legend teaches and the keys OPERATE;
+      conveniences a user discovers anyway), EXCEPT that a scrolling list drops
+      ``type`` first instead — paging is the fastest way through a list that has
+      more than one page, so it must not be the first thing sacrificed;
     * ``↑↓`` last of all the droppable hints;
     * ``enter``/``esc`` never appear here — they are how the card is used and
       how it is left.
 
-    ``legends`` arrives in SHED order, which is the REVERSE of display order,
-    and the difference is deliberate. Displayed, the body mark comes first
-    because that is the order the marks appear in a row. Shed, ``[exec]`` goes
-    first: it is a readable word that still means something without its gloss,
-    while a lone right-quote with nothing explaining it is exactly the rendering
-    artifact the marker legend was added to prevent. So under width pressure the
-    picker gives up the explanation that is least needed, which is the same
-    judgement every other rank here makes.
+    Legends are NOT shed here any more. They live on the counter's row and shed
+    against their own budget in :func:`_meta_legends`, which is what made them
+    reachable at all — see that function and the call site.
     """
-    leading = ("type",) if scrolls else ("pgup/pgdn", "type")
-    trailing = ("pgup/pgdn", "↑↓") if scrolls else ("↑↓",)
-    return (*leading, *legends, *trailing)
+    return ("type", "pgup/pgdn", "↑↓") if scrolls else ("pgup/pgdn", "type", "↑↓")
 
 
-# The derivation must reproduce the four documented constants exactly, or the
+# The derivation must reproduce the documented constants exactly, or the
 # comments above them are describing a policy the code no longer follows.
-assert _footer_drop_order(legends=(), scrolls=False) == _FOOTER_DROP_ORDER
-assert _footer_drop_order(legends=(), scrolls=True) == _FOOTER_DROP_ORDER_SCROLLING
-assert _footer_drop_order(legends=(_MARKER_LEGEND[0],), scrolls=False) == _FOOTER_DROP_ORDER_MARKED
-assert (
-    _footer_drop_order(legends=(_MARKER_LEGEND[0],), scrolls=True)
-    == _FOOTER_DROP_ORDER_MARKED_SCROLLING
-)
+assert _footer_drop_order(scrolls=False) == _FOOTER_DROP_ORDER
+assert _footer_drop_order(scrolls=True) == _FOOTER_DROP_ORDER_SCROLLING
 
 
 #: The footer for a filter that matched nothing. Movement, paging and `enter
@@ -1794,13 +1820,75 @@ assert (
 _EMPTY_HINT: tuple[str, str] = ("backspace", "to widen")
 
 
+def _counter_cells(counter: tuple[int, int, int] | None) -> int:
+    """Cells the position counter will occupy, or 0 when it is not drawn.
+
+    Measured from the FORMATTED string rather than estimated, because the
+    numerals are thousands-grouped and the width therefore depends on the store
+    size: "showing 1–10 of 40" is 18 cells and "of 24,310" is 22. The legends
+    share this row, so an estimate here is a legend that overflows the card on
+    exactly the large stores that made the picker scroll in the first place.
+    """
+    if counter is None:
+        return 0
+    first, last, total = counter
+    return cell_len(f"showing {first:,}–{last:,} of {total:,}")
+
+
+def _meta_legends(
+    width: int,
+    *,
+    has_marked: bool,
+    has_exec: bool,
+    counter_cells: int = 0,
+) -> list[tuple[str, str]]:
+    """The mark legends that fit beside the counter, dropping the least needed.
+
+    Legends explain what a mark in the LIST means, which is a statement about
+    the list — the same kind of statement the position counter makes — so they
+    share its row. They used to lead the key row below and were unreachable
+    there: see the call site, where the 69-vs-74 cell arithmetic is set out.
+
+    Order and shed are unchanged from that row and keep their round-1 reasoning.
+    DISPLAYED, the body mark leads because that is the order the marks appear in
+    a row (body column, then the kind column to its right). SHED, ``[exec]`` goes
+    first: it is a readable word that still means something without its gloss,
+    while a lone right-quote with nothing explaining it is exactly the rendering
+    artifact :data:`_MARKER_LEGEND` exists to prevent.
+
+    A legend never survives as a bare glyph. Dropping the gloss would leave the
+    unexplained mark the legend was added for, so the whole pair goes.
+    """
+    legends = [
+        legend
+        for legend, present in ((_MARKER_LEGEND, has_marked), (_EXEC_LEGEND, has_exec))
+        if present
+    ]
+    # The counter's own cells plus the separator that would join it to the
+    # first legend: the budget is what is LEFT of the row, not the row.
+    room = width - counter_cells - (3 if counter_cells else 0)
+    while legends and _row_cells(legends) > room:
+        # Shed the readable word first — reverse of display order, per above.
+        legends.pop()
+    return legends
+
+
+def _row_cells(pairs: Sequence[tuple[str, str]]) -> int:
+    """Cells ``pairs`` occupy when joined by the card's ``" · "`` separator.
+
+    One definition for both meta rows, so a legend and a key hint can never
+    disagree about what a row costs.
+    """
+    return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
+        0, len(pairs) - 1
+    )
+
+
 def _footer_hints(
     width: int,
     *,
-    has_marked: bool = False,
     scrolls: bool = False,
     empty: bool = False,
-    has_exec: bool = False,
 ) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
@@ -1810,50 +1898,24 @@ def _footer_hints(
     LABELS and keep the keys. Two bare keys still say which keys exist, which
     is more than a clipped row says.
 
-    ``has_marked`` adds the ``"``-marker legend (see :data:`_MARKER_LEGEND`)
-    so the glyph the list is drawing is explained where the reader already
-    looks for meaning. It sits at the FRONT (adjacent to nothing that could be
-    read as a key) and is shed under width pressure per
-    :data:`_FOOTER_DROP_ORDER_MARKED` — above the disposable hints so it can
-    actually appear on a normal card, below the movement and action keys.
+    KEYS ONLY. The mark legends moved to the counter's row in design round 2 —
+    see :func:`_meta_legends` — because the full key row is 69 cells against a
+    card capped at :data:`PICKER_MAX_WIDTH`, so a legend could only appear here
+    by evicting a key. This function no longer has to choose between teaching a
+    mark and stating how to leave the card.
 
-    ``scrolls`` says the list is longer than one page, which REORDERS the shed
-    rather than adding a hint: the paging keys outrank the legend exactly when
-    there is something to page through (see
-    :data:`_FOOTER_DROP_ORDER_MARKED_SCROLLING`). Without it the two features
-    fought — a list long enough to scroll is also long enough to contain a
-    marked row, so the legend evicted the very hint the reader needed.
-
-    ``has_exec`` adds :data:`_EXEC_LEGEND` on the same terms and for the reason
-    given there: the tag's grammar says "provenance" and its meaning is
-    "lifetime", and this footer is the picker's own established place for
-    explaining a mark. Both legends may be present at once; the shed order for
-    every combination comes from :func:`_footer_drop_order`.
+    ``scrolls`` says the list is longer than one page, which REORDERS the shed:
+    ``pgup/pgdn`` sheds first on a list that fits one page (paging there is a
+    no-op) and ``type`` sheds first on one that does not, because paging is then
+    the fastest way through the list (round 1, D3).
     """
     if empty:
         # Nothing to move through, page, or resume: offering those keys for an
-        # empty list advertises actions that do nothing, and the marker legend
-        # explains a glyph no row is drawing. `esc` stays because leaving is
-        # still available and is the other thing a user wants here.
+        # empty list advertises actions that do nothing. `esc` stays because
+        # leaving is still available and is the other thing a user wants here.
         return _shed_to_width([_EMPTY_HINT, ("esc", "cancel")], (_EMPTY_HINT[0],), width)
 
-    # Legends lead the row, ahead of anything that could be read as a key, and
-    # in the order the marks themselves appear in a row: the body mark sits in
-    # the body column, `[exec]` in the kind column to its right.
-    legends = [
-        legend
-        for legend, present in ((_MARKER_LEGEND, has_marked), (_EXEC_LEGEND, has_exec))
-        if present
-    ]
-    hints = [*legends, *_FOOTER_HINTS]
-    # Shed in the REVERSE of display order — see `_footer_drop_order`: the
-    # cryptic glyph keeps its explanation longer than the readable word does.
-    drop_order = _footer_drop_order(
-        legends=[legend[0] for legend in reversed(legends)],
-        scrolls=scrolls,
-    )
-
-    return _shed_to_width(hints, drop_order, width)
+    return _shed_to_width(list(_FOOTER_HINTS), _footer_drop_order(scrolls=scrolls), width)
 
 
 def _shed_to_width(

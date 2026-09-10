@@ -39,6 +39,7 @@ from local_operator.tui.widgets.session_picker import (
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
     _footer_hints,
+    _meta_legends,
     filter_rows,
     matched_in_body,
     plan_columns,
@@ -421,15 +422,30 @@ def test_the_footer_explains_the_exec_tag_where_the_picker_can_show_it() -> None
     lands there — and only when an exec row is actually present, on the same
     "teach the mark where it is used" rule the body-match legend follows.
     """
-    with_exec = _footer_hints(74, has_exec=True)
+    with_exec = _meta_legends(74, has_marked=False, has_exec=True)
     assert _EXEC_LEGEND in with_exec
-    assert _EXEC_LEGEND not in _footer_hints(74, has_exec=False)
+    assert _EXEC_LEGEND not in _meta_legends(74, has_marked=False, has_exec=False)
     # It says how long the row lasts, not merely what it is.
     assert "one-shot" in _EXEC_LEGEND[1]
-    # Legends teach; keys operate. The legend sheds before either.
-    narrow = [key for key, _ in _footer_hints(40, has_exec=True)]
-    assert _EXEC_LEGEND[0] not in narrow
-    assert "enter" in narrow and "esc" in narrow
+
+    # AT THE WIDTHS THE CARD CAN ACTUALLY PASS, and in the shape the user is
+    # overwhelmingly in. Design round 2 (D2) found this legend structurally
+    # unreachable because the tests asserted it at `_footer_hints(100, ...)` —
+    # a width `_card_width()` caps at PICKER_MAX_WIDTH = 74 and can never
+    # produce — and because `scrolls` defaulted to False while a real store
+    # (PAGE_ROWS_MAX = 10 against hundreds of sessions) always scrolls. A check
+    # that cannot observe the case it exists for certifies nothing.
+    for counter_cells in (0, len("showing 1–10 of 501")):
+        legends = _meta_legends(74, has_marked=False, has_exec=True, counter_cells=counter_cells)
+        assert _EXEC_LEGEND in legends, f"unreachable at counter_cells={counter_cells}"
+
+    # Legends teach; keys operate. On a card too narrow for both, the legend
+    # goes and never survives as a bare unlabelled glyph.
+    narrow = _meta_legends(30, has_marked=False, has_exec=True, counter_cells=19)
+    assert _EXEC_LEGEND not in narrow
+    assert (_EXEC_LEGEND[0], "") not in narrow
+    keys = [key for key, _ in _footer_hints(30)]
+    assert "enter" in keys and "esc" in keys
 
 
 def test_both_legends_coexist_and_the_cryptic_one_survives_longer() -> None:
@@ -440,13 +456,62 @@ def test_both_legends_coexist_and_the_cryptic_one_survives_longer() -> None:
     something without its gloss, while a lone right-quote with nothing
     explaining it is the rendering artifact its legend exists to prevent.
     """
-    wide = [key for key, _ in _footer_hints(100, has_marked=True, has_exec=True)]
+    wide = [key for key, _ in _meta_legends(74, has_marked=True, has_exec=True)]
     assert wide.index(_MARKER_LEGEND[0]) < wide.index(_EXEC_LEGEND[0])
 
-    # Under pressure the readable word gives up its gloss first.
-    squeezed = [key for key, _ in _footer_hints(80, has_marked=True, has_exec=True)]
+    # Under pressure the readable word gives up its gloss first. Squeezed by a
+    # REAL constraint — the counter sharing the row on a narrow card — rather
+    # than by a width the card cannot pass.
+    squeezed = [
+        key for key, _ in _meta_legends(58, has_marked=True, has_exec=True, counter_cells=19)
+    ]
     assert _EXEC_LEGEND[0] not in squeezed
     assert _MARKER_LEGEND[0] in squeezed
+
+
+def test_the_exec_legend_paints_on_a_scrolling_list_which_is_the_ordinary_case() -> None:
+    """Design round 2, D2: the legend was unreachable in the shape users are in.
+
+    Driven through the REAL card rather than the shed helper, because that is
+    exactly the gap the finding exploited: `_footer_hints` was correct about its
+    own inputs while the card could never supply the width those tests used.
+    `_card_width()` caps at PICKER_MAX_WIDTH, so the assertion below fails on
+    the pre-fix tree at every terminal size, including 200 columns.
+
+    The legend is read off the META row specifically. A grep over the whole
+    frame would match the `[exec]` tag in the LIST and pass without the legend
+    existing at all — a false pass this PR's QA round hit with that instrument.
+    """
+    rows = [
+        SessionRow(
+            id=f"{index:012d}",
+            name=f"session number {index}",
+            mtime=NOW - index * 60,
+            created_at=NOW - index * 60,
+            forked=False,
+            live_state="",
+            pending=0,
+            wakes=0,
+            wakes_dormant=False,
+            kind="exec" if index == 1 else "",
+        )
+        for index in range(PAGE_ROWS_MAX * 3)
+    ]
+    screen = SessionPickerScreen(rows, NOW)
+    screen._screen_size = lambda: (100, 30)  # type: ignore[method-assign]
+
+    assert len(rows) > screen._page_rows(), "this list must scroll or it tests the wrong shape"
+    lines = screen.render_lines_for_test()
+    meta = lines[-2]
+
+    assert EXEC_MARKER.strip() in meta, f"legend absent from the meta row: {meta!r}"
+    assert "one-shot" in meta
+    # The keys kept their whole row: the legend no longer buys its place by
+    # evicting a hint, which is what made it unreachable when it did.
+    assert "pgup/pgdn" in lines[-1]
+    # CANARY: the list really is drawing the tag, so the legend has something to
+    # explain and this is not a frame that would pass with no exec row at all.
+    assert any(EXEC_MARKER.strip() in line for line in lines[:-2])
 
 
 def test_a_cold_row_carries_no_kind_so_a_reaped_exec_run_stops_claiming_to_be_one() -> None:
@@ -1378,33 +1443,44 @@ async def test_a_row_matched_only_by_a_past_name_is_shown_and_marked() -> None:
 def test_footer_legend_appears_only_when_a_row_is_marked() -> None:
     """D2: the ``"`` marker is meaningless without a legend, but advertising it
     when nothing is marked would explain a glyph the user cannot see. So the
-    legend is present exactly when the footer has room AND a marked row exists,
+    legend is present exactly when the row has room AND a marked row exists,
     and absent otherwise."""
-    # A card wide enough to hold the legend beside the essential keys.
-    with_legend = _footer_hints(74, has_marked=True)
-    assert _MARKER_LEGEND in with_legend
-    # Same width, nothing marked: no legend, and the full key row is intact.
-    without = _footer_hints(74, has_marked=False)
-    assert _MARKER_LEGEND not in without
-    assert ("pgup/pgdn", "page") in without
+    # A card at its widest, in BOTH list shapes: the counter shares this row on
+    # a scrolling list, and a legend that only fits when it is absent is the
+    # unreachable-in-the-ordinary-case defect of round 2 (D2).
+    for counter_cells in (0, len("showing 1–10 of 501")):
+        with_legend = _meta_legends(
+            74, has_marked=True, has_exec=False, counter_cells=counter_cells
+        )
+        assert _MARKER_LEGEND in with_legend, f"unreachable at counter_cells={counter_cells}"
+        # Same width, nothing marked: no legend.
+        without = _meta_legends(74, has_marked=False, has_exec=False, counter_cells=counter_cells)
+        assert _MARKER_LEGEND not in without
+    # The key row is untouched either way — legends no longer buy space from it.
+    assert ("pgup/pgdn", "page") in _footer_hints(74)
 
 
 def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
-    """The legend teaches; it must never crowd out the keys that OPERATE the
-    card. Under width pressure it sheds after the two disposable hints but
-    before movement/resume/cancel, and it never survives as a bare unlabelled
-    glyph (which would be the very artifact-looking mark D2 flagged)."""
-    # Wide: legend shown, and it displaced only a disposable hint (pgup/pgdn).
-    wide = _footer_hints(74, has_marked=True)
+    """The legend teaches; the keys OPERATE the card, so they never compete.
+
+    Since round 2 (D2) they do not even share a row: a legend sheds against the
+    counter's row and cannot evict a key at all. What must still hold is that a
+    card too narrow for a legend keeps every essential key, and that a legend
+    never survives as a bare unlabelled glyph (the artifact-looking mark D2
+    flagged in round 1).
+    """
+    # Wide: legend shown, and the full key row survives beside it.
+    wide = _meta_legends(74, has_marked=True, has_exec=False)
     assert _MARKER_LEGEND in wide
-    assert ("pgup/pgdn", "page") not in wide
-    # Narrow: the essential keys survive and the legend is gone entirely — not
-    # reduced to a lone glyph.
-    narrow = _footer_hints(40, has_marked=True)
+    assert ("pgup/pgdn", "page") in _footer_hints(74)
+    # Narrow: the legend is gone entirely — not reduced to a lone glyph — and
+    # the essential keys survive.
+    narrow = _meta_legends(30, has_marked=True, has_exec=False, counter_cells=19)
     assert _MARKER_LEGEND not in narrow
     assert (_MARKER_LEGEND[0], "") not in narrow
-    assert ("enter", "resume") in narrow
-    assert ("esc", "cancel") in narrow
+    keys = _footer_hints(40)
+    assert ("enter", "resume") in keys
+    assert ("esc", "cancel") in keys
 
 
 @pytest.mark.asyncio
@@ -1693,29 +1769,28 @@ async def test_the_soft_tier_runs_only_when_the_exact_tiers_are_empty() -> None:
                 assert typed in ran, f"soft tier did not run at {typed!r} with no name/id hit"
 
 
-def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
+def test_the_paging_hint_outranks_the_filter_hint_once_the_list_scrolls() -> None:
     """The paging hint was offered where paging does nothing and withdrawn where
-    it is the fastest way through the list.
+    it is the fastest way through the list (design round 1, D3).
 
-    A scrolling list is also long enough to contain a marked row, so the legend
-    shed `pgup/pgdn` to make room for itself. Uncapping the store made that the
-    normal case rather than the rare one (design round 1, D3).
+    Round 2 moved the legends off this row, so the competition `pgup/pgdn` now
+    survives is against `type to filter` — the genuinely disposable hint, since
+    a user who is filtering already knows they can type and the query is echoed
+    in the header regardless.
     """
-    width = 62  # narrow enough that legend and paging cannot both fit
+    width = 56  # narrow enough that both disposable hints cannot fit
 
-    not_scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=False)]
-    scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=True)]
+    not_scrolling = [key for key, _ in _footer_hints(width, scrolls=False)]
+    scrolling = [key for key, _ in _footer_hints(width, scrolls=True)]
 
-    assert _MARKER_LEGEND[0] in not_scrolling, "the legend should win when nothing scrolls"
-    assert "pgup/pgdn" not in not_scrolling
-
+    assert "pgup/pgdn" not in not_scrolling, "paging is a no-op on a list that fits"
     assert "pgup/pgdn" in scrolling, "paging must survive when the list actually pages"
-    assert _MARKER_LEGEND[0] not in scrolling
+    assert "type" not in scrolling
 
-    # A wide card keeps both regardless: the reorder is a shed policy, not a
+    # A card at its widest keeps both: the reorder is a shed policy, not a
     # removal, so nothing is lost when there is room for everything.
-    wide = [key for key, _ in _footer_hints(100, has_marked=True, scrolls=True)]
-    assert "pgup/pgdn" in wide and _MARKER_LEGEND[0] in wide
+    wide = [key for key, _ in _footer_hints(74, scrolls=True)]
+    assert "pgup/pgdn" in wide and "type" in wide
 
 
 def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
@@ -1727,12 +1802,12 @@ def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
     picker the DEFAULT state, so that was the usual case rather than an edge.
     """
     for width in (56, 60, 66):
-        scrolling = [key for key, _ in _footer_hints(width, has_marked=False, scrolls=True)]
+        scrolling = [key for key, _ in _footer_hints(width, scrolls=True)]
         assert "pgup/pgdn" in scrolling, f"paging hint dropped at width {width}: {scrolling}"
 
     # A list that fits on one page may still shed it first: there is nothing to
     # page through, so the hint is the least useful thing on the row.
-    settled = [key for key, _ in _footer_hints(60, has_marked=False, scrolls=False)]
+    settled = [key for key, _ in _footer_hints(60, scrolls=False)]
     assert "pgup/pgdn" not in settled
 
 
@@ -1743,7 +1818,7 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
     `backspace` is what widens the query and is the key a user in this state is
     already reaching for; `esc` stays because leaving is still available.
     """
-    hints = _footer_hints(100, empty=True)
+    hints = _footer_hints(74, empty=True)
     keys = [key for key, _ in hints]
     assert keys == ["backspace", "esc"], keys
 
@@ -1752,7 +1827,7 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
         assert [key for key, _ in _footer_hints(width, empty=True)] == ["backspace", "esc"]
 
     # And the populated footer is untouched.
-    populated = [key for key, _ in _footer_hints(100, empty=False)]
+    populated = [key for key, _ in _footer_hints(74, empty=False)]
     assert "↑↓" in populated and "enter" in populated
 
 

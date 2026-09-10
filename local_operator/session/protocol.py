@@ -522,11 +522,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``not session.owns_runtime`` (what it is now)          0.021-0.024 us
     ====================================================  ==================
 
-    The ratio is what the decision rests on and it is stable at ~2,400-2,700x
-    against the predicate; the absolute figures move with the host, so
-    re-measure them rather than inheriting them. (The negative case is cheap,
-    ~1-3 us: it fails on the first missing member. Only the positive path pays,
-    and the sites below are overwhelmingly positive.)
+    THE ABSOLUTE IS THE PORTABLE FACT; the ratio is an order of magnitude and
+    should be quoted as one (~10^3x). The positive reproduced across three
+    independent hosts at 55-58 us, but the same three computed ratios of
+    ~2,400x, ~1,500-1,690x and ~930-1,054x from it — because the sub-100 ns
+    denominator is dominated by the timing loop rather than by the work. One
+    host measured an empty-lambda floor of 0.018 us, 34% of its own predicate
+    reading, and floor-subtracting moved its ratio to ~1,641x. So a narrow band
+    here is a property of whoever last ran it: state the microseconds, which
+    travel, and let the ratio carry only the magnitude, which is all the
+    decision needs. (The negative case is cheap, ~1-3 us: it fails on the first
+    missing member. Only the positive path pays, and the sites below are
+    overwhelmingly positive.)
 
     **HOW to re-measure, because the obvious method silently measures the wrong
     path.** Only a FULLY CONSTRUCTED ``RemoteSession`` is a positive here — the

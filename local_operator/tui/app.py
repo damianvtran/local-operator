@@ -34433,10 +34433,10 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     whose ``False`` default silently meant "in-process".
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
-    The obvious conversion is the honest-looking one and it is ~2,400-2,700x
-    slower: that protocol is ``runtime_checkable`` with 84 public members, and a
-    positive ``isinstance`` walks every one of them. Measured on an arm64 host,
-    CPython 3.12.13, min-of-seven over 2,000 iterations:
+    The obvious conversion is the honest-looking one and it costs three orders
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 84 public
+    members, and a positive ``isinstance`` walks every one of them. Measured on
+    an arm64 host, CPython 3.12.13, min-of-seven over 2,000 iterations:
 
     ==============================================  ===============
     ``isinstance(viewer, RemoteSession)``            0.014-0.015 us
@@ -34444,8 +34444,12 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     ``not session.owns_runtime``                     0.021-0.024 us
     ==============================================  ===============
 
-    The RATIO is the stable quantity and the decision rests on it; the absolute
-    figures move with the host. Re-measuring needs a fully constructed
+    THE ABSOLUTE is the quantity that travels: the positive reproduced at 55-58
+    us on three independent hosts, while the ratio computed from it ranged
+    ~930x-2,700x across those same hosts because the sub-100 ns denominator is
+    mostly timing-loop overhead (one host measured its empty-lambda floor at 34%
+    of the reading). Quote the microseconds and treat the ratio as ~10^3x, which
+    is all the decision needs. Re-measuring needs a fully constructed
     ``RemoteSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
     NOT a positive and times the cheap negative path instead, which is how the
     same row has now been "re-measured" to three different values. See
