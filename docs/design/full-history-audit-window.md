@@ -240,7 +240,7 @@ branch for `compaction_summary`** — verified, the custom-type branches are
 Add one branch:
 
 ```
-context compacted here — earlier history above the agent no longer sees
+context compacted — earlier history above the agent no longer sees
 ```
 
 `NoticeBlock`, kind `"note"` — same reasoning as `RESUME_UNREACHABLE_NOTICE`
@@ -256,11 +256,15 @@ a marker were 100% still in the model's context — precisely what the sentence
 claimed the agent could not see — while the rows above were 0-1%. Both halves of
 the original sentence were wrong.
 
-**Hold the string under ~76 characters.** The glyph prefix costs 2 columns, so
-82 characters needed 84 and wrapped at an 80-column terminal, orphaning the last
-two words on their own line at every compaction (D2). This is a review-time
-arithmetic check: the usual capture geometries (98 and 138 usable columns) clear
-it and so cannot show the wrap.
+**Hold the string at 66 characters or fewer, verified in a rendered 80-column
+frame.** The original 82-character string wrapped and orphaned its last two
+words at every compaction (D2). Arithmetic alone is not enough to settle this:
+round 1 derived a "~76 character" budget and the 71-character string it produced
+*still wrapped*. The budget is not the terminal width — an 80-column terminal
+gives a 78-column screen, the notice block's padding takes more, and the `· `
+glyph costs 2, leaving 68 columns of text and so 66 for the string. Check it
+with `scripts/audit_history_shot.py <dir> marker 80x30`, which is the only
+instrument that answers the question.
 
 Head notice copy, by state — this is the full state table for
 `_reconcile_head_notice`:

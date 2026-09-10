@@ -53,13 +53,42 @@ RETAIN_TEXT_BYTES = 1024 * 1024
 #: the wrong way is worse for a trusting reader than the silent nothing it
 #: replaced.
 #:
-#: Keep it UNDER ~76 characters. The glyph prefix costs 2 columns, so a longer
-#: string wraps at an 80-column terminal and orphans its last words on a second
-#: line — at every compaction, 48 times in the reference journal (D2). The
-#: captured evidence geometries (98 and 138 usable columns) cannot show that,
-#: so width is a review-time arithmetic check rather than something a frame
-#: will catch.
-COMPACTION_MARKER_NOTICE = "context compacted here — earlier history above the agent no longer sees"
+#: Keep it at 66 characters or fewer, and CHECK THAT IN A RENDERED 80-COLUMN
+#: FRAME rather than by counting. A longer string wraps and orphans its last
+#: word on a second line, at every compaction — 48 times in the reference
+#: journal (D2). The budget is not the terminal width: an 80-column terminal
+#: leaves a 78-column screen, the notice block's own padding takes more, and
+#: the ``· `` glyph costs 2, which measured out to 68 columns of text and so
+#: 66 for this string. Round 1 suggested "under ~76" from arithmetic alone and
+#: the 71-character string it produced still wrapped in the frame; the only
+#: instrument that settles it is ``scripts/audit_history_shot.py marker
+#: 80x30``.
+COMPACTION_MARKER_NOTICE = "context compacted — earlier history above the agent no longer sees"
+
+
+class CompactionMarkerBlock(NoticeBlock):
+    """The compaction seam, spaced apart from whatever it lands beside.
+
+    A plain ``NoticeBlock`` would be right in every respect but one. In the
+    audit state the head notice sits directly above this row, and the two share
+    a ``SPACING_KIND`` of ``notice``, so the adaptive rule stacks them flush
+    (see :func:`needs_gap_above`: same kind, previous is one row, no gap). They
+    also share the ``·`` glyph and the ``note`` ink, and after the round-1 copy
+    fix they open with nearly the same words — "earlier history above — scroll
+    up to load" over "context compacted — earlier history above …". Design
+    review round 1 (D3) flagged the pair as indistinguishable, and the D1 fix
+    alone did not resolve it: verified in a rendered 80x30 frame, the two rows
+    still read as one wrapped block, with nothing to say that the first is a
+    CONTROL (focusable, clickable, `enter`-bound) and this one is inert.
+
+    ``SPACING_AIRY`` is the mechanism the tool ledger already uses for exactly
+    this — "each row is a separate thing, not a paragraph of one" — so the seam
+    takes a blank row above itself rather than earning a second glyph or a
+    second ink. The designer's own preference, and it keeps ``NOTICE_GLYPHS``'
+    deliberate sharing of ``·`` between ``info`` and ``note`` intact.
+    """
+
+    SPACING_AIRY = True
 
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):
@@ -715,7 +744,7 @@ def project_settled_rows(
             # error — the rows below are real history, they are simply outside
             # what the agent can still see.
             if getattr(message, "custom_type", None) == COMPACTION_MARKER_TYPE:
-                self._append_block(NoticeBlock(COMPACTION_MARKER_NOTICE, kind="note"))
+                self._append_block(CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note"))
                 appended = True
                 continue
             role = getattr(message, "role", None)

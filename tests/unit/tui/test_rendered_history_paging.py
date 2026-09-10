@@ -1024,3 +1024,57 @@ async def test_the_compaction_marker_renders_as_a_notice_mid_transcript(tmp_path
                 if isinstance(block, NoticeBlock) and hasattr(block, "text")
             ]
             assert COMPACTION_MARKER_NOTICE in texts
+
+
+def test_the_compaction_marker_fits_an_80_column_terminal() -> None:
+    """D2: the marker must not wrap and orphan its last word.
+
+    80x24 is the oldest default terminal size there is, and this row repeats at
+    every compaction — 48 times in the reference journal — so a wrap is paid
+    once per seam on exactly the sessions audit paging exists for.
+
+    The budget is NOT the terminal width, which is why round 1's arithmetic
+    ("under ~76") produced a 71-character string that still wrapped. An
+    80-column terminal yields a 78-column screen, the notice block's padding
+    takes more, and the `· ` glyph costs 2 — measured at 68 columns of text in
+    a rendered frame, so 66 for the string. Kept as a cheap unit guard beside
+    the frame capture (`scripts/audit_history_shot.py <dir> marker 80x30`),
+    which is the instrument that established the number.
+    """
+    from local_operator.tui.session_presentation import COMPACTION_MARKER_NOTICE
+
+    assert len(COMPACTION_MARKER_NOTICE) <= 66, (
+        f"the marker is {len(COMPACTION_MARKER_NOTICE)} chars; it wraps at 80 "
+        f"columns and orphans its last word at every compaction"
+    )
+
+
+def test_the_compaction_marker_is_spaced_apart_from_the_head_notice() -> None:
+    """D3: the seam and the head notice must not read as one block.
+
+    In the audit state they land on adjacent rows sharing the `·` glyph, the
+    `note` ink, and — after the D1 copy fix — nearly the same opening words.
+    One is a CONTROL (focusable, clickable) and the other is inert, with
+    nothing else to tell them apart, so the separation has to come from
+    spacing. `SPACING_AIRY` is the mechanism the tool ledger already uses for
+    "each row is a separate thing"; asserting it here keeps a future edit from
+    dropping the class and silently restacking the two rows flush.
+    """
+    from local_operator.tui.app import RESUME_AUDIT_NOTICE
+    from local_operator.tui.session_presentation import (
+        COMPACTION_MARKER_NOTICE,
+        CompactionMarkerBlock,
+        OlderHistoryNotice,
+    )
+    from local_operator.tui.widgets.transcript import needs_gap_above
+
+    marker = CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note")
+    # The real audit-state pairing: this exact copy sits directly above it.
+    head = OlderHistoryNotice(RESUME_AUDIT_NOTICE)
+    # Same SPACING_KIND is precisely why the default rule stacked them flush.
+    assert marker.SPACING_KIND == head.SPACING_KIND == "notice"
+    assert needs_gap_above(head, marker), (
+        "the compaction marker stacks flush against the head notice; the two "
+        "share a glyph, an ink and their opening words, and one is clickable "
+        "while the other is not"
+    )
