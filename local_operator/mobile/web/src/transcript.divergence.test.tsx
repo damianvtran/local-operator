@@ -49,7 +49,7 @@ describe("rows the phone used to drop entirely", () => {
 	it("shows a refusal, a failed turn and a gate timeout", () => {
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[
 					entry({ id: "a", kind: "assistant", text: "I started to answer but" }),
 					entry({ id: "b", text: "content policy", details: { severity: "error" } }),
@@ -75,7 +75,7 @@ describe("rows the phone used to drop entirely", () => {
 		// deciding what to do next, and one ink for both loses that.
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[
 					entry({ id: "a", text: "compaction failed", details: { severity: "error" } }),
 					entry({ id: "b", text: "compaction skipped", details: { severity: "warning" } }),
@@ -104,7 +104,7 @@ describe("rows the phone used to drop entirely", () => {
 		   desaturation because it fronts every notice with ✗/!/·. */
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[
 					entry({ id: "a", text: "compaction failed", details: { severity: "error" } }),
 					entry({ id: "b", text: "compaction skipped", details: { severity: "warning" } }),
@@ -130,7 +130,7 @@ describe("rows the phone used to drop entirely", () => {
 		   neutral clock rather than alarm ink. */
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[
 					entry({
 						id: "a",
@@ -152,7 +152,7 @@ describe("a hub steer never leaks its envelope", () => {
 	it("renders the parent's own words as a parent_message card", () => {
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[entry({ id: "a", kind: "parent_message", text: "focus on the parser" })]}
 			/>,
 		);
@@ -169,7 +169,7 @@ describe("tool rows", () => {
 		// observed.
 		render(
 			<Transcript
-				pid="1"
+				pid={1}
 				entries={[
 					entry({
 						id: "a",
@@ -207,7 +207,7 @@ describe("tool rows", () => {
 				details: { output: "MODEL RAN THIS" },
 			}),
 		];
-		render(<Transcript pid="1" entries={rows} />);
+		render(<Transcript pid={1} entries={rows} />);
 
 		// The user's own command shows its output without a tap...
 		expect(screen.getByText(/drwxr-xr-x/)).toBeTruthy();
