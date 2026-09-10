@@ -141,7 +141,18 @@ _HOST_SESSION_EXPRS = frozenset({"remote", "self.remote"})
 #: routes, so a rename is a 500 on the phone portal rather than a silent
 #: ``None``. Adding this set needed no new machinery, only another literal
 #: binding, which is why it is fixed here rather than deferred.
-_ROUTE_SESSION_EXPRS = frozenset({"bridge.remote", "child.remote", "remote"})
+#:
+#: Split PER ROUTE HOST rather than shared, for the reason
+#: ``_INTERACTION_SESSION_EXPRS`` is separate from ``_SESSION_EXPRS``: a binding
+#: registered against a file that does not use it is a coverage claim the file
+#: cannot honour. All three spellings against all three route hosts produced
+#: four (host, binding) pairs deriving nothing, and a shared set hid every one
+#: of them behind a sibling host that did use the name — which is exactly the
+#: hole ``test_every_registered_session_binding_still_matches_the_source``
+#: closes below (review round 3, MAJOR-3 / QA round 3, Q7).
+_LIFECYCLE_SESSION_EXPRS = frozenset({"bridge.remote", "child.remote"})
+_ROUTE_SESSION_EXPRS = frozenset({"bridge.remote"})
+_CATALOGUE_SESSION_EXPRS = frozenset({"bridge.remote", "remote"})
 
 #: The bindings that hold a session in ``info/collect.py``.
 #:
@@ -188,13 +199,23 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: scan cost and no coverage; add one when it starts probing something new.
 #:
 #: The third element is that host's MINIMUM member count, and it is per host for
-#: a structural reason: ``app.py`` derives 104 of the 139 sites, so any single
-#: global floor loose enough to survive ordinary churn there cannot notice a
-#: smaller host going dark at all. Measured, not guessed: dropping the desktop
-#: utils host costs 4 viewer-only members out of 49 and dropping
+#: a structural reason: ``app.py`` derives 104 of the 112 DISTINCT PUBLIC
+#: MEMBERS (and 362 of 413 ``file:line`` SITES, deduped per member and line), so
+#: any single global floor loose enough to survive ordinary churn there cannot
+#: notice a smaller host going dark at all. Measured, not guessed: dropping the
+#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 48 and dropping
 #: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
 #: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
 #: stated beside each path fires on the host that actually decayed and names it.
+#:
+#: Every figure above names the quantity it counts, because two of them were
+#: wrong when this argument was first made — "104 of the 139 sites" crossed a
+#: member count with a site count, and the viewer-only total was off by one
+#: (review round 3, MINOR-6 / QA round 3, Q9). The dominance claim is now
+#: ASSERTED, as a RATIO, in
+#: ``test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work``; the
+#: absolute counts here are a snapshot for the reader and will drift with
+#: ordinary work, which is exactly why the test does not pin them.
 #:
 #: Set a few members below the current value: enough headroom that deleting a
 #: call site is not a test failure, tight enough that losing a BINDING or a PATH
@@ -204,9 +225,9 @@ _SCANNED = (
     ("tui/app.py", _SESSION_EXPRS, 95),
     ("server/utils/desktop_sessions.py", _HOST_SESSION_EXPRS, 6),
     ("info/collect.py", _INFO_SESSION_EXPRS, 5),
-    ("server/routes/desktop_lifecycle.py", _ROUTE_SESSION_EXPRS, 7),
+    ("server/routes/desktop_lifecycle.py", _LIFECYCLE_SESSION_EXPRS, 7),
     ("server/routes/desktop_sessions.py", _ROUTE_SESSION_EXPRS, 4),
-    ("server/routes/desktop_catalogues.py", _ROUTE_SESSION_EXPRS, 3),
+    ("server/routes/desktop_catalogues.py", _CATALOGUE_SESSION_EXPRS, 3),
     ("tui/session_interaction.py", _INTERACTION_SESSION_EXPRS, 2),
 )
 
@@ -373,18 +394,26 @@ def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, li
     return touched
 
 
-def _all_touched() -> dict[str, list[str]]:
-    """Every scanned file's session members, mapped name -> ``file:line`` sites.
+def _site_label(relpath: str) -> str:
+    """A scanned host's ``parent/file.py`` label for an assertion message.
 
-    The site label keeps the parent directory, not just the basename: two
-    scanned hosts are both called ``desktop_sessions.py`` (one under
-    ``server/utils``, one under ``server/routes``), so a bare filename would
-    name an ambiguous file in the very message whose job is to send the reader
-    to the offending line.
+    Keeps the parent directory, not just the basename: two scanned hosts are
+    both called ``desktop_sessions.py`` (one under ``server/utils``, one under
+    ``server/routes``), so a bare filename would name an ambiguous file in the
+    very message whose job is to send the reader to the offending line.
+
+    A shared helper rather than the rule inlined at each site, because it was
+    inlined twice and the two copies had already drifted — one fixed, one still
+    printing the ambiguous basename (review round 3, MINOR-5).
     """
+    return "/".join(relpath.rsplit("/", 2)[-2:])
+
+
+def _all_touched() -> dict[str, list[str]]:
+    """Every scanned file's session members, mapped name -> ``file:line`` sites."""
     sites: dict[str, list[str]] = {}
     for relpath, exprs, _floor in _SCANNED:
-        filename = "/".join(relpath.rsplit("/", 2)[-2:])
+        filename = _site_label(relpath)
         found = _session_members_touched((_ROOT / relpath).read_text(), exprs)
         for member, lines in found.items():
             sites.setdefault(member, []).extend(f"{filename}:{line}" for line in sorted(set(lines)))
@@ -567,14 +596,17 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     #
     # PER HOST, and that is the whole point rather than a refinement. A GLOBAL
     # floor cannot do this job at any value: ``app.py`` contributes 104 of the
-    # 139 derived sites, so a number that survives ordinary churn there is
-    # necessarily far above every other host's entire contribution. Measured on
-    # this head — dropping the desktop utils host costs 4 viewer-only members of
-    # 49, dropping ``info/collect.py`` costs 0 — so both single-point decays
-    # slid under a global ``>= 40`` exactly as they slid under the ``>= 20``
-    # that review round 2 (MINOR-1) rejected. Raising one number would only
-    # move the blind spot. Each host is now asserted against its own count, so
-    # the failure names the host that decayed.
+    # 112 distinct public MEMBERS, so a number that survives ordinary churn
+    # there is necessarily far above every other host's entire contribution.
+    # Measured on this head — dropping the desktop utils host costs 3
+    # viewer-only members of 48, dropping ``info/collect.py`` costs 0 — so both
+    # single-point decays slid under a global ``>= 40`` exactly as they slid
+    # under the ``>= 20`` that review round 2 (MINOR-1) rejected. Raising one
+    # number would only move the blind spot. Each host is now asserted against
+    # its own count, so the failure names the host that decayed.
+    #
+    # That dominance is itself asserted, as a ratio, by
+    # ``test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work``.
     thin = {
         relpath: (len(members), floor)
         for relpath, exprs, floor in _SCANNED
@@ -613,6 +645,92 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     )
 
 
+def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None:
+    """Assert the dominance the per-host floor's justification rests on.
+
+    ``_SCANNED`` argues for a floor PER HOST rather than one global number, and
+    the argument is entirely quantitative: ``app.py`` derives so much of the
+    total that any global floor loose enough to survive churn there sits above
+    every other host's whole contribution. If that ratio ever stops holding, the
+    per-host design is over-engineering and the comment defending it is wrong.
+
+    Asserted rather than left in prose because two of these numbers WERE wrong
+    (review round 3, MINOR-6 / QA round 3, Q9): the text said "104 of the 139
+    sites", conflating distinct members with ``file:line`` site strings, and
+    said 49 viewer-only members where there are 48. Two independent reviewers
+    measured two different pairs of numbers from the same tree, which is what a
+    figure nothing executes looks like from outside. Everything this file
+    asserts about the source is derived; the argument for its own shape should
+    not be the one exception.
+
+    Each number states exactly WHICH QUANTITY it counts, because that ambiguity
+    is what produced the wrong figure and then hid it. Two reviewers measuring
+    this tree independently reported 104/112 members with 362/413 sites and
+    104/124 members with 364/415 sites, and BOTH were arithmetically right — the
+    three axes they silently differed on are:
+
+    * PUBLIC vs ALL members. Underscore-prefixed names are excluded here (112),
+      included there (124). ``_session_members_touched`` collects both; every
+      assertion in this file that consumes it filters, so public is the number
+      that matches what is guarded.
+    * DISTINCT MEMBERS vs SITE STRINGS. A member touched in twelve places is one
+      member and twelve sites. The original prose said "104 of the 139 sites"
+      while 104 is a MEMBER count — the two axes crossed in a single sentence.
+    * RAW occurrences (364/415) vs sites DEDUPED by ``(member, line)``
+      (362/413). ``_all_touched`` dedupes, so two probes of the same member on
+      one line collapse; ``session.history`` on ``app.py`` lines 19279 and 19356
+      is the only such pair today, and it is the whole 2-site gap.
+
+    The RATIO is asserted rather than the absolute counts, and that is the point
+    rather than a weakening. The counts churn on ordinary work — over the last
+    30 commits touching ``app.py`` the site total moved eight times and the
+    member total four, none of them a decay — so pinning them exactly would fire
+    on unrelated PRs and train the next author to bump a number without reading
+    what it claims. AGENTS.md ("Prefer a structural invariant to a numeric one")
+    is the standing guidance. Dominance is the fact the per-host design rests
+    on, it is what a global floor cannot accommodate, and it is stable: measured
+    at 0.925-0.929 across that same history, against a bound of 0.80.
+    """
+    sites = {name: places for name, places in _all_touched().items() if not name.startswith("_")}
+    app_sites = {
+        name: [place for place in places if place.startswith("tui/app.py")]
+        for name, places in sites.items()
+    }
+    app_sites = {name: places for name, places in app_sites.items() if places}
+
+    # Guard the ratio in both currencies: a member-only bound would miss app.py
+    # shedding sites while keeping the names, which is the shape a refactor into
+    # helper modules actually takes.
+    member_share = len(app_sites) / len(sites)
+    site_share = sum(len(p) for p in app_sites.values()) / sum(len(p) for p in sites.values())
+    assert member_share >= 0.80 and site_share >= 0.80, (
+        f"app.py now derives {len(app_sites)} of {len(sites)} distinct public "
+        f"members ({member_share:.3f}) and "
+        f"{sum(len(p) for p in app_sites.values())} of "
+        f"{sum(len(p) for p in sites.values())} deduped file:line sites "
+        f"({site_share:.3f}). _SCANNED's comment justifies a PER-HOST floor by "
+        "app.py dominating the derivation; below ~0.80 the other hosts are "
+        "comparable enough that one global floor could do the job, so either "
+        "restore the ratio or rewrite that comment — do not just lower this "
+        "bound to make the failure go away."
+    )
+
+    owner = _members(Session, "session.py", "Session")
+    viewer = _members(RemoteSession, "remote.py", "RemoteSession")
+    viewer_only = {
+        name for name in sites if name not in _RETIRED and name in viewer and name not in owner
+    }
+    # An exact pin, unlike the ratio above: this is the population the aggregate
+    # floor of 40 is set against, so a drop here is the decay that floor exists
+    # to catch rather than ordinary churn.
+    assert len(viewer_only) == 48, (
+        f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
+        "says 48, and the aggregate floor is set at 40 against that number. A "
+        "drop here is the decay that floor exists to catch, so check it is "
+        "genuinely a removal before editing this figure."
+    )
+
+
 def test_owner_only_probes_are_all_optional_capability_probes() -> None:
     """``_OWNER_ONLY_CAPABILITY_PROBES`` is sound only if every name has a default.
 
@@ -629,7 +747,7 @@ def test_owner_only_probes_are_all_optional_capability_probes() -> None:
     """
     hard_accesses: dict[str, list[str]] = {}
     for relpath, exprs, _floor in _SCANNED:
-        filename = relpath.rsplit("/", 1)[-1]
+        filename = _site_label(relpath)
         tree = ast.parse((_ROOT / relpath).read_text())
         for node in ast.walk(tree):
             if (
@@ -801,14 +919,14 @@ def test_the_static_conformance_anchor_still_exists() -> None:
 
 
 def test_every_registered_session_binding_still_matches_the_source() -> None:
-    """Each binding in every ``_SCANNED`` set must derive at least one member.
+    """Each (host, binding) pair in ``_SCANNED`` must derive at least one member.
 
     The floor in ``test_the_viewer_protocol_covers_what_only_the_facade_has``
     catches decay in AGGREGATE, and QA round 2 (Q5) showed that is not enough:
     renaming ``self._session`` in ``_SESSION_EXPRS`` drops five members and the
-    total stays above any floor loose enough to be maintainable. A per-binding
-    assertion catches the same decay at its source and names the binding, which
-    a total never can.
+    total stays above any floor loose enough to be maintainable. A per-pair
+    assertion catches the same decay at its source and names the host and the
+    binding, which a total never can.
 
     Zero sites means one of two things and both need the reader's attention: the
     binding was renamed in the source (fix the set), or it never matched and the
@@ -820,19 +938,41 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
 
     The count is pinned as well as the contribution, because the two decays are
     different and only one of them is a rename. DELETING ``source.session``
-    outright costs 2 of 49 viewer-only members — under any floor, per-host or
+    outright costs 2 of 48 viewer-only members — under any floor, per-host or
     aggregate, and invisible to the zero-sites check because a removed entry is
     not an entry that derives nothing. It was the last planted violation this
     guard did not catch. A registered binding is a coverage claim, so removing
     one has to be a deliberate edit to a stated number rather than a quiet
     deletion.
+
+    Counted per (HOST, BINDING) rather than over the union across hosts, which
+    round 3 found was hiding two distinct failures at once (review MAJOR-3, QA
+    Q7). A union credits a binding as live as long as ANY scanned host uses it,
+    so a spelling registered against a host that never had it read as covered:
+    four such pairs existed on the round-2 head, and ``desktop_lifecycle.py``
+    was passing the check solely on ``child.remote``, a single site in the whole
+    package. Per-pair counting also makes the DELETION of a whole ``_SCANNED``
+    entry visible where the union could not see it — dropping the
+    ``info/collect.py`` line removed its pair rather than emptying it, which is
+    how the reviewer re-shipped the motivating outage (rename
+    ``subagent_comms``, drop the exclusion entry it no longer backs) against a
+    fully green guard.
+
+    The scanned PATHS are pinned for the residue that per-pair counting still
+    cannot reach: a deleted entry contributes no pair to check, so the pin is
+    what converts "host silently removed" into a failure. The two assertions are
+    complementary rather than redundant — the pin catches removing a host, the
+    per-pair check catches a host that is still listed but no longer derives
+    what it claims to.
     """
-    per_binding: dict[str, int] = {}
+    per_pair: dict[tuple[str, str], int] = {}
     for relpath, exprs, _floor in _SCANNED:
         source = (_ROOT / relpath).read_text(encoding="utf-8")
         # Counted per binding rather than per member: a member reached through
         # two bindings must credit both, or dropping either looks harmless.
         tree = ast.parse(source)
+        for expr in exprs:
+            per_pair.setdefault((relpath, expr), 0)
         for node in ast.walk(tree):
             expr = None
             if isinstance(node, ast.Attribute) and not node.attr.startswith("_"):
@@ -847,22 +987,46 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
             ):
                 expr = _unparse(node.args[0])
             if expr is not None and expr in exprs:
-                per_binding[expr] = per_binding.get(expr, 0) + 1
+                per_pair[(relpath, expr)] = per_pair[(relpath, expr)] + 1
 
-    registered = {expr for _relpath, exprs, _floor in _SCANNED for expr in exprs}
-    dead = sorted(expr for expr in registered if per_binding.get(expr, 0) == 0)
+    dead = sorted(f"{relpath}:{expr}" for (relpath, expr), n in per_pair.items() if n == 0)
     assert not dead, (
-        f"these registered session bindings derive ZERO members: {dead}. Either "
-        "the binding was renamed in the source — in which case every member it "
-        "reached has silently stopped being guarded — or it never matched and "
-        "the coverage it implies is fictional. Fix the spelling or remove it "
-        "with a note saying which."
+        f"these registered (host, binding) pairs derive ZERO members: {dead}. "
+        "Either the binding was renamed in that host — in which case every "
+        "member it reached there has silently stopped being guarded — or it "
+        "never matched in that file and the coverage it implies is fictional. "
+        "Fix the spelling or drop the binding from that host's set with a note "
+        "saying which."
+    )
+
+    # The scanned PATHS, pinned by name. A ``_SCANNED`` entry is the claim that
+    # this host is watched at all, and deleting one is invisible to every other
+    # assertion here: the per-pair check loses the pairs it would have failed
+    # on, and both floors only ever see the hosts still listed.
+    assert {relpath for relpath, _exprs, _floor in _SCANNED} == {
+        "tui/app.py",
+        "server/utils/desktop_sessions.py",
+        "info/collect.py",
+        "server/routes/desktop_lifecycle.py",
+        "server/routes/desktop_sessions.py",
+        "server/routes/desktop_catalogues.py",
+        "tui/session_interaction.py",
+    }, (
+        "the set of scanned hosts changed: "
+        f"{sorted(relpath for relpath, _e, _f in _SCANNED)}. Removing one "
+        "unguards every member it derived, and three of these hosts cost ZERO "
+        "viewer-only members to delete — no floor, per-host or aggregate, can "
+        "notice their absence. Deleting the 'info/collect.py' line is how the "
+        "motivating /info outage was re-shipped against a green guard. Adding a "
+        "host is good news and needs this list updated too; either way, say "
+        "which in the commit."
     )
 
     # The bindings themselves, pinned by name. Deliberately the whole set rather
     # than a count: a count would let a deletion be paid for with an unrelated
     # addition, and the message that matters names the spelling that stopped
     # being watched.
+    registered = {expr for _relpath, exprs, _floor in _SCANNED for expr in exprs}
     assert registered == {
         "self._session",
         "session",

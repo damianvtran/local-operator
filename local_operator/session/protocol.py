@@ -693,8 +693,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ``bridge.remote`` binding. A rename on the facade is therefore an
         ``AttributeError`` inside a live HTTP route rather than the silent
         ``None`` a duck-probe would return — louder, but a 500 on the phone
-        portal all the same, and equally invisible to pyright while the member
-        was undeclared (QA round 2, Q4).
+        portal all the same (QA round 2, Q4).
+
+        Unlike the duck-probed members, these three were NOT invisible to
+        pyright before this declaration: the routes reach them through
+        ``DesktopSessionBridge.remote``, annotated as a concrete
+        ``RemoteSession | None``, so a rename was already a type error there —
+        reproduced against the pre-PR base (QA round 3, Q8, correcting an
+        earlier claim here that it was not). Declaring them buys the protocol's
+        coverage of the surface, not a check that was missing.
 
         Distinct from :meth:`attach_existing`: this one is allowed to START a
         runtime, because the caller is a user action that needs one. A READ
