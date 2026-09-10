@@ -859,7 +859,7 @@ async def test_mcp_login_still_refuses_a_server_that_cannot_take_oauth(
 
 
 @pytest.mark.asyncio
-async def test_mcp_reauth_on_a_url_only_server_reconnects_authenticated(
+async def test_mcp_reauth_cli_on_a_url_only_server_reconnects_authenticated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CLI reauth path shares the TUI's evidence-loss bug and its fix.
@@ -910,6 +910,84 @@ async def test_mcp_reauth_on_a_url_only_server_reconnects_authenticated(
     assert await cli._mcp_reauth_server("codex", tmp_path) == 0
     assert auth_mod.server_has_stored_grant(url, store) is False  # really deleted
     assert seen["capable"] is True  # ...but still known to take OAuth
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_with_nothing_stored_proceeds_into_the_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Reauth on a url-only server holding no grant must log in, not dead-end.
+
+    The removal fails here because ``mcp_logout_server`` gates on the STRICT
+    ``server_is_oauth_capable``, and a Codex-imported config with a cold ledger
+    and no stored row satisfies none of its three evidence kinds. That used to
+    exit 1 saying the server "does not use OAuth login" — false for a server
+    the login probe accepts, and a dead end for the user this path is for.
+    Reauth's contract is "end up authenticated", so a no-op delete is a
+    satisfied precondition.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+
+    auth_mod.OAUTH_CHALLENGES.clear()
+    cfg = MCPHttpServerConfig(url="https://codex.example/mcp")
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": cfg}, {}),
+    )
+
+    logged_in: list[str] = []
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        logged_in.append(name)
+        return 0
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 0
+    assert logged_in == ["codex"]  # fell through instead of erroring
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_still_refuses_a_server_that_cannot_take_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Falling through on a failed removal must not weaken the static refusals.
+
+    A stdio server and a declared ``auth.type: apikey`` server both fail the
+    removal for the same "not OAuth" reason as the url-only case above, but
+    they are statically ineligible — the F3 protection. They must still exit 1
+    without reaching a login, or a typo could open a browser tab.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "apikey": MCPHttpServerConfig(
+            url="https://api.example/mcp", auth=MCPAuthConfig(type="apikey")
+        ),
+        "stdio": MCPStdioServerConfig(command="run-me"),
+    }
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: (configs, {}),
+    )
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        raise AssertionError("an ineligible or unknown server must not reach the login")
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    for name in ("apikey", "stdio"):
+        assert await cli._mcp_reauth_server(name, tmp_path) == 1
+        assert "does not use OAuth login" in capsys.readouterr().err
+    # An unknown name is still a typo the user wants told about, not a login.
+    assert await cli._mcp_reauth_server("nosuch", tmp_path) == 1
+    assert "not configured" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

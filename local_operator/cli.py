@@ -3616,23 +3616,21 @@ async def _mcp_login_server(name: str, cwd: Path) -> int:
         print(f"error: MCP server {name!r} is not configured", file=sys.stderr)
         return 1
     # NOT ``cfg.auth.type == 'oauth'`` any more — the same widening the TUI and
-    # runtime grant paths already made (issue #367). A config imported from a
-    # foreign tool (Codex) carries only a ``url``, because that tool keeps its
-    # OAuth grants elsewhere and its format has no auth block to copy. The
-    # static check refused those outright, so ``local-operator mcp login
-    # <codex-server>`` failed on exactly the servers ``/mcp login`` handles
-    # fine — two gates for one question, disagreeing.
+    # runtime grant paths already made (issue #367); for what counts as
+    # evidence and why a url-only foreign import has none of the static kind,
+    # see :func:`server_is_oauth_capable`. The static check refused exactly the
+    # servers ``/mcp login`` handles fine — two gates for one question,
+    # disagreeing.
     #
     # The split below preserves the F3 protection that motivated the strict
-    # check. ``server_rejects_oauth`` is the STATIC impossibility (a stdio
-    # server, or one whose config declares ``auth.type: apikey`` — the user
-    # stating how it authenticates), and it stays a free, hard refusal with the
-    # wording that tells them how to add an OAuth server. Only the genuinely
-    # undecidable url-only case pays for the live probe, which asks the network
-    # once instead of assuming every remote URL is authenticable.
+    # check: ``server_rejects_oauth`` is the STATIC impossibility, and it stays
+    # a free, hard refusal with the wording that tells them how to add an OAuth
+    # server. Only the genuinely undecidable url-only case pays for the live
+    # probe, which asks the network once instead of assuming every remote URL
+    # is authenticable.
     if server_rejects_oauth(cfg):
         print(
-            f"error: MCP server {name!r} is not OAuth-enabled; " "add a remote server with --oauth",
+            f"error: MCP server {name!r} is not OAuth-enabled; add a remote server with --oauth",
             file=sys.stderr,
         )
         return 1
@@ -3641,8 +3639,16 @@ async def _mcp_login_server(name: str, cwd: Path) -> int:
         # advertising an authorization server: it may be genuinely public, or
         # discovery may be unreachable. Distinct wording, because "add a remote
         # server with --oauth" is useless advice for a server that IS one.
+        #
+        # The parenthetical is load-bearing, not decoration: the probe swallows
+        # its transport exception and returns False for BOTH readings, so after
+        # the 30 s worst case against an unroutable host a bare "does not use
+        # OAuth login" tells the user a falsehood about their server when the
+        # real fault is the URL or the network. The message has to admit the
+        # ambiguity the code already acknowledges.
         print(
-            f"error: MCP server {name!r} does not use OAuth login",
+            f"error: MCP server {name!r} does not use OAuth login"
+            " (no authorization server discovered — check the URL and your network)",
             file=sys.stderr,
         )
         return 1
@@ -3673,11 +3679,39 @@ async def _mcp_reauth_server(name: str, cwd: Path) -> int:
     non-OAuth name so a typo does not turn into an unexpected browser tab)
     and then runs exactly the login connect path — one implementation of what
     "authenticated" means.
+
+    A failed removal is NOT automatically a failed reauth. Reauth's contract
+    is "end up authenticated", not "delete a row", so having nothing to delete
+    is a satisfied precondition rather than an error — see the gate below.
     """
-    from local_operator.mcp.auth import mcp_logout_server
+    from local_operator.mcp.auth import mcp_logout_server, server_rejects_oauth
+    from local_operator.mcp.config import load_all_mcp_configs
 
     error = mcp_logout_server(name, cwd)
     if error is not None:
+        # ``mcp_logout_server`` gates on ``server_is_oauth_capable`` — the
+        # STRICT test, deliberately unwidened because other callers (the
+        # ``/mcp logout`` picker) need it to mean "we actually hold something
+        # here". On a url-only Codex import with a cold ledger and no stored
+        # row that is False, so reauth used to exit 1 with "does not use OAuth
+        # login" on precisely the server ``mcp login`` accepts one line later:
+        # a false statement AND a dead end, for the exact user this path exists
+        # for.
+        #
+        # Fixed HERE rather than by loosening the shared helper. Nothing stored
+        # means the delete was a no-op, and a no-op delete leaves reauth's own
+        # precondition (no credential to reuse) already satisfied — so fall
+        # through to the login, which IS the rest of reauth. The refusals that
+        # matter survive because they are re-made downstream, not skipped: an
+        # unknown name still errors here (``cfg is None``), a statically
+        # ineligible server — stdio, or a declared ``auth.type: apikey`` — is
+        # refused by ``server_rejects_oauth`` here, and a remote server that
+        # advertises no authorization server is refused by the live probe
+        # inside ``_mcp_login_server``. A typo still cannot open a browser tab.
+        configs, _sources = load_all_mcp_configs(cwd)
+        cfg = configs.get(name)
+        if cfg is not None and not server_rejects_oauth(cfg):
+            return await _mcp_login_server(name, cwd)
         print(f"error: MCP reauth failed for {name!r}: {error}", file=sys.stderr)
         return 1
     return await _mcp_login_server(name, cwd)

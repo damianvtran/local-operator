@@ -535,7 +535,7 @@ async def test_the_last_notice_never_claims_a_deleted_credential_is_intact(
 
 
 @pytest.mark.asyncio
-async def test_reauth_on_a_url_only_server_reconnects_authenticated(
+async def test_reauth_run_grant_on_a_url_only_server_reconnects_authenticated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The operator's bug: `/mcp reauth` 401'd where `/mcp login` then worked.

@@ -841,6 +841,19 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
+    return payload_carries_grant(payload)
+
+
+def payload_carries_grant(payload: dict[str, Any] | None) -> bool:
+    """Whether a credential row payload holds an actual OAuth grant.
+
+    Split out of :func:`server_has_stored_grant` so the grant-vs-registration
+    distinction it documents lives in ONE place. ``mcp_logout_server`` needs
+    the same answer about a row it has already opened a storage for, and
+    re-deriving the test there would put this rule in two places — the drift
+    risk that matters most for a predicate whose whole point is that a
+    ``client_info``-only row is not a grant.
+    """
     if not payload:
         return False
     tokens = payload.get("tokens")
@@ -1001,19 +1014,26 @@ def mcp_logout_server(
     # have already failed the OAuth check above, so the getattr is a type
     # narrowing rather than a guess.
     url = getattr(cfg, "url", "")
-    # Read the durable evidence BEFORE destroying it — see the transfer below.
-    had_stored_grant = server_has_stored_grant(url, store)
     storage = McpTokenStorage(url, store)
+    # Read the durable evidence BEFORE destroying it — see the transfer below.
+    # Derived from THIS storage rather than via ``server_has_stored_grant``,
+    # which would open a second ``AuthStore`` (and a second sqlite connection)
+    # for a row we are about to open one for anyway.
+    #
+    # An unreadable store makes this False, so the transfer is skipped in
+    # exactly the case where the evidence is most likely to be lost for good.
+    # That is the deliberate direction and not an oversight: recording a
+    # challenge we could not substantiate would write a fact we never observed
+    # into an observation-only ledger, and the two reads here hit the same
+    # store microseconds apart, so a read that fails while the delete below
+    # succeeds is a very narrow window. Silence is the conservative error.
+    had_stored_grant = payload_carries_grant(storage._read())
     if not storage.clear():
         return f"no stored credential for MCP server {name!r} — nothing to log out of"
     if had_stored_grant:
-        # EVIDENCE TRANSFER, not a guess. ``server_is_oauth_capable`` accepts
-        # three kinds of evidence that a server authenticates over OAuth: an
-        # explicit ``auth.type: oauth`` block, a stored grant for its URL, and
-        # an observed 401 challenge in ``OAUTH_CHALLENGES``. A config imported
-        # from a foreign tool (Codex, issue #367) carries only a ``url``, so
-        # the stored grant is its ONLY evidence — and the delete above is what
-        # erases it.
+        # EVIDENCE TRANSFER, not a guess — for the three kinds of evidence and
+        # why a url-only Codex import (issue #367) has only this one, see
+        # :func:`server_is_oauth_capable`. The delete above is what erases it.
         #
         # That erasure is what broke ``/mcp reauth`` on those servers. Reauth
         # is a delete followed by a reconnect, and the reconnect re-asks
