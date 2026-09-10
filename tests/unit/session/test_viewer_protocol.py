@@ -203,7 +203,7 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: MEMBERS (and 363 of 414 ``file:line`` SITES, deduped per member and line), so
 #: any single global floor loose enough to survive ordinary churn there cannot
 #: notice a smaller host going dark at all. Measured, not guessed: dropping the
-#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 49 and dropping
+#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 47 and dropping
 #: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
 #: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
 #: stated beside each path fires on the host that actually decayed and names it.
@@ -629,7 +629,7 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     # 113 distinct public MEMBERS, so a number that survives ordinary churn
     # there is necessarily far above every other host's entire contribution.
     # Measured on this head — dropping the desktop utils host costs 3
-    # viewer-only members of 49, dropping ``info/collect.py`` costs 0 — so both
+    # viewer-only members of 47, dropping ``info/collect.py`` costs 0 — so both
     # single-point decays slid under a global ``>= 40`` exactly as they slid
     # under the ``>= 20`` that review round 2 (MINOR-1) rejected. Raising one
     # number would only move the blind spot. Each host is now asserted against
@@ -760,9 +760,15 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # left the viewer-only population by becoming declared for both shapes.
     # That move is the fix for the inline ``/credential`` half-feature; a
     # LATER drop back to this figure would mean the word crept home again.
-    assert len(viewer_only) == 49, (
+    #
+    # 49 → 47 is the same shape of move, twice over: the live-tool-row resume
+    # work needs the pending/executing display ids on a LOCAL session too, so
+    # ``pending_display_tool_ids`` and ``executing_display_tool_ids`` moved
+    # onto ``SessionProtocol`` and both left the viewer-only population by
+    # becoming declared for both shapes.
+    assert len(viewer_only) == 47, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 49, and the aggregate floor is set at 40 against that number. A "
+        "says 47, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1047,7 +1053,7 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
 
     The count is pinned as well as the contribution, because the two decays are
     different and only one of them is a rename. DELETING ``source.session``
-    outright costs 2 of 49 viewer-only members — under any floor, per-host or
+    outright costs 2 of 47 viewer-only members — under any floor, per-host or
     aggregate, and invisible to the zero-sites check because a removed entry is
     not an entry that derives nothing. It was the last planted violation this
     guard did not catch. A registered binding is a coverage claim, so removing
