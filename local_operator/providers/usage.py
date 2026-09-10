@@ -306,14 +306,17 @@ class UsageReport:
     #: good numbers. 0 after a successful fetch.
     consecutive_failures: int = 0
     #: True once :data:`USAGE_ACCOUNT_MAX_FAILURES` consecutive probes have
-    #: failed. The account stays on ``/usage`` (the login is still real) but
-    #: probing stops until the user hits ``r``. Distinct from an exhausted
-    #: window: a 200 with 100% weekly is quota, not unavailability.
+    #: failed. The account stays on ``/usage`` (the login is still real) and
+    #: re-probes on a jittered :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence, so
+    #: a provider that recovers is discovered without the user pressing ``r``.
+    #: Distinct from an exhausted window: a 200 with 100% weekly is quota, not
+    #: unavailability.
     usage_unavailable: bool = False
     #: Earliest epoch-ms this account may be probed again. Set from the
-    #: per-account exponential backoff on failure, or from the jittered TTL on
-    #: success. ``None`` once unavailable (only ``r`` retries) or on a report
-    #: that has never been through the cache merge.
+    #: per-account exponential backoff on a transient miss, from the jittered
+    #: :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence once the unavailable ceiling
+    #: trips, or from the jittered TTL on success. ``None`` on a report that
+    #: has never been through the cache merge.
     next_probe_at_ms: int | None = None
     #: True when this account's stored OAuth grant was refused as permanently
     #: dead (RFC 6749 SS5.2 ``invalid_grant`` and friends). Distinct from

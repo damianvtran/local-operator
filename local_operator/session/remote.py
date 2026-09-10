@@ -5682,5 +5682,22 @@ def _pending_request(state: Any) -> PendingRequest | None:
     )
 
 
-def _image_to_wire(image: ImageContent) -> dict[str, str]:
-    return {"data_b64": image.data, "mime_type": image.mime_type}
+def _image_to_wire(image: ImageContent) -> dict[str, Any]:
+    """One image block as the owner's control socket carries it.
+
+    ``marker`` rides along when the producer knows one, because the transport
+    can REFUSE an attachment and has to name the chip the user is looking at:
+    ``markers`` in ``attach_client._refit_images`` prefers it and falls back to
+    the wire position. Omitted rather than sent as ``null`` when there is none,
+    so a producer with no chips (the phone relay, a tool result) leaves the
+    fallback in charge and the frame stays the shape older owners parse.
+
+    Emitting it here is what makes the lookup reachable at all: the field is
+    ``exclude=True`` on :class:`ImageContent`, so no ``model_dump`` carries it
+    and this is the only seam that can (design round 2, D8 — the lookup shipped
+    while nothing populated it, and the refusal went on quoting the position).
+    """
+    block: dict[str, Any] = {"data_b64": image.data, "mime_type": image.mime_type}
+    if image.marker is not None:
+        block["marker"] = image.marker
+    return block

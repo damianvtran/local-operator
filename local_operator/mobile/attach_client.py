@@ -34,11 +34,13 @@ owned-resume branch only, keeping ``resume.py`` and the startup path light.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, NamedTuple, Sequence
 
 from local_operator.mobile.types import (
     PROTOCOL_VERSION,
@@ -88,6 +90,558 @@ class _OversizedFrame(Exception):
     handler cannot confuse it with a ``ValueError`` a frame CALLBACK raised —
     the two mean opposite things (owner sent too much vs. this side refused
     what it sent) and were logged as the same overrun before this existed."""
+
+
+class OversizedRequest(ValueError):
+    """This side refused to SEND a frame the owner could not have read.
+
+    The outbound twin of :class:`_OversizedFrame`, and the whole point is that
+    it is raised INSTEAD of a write. Writing an over-limit line does not fail:
+    it succeeds, the owner's ``readline`` raises on the far side, and the
+    connection dies — so the caller's request is answered by a dead socket
+    rather than an error, which is exactly the session death this guards
+    (pasting a large screenshot exited ``lop`` and forced ``lop --resume``).
+
+    A ``ValueError`` and not a ``ConnectionError``, deliberately: the socket is
+    healthy and redialling fixes nothing. The TUI's prompt worker surfaces the
+    message as a notice and puts the draft back in the composer, which is what
+    makes the refusal actionable rather than a loss.
+    """
+
+
+class UnreadableImageRequest(OversizedRequest):
+    """The refusal for an attachment that is not a decodable image AT ALL.
+
+    A SUBCLASS so every existing handler keeps working unchanged — the TUI's
+    prompt worker matches on ``isinstance(error, OversizedRequest)`` and the
+    relay's 422 path on ``ValueError``, and both still catch this.
+
+    It exists because the two refusals have DIFFERENT REMEDIES, and one place
+    in :func:`fit_request_frame` rewrites a refusal's sentence: when the text
+    has eaten the frame's budget, a SIZE failure is re-blamed on the text,
+    which is the copy call review round 2 (MAJOR-4) argued for. That rewrite
+    used to catch this one too, so a corrupt attachment on a text-heavy frame
+    told the user to "shorten the text or send the images on their own" —
+    advice that cannot work, because these bytes are not an image at any size
+    and no amount of shortening makes them one. The remedy here is always
+    "remove it", whatever the budget looks like (review round 3, NIT-1).
+
+    Narrow, and deliberately still fixed: no in-tree producer emits an
+    undecodable payload today (the owner content-sniffs and drops unusable
+    blocks on the far side), but a truncated paste or a file that is not
+    really a PNG reaches ``refit_image_to_budget`` from the client side first,
+    and a sentence that sends the user off fixing the wrong thing is the exact
+    defect ``ImageUnreadable`` was split out from ``None`` to prevent.
+    """
+
+
+class _RefitReport(NamedTuple):
+    """What the wire refit did to ONE image, for the surface that must say so.
+
+    ``marker`` is the number the USER sees on their composer chip, not the
+    image's wire position \u2014 see :func:`_refit_images` for why the two differ.
+
+    ``downscaled`` is the only field that decides whether anything is said at
+    all. The refit's common outcome is a codec swap that keeps every pixel
+    (the composer already bounds a paste to 1024px, so the descending rungs are
+    unreachable for ordinary messages), and a notice on that would be pure
+    noise on a routine gesture. Losing pixels is different in kind: measured at
+    the 768px rung it costs ~40% edge energy and makes digits misread, which is
+    exactly the failure a user pastes a screenshot to avoid (design round 1,
+    D2). So the dimensions are carried to be shown, and the codec is not.
+    """
+
+    marker: int
+    width: int
+    height: int
+    source_width: int
+    source_height: int
+
+    @property
+    def downscaled(self) -> bool:
+        """Did the refit cost PIXELS, as opposed to merely changing codec?
+
+        Pixel counts rather than the ``WxH`` strings, matching
+        ``editor._was_downscaled``: the mark is a claim about fidelity and has
+        to be tested as one.
+        """
+        if not all((self.width, self.height, self.source_width, self.source_height)):
+            return False
+        return self.width * self.height < self.source_width * self.source_height
+
+
+#: Slack left over the MEASURED frame overhead, to absorb the difference
+#: between the empty-image frame and the encoded one.
+#:
+#: The overhead itself is no longer guessed — :func:`_frame_overhead_bytes`
+#: serialises the real frame with its images emptied, so the op name, the
+#: ``req`` id, any command id and the user's ACTUAL text are counted rather
+#: than bounded. A fixed 64 KiB reserve was the bug: ``clipboard.py`` admits
+#: pastes up to ``MAX_CLIPBOARD_TEXT_BYTES`` (1 MiB), so any prompt whose text
+#: passed ~64 KiB had its images fitted against a budget that was never
+#: available, the post-refit re-measure caught the overflow, and the whole
+#: message was refused — including the ~780 KB screenshot this module's
+#: docstring names as the motivating bug (review round 1, MAJOR-1).
+#:
+#: What remains is per-image JSON punctuation the emptied frame does not carry:
+#: the ``data_b64``/``mime_type`` keys, quotes, braces and commas, ~40 bytes an
+#: image plus base64's own padding. 4 KiB covers a 16-attachment message an
+#: order of magnitude over, and the exact frame is still measured again after
+#: the refit — so this only has to be non-negative, not precise.
+_FRAME_ENCODING_SLACK_BYTES = 4 * 1024
+
+
+#: Below this much room for ALL the images, blame the TEXT rather than an
+#: attachment — a COPY decision, and only that.
+#:
+#: NOT A PREDICTION THAT THE REFIT WOULD FAIL, and the earlier version of this
+#: constant made exactly that claim: it short-circuited to a refusal before the
+#: refit ran, on the premise that the tightest rung "lands around 20-30 KB of
+#: base64" so a smaller budget guaranteed a per-image refusal. That premise
+#: holds for continuous-tone photographs and is false for the two shapes an
+#: operator most often pastes. A flat terminal screenshot compresses to ~6.6 KB
+#: of base64 and fits a quarter of this figure; line art is exempt from the
+#: JPEG rung by design and a 1024x1024 bilevel grid is ~1.4 KB. Measured, three
+#: smooth-gradient sends were refused here while the refit produced a fitting
+#: image and a frame under the limit (review round 2, MAJOR-4) — the same class
+#: of defect MAJOR-1 filed against the old fixed reserve, one layer up.
+#:
+#: So the refit ALWAYS runs, and this only decides which sentence a failure
+#: gets. Below this much room the per-image refusal would quote a share
+#: rounding to ``0.0 MB`` and point the user at a screenshot when only
+#: shortening the prompt can help; the frame-level refusal names the text
+#: instead. The cost of being wrong is now one re-encode rather than a message
+#: the user was told they could not send.
+_MIN_VIABLE_IMAGE_BUDGET_BYTES = 32 * 1024
+
+
+#: The refit that the CURRENT task performed, published for the caller that has
+#: to tell the user about it. See :func:`taken_refit_report`.
+#:
+#: A context variable rather than a return value because the refit happens four
+#: call frames below the surface that renders transcripts — ``fit_request_frame``
+#: is reached through ``AttachClient._request_frame`` → ``send_command`` →
+#: ``RemoteSession.prompt``, each of which returns a receipt string with no room
+#: for a second value, and widening all four signatures to carry a UI detail
+#: through the transport would put presentation concerns in three layers that
+#: currently have none.
+#:
+#: Context propagates the RIGHT way for this: a value set in a coroutine is
+#: visible to the task that awaited it, while a task spawned with
+#: ``create_task`` gets a COPY — so two concurrent sends can never read each
+#: other's report. Verified, not assumed. The reader consumes it, so a stale
+#: report cannot outlive the send that produced it.
+_REFIT_REPORT: ContextVar[tuple[_RefitReport, ...] | None] = ContextVar(
+    "local_operator_attach_refit_report", default=None
+)
+
+
+async def fit_request_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    """Return ``frame`` sized to fit the socket, refitting its images if needed.
+
+    THE BUG THIS CLOSES. The owner's control socket reads one JSON line per
+    frame with ``limit=_MAX_LINE_BYTES``; a line over that makes its
+    ``readline`` raise and (before the sibling fix in ``RuntimeServer``) killed
+    the reader loop and the connection. Nothing on this side checked, so
+    ``prompt``/``steer``/``slash`` put the user's images on the wire fully
+    base64-encoded and unguarded, and ONE pasted screenshot over ~780 KB of
+    source severed the socket at the moment of sending. Measured on this
+    machine: a 1672x941 render is 1.23 MB of base64 after the composer's own
+    ingest bound, and two ordinary screenshots together are 1.1 MB, so the
+    frames that break it are ordinary rather than pathological.
+
+    WHY REFIT RATHER THAN REFUSE. Pasting screenshots is a routine gesture, and
+    the sizes above are routine too — a hard rejection would break the feature
+    to protect the transport. So each image is re-encoded to fit
+    (:func:`~local_operator.imaging.refit_image_to_budget`, JPEG at full
+    resolution first, downscale only if that is not enough). Only an image that
+    cannot fit even at its tightest rung is refused, named by the MARKER NUMBER
+    on the user's own composer chip so they know which attachment to drop.
+
+    WHY THE BUDGET IS SHARED ACROSS THE IMAGES. The line limit applies to the
+    whole frame, so N images have to fit TOGETHER; refitting each against the
+    full limit would pass N times and still overflow. What is left after the
+    frame's MEASURED overhead is therefore split between them — see
+    :func:`_refit_images` for why the split reclaims rather than divides flat.
+
+    A COROUTINE because the refit decodes and re-encodes images — ~315 ms for a
+    20 MP frame — and every caller is on an event loop. The work goes to a
+    thread; a frame with no images (the overwhelming majority: every ack, every
+    watch, every projection request) returns after one length check without
+    ever reaching it.
+
+    Publishes what the refit COST to :data:`_REFIT_REPORT` for the front end to
+    render — see :func:`taken_refit_report`. Always, including the empty tuple
+    when nothing was resized, so a reader cannot mistake a previous send's
+    report for this one's.
+
+    Raises :class:`OversizedRequest` when the frame cannot be made to fit,
+    which is strictly better than the alternative: the caller learns its
+    request was not sent while the connection is still alive.
+    """
+    images = frame.get("images")
+    encoded_size = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded_size <= _READ_LIMIT_BYTES:
+        # The common path, and the ONLY one that leaves the report untouched:
+        # nothing was refitted, so there is nothing for a caller to consume and
+        # a `set` here would cost every ack and projection request a context
+        # write. `taken_refit_report` treats "absent" as "nothing happened".
+        return frame
+    if not isinstance(images, list) or not images:
+        # Nothing bulky to shrink, so the text itself is over the limit. Say so
+        # with both numbers rather than truncating: a prompt silently cut in
+        # half is worse than one that was not sent, because the damage is
+        # invisible until the model answers about the wrong thing.
+        raise OversizedRequest(
+            f"this message is {_megabytes(encoded_size)} and the limit is "
+            f"{_megabytes(_READ_LIMIT_BYTES)}; shorten it and send again"
+        )
+    # MEASURED, not reserved. Serialising the frame with its images emptied
+    # counts the op, the ``req``, any command id and the user's real text, so a
+    # 100 KiB prompt beside a screenshot is budgeted for instead of being
+    # refused against a 64 KiB constant that was never checked against it
+    # (review round 1, MAJOR-1).
+    overhead = _frame_overhead_bytes(frame)
+    budget = max(0, _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES)
+    # THE REFIT ALWAYS RUNS, even on a budget this small. Whether an image fits
+    # is a question only the encoder can answer — a flat screenshot or line art
+    # fits a budget that no photograph would (see
+    # `_MIN_VIABLE_IMAGE_BUDGET_BYTES`), and predicting the answer here refused
+    # messages that would have sent (review round 2, MAJOR-4).
+    #
+    # `text_is_the_bulk` decides only which SENTENCE a genuine failure gets, so
+    # a refusal on a budget the text has eaten blames the text rather than
+    # quoting a per-image share that rounds to `0.0 MB`.
+    text_is_the_bulk = budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES
+    try:
+        fitted, report = await asyncio.to_thread(_refit_images, images, budget)
+    except UnreadableImageRequest:
+        # NOT a size failure, so the text-is-the-bulk rewrite below must not
+        # replace it: the remedy is removing the attachment, and shortening the
+        # text cannot make an undecodable payload decodable (review round 3,
+        # NIT-1). Caught before `OversizedRequest` because it subclasses it.
+        raise
+    except OversizedRequest:
+        if not text_is_the_bulk:
+            raise
+        raise _text_is_the_bulk_refusal(overhead, budget) from None
+    candidate = {**frame, "images": fitted}
+    refitted_size = len(json.dumps(candidate).encode()) + 1
+    if refitted_size > _READ_LIMIT_BYTES:
+        # Every image reached its tightest rung and the frame is STILL over, so
+        # the text is the bulk. Measured on the real frame rather than assumed,
+        # so the refusal names the size the user can actually act on.
+        if text_is_the_bulk:
+            # "send fewer attachments" is not the move when the text alone has
+            # eaten the frame — the same copy call the pre-refit gate used to
+            # make, now made where the failure is real.
+            raise _text_is_the_bulk_refusal(overhead, budget)
+        raise OversizedRequest(
+            f"this message is {_megabytes(refitted_size)} even after its images were "
+            f"resized, and the limit is {_megabytes(_READ_LIMIT_BYTES)}; shorten the "
+            "text or send fewer attachments"
+        )
+    _REFIT_REPORT.set(report)
+    logger.warning(
+        "attach client: %s frame was %d bytes, over the %d-byte line limit; "
+        "resized %d image(s) to %d bytes of image payload and the frame is now "
+        "%d bytes; %d of them lost pixels",
+        frame.get("op", "request"),
+        encoded_size,
+        _READ_LIMIT_BYTES,
+        len(images),
+        # THE IMAGES, summed from what was actually fitted. This said
+        # `refitted_size` — the WHOLE frame — inside a clause reading as the
+        # images, which was within ~6% while the reserve was a fixed 64 KiB and
+        # became an overstatement of 3.25x-16.75x once the overhead was measured
+        # and up to 1 MiB of the user's own text sat inside a number attributed
+        # to the attachments (QA round 2, Q3). Both quantities are named now,
+        # because the frame size is the one that explains the limit and the
+        # payload size is the one that explains the resize.
+        sum(len(_image_payload(image)) for image in fitted),
+        refitted_size,
+        sum(1 for entry in report if entry.downscaled),
+    )
+    return candidate
+
+
+def _text_is_the_bulk_refusal(overhead: int, budget: int) -> OversizedRequest:
+    """The refusal for a frame whose TEXT left no usable room for attachments.
+
+    A copy decision rather than a diagnosis: raised only where the refit has
+    already tried and failed, so the sentence blames the quantity the user can
+    actually act on. The per-image refusal would name a share rounding to
+    ``0.0 MB`` and point at a screenshot when only shortening the prompt can
+    help (review round 2, MAJOR-4).
+
+    "no room" rather than a figure once the remainder rounds away: a sentence
+    ending "leaving only 0 KB" reads as a bug in the message.
+    """
+    room = f"only {_megabytes(budget)}" if budget >= 1024 else "no room"
+    # The text figure in the LIMIT'S scale rather than the honest-for-its-size
+    # scale, because the mixed scale broke comparability: "fills 1000 KB of the
+    # 1.0 MB limit" asked the user to convert units mid-sentence between the
+    # two figures the sentence exists to compare (design round 3, D17).
+    #
+    # Safe ONLY because of where this sentence fires: the budget precondition
+    # (under `_MIN_VIABLE_IMAGE_BUDGET_BYTES`) puts the overhead within a few
+    # KB of the whole limit, so its MB figure can never round below 0.9 and the
+    # "0.0 MB" class `_megabytes` exists to avoid is unreachable HERE. The ROOM
+    # figure keeps `_megabytes`' own scale because it is genuinely small — KB
+    # is the honest unit for a few KB, and "no room" covers a sub-KB remainder.
+    return OversizedRequest(
+        f"this message's text alone fills {overhead / (1024 * 1024):.1f} MB of "
+        f"the {_megabytes(_READ_LIMIT_BYTES)} limit, leaving {room} for its "
+        "attachments; shorten the text or send the images on their own"
+    )
+
+
+def taken_refit_report() -> tuple[_RefitReport, ...]:
+    """CONSUME what the last refit on this task cost, for the surface showing it.
+
+    Taken rather than read, so one report is rendered exactly once: the front
+    end asks after a send returns, and a later send that refits nothing must not
+    find this one still sitting there and mark an untouched image as resized.
+
+    Empty when the send needed no refit at all, which is the overwhelmingly
+    common case — callers can treat empty as "say nothing".
+    """
+    report = _REFIT_REPORT.get()
+    _REFIT_REPORT.set(None)
+    return report or ()
+
+
+def _frame_overhead_bytes(frame: dict[str, Any]) -> int:
+    """Bytes this frame costs with its images emptied — everything but payloads.
+
+    The images are replaced by EMPTY BLOCKS rather than dropped, so the keys and
+    punctuation of the list itself are counted; only the base64 the refit is
+    about to resize is excluded. Serialising the real frame is what makes the
+    budget track the user's actual text instead of a constant that a 100 KiB
+    paste silently invalidates.
+
+    Falls back to the emptied-list encoding if a block is not a dict — those are
+    passed through untouched by the refit, so counting them as empty would
+    under-budget by their own size; they are kept verbatim here for that reason.
+    """
+    images = frame.get("images")
+    if not isinstance(images, list):
+        return len(json.dumps(frame).encode()) + 1
+    hollow = [{**image, "data_b64": ""} if isinstance(image, dict) else image for image in images]
+    return len(json.dumps({**frame, "images": hollow}).encode()) + 1
+
+
+def _megabytes(size_bytes: int) -> str:
+    """``size_bytes`` in the scale a person reads sizes in.
+
+    ONE unit system across the whole sentence family. The text refusal printed
+    raw byte counts (``1,341,208 bytes``) while the image one printed MB, so two
+    refusals raised from the same function asked the user to compare figures in
+    different scales (design round 1, D1).
+
+    MB at and above a full megabyte, KB below it, and the raw byte count below
+    one KB. The KB floor is there because a one-decimal MB renders every small
+    figure as ``0.0 MB`` — and the figures that go small here are exactly the
+    per-image budgets a refusal is trying to explain. A budget the sentence
+    prints as zero tells the user their image did not fit in nothing, which is
+    not a fact they can act on; the same applies one scale down, where a
+    ``1023 B`` share must not read ``0 KB``: the split walks smallest-first, so
+    the LAST image of a many-attachment message can face a sub-KB share while
+    its tightest rung is still over a KB, and that sentence has to state a
+    budget the user can act on (review round 3, NIT-2 — previously only the
+    exact-zero case had been noticed, which is unreachable; the share path is
+    not).
+
+    THE SWITCH IS AT 1024 KB, not at 0.1 MB, so the two scales cannot cross.
+    Keyed on the rounded MB figure the sentence would actually print, the
+    boundary sat mid-KB: ``104,857`` read ``102 KB`` and ``104,858`` read
+    ``0.1 MB``, so a one-byte step moved the number DOWN while moving the unit
+    up, and a user comparing two refusals a minute apart saw the smaller figure
+    in the larger unit (review round 2, NIT-2). Below a full megabyte the
+    KB figure is the honest one; at or above it the MB figure is.
+    """
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    kilobytes = size_bytes / 1024
+    if kilobytes < 1024:
+        return f"{kilobytes:.0f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _refit_images(
+    images: list[Any], budget_bytes: int
+) -> tuple[list[Any], tuple[_RefitReport, ...]]:
+    """Fit every image block into ``budget_bytes`` of base64 TOTAL, or refuse by name.
+
+    Runs in a thread (see :func:`fit_request_frame`). A block that is not a
+    dict, or carries no ``data_b64``, is passed through untouched: the owner
+    already drops unusable blocks (``_images_from_wire``), and inventing a
+    refusal for one here would fail a send over something the owner would have
+    ignored. Its bytes still count against the budget, because they still ride
+    the frame.
+
+    THE BUDGET IS RECLAIMED, NOT DIVIDED FLAT. An equal ``budget // len(images)``
+    share is the obvious split and it wastes the frame: a 32x32 icon reserved
+    the same share as a 1600x1000 screenshot and handed nothing back, so the
+    screenshot lost half its pixels while 59% of the frame went unspent (review
+    round 1, MINOR-2). Images are therefore fitted SMALLEST FIRST, each against
+    an equal share of what REMAINS divided by the images still to come, and
+    whatever a small image does not spend is immediately available to the
+    larger ones behind it. Smallest-first is what makes the reclaim monotone:
+    an image under its share always passes untouched, so the leftover only ever
+    grows as the walk proceeds.
+
+    This keeps the property the flat split was chosen for \u2014 a message shrinks
+    evenly rather than refusing its last attachment \u2014 because an image that
+    genuinely needs more than its share still only gets its share when every
+    other image is equally hungry.
+
+    Returns the fitted blocks in their ORIGINAL order (the wire order the owner
+    binds to markers), plus one :class:`_RefitReport` per image that was
+    actually re-encoded.
+    """
+    from local_operator.imaging import (
+        ImageUnreadable,
+        refit_image_to_budget,
+        sniff_image,
+    )
+
+    fitted: dict[int, Any] = {}
+    report: list[_RefitReport] = []
+    # Wire position -> the number on the user's composer chip. They are NOT the
+    # same: marker numbers do not renumber when an attachment is deleted, so
+    # after pasting three images and backspacing two the survivor is `[Image
+    # #3]` while its wire position is 1 \u2014 and the refusal said "image 1",
+    # pointing at a chip that is not on screen (design round 1, D4).
+    #
+    # THE PRODUCER IS `editor.resolve_markers`, which stamps the chip number on
+    # each `ImageContent`, and `remote._image_to_wire`, which puts it on the
+    # block. Both were added in review round 2: this lookup shipped first with
+    # nothing populating it, so every refusal still fell through to the position
+    # and the fix was the old behaviour renamed (design round 2, D8). A change
+    # that drops either end silently restores that, which is why
+    # `test_a_refusal_quotes_the_marker_a_real_paste_produced` starts at a real
+    # paste rather than at a hand-built wire dict.
+    #
+    # Position stays the fallback for producers with no chips to name - the
+    # phone relay, a tool result - where it is the only number that means
+    # anything.
+    markers = {
+        position: (
+            int(image["marker"])
+            if isinstance(image, dict)
+            and isinstance(image.get("marker"), int)
+            and image["marker"] > 0
+            else position + 1
+        )
+        for position, image in enumerate(images)
+    }
+    # Smallest first, by the bytes each block actually contributes. The ORDER of
+    # the walk only; `fitted` is re-assembled by wire position below.
+    order = sorted(
+        range(len(images)),
+        key=lambda position: len(_image_payload(images[position])),
+    )
+    remaining = budget_bytes
+    for walked, position in enumerate(order):
+        image = images[position]
+        data_b64 = _image_payload(image)
+        # Everything still to fit, this one included, shares what is left.
+        share = max(0, remaining) // max(1, len(order) - walked)
+        if not isinstance(image, dict) or not data_b64:
+            # Passed through, but still charged: these bytes ride the frame
+            # whether or not this function can do anything about them.
+            fitted[position] = image
+            remaining -= len(data_b64)
+            continue
+        mime_type = str(image.get("mime_type") or "image/png")
+        try:
+            result = refit_image_to_budget(data_b64, mime_type, share)
+        except ImageUnreadable as exc:
+            # A DIFFERENT SENTENCE FROM "too large", deliberately: these bytes
+            # would not have been sendable at any size, so telling the user to
+            # shrink them sends them off fixing the wrong thing. A distinct
+            # CLASS too, so `fit_request_frame` cannot rewrite this sentence
+            # into the text-blaming one — see `UnreadableImageRequest`.
+            raise UnreadableImageRequest(
+                f"image {markers[position]} could not be sent because {exc}; "
+                "remove it and send again"
+            ) from exc
+        if result is None:
+            # NAMES THE CEILING THAT ACTUALLY APPLIED, and measures the IMAGE.
+            # `len(data_b64)` is the base64, which inflates 4/3 \u2014 reporting it
+            # told a user their 2.4 MB screenshot was "3.2 MB", overstating by a
+            # third against the number their file manager shows. And a size with
+            # no scale beside it answers nothing: "remove it" is the only move
+            # the sentence leaves, when the real ceiling is a per-image share
+            # that says whether cropping or sending it alone would work (design
+            # round 1, D1).
+            detail = (
+                f"this message's {_megabytes(share)} per-image budget "
+                f"({len(images)} attachments)"
+                if len(images) > 1
+                else f"this message's {_megabytes(share)} budget"
+            )
+            raise OversizedRequest(
+                f"image {markers[position]} is {_megabytes(_decoded_size(data_b64))} and will "
+                f"not fit in {detail} even at its smallest size; remove it and send again"
+            )
+        refitted_b64, refitted_mime = result
+        fitted[position] = {**image, "data_b64": refitted_b64, "mime_type": refitted_mime}
+        remaining -= len(refitted_b64)
+        if refitted_b64 != data_b64:
+            # Only a block that actually changed is reported, and only its
+            # DIMENSIONS decide whether the user is told (see `_RefitReport`).
+            # Sniffed from the bytes on both sides rather than trusting the
+            # rung: the ladder's first rung re-encodes at unchanged dimensions,
+            # so the codec-only case must measure as "not downscaled".
+            source = sniff_image(_decode_quietly(data_b64))
+            delivered = sniff_image(_decode_quietly(refitted_b64))
+            if source is not None and delivered is not None:
+                report.append(
+                    _RefitReport(
+                        marker=markers[position],
+                        width=delivered.width or 0,
+                        height=delivered.height or 0,
+                        source_width=source.width or 0,
+                        source_height=source.height or 0,
+                    )
+                )
+    return [fitted[position] for position in range(len(images))], tuple(report)
+
+
+def _image_payload(image: Any) -> str:
+    """The base64 an image block contributes to the frame, or ``""``."""
+    if not isinstance(image, dict):
+        return ""
+    data_b64 = image.get("data_b64") or ""
+    return data_b64 if isinstance(data_b64, str) else ""
+
+
+def _decoded_size(data_b64: str) -> int:
+    """The IMAGE's size in bytes, from its base64 length, without decoding it.
+
+    Base64 is 4 characters per 3 bytes plus padding, so the decoded size is
+    what the user recognises as their file and the encoded length is a third
+    larger. Arithmetic rather than a decode because this runs on a refusal
+    path holding megabytes that are about to be discarded.
+    """
+    padding = data_b64[-2:].count("=") if data_b64 else 0
+    return max(0, (len(data_b64) * 3) // 4 - padding)
+
+
+def _decode_quietly(data_b64: str) -> bytes:
+    """``data_b64`` decoded, or empty bytes \u2014 a sniff failure is never fatal.
+
+    Only feeds :func:`~local_operator.imaging.sniff_image` for the report, and
+    a report is a convenience: bytes that will not decode here have already
+    been through the refit successfully, so the right outcome is one less
+    caption, never a failed send.
+    """
+    try:
+        return base64.b64decode(data_b64, validate=True)
+    except Exception:  # noqa: BLE001 \u2014 a missing caption must never fail a send
+        return b""
 
 
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
@@ -499,9 +1053,15 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
+        # `OversizedRequest` and a future parked in `_pending` for a request
+        # that was never written is never resolved by anything: it sits there
+        # until the connection closes, then takes the teardown's
+        # `ConnectionError` with nobody awaiting it — an "exception was never
+        # retrieved" log for a refusal the caller had already handled cleanly.
+        frame = await fit_request_frame({"op": op, "req": req, **fields})
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
-        frame = {"op": op, "req": req, **fields}
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
@@ -522,15 +1082,20 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # Fitted before the future is registered, for the reason spelled out in
+        # :meth:`_request_frame`: a refusal must leave nothing parked in
+        # ``_pending``.
+        frame = await fit_request_frame({"op": op, "req": req, **fields})
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
-        frame = {"op": op, "req": req, **fields}
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
             reply = await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
-            self._pending.pop(req, None)
+            # No `_pending.pop` here: the `finally` below runs on this path too,
+            # so the second call was always a no-op on an already-popped id
+            # (review round 1, MINOR-3).
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
             self._pending.pop(req, None)
