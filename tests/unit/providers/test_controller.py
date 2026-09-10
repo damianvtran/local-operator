@@ -1120,6 +1120,17 @@ class TestPerAccountLastKnown:
     async def test_force_refresh_retries_a_maxed_out_account(
         self, controller, store, monkeypatch
     ) -> None:
+        """An unavailable account is no longer latched: it re-probes on its own
+        once the retry cadence elapses, and ``r`` still retries immediately.
+
+        Updated for the recovery-discoverability contract: reaching the ceiling
+        schedules a jittered ``USAGE_UNAVAILABLE_RETRY_MS`` probe instead of
+        setting ``next_probe_at_ms=None``, so the background warmer (and any
+        non-forced fetch after the cadence) discovers a recovered provider
+        without ``r``.
+        """
+        import time as _time
+
         store.oauth_accounts["anthropic"] = [self._account("new@example.com", "acct-new")]
         calls = 0
         succeed = False
@@ -1135,32 +1146,121 @@ class TestPerAccountLastKnown:
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
 
-        for _ in range(USAGE_ACCOUNT_MAX_FAILURES):
+        def _expire_and_backdate() -> None:
+            """Expire the cache row and put every next_probe in the past, so the
+            next fetch re-probes instead of serving the fresh payload."""
             key = controller._usage_cache_key("anthropic")
             cache = controller._usage_cache_store()
             assert cache is not None
-            import time as _time
-
             existing = cache.get(key, include_expired=True)
             if existing:
                 now_ms = int(_time.time() * 1000)
                 for report in existing:
                     report.next_probe_at_ms = now_ms - 1
                 cache.set(key, "anthropic", existing, expires_at_ms=now_ms - 1000)
-            await controller.fetch_usage(["anthropic"])
 
+        async def _drive_to_unavailable() -> None:
+            for _ in range(USAGE_ACCOUNT_MAX_FAILURES):
+                _expire_and_backdate()
+                await controller.fetch_usage(["anthropic"])
+
+        await _drive_to_unavailable()
         calls_before = calls
         succeed = True
-        # Without force, the unavailable account is not re-probed.
+
+        # 1. No probe BEFORE the cadence: the cache row is fresh for
+        #    ~USAGE_UNAVAILABLE_RETRY_MS, so a non-forced fetch serves it.
         idle = await controller.fetch_usage(["anthropic"])
         assert calls == calls_before
         assert idle[0].usage_unavailable is True
 
-        recovered = await controller.fetch_usage(["anthropic"], force_refresh=True)
+        # 2. Force still retries immediately, regardless of the schedule.
+        forced = await controller.fetch_usage(["anthropic"], force_refresh=True)
         assert calls == calls_before + 1
+        assert forced[0].usage_unavailable is False
+        assert forced[0].consecutive_failures == 0
+
+        # 3. Probe AFTER the cadence, WITHOUT force: re-drive to unavailable,
+        #    then expire the row and backdate next_probe past the cadence. A
+        #    non-forced fetch now probes and a 200 clears the latch.
+        succeed = False
+        await _drive_to_unavailable()
+        calls_before = calls
+        succeed = True
+        _expire_and_backdate()
+        auto = await controller.fetch_usage(["anthropic"])  # NOT forced
+        assert calls == calls_before + 1
+        assert auto[0].usage_unavailable is False
+        assert auto[0].consecutive_failures == 0
+        assert auto[0].limits[0].amount.used == 7.0
+
+    @pytest.mark.asyncio
+    async def test_a_latched_account_recovers_on_its_own_after_the_retry_cadence(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Recovery is discoverable without ``r``: a latched account re-probes
+        once the jittered ``USAGE_UNAVAILABLE_RETRY_MS`` cadence elapses, and a
+        200 clears ``usage_unavailable``, ``consecutive_failures`` and the panel
+        note end to end.
+
+        This is the operator's stated need: accounts are out of quota now, and
+        the panel must show on its own when quota becomes available again. The
+        old latch set ``next_probe_at_ms=None`` and ``_account_in_backoff``
+        returned True on the flag alone forever, so only a manual ``r`` could
+        ever discover the recovery.
+        """
+        import time as _time
+
+        from local_operator.tui.widgets.usage_panel import _account_status_note
+
+        store.oauth_accounts["anthropic"] = [self._account("me@example.com", "acct-me")]
+        succeed = False
+
+        async def fake_fetch(
+            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+        ):
+            if succeed:
+                return self._report("me@example.com", 23.0)
+            return None
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        # Drive to the unavailable ceiling.
+        latched: list[UsageReport] = []
+        for _ in range(USAGE_ACCOUNT_MAX_FAILURES):
+            key = controller._usage_cache_key("anthropic")
+            cache = controller._usage_cache_store()
+            assert cache is not None
+            existing = cache.get(key, include_expired=True)
+            if existing:
+                now_ms = int(_time.time() * 1000)
+                for report in existing:
+                    report.next_probe_at_ms = now_ms - 1
+                cache.set(key, "anthropic", existing, expires_at_ms=now_ms - 1000)
+            latched = await controller.fetch_usage(["anthropic"])
+
+        assert latched[0].usage_unavailable is True
+        assert latched[0].consecutive_failures == USAGE_ACCOUNT_MAX_FAILURES
+        # The latched row carries the panel note.
+        assert _account_status_note(latched[0], int(_time.time() * 1000)) != ""
+
+        # The cadence elapses: expire the row and backdate next_probe, the same
+        # lever the loop above pulls. A NON-forced fetch now re-probes.
+        succeed = True
+        key = controller._usage_cache_key("anthropic")
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        now_ms = int(_time.time() * 1000)
+        for report in latched:
+            report.next_probe_at_ms = now_ms - 1
+        cache.set(key, "anthropic", latched, expires_at_ms=now_ms - 1000)
+
+        recovered = await controller.fetch_usage(["anthropic"])  # NOT forced
         assert recovered[0].usage_unavailable is False
         assert recovered[0].consecutive_failures == 0
-        assert recovered[0].limits[0].amount.used == 7.0
+        assert recovered[0].limits[0].amount.used == 23.0
+        # And the panel note clears with it.
+        assert _account_status_note(recovered[0], int(_time.time() * 1000)) == ""
 
     @pytest.mark.asyncio
     async def test_backoff_skips_only_the_failed_account(
