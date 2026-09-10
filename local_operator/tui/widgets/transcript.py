@@ -1678,11 +1678,9 @@ class WakeBlock(ExpandableActionBlock):
         the dim single-line the user could not find. The body is the
         verbatim prompt, shown only once the row is opened.
         """
-        head, _, message = self._text.partition("\n\n")
-        head = " ".join(head.split())  # collapse any envelope whitespace
-        # Drop the cancel how-to — it is instructions for the model, and the
-        # user wants WHICH wake fired, not how to stop it.
-        head = head.split(" — cancel with wake(", 1)[0]
+        from local_operator.harness.rows import wake_receipt_headline
+
+        _, _, message = self._text.partition("\n\n")
         if self._catchup:
             # The catch-up's first line is itself a model-facing preamble
             # ("(alarm) The session resumed after being closed; the following
@@ -1702,15 +1700,10 @@ class WakeBlock(ExpandableActionBlock):
             if ids:
                 headline += f" ({', '.join(ids)})"
             return headline, message
-        if head.startswith("(alarm) "):
-            head = head[len("(alarm) ") :]
-        # The name column already says ``wake``; repeating "Scheduled wake"
-        # in the summary is the same caption-not-card problem at the next
-        # column along.
-        prefix = "Scheduled wake "
-        if head.startswith(prefix):
-            head = head[len(prefix) :]
-        return head, message
+        # The envelope strip is shared with the phone fold
+        # (``harness.rows.wake_receipt_headline``): while it lived only here,
+        # the phone rendered the raw model-facing envelope verbatim.
+        return wake_receipt_headline(self._text), message
 
     def settled_rows(self) -> int:
         """Rows settled now: one collapsed, the whole card when expanded."""

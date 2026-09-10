@@ -80,6 +80,79 @@ function AttachmentImage({
 	);
 }
 
+/* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
+   Severity was HUE-ONLY on this surface: measured against the theme tokens,
+   `danger` and `ink-dim` sit at 1.30:1, and across all 31 themes those two are
+   within 1.6:1 on 30 of them (exactly 1.00:1 on six). Desaturated — grayscale,
+   a cheap screen, low vision, bright sun — "turn failed", "compaction failed"
+   and a routine wake receipt collapsed into one indistinguishable grey, while
+   the TUI stayed readable because it fronts every notice with a symbol.
+
+   The glyph is the redundant channel that makes the distinction survive losing
+   colour, and `tool-row.tsx` already leads with a state glyph (✓/✗), so
+   without this the surface was speaking two visual languages for one idea. */
+const NOTICE_GLYPHS = {
+	error: "✗",
+	warning: "!",
+	info: "·",
+} as const;
+
+function NoticeRow({ entry }: { entry: TranscriptEntry }) {
+	const severity = entry.details.severity;
+	const isWake = entry.details.notice_kind === "wake";
+	/* A wake is a DELIVERY RECEIPT, not a failure or a warning, so it takes a
+	   neutral marker rather than a severity one — but it still gets one,
+	   because a row with no glyph in a column of glyphed rows reads as a
+	   rendering bug.
+
+	   `○` is the TUI's own ASCII wake glyph (`glyphs.py`, "a clock face"),
+	   deliberately not the ⏰ emoji: an emoji renders from the colour font, so
+	   it keeps its hue under the grayscale test this glyph exists to pass and
+	   carries far more visual weight than the ✗/!/· it sits beside — two
+	   inks and two weights for one column. */
+	const glyph = isWake ? "○" : severity ? NOTICE_GLYPHS[severity] : NOTICE_GLYPHS.info;
+	return (
+		/* Severity ink mirrors the TUI's NoticeBlock kind. A refusal, a failed
+		   turn and a failed compaction are things the user has to know
+		   happened; an unattended gate timeout is something they may have to
+		   act on. Everything else keeps the quiet default — the loudest ink in
+		   the palette is worth nothing once routine receipts are wearing it. */
+		<p
+			className={cn(
+				"text-meta flex gap-1.5 break-words",
+				severity === "error" && "text-danger",
+				severity === "warning" && "text-warning",
+				/* `info` and absent are ONE case, not two. Written as three
+				   branches this fell through all of them for an explicit
+				   `severity: "info"` and rendered with no ink class at all —
+				   while NOTICE_GLYPHS above does handle `info`, so the table
+				   and the renderer disagreed about the same tier. Latent (no
+				   producer emits it today) and exactly the shape of the
+				   typed-but-unread field this delta exists to remove. */
+				(!severity || severity === "info") && "text-ink-dim",
+			)}
+		>
+			{/* aria-hidden: the glyph is a redundant encoding of the severity
+			    already carried by the text, so announcing "✗" adds noise for a
+			    screen reader rather than information. `shrink-0` keeps the
+			    marker on the first line when the text wraps.
+
+			    `w-4 text-center font-mono` is the glyph-column recipe
+			    `tool-row.tsx` already uses, and it is what makes the column a
+			    column: bare `shrink-0` sizes each marker to its own advance
+			    width in the PROPORTIONAL body font, so the text beside it
+			    started anywhere across a 7.6px range (21.6→29.1px) — worst on
+			    the highest-severity rows, which are the ones the eye should
+			    catch fastest. A fixed monospace box makes every notice's text
+			    start on one edge. */}
+			<span aria-hidden="true" className="w-4 shrink-0 text-center font-mono">
+				{glyph}
+			</span>
+			<span className="min-w-0">{entry.text}</span>
+		</p>
+	);
+}
+
 function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 	switch (entry.kind) {
 		case "user": {
@@ -180,11 +253,7 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 			return <ToolRow entry={entry} />;
 		case "notice":
 		case "compaction":
-			return (
-				<p className="text-meta text-ink-dim break-words">
-					{entry.text}
-				</p>
-			);
+			return <NoticeRow entry={entry} />;
 		default:
 			return null;
 	}

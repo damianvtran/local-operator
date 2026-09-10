@@ -29,8 +29,23 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_message
-from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
+
+# The row DECISIONS both this fold and the TUI's must make identically. They
+# live outside both hosts precisely so neither can own them: every divergence
+# the convergence review found was a decision one surface made and the other
+# did not (docs/design/history-fold-convergence.md §3).
+from local_operator.harness.rows import (
+    assistant_row_text,
+    assistant_stop_notice,
+    compaction_refused_notice,
+    gate_timeout_notice,
+    is_harness_chrome,
+    user_row_text,
+    wake_receipt_headline,
+)
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -58,6 +73,7 @@ from local_operator.harness.types import (
     ToolExecutionUpdateEvent,
     TurnEndEvent,
 )
+from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
     PendingRequest,
@@ -246,6 +262,30 @@ def _image_refs(message: AgentMessage) -> list[dict[str, Any]]:
             refs.append({"index": image_index, "mime_type": block.mime_type or "image/png"})
             image_index += 1
     return refs
+
+
+def _tool_row_details(
+    args: dict[str, Any], output: str, result_details: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The expand-on-tap payload for a settled tool row.
+
+    Shared by the history fold and :meth:`ProjectionFold._tool_details` so a
+    replayed row expands to exactly what the live one did. The caps are the
+    wire budget's, not a display choice: this payload is re-sent on every
+    projection repaint.
+    """
+    details: dict[str, Any] = {}
+    if args:
+        details["args"] = {k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()}
+    if output:
+        details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
+    if result_details:
+        # Diff payloads ride through whole — the expanded row renders the
+        # coloured unified diff from them.
+        for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+            if key in result_details:
+                details[key] = result_details[key]
+    return details
 
 
 def _diff_counts(details: dict[str, Any] | None) -> tuple[int, int]:
@@ -565,14 +605,25 @@ def cap_projection_frame(
 
 
 def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntry]:
-    """Fold a full message history into transcript entries, UNCAPPED.
+    """Fold a message history into transcript entries — THE phone's row fold.
 
-    The session-side ``ProjectionFold.fold_history`` caps to the live tail
-    (the phone's realtime view is a window, not the whole log). The daemon's
-    history endpoint needs the SAME render semantics over the FULL history so
-    it can serve the older pages the cap dropped — this is the lazy-load
-    source. Pure (no ProjectionFold state), so the daemon can call it per
-    request without touching the live fold.
+    UNCAPPED and pure. Both phone surfaces come through here: the daemon's
+    history endpoint calls it directly for the older pages a cap dropped, and
+    :meth:`ProjectionFold.fold_history` calls it for the attach seed and then
+    layers its correlation-map maintenance and ``_cap_tail`` on top.
+
+    WHY ONE FUNCTION. This used to be two near-identical folds (this one and
+    a copy inside ``fold_history``), each carrying a comment asserting the
+    other could not disagree with it. They disagreed: a hub steer rendered as
+    a clean ``parent_message`` card here and leaked the raw
+    ``<parent-message>`` XML envelope as a ``notice`` on the attach seed, so
+    the phone contradicted ITSELF one scroll gesture apart. A contract two
+    functions promise to keep is a contract nothing checks — the only fix
+    that holds is that there is one function to change.
+
+    Row semantics that both the phone and the TUI must agree on live in
+    ``harness/rows.py`` and are called from here, so a decision cannot be
+    made on one surface and missed on the other.
 
     Tool-result diffs ride in ``provider_payload["details"]`` (where the
     harness stores them); rehydrated messages carry that payload, so the
@@ -582,9 +633,15 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
     # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
     tool_rows: dict[str, TranscriptEntry] = {}
     tool_args: dict[str, dict[str, Any]] = {}
+    # Message ids whose assistant turn opened a bang-mode (`! cmd`) command,
+    # so the call it issues opens expanded exactly as the TUI's does.
+    bang_pending = False
     for message in history:
         if isinstance(message, CustomMessage):
             if message.custom_type == HUB_MESSAGE_TYPE:
+                # The parent's own words (``body``), never the model-facing
+                # envelope in ``details["text"]``. Reading the envelope here
+                # is what leaked raw XML onto the attach seed.
                 body = str(message.details.get("body") or "").strip()
                 direction = message.details.get("direction")
                 if body:
@@ -613,6 +670,71 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                         )
                     )
                 continue
+            if message.custom_type == WAKE_PROMPT_MESSAGE_TYPE:
+                # A wake delivery is a receipt with its own identity, not a
+                # generic notice: a resumed session that showed the agent
+                # answering a wake with no sign the wake fired is the bug this
+                # row exists to prevent. The CATCH-UP prompt is skipped for the
+                # opposite reason — it is user-attributed, so replaying it
+                # would put a raw '(alarm) The session resumed…' line in the
+                # transcript as if the user had typed it.
+                details = message.details or {}
+                if not details.get("wake_catchup"):
+                    # Strip the model-facing envelope with the SAME helper the
+                    # TUI's WakeBlock uses. The raw payload is
+                    # '(alarm) Scheduled wake w-9 (1, every 6h) — cancel with
+                    # wake({op:"cancel",id:"w-9"})', which is markup addressed
+                    # to the model; painting it verbatim on a human surface is
+                    # the same defect as the leaked <parent-message> rows.
+                    raw = str(details.get("text", ""))
+                    headline = wake_receipt_headline(raw)
+                    _, _, body = raw.partition("\n\n")
+                    entries.append(
+                        TranscriptEntry(
+                            id=message.id,
+                            kind="notice",
+                            # Headline plus the delivered prompt: the phone has
+                            # no expand affordance for a notice row, so the
+                            # prompt rides the same row rather than being
+                            # dropped (the TUI hides it behind an expansion).
+                            text=_compact(
+                                f"{headline} — {body.strip()}" if body.strip() else headline,
+                                400,
+                            ),
+                            details={"notice_kind": "wake"},
+                        )
+                    )
+                continue
+            if message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
+                # A gate that timed out unattended is the most expensive event
+                # in the detached feature — up to a day of held residency ends
+                # here — and it rendered NOWHERE on the phone: the user
+                # returned to a conversation that promised an action and
+                # appeared to simply stop.
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(gate_timeout_notice(message.details or {}), 400),
+                        details={"severity": "warning"},
+                    )
+                )
+                continue
+            if message.custom_type == COMPACTION_REFUSED_TYPE:
+                # A compaction that did NOT run, correcting the optimistic
+                # "compacting context…" receipt the routed command showed.
+                # Severity is derived by the shared helper so the phone cannot
+                # flatten a FAILURE into the same ink as a decline.
+                text, severity = compaction_refused_notice(message.details or {})
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, 400),
+                        details={"severity": severity},
+                    )
+                )
+                continue
             text = _message_text(message)
             if text:
                 entries.append(
@@ -624,44 +746,101 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
             if parent_message is not None:
                 # A persisted hub steer: model-facing XML around the parent's
                 # own words. The phone shows the body the parent authored,
-                # never the envelope. Unlike the TUI, this fold sees only
-                # LLM-visible messages — the journaled communication fact is a
-                # custom row that never replays — so body extraction is the
-                # phone's only path to a human-facing rendering.
+                # never the envelope.
                 entries.append(
                     TranscriptEntry(id=message.id, kind="parent_message", text=parent_message.body)
                 )
                 continue
-            if message.text == CONNECTIVITY_CONTINUATION_PROMPT:
-                # Harness chrome, not the user's words: the loop persists this
-                # so the TRANSCRIPT records why one answer arrived in two
-                # pieces, but no front end paints it as a user bubble — the
-                # live run showed a notice instead. Same rule as the TUI's
-                # replay suppression; the surfaces must not diverge.
+            if is_harness_chrome(message.text):
+                # Harness chrome, not the user's words. The loop persists these
+                # so the TRANSCRIPT records why the conversation continued, but
+                # no front end paints one as a user bubble. The list is shared
+                # with the TUI (``harness/rows.py``) because this fold used to
+                # carry a PARTIAL copy of it — suppressing the connectivity
+                # prompt while rendering the goal-loop and auto-continuation
+                # prompts as the user's own words.
                 continue
+            # A `$skill` invocation persists as its EXPANDED payload, because
+            # that is what the model was sent. Rendering it verbatim showed the
+            # whole SKILL.md body as the user's bubble and titled the session
+            # after it; the typed line rides the payload's own opening tag.
+            text = user_row_text(message.text)
             # Carry image attachments as references so an image-only prompt
             # (the composer allows "" text + images) renders its thumbnails on
             # replay instead of round-tripping as an empty bubble — the same
             # inline render the live fold produces. The bytes are fetched
             # lazily from the image endpoint; only the reference travels here.
             refs = _image_refs(message)
-            text = message.text
             entries.append(TranscriptEntry(id=message.id, kind="user", text=text, images=refs))
+            # A bang-mode receipt replays as open as it lived: the user row is
+            # `! <command>` and the assistant message that follows carries
+            # exactly one bash call, whose card opens expanded. SET only,
+            # never cleared here — matching the TUI's replay exactly, which
+            # clears the flag on the next ASSISTANT message rather than on an
+            # intervening user row.
+            if text.startswith("! "):
+                bang_pending = True
         elif message.role == "assistant":
-            if message.text:
-                entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
+            # Consume the pending bang marker on EVERY assistant message:
+            # record_shell writes the call-bearing assistant immediately after
+            # the `!` row, so a later unrelated turn must not inherit the flag.
+            message_bang = bang_pending
+            bang_pending = False
+            # Through the shared helper, not `if message.text:` — the latter
+            # is truthy for `"   "`, so a whitespace-only turn painted an
+            # extra EMPTY row here that the TUI (which tests its stripped
+            # text) never emits. Same rows plus one blank one is not the
+            # same rows.
+            assistant_text = assistant_row_text(message.text)
+            if assistant_text:
+                entries.append(
+                    TranscriptEntry(id=message.id, kind="assistant", text=assistant_text)
+                )
             for call in message.tool_calls:
+                # Only the FIRST call of a bang assistant message is the
+                # command's own card; the shape record_shell writes has exactly
+                # one, so consuming here is exact in practice.
+                user_run = bool(
+                    message_bang and message.tool_calls[0] is call and call.name == "bash"
+                )
                 entry = TranscriptEntry(
                     id=f"{message.id}:{call.id}",
                     kind="tool",
                     tool_call_id=call.id,
                     tool_name=call.name,
-                    tool_state="done",
+                    # UNKNOWN until a result pairs, not "done". A call whose
+                    # result never arrived is a call that never returned, and
+                    # painting it ✓ asserts an outcome nobody observed — the
+                    # same "a default that means success" class as the three
+                    # shipped duration bugs. The tool-role branch below settles
+                    # it; anything this fold never pairs stays interrupted.
+                    tool_state="interrupted",
                     summary=_summarize_args(call.name, call.arguments or {}),
+                    details={"user_run": True} if user_run else {},
                 )
                 entries.append(entry)
                 tool_rows[call.id] = entry
                 tool_args[call.id] = call.arguments or {}
+            notice = assistant_stop_notice(
+                text=message.text,
+                has_tool_calls=bool(message.tool_calls),
+                stop_reason=getattr(message, "stop_reason", None),
+                provider_payload=message.provider_payload,
+            )
+            if notice is not None:
+                # A refused, failed or interrupted turn. The phone had no
+                # ``stop_reason`` branch at all, so a truncated answer looked
+                # complete and a failed turn looked like the agent ignoring
+                # the user.
+                text, severity = notice
+                entries.append(
+                    TranscriptEntry(
+                        id=f"{message.id}:stop",
+                        kind="notice",
+                        text=_compact(text, 400),
+                        details={"severity": severity},
+                    )
+                )
         elif message.role == "tool":
             entry = tool_rows.get(message.tool_call_id or "")
             if entry is not None:
@@ -673,19 +852,18 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 duration = payload.get("duration_s")
                 if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                     entry.elapsed_s = float(duration)
-                entry.diff_added, entry.diff_removed = _diff_counts(result_details)
-                details: dict[str, Any] = {}
-                args = tool_args.get(message.tool_call_id or "", {})
-                if args:
-                    details["args"] = {
-                        k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()
-                    }
-                if message.text:
-                    details["output"] = message.text[-TOOL_OUTPUT_TAIL_CHARS:]
-                if isinstance(result_details, dict):
-                    for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
-                        if key in result_details:
-                            details[key] = result_details[key]
+                entry.diff_added, entry.diff_removed = _diff_counts(
+                    result_details if isinstance(result_details, dict) else None
+                )
+                details = _tool_row_details(
+                    tool_args.get(message.tool_call_id or "", {}),
+                    message.text,
+                    result_details if isinstance(result_details, dict) else None,
+                )
+                # The expansion flag is set on the CALL and must survive the
+                # result settling the row.
+                if entry.details.get("user_run"):
+                    details["user_run"] = True
                 entry.details = details
     return entries
 
@@ -745,97 +923,47 @@ class ProjectionFold:
 
     def fold_history(self, history: list[AgentMessage]) -> None:
         """Wholesale fold on attach: rebuild the transcript tail from the
-        session's persisted history. Tool calls arrive as assistant messages
-        carrying ``tool_calls`` followed by tool-role messages; we pair them
-        into the same one-line rows live events would have produced."""
-        entries: list[TranscriptEntry] = []
+        session's persisted history.
+
+        Row production is delegated ENTIRELY to
+        :func:`fold_messages_to_entries` — this method owns only what is
+        stateful and therefore cannot live in a pure function: the
+        ``_tool_rows``/``_tool_args`` correlation maps that let a LATER live
+        event settle a row this seed painted, and the ``_cap_tail`` trim to
+        the render window.
+
+        WHY THE DELEGATION. This method used to carry its own copy of the
+        fold, under a comment promising it could not disagree with the
+        original. It did disagree: a hub steer leaked its raw
+        ``<parent-message>`` XML envelope here while rendering as a clean card
+        on a history page, so the phone contradicted itself one scroll gesture
+        apart. Both comments asserted a contract that nothing enforced. Now
+        there is one function to change, and the seed and the page cannot
+        disagree because they are the same code.
+
+        The cap is applied AFTER the fold, so the extra notice rows the fold
+        now produces (refusals, failed turns, gate timeouts) compete for the
+        window like any other row — ``_cap_tail`` still pins the opening user
+        message so a tail full of notices cannot push the conversation's
+        subject out of the seed.
+        """
+        entries = fold_messages_to_entries(history)
+        # Rebuild the correlation maps from the rows just produced. Keyed off
+        # the fold's output rather than maintained during it: the pure fold
+        # cannot own instance state, and its row ids are stable
+        # (``{message.id}:{call.id}``), so this is a total reconstruction
+        # rather than a second pass over the messages.
+        self._tool_rows = {
+            entry.tool_call_id: entry.id
+            for entry in entries
+            if entry.kind == "tool" and entry.tool_call_id
+        }
+        self._tool_args = {}
         for message in history:
-            if isinstance(message, CustomMessage):
-                if message.custom_type == PEER_MESSAGE_MESSAGE_TYPE:
-                    # A cross-session `lop send` delivery renders as its own
-                    # inbound card (never a bare notice), so an attaching phone
-                    # sees the same peer affordance the TUI paints.
-                    body = str(message.details.get("body") or "").strip()
-                    if body:
-                        entries.append(
-                            TranscriptEntry(
-                                id=message.id,
-                                kind="peer_message",
-                                text=body,
-                                details={"sender": message.details.get("sender") or {}},
-                            )
-                        )
-                    continue
-                text = _message_text(message)
-                if text:
-                    entries.append(
-                        TranscriptEntry(id=message.id, kind="notice", text=_compact(text, 400))
-                    )
+            if isinstance(message, CustomMessage) or message.role != "assistant":
                 continue
-            if message.role == "user":
-                if message.text == CONNECTIVITY_CONTINUATION_PROMPT:
-                    # Harness chrome — see ``fold_messages_to_entries``, whose
-                    # rule this mirrors so the attaching phone and the
-                    # lazy-loaded page agree about the same row.
-                    continue
-                parent_message = extract_parent_message(message.text)
-                if parent_message is not None:
-                    # A persisted hub steer renders as the parent's own words,
-                    # never the model-facing envelope — the same rule as
-                    # ``fold_messages_to_entries``; the two folds must not
-                    # diverge or an attaching phone and a lazy-loaded page
-                    # would disagree about the same row.
-                    entries.append(
-                        TranscriptEntry(
-                            id=message.id, kind="parent_message", text=parent_message.body
-                        )
-                    )
-                    continue
-                entries.append(
-                    TranscriptEntry(
-                        id=message.id,
-                        kind="user",
-                        text=message.text,
-                        images=_image_refs(message),
-                    )
-                )
-            elif message.role == "assistant":
-                if message.text:
-                    entries.append(
-                        TranscriptEntry(id=message.id, kind="assistant", text=message.text)
-                    )
-                for call in message.tool_calls:
-                    entry = TranscriptEntry(
-                        id=f"{message.id}:{call.id}",
-                        kind="tool",
-                        tool_call_id=call.id,
-                        tool_name=call.name,
-                        tool_state="done",
-                        summary=_summarize_args(call.name, call.arguments or {}),
-                    )
-                    entries.append(entry)
-                    self._tool_rows[call.id] = entry.id
-                    self._tool_args[call.id] = call.arguments or {}
-            elif message.role == "tool":
-                entry_id = self._tool_rows.get(message.tool_call_id or "")
-                entry = next((e for e in entries if e.id == entry_id), None)
-                if entry is not None:
-                    entry.tool_state = "failed" if message.is_error else "done"
-                    if message.is_error:
-                        entry.error = _compact(message.text, 200)
-                    payload = message.provider_payload or {}
-                    result_details = payload.get("details")
-                    entry.diff_added, entry.diff_removed = _diff_counts(
-                        result_details if isinstance(result_details, dict) else None
-                    )
-                    duration = payload.get("duration_s")
-                    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-                        entry.elapsed_s = float(duration)
-                    entry.details = self._tool_details(
-                        self._tool_args.get(message.tool_call_id or "", {}),
-                        message.text,
-                        result_details if isinstance(result_details, dict) else None,
-                    )
+            for call in message.tool_calls:
+                self._tool_args[call.id] = call.arguments or {}
         # A resumed fold starts clean: no streaming row, no half-run tools, and
         # no pending echoes — the rows those entries pointed at have just been
         # replaced wholesale, and the persisted history already carries any
@@ -961,6 +1089,13 @@ class ProjectionFold:
             self._tool_args[event.tool_call_id] = event.args
         elif isinstance(event, ToolExecutionUpdateEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
+            # Partial output means the call IS running. Normally the start
+            # event already said so, but a relayed stream can deliver an
+            # update whose start was dropped, and such a row would otherwise
+            # keep the factory default — which must never be a state this
+            # path can observe to be false.
+            if row.tool_state not in ("done", "failed"):
+                row.tool_state = "running"
             text = getattr(event.partial_result, "text", "") or ""
             if text:
                 row.details["partial"] = text[-TOOL_OUTPUT_TAIL_CHARS:]
@@ -1594,19 +1729,13 @@ class ProjectionFold:
     def _tool_details(
         self, args: dict[str, Any], output: str, result_details: dict[str, Any] | None
     ) -> dict[str, Any]:
-        details: dict[str, Any] = {}
-        if args:
-            rendered = {k: _compact(str(v), TOOL_ARGS_CHARS) for k, v in args.items()}
-            details["args"] = rendered
-        if output:
-            details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
-        if result_details:
-            # Diff payloads ride through whole — the expanded row renders the
-            # coloured unified diff from them.
-            for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
-                if key in result_details:
-                    details[key] = result_details[key]
-        return details
+        """The live path's expand payload — one implementation with replay's.
+
+        Delegated rather than duplicated so a live row and the replayed row
+        for the same call expand to the same thing; the caps here are the
+        wire budget's and must not drift between the two paths.
+        """
+        return _tool_row_details(args, output, result_details)
 
     def _append(self, entry: TranscriptEntry) -> None:
         self.projection.transcript.append(entry)
