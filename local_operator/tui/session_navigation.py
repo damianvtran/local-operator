@@ -20,6 +20,27 @@ class PreparationInvalidated(RuntimeError):
     """The authoritative replay changed before presentation ownership moved."""
 
 
+class SurfaceNotReady(RuntimeError):
+    """A committed session's input surface never painted a usable frame.
+
+    A PAINT failure, not a connection failure, and the distinction is the whole
+    reason this type exists rather than a bare ``RuntimeError``. The session on
+    the far side is bound and reachable; what did not happen is local. So it
+    must NOT be retried the way an unreachable owner is: the readiness gate runs
+    its own 15 s timer to expiry on every attempt, so folding it into a bounded
+    reconnect budget multiplies one 15 s failure by the attempt count — measured
+    at 8 commits, ~120 s of "Connecting…", and 8 forced full-screen arming
+    relayouts, where the honest behaviour is a single 15 s failure.
+
+    Subclasses ``RuntimeError`` because that is what ``_await_sidebar_frame``
+    raised before it was named, and every existing handler that catches it —
+    ``_commit_sidebar_session``'s callers, the navigation coordinator's
+    ``failed`` hook — must keep catching it unchanged. Naming it only lets the
+    ONE handler that needs to tell paint from connectivity do so, instead of
+    matching on the message text.
+    """
+
+
 class SessionNavigation(Generic[Prepared]):
     def __init__(
         self,
