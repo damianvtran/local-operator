@@ -695,7 +695,14 @@ def test_main_exec_dispatch(
 async def test_mcp_login_connects_and_disconnects_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    config = types.SimpleNamespace(auth=types.SimpleNamespace(type="oauth"))
+    # ``url`` is part of the shape, not decoration: an OAuth server with no URL
+    # is a contradiction (a stdio transport cannot carry a bearer token), and
+    # the real ``MCPHttpServerConfig`` always has one. The gate now asks
+    # ``server_rejects_oauth``, which reads the transport as well as the auth
+    # block, so a double omitting it describes a server that cannot exist.
+    config = types.SimpleNamespace(
+        auth=types.SimpleNamespace(type="oauth"), url="https://linear.example/mcp"
+    )
     monkeypatch.setattr(
         "local_operator.mcp.config.load_all_mcp_configs",
         lambda _cwd: ({"linear": config}, {"linear": tmp_path / "mcp.json"}),
@@ -743,6 +750,82 @@ def test_mcp_logout_command_reports_removal(
     assert "nothing" not in capsys.readouterr().out  # reason goes to stderr
 
 
+def test_mcp_logout_reports_a_failed_delete_as_one_actionable_line(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A locked store must produce ONE error line, not a stack-trace banner.
+
+    ``McpTokenStorage.clear`` RAISES when a row is found and its delete fails,
+    so that a caller cannot read it as the benign "nothing was stored". The
+    logout branch is the one caller with no reauth gate in front of it: left
+    bare, the exception reached ``main``'s generic handler, which printed
+    "Error: ...", a 30-line traceback, and "Please review and correct the
+    error to continue" for a sibling process holding a sqlite write lock.
+
+    That framing is wrong twice — it presents a retryable, user-fixable
+    condition as a defect in local-operator, and it buries the sentence that
+    matters (the credential is still there) under the trace.
+
+    Driven through the real ``main()`` over a real ``AuthStore``, because the
+    defect lived in the seam BETWEEN the helper and the entry point: every
+    layer below was already correct and a test calling ``mcp_command``
+    directly still passes the generic handler by. The store is a real one on
+    ``tmp_home`` whose delete raises the real ``OperationalError`` a locked
+    db raises, rather than a mock raising the app's own exception type.
+    """
+    import json
+    import sqlite3
+
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    class LockedStore(AuthStore):
+        """Real store, real rows — but its delete hits a held write lock."""
+
+        deletes_attempted = 0
+
+        def delete_credential(self, credential_id: int) -> None:
+            type(self).deletes_attempted += 1
+            raise sqlite3.OperationalError("database is locked")
+
+    url = "https://locktest.example/mcp"
+    (tmp_home / ".local-operator").mkdir(parents=True, exist_ok=True)
+    (tmp_home / ".local-operator" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"locktest": {"url": url}}})
+    )
+    store = LockedStore(tmp_home / ".local-operator" / "auth.db")
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+    # A stored grant is what makes the server OAuth-capable AND what the
+    # delete then fails on — both preconditions come from this one row.
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "SURVIVOR"}})
+    auth_mod.OAUTH_CHALLENGES.clear()
+
+    # The observation path must be LIVE before its silence means anything: a
+    # missing row, or a config the loader never saw, would make the command
+    # fail for an unrelated reason and this test pass without ever reaching
+    # the raise. Assert the setup landed instead of assuming it.
+    assert auth_mod.server_has_stored_grant(url, store) is True
+
+    monkeypatch.setattr(sys, "argv", ["program", "mcp", "logout", "locktest"])
+    assert main() == 1
+
+    err = capsys.readouterr().err
+    # The delete was really attempted — this is the failed-delete path and not
+    # some earlier refusal (unknown name, not-OAuth) wearing the same rc.
+    assert LockedStore.deletes_attempted == 1
+    # The credential really did survive, which is what the message must say.
+    assert auth_mod.server_has_stored_grant(url, store) is True
+    assert "still in place" in err
+    assert "Retry once" in err  # actionable: names what the user can do
+    # NOT the old message, which claimed nothing was stored while the row
+    # survived — the conflation this PR removed.
+    assert "nothing to log out of" not in err
+    # The regression itself: no traceback banner, and one line of output.
+    assert "Stack Trace" not in err
+    assert "Please review and correct the error" not in err
+    assert len([line for line in err.splitlines() if line.strip()]) == 1
+
+
 @pytest.mark.asyncio
 async def test_mcp_reauth_removes_then_logs_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -751,9 +834,12 @@ async def test_mcp_reauth_removes_then_logs_in(
     row would reuse the stored registration and never show the consent
     screen, which is the entire reason reauth exists."""
     calls: list[str] = []
+    # ``store`` is part of the real signature and the reauth gate passes it, so
+    # the stub accepts it too — a narrower stub raises TypeError, which the
+    # gate would report as a failed removal and refuse for the wrong reason.
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
-        lambda name, cwd: calls.append("logout") or None,
+        lambda name, cwd, store=None: calls.append("logout") or None,
     )
 
     async def fake_login(name: str, cwd: Path) -> int:
@@ -771,7 +857,7 @@ async def test_mcp_reauth_stops_when_removal_fails(
 ) -> None:
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
-        lambda name, cwd: "MCP server 'linar' is not configured",
+        lambda name, cwd, store=None: "MCP server 'linar' is not configured",
     )
 
     async def fake_login(name: str, cwd: Path) -> int:
@@ -779,6 +865,266 @@ async def test_mcp_reauth_stops_when_removal_fails(
 
     monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
     assert await cli._mcp_reauth_server("linar", tmp_path) == 1
+    assert "not configured" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_accepts_a_url_only_oauth_capable_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A Codex-imported server has no auth block, and the CLI must not refuse it.
+
+    The static ``cfg.auth.type == 'oauth'`` gate this replaced rejected exactly
+    the servers ``/mcp login`` in the TUI handles fine — one question with two
+    gates that disagreed. Capability is decided by the same live probe the rest
+    of the code uses.
+    """
+    config = types.SimpleNamespace(auth=None, url="https://codex.example/mcp")
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": config}, {"codex": tmp_path / "config.toml"}),
+    )
+
+    async def _capable(cfg, store=None):
+        return True
+
+    monkeypatch.setattr("local_operator.mcp.auth.probe_oauth_capability", _capable)
+
+    class FakeManager:
+        def __init__(self, cwd: Path) -> None:
+            self.disconnected = False
+
+        async def connect_configured_server(self, name, *, timeout_ms=None):
+            return types.SimpleNamespace(tools=[object()])
+
+        async def disconnect_all(self) -> None:
+            self.disconnected = True
+
+    monkeypatch.setattr("local_operator.mcp.manager.McpManager", FakeManager)
+
+    assert await cli._mcp_login_server("codex", tmp_path) == 0
+    assert "discovered 1 tools" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_still_refuses_a_server_that_cannot_take_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """F3: an apikey or stdio server stays a HARD refusal, with no probe.
+
+    An ``auth.type: apikey`` entry is the user stating how the server
+    authenticates; starting an OAuth flow there answers a question they already
+    answered. The refusal must also stay free — no network round trip to learn
+    something the config already settles.
+    """
+
+    async def _must_not_probe(cfg, store=None):
+        raise AssertionError("a statically-ineligible server must not be probed")
+
+    monkeypatch.setattr("local_operator.mcp.auth.probe_oauth_capability", _must_not_probe)
+
+    apikey = types.SimpleNamespace(
+        auth=types.SimpleNamespace(type="apikey"), url="https://api.example/mcp"
+    )
+    stdio = types.SimpleNamespace(auth=None, url=None)
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"apikey": apikey, "stdio": stdio}, {}),
+    )
+
+    for name in ("apikey", "stdio"):
+        assert await cli._mcp_login_server(name, tmp_path) == 1
+        assert "not OAuth-enabled" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_cli_on_a_url_only_server_reconnects_authenticated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI reauth path shares the TUI's evidence-loss bug and its fix.
+
+    ``_mcp_reauth_server`` is its own function — it does not go through
+    ``run_grant`` — so it deletes the row via the same helper and then logs in.
+    With the stored grant as a url-only config's ONLY capability evidence, the
+    delete used to make the subsequent connect unauthenticated.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    url = "https://codex.example/mcp"
+    cfg = MCPHttpServerConfig(url=url)
+    auth_mod.OAUTH_CHALLENGES.clear()
+    store = FakeAuthStore()  # never the developer's real auth.db
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": cfg}, {}),
+    )
+    real_logout = auth_mod.mcp_logout_server
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd, _store=None: real_logout(name, cwd, store),
+    )
+    # The reauth gate re-reads the store to confirm nothing survived the
+    # delete, and would resolve the real shared ``auth.db`` to do it.
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+
+    seen: dict[str, bool] = {}
+
+    class FakeManager:
+        def __init__(self, cwd: Path) -> None:
+            pass
+
+        async def connect_configured_server(self, name, *, timeout_ms=None):
+            # The question ``_build_oauth_auth`` asks before wiring the provider.
+            seen["capable"] = auth_mod.server_is_oauth_capable(cfg, store)
+            if not seen["capable"]:
+                raise RuntimeError(f"MCP server at {url} refused the connection (401)")
+            return types.SimpleNamespace(tools=[object()])
+
+        async def disconnect_all(self) -> None:
+            pass
+
+    monkeypatch.setattr("local_operator.mcp.manager.McpManager", FakeManager)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 0
+    assert auth_mod.server_has_stored_grant(url, store) is False  # really deleted
+    assert seen["capable"] is True  # ...but still known to take OAuth
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_with_nothing_stored_proceeds_into_the_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Reauth on a url-only server holding no grant must log in, not dead-end.
+
+    The removal fails here because ``mcp_logout_server`` gates on the STRICT
+    ``server_is_oauth_capable``, and a Codex-imported config with a cold ledger
+    and no stored row satisfies none of its three evidence kinds. That used to
+    exit 1 saying the server "does not use OAuth login" — false for a server
+    the login probe accepts, and a dead end for the user this path is for.
+    Reauth's contract is "end up authenticated", so a no-op delete is a
+    satisfied precondition.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+
+    auth_mod.OAUTH_CHALLENGES.clear()
+    cfg = MCPHttpServerConfig(url="https://codex.example/mcp")
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": cfg}, {}),
+    )
+
+    logged_in: list[str] = []
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        logged_in.append(name)
+        return 0
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 0
+    assert logged_in == ["codex"]  # fell through instead of erroring
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_refuses_when_the_credential_delete_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A FAILED delete must never look like "nothing was stored".
+
+    The hazard the fall-through above opens if the two are conflated: both
+    outcomes made ``mcp_logout_server`` return an error string, so falling
+    through on "an error" also fell through when the delete had been ATTEMPTED
+    and had RAISED — leaving the row on disk. The SDK then reuses the surviving
+    token and ``client_info``, no consent screen comes back up, and reauth
+    exits 0 for the account switch that silently did not happen.
+
+    Reachable rather than theoretical: a sibling session holding an EXCLUSIVE
+    sqlite transaction makes ``delete_credential`` raise ``database is locked``,
+    which is what ``RefusingStore`` reproduces here.
+
+    This test is the one that can SEE the distinction. Asserting only "reauth
+    errors when nothing is stored" cannot: it is satisfied by a gate that
+    refuses everything. So it drives the real ``_mcp_reauth_server`` against a
+    real ``McpTokenStorage`` over a store whose delete raises, and asserts all
+    three of rc=1, the login NOT reached, and the row still present.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    class RefusingStore(FakeAuthStore):
+        """A store whose row cannot be deleted — `OperationalError` in the field."""
+
+        def delete_credential(self, credential_id: int) -> None:
+            raise RuntimeError("database is locked")
+
+    url = "https://codex.example/mcp"
+    store = RefusingStore()
+    auth_mod.OAUTH_CHALLENGES.clear()
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "OLD-TOKEN"}})
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": MCPHttpServerConfig(url=url)}, {}),
+    )
+    # The CLI resolves the real shared ``auth.db``; pin it to the in-memory
+    # store so the developer's own credentials are never touched.
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        raise AssertionError("a surviving credential must not be reused by a fresh grant")
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 1
+    assert "still in place" in capsys.readouterr().err
+    # The row really did survive — which is precisely why the login was refused.
+    assert auth_mod.server_has_stored_grant(url, store) is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_still_refuses_a_server_that_cannot_take_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Falling through on a failed removal must not weaken the static refusals.
+
+    A stdio server and a declared ``auth.type: apikey`` server both fail the
+    removal for the same "not OAuth" reason as the url-only case above, but
+    they are statically ineligible — the F3 protection. They must still exit 1
+    without reaching a login, or a typo could open a browser tab.
+    """
+    from local_operator.mcp.config import (
+        MCPAuthConfig,
+        MCPHttpServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    configs = {
+        "apikey": MCPHttpServerConfig(
+            url="https://api.example/mcp", auth=MCPAuthConfig(type="apikey")
+        ),
+        "stdio": MCPStdioServerConfig(command="run-me"),
+    }
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: (configs, {}),
+    )
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        raise AssertionError("an ineligible or unknown server must not reach the login")
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    for name in ("apikey", "stdio"):
+        assert await cli._mcp_reauth_server(name, tmp_path) == 1
+        assert "does not use OAuth login" in capsys.readouterr().err
+    # An unknown name is still a typo the user wants told about, not a login.
+    assert await cli._mcp_reauth_server("nosuch", tmp_path) == 1
     assert "not configured" in capsys.readouterr().err
 
 

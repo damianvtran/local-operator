@@ -262,6 +262,34 @@ class AbandonedGrantError(Exception):
     """
 
 
+class McpCredentialDeleteError(RuntimeError):
+    """A stored MCP credential was found and its deletion FAILED — the row lives.
+
+    The distinction this type exists to make is between the two ways a removal
+    can decline to remove anything, which are opposite facts about the store:
+
+    * there was no row, so there is nothing to delete and the caller's
+      "no credential is stored here" precondition is already satisfied;
+    * there WAS a row, the delete was attempted, and it failed — so the old
+      grant and its client registration are still on disk.
+
+    Collapsing both into a falsey return (which :meth:`McpTokenStorage.clear`
+    used to do, swallowing the store's exception into a ``logger.debug``) let
+    ``mcp reauth`` treat a failed delete as "nothing was stored" and proceed
+    into the login still holding the old credential: the SDK reused the
+    surviving token and ``client_info``, no consent screen came back up, and
+    reauth exited 0 for the account switch or scope change that silently did
+    not happen. This is reachable rather than theoretical — a sibling session
+    holding an EXCLUSIVE sqlite transaction is enough to make
+    ``delete_credential`` raise ``OperationalError: database is locked``.
+
+    Raised rather than returned so a caller CANNOT accidentally read it as the
+    benign outcome: the two shapes no longer share a channel, and no caller has
+    to string-match a human-readable message to make a security-relevant
+    control-flow decision.
+    """
+
+
 def mcp_oauth_credential_id(server_url: str) -> str:
     """Stable logical credential id for one MCP server's OAuth grant."""
     return f"{MCP_OAUTH_CREDENTIAL_PREFIX}{server_url}"
@@ -456,6 +484,35 @@ class McpTokenStorage:
                 return row
         return None
 
+    def has_stored_row(self) -> bool | None:
+        """Whether ANY credential row exists for this server URL.
+
+        Three-valued on purpose, and ``None`` ("the store could not be read")
+        is deliberately NOT folded into ``False`` the way :meth:`_read` folds
+        it — same reasoning as :func:`mcp_logged_out_servers` and
+        :meth:`grant_marker`. The caller is :func:`clear_for_reauth`, which
+        uses this to decide whether a fresh grant could silently reuse
+        something still on disk; for that question an unreadable store means
+        "cannot rule it out", which must not read as "nothing is there".
+
+        Asks about the ROW, not about a grant: a ``client_info``-only row is
+        not a grant (see :func:`payload_carries_grant`) but it is exactly what
+        short-circuits DCR on the next login, so reauth has to count it.
+
+        No store at all is a definite ``False``: nothing can be persisted in
+        that environment, so nothing can be reused either — consistent with
+        :meth:`clear` reporting ``False`` there.
+        """
+        store = self._store
+        if store is None:
+            return False
+        try:
+            rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        except Exception:
+            logger.debug("MCP row lookup failed for %s", self.credential_id, exc_info=True)
+            return None
+        return any(row.identity_key == self.server_url for row in rows)
+
     def _read(self) -> dict[str, Any] | None:
         """Row payload for this server URL, or ``None`` (no store/no row)."""
         row = self._read_row()
@@ -488,7 +545,16 @@ class McpTokenStorage:
 
     def clear(self) -> bool:
         """Delete this server's credential row entirely (logout). Returns
-        ``True`` when a row existed and was removed.
+        ``True`` when a row existed and was removed, ``False`` when there was
+        nothing to remove, and RAISES :class:`McpCredentialDeleteError` when a
+        row was found and the delete failed.
+
+        Those are three outcomes, not two, and the third must not be reported
+        as the second: a caller that reads "the delete failed" as "nothing was
+        stored" concludes the credential is gone while it is still on disk.
+        See :class:`McpCredentialDeleteError` for what that cost ``mcp reauth``.
+        This method is ours alone — the SDK's ``TokenStorage`` protocol does
+        not declare it — so the contract is free to say so.
 
         The row carries BOTH the OAuth grant and any client registration
         (``seed_client_info`` pins it via ``project_id``, DCR writes it via
@@ -506,9 +572,12 @@ class McpTokenStorage:
             return False
         try:
             store.delete_credential(row.id)
-        except Exception:
+        except Exception as exc:
             logger.debug("MCP credential delete failed for %s", self.credential_id, exc_info=True)
-            return False
+            raise McpCredentialDeleteError(
+                f"could not delete the stored credential for {self.server_url} ({exc}) — "
+                "it is still in place, so a fresh grant would silently reuse it"
+            ) from exc
         return True
 
     async def get_tokens(self) -> OAuthToken | None:
@@ -841,6 +910,19 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
+    return payload_carries_grant(payload)
+
+
+def payload_carries_grant(payload: dict[str, Any] | None) -> bool:
+    """Whether a credential row payload holds an actual OAuth grant.
+
+    Split out of :func:`server_has_stored_grant` so the grant-vs-registration
+    distinction it documents lives in ONE place. ``mcp_logout_server`` needs
+    the same answer about a row it has already opened a storage for, and
+    re-deriving the test there would put this rule in two places — the drift
+    risk that matters most for a predicate whose whole point is that a
+    ``client_info``-only row is not a grant.
+    """
     if not payload:
         return False
     tokens = payload.get("tokens")
@@ -981,6 +1063,27 @@ def mcp_logout_server(
     distinguishing from a successful removal (the caller's message says
     which).
 
+    A FAILED delete is none of those three and does not come back as a string
+    at all: it raises :class:`McpCredentialDeleteError`, because the row is
+    still on disk and a caller must not be able to mistake that for the benign
+    "nothing was stored" outcome.
+
+    That raise is part of the contract, so every call site handles it. Named
+    rather than asserted, because "all callers handle this" is a claim that
+    silently decays the moment somebody adds the next caller — and it already
+    did once: ``mcp logout`` was left bare when the raise was introduced, and
+    a locked store printed a stack trace where it used to print one line.
+
+    * :func:`clear_for_reauth` catches it explicitly in both of its arms and
+      converts it into the refusal that stops the login;
+    * ``cli.mcp_command``'s ``logout`` branch catches it and prints one error
+      line, because reaching ``main``'s generic handler means a traceback;
+    * :func:`~local_operator.mcp.grants.logout_server` and
+      :func:`~local_operator.mcp.grants.clear_for_reauth_server` funnel it
+      through their ``except Exception`` into a notice body;
+    * the TUI's ``_mcp_logout`` wraps both verbs in one ``except Exception``
+      that becomes a system notice.
+
     The deletion goes through the REAL store (``_resolve_store(None)``), not
     the session manager's possibly-injected one: logout must remove the
     persisted row every future process will read, which is the shared
@@ -1000,9 +1103,160 @@ def mcp_logout_server(
     # Only remote configs carry ``url``; a stdio config reaching here would
     # have already failed the OAuth check above, so the getattr is a type
     # narrowing rather than a guess.
-    storage = McpTokenStorage(getattr(cfg, "url", ""), store)
+    url = getattr(cfg, "url", "")
+    storage = McpTokenStorage(url, store)
+    # Read the durable evidence BEFORE destroying it — see the transfer below.
+    # Derived from THIS storage rather than via ``server_has_stored_grant``,
+    # which would open a second ``AuthStore`` (and a second sqlite connection)
+    # for a row we are about to open one for anyway.
+    #
+    # An unreadable store makes this False, so the transfer is skipped in
+    # exactly the case where the evidence is most likely to be lost for good.
+    # That is the deliberate direction and not an oversight: recording a
+    # challenge we could not substantiate would write a fact we never observed
+    # into an observation-only ledger, and the two reads here hit the same
+    # store microseconds apart, so a read that fails while the delete below
+    # succeeds is a very narrow window. Silence is the conservative error.
+    had_stored_grant = payload_carries_grant(storage._read())
     if not storage.clear():
         return f"no stored credential for MCP server {name!r} — nothing to log out of"
+    if had_stored_grant:
+        # EVIDENCE TRANSFER, not a guess — for the three kinds of evidence and
+        # why a url-only Codex import (issue #367) has only this one, see
+        # :func:`server_is_oauth_capable`. The delete above is what erases it.
+        #
+        # That erasure is what broke ``/mcp reauth`` on those servers. Reauth
+        # is a delete followed by a reconnect, and the reconnect re-asks
+        # ``server_is_oauth_capable`` (via ``_build_oauth_auth``): with the row
+        # gone and the ledger cold, it answered False, attached no OAuth
+        # provider, and the connect went out unauthenticated and took a 401.
+        # The gate that authorised the reauth had already short-circuited on
+        # the very row being deleted, so nothing re-established the fact. It
+        # was intermittent only because the ledger is per-process: a session
+        # that had already watched this server 401 was warm and worked.
+        #
+        # Holding a token for ``url`` is STRONGER proof than the discovery
+        # probe that normally populates this ledger — an authorization server
+        # did not merely advertise itself, it issued us a grant — so recording
+        # it as an observed challenge asserts only what we just read. The
+        # record is deliberately made HERE, at the single point that destroys
+        # the row, so no caller can delete a credential without preserving
+        # what it proved (``/mcp reauth``, the CLI's ``mcp reauth``, and the
+        # desktop grant runner all funnel through this function).
+        #
+        # Scoped to ``had_stored_grant`` on purpose: a server that qualified
+        # only through a declared ``auth.type: oauth`` block keeps qualifying
+        # without the ledger, and claiming a discovery result we never ran
+        # would put an unverified fact in a ledger whose entries are supposed
+        # to be observations.
+        record_oauth_challenge(url, oauth_available=True)
+    return None
+
+
+def clear_for_reauth(
+    name: str,
+    cwd: str | os.PathLike[str],
+    store: StructuralAuthStore | None = None,
+    removed: list[str] | None = None,
+) -> str | None:
+    """Remove ``name``'s credential for a REAUTH. ``None`` when the login may
+    proceed, an error string when it must not.
+
+    ``removed`` is an out-parameter appended to only when a row was genuinely
+    deleted, mirroring ``run_grant``'s ``forgotten``. It exists because this
+    function now returns ``None`` for TWO outcomes — a real deletion and a
+    no-op on a server holding nothing — and a caller that warns "your
+    credential is gone" after a cancelled grant must not say so for the second.
+
+    Reauth's contract is "end up authenticated having genuinely re-granted",
+    which needs a weaker precondition than logout's: logout must actually
+    delete something, while reauth only needs to KNOW that nothing is left for
+    the coming grant to reuse. A no-op delete satisfies that; a failed one does
+    not. :func:`mcp_logout_server` reports both as an error string, so a caller
+    branching on ``error is not None`` refuses the first case (the bug this PR
+    fixes) and a caller branching on nothing at all accepts the second (a
+    successful-looking reauth over a live credential).
+
+    This function is the ONE place that distinction is made, so the CLI's
+    ``mcp reauth`` and the TUI's ``/mcp reauth`` cannot answer it differently —
+    two gates disagreeing about one question is the defect this PR exists to
+    remove, and shipping it in a new place would only move it.
+
+    The decision is structural at every step, never a string match on
+    :func:`mcp_logout_server`'s human-readable message: that message is prose
+    for a user, and reading control flow — security-relevant control flow — out
+    of it would break silently the first time somebody rewords it.
+
+    Three refusals survive, and each is re-made here rather than inherited:
+
+    * an unknown name (``cfg is None``) is a typo, which must never turn into
+      a browser tab;
+    * a statically ineligible server (stdio, or a declared non-OAuth
+      ``auth.type``) can never take a grant — the F3 protection;
+    * a row that is STILL THERE after everything below has tried to remove it,
+      because the next login would reuse it.
+
+    The last case needs one extra step rather than only a check. A
+    ``client_info``-only row is not a grant (:func:`payload_carries_grant`), so
+    on a cold ledger it does not make the server ``server_is_oauth_capable``
+    and :func:`mcp_logout_server` declines to touch it — yet it is exactly what
+    short-circuits DCR and denies the user the fresh registration they ran
+    reauth for. Reauth therefore removes it directly here: "delete what would
+    be reused" IS reauth's contract, where logout's stricter "only remove a
+    server we demonstrably hold something on" correctly protects the picker.
+    No evidence is lost by that directness — this path is reachable only when
+    the capability test was False, which for a readable row means it carried no
+    grant, so :func:`mcp_logout_server` would have had nothing to transfer.
+    """
+    from local_operator.mcp.config import load_all_mcp_configs
+
+    try:
+        error = mcp_logout_server(name, cwd, store)
+    except McpCredentialDeleteError as exc:
+        # The row was found and the delete failed, so it is still on disk.
+        # Loud and terminal: this is the case that used to masquerade as
+        # "nothing was stored" and let the grant reuse the old credential.
+        return str(exc)
+    if error is None:
+        if removed is not None:
+            removed.append(name)
+        return None
+
+    configs, _sources = load_all_mcp_configs(cwd)
+    cfg = configs.get(name)
+    if cfg is None or server_rejects_oauth(cfg):
+        return error
+
+    # Only remote configs carry ``url``; a stdio config was refused one line
+    # above, so this is type narrowing rather than a guess.
+    url = getattr(cfg, "url", "")
+    stored = McpTokenStorage(url, store).has_stored_row()
+    if stored is None:
+        # Unreadable store. "Cannot rule out a surviving credential" is not
+        # "there is none" — refusing costs the user a retry, while proceeding
+        # costs them a reauth that silently did nothing.
+        return (
+            f"could not read the credential store for MCP server {name!r}, so it is "
+            "unknown whether a fresh grant would reuse an existing credential"
+        )
+    if stored:
+        storage = McpTokenStorage(url, store)
+        try:
+            deleted = storage.clear()
+        except McpCredentialDeleteError as exc:
+            return str(exc)
+        if deleted and removed is not None:
+            removed.append(name)
+        # Re-read rather than trusting the return: the point of this gate is
+        # the state of the store, not the outcome of one call, and a racing
+        # writer between the two is the whole reason this refusal exists.
+        if McpTokenStorage(url, store).has_stored_row() is not False:
+            return (
+                f"the stored credential for MCP server {name!r} is still in place after the "
+                "removal, so a fresh grant would silently reuse it"
+            )
+    # Nothing is stored: the delete was a no-op and reauth's precondition is
+    # already satisfied. This is the url-only Codex import the PR is about.
     return None
 
 

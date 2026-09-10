@@ -6536,7 +6536,17 @@ async def test_mcp_login_worker_cancellation_is_acknowledged() -> None:
 async def test_mcp_reauth_never_logs_in_on_top_of_a_surviving_row() -> None:
     """A login over a row that failed to delete is NOT a re-auth — the stored
     registration would short-circuit the grant — so a failed removal stops the
-    chain instead of popping a misleading browser tab."""
+    chain instead of popping a misleading browser tab.
+
+    The removal is made to fail the way it fails in the field: the delete is
+    ATTEMPTED and raises, which is what leaves the row behind. This test used
+    to simulate that with the "nothing to log out of" string instead, but that
+    message is the OPPOSITE fact — it means no row existed, so nothing can be
+    reused and the login may proceed. Conflating the two is precisely the
+    defect this path was fixed for, so the test now names the surviving-row
+    case by its own signal rather than borrowing another outcome's message.
+    """
+    from local_operator.mcp.auth import McpCredentialDeleteError
     from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
 
     configs = {
@@ -6559,7 +6569,11 @@ async def test_mcp_reauth_never_logs_in_on_top_of_a_surviving_row() -> None:
             ),
             patch(
                 "local_operator.mcp.auth.mcp_logout_server",
-                return_value="no stored credential for MCP server 'linear' — nothing to log out of",
+                side_effect=McpCredentialDeleteError(
+                    "could not delete the stored credential for "
+                    "https://mcp.linear.app/mcp (database is locked) — it is still "
+                    "in place, so a fresh grant would silently reuse it"
+                ),
             ),
         ):
             await _type_command(pilot, app, "mcp reauth linear")

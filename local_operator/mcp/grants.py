@@ -134,6 +134,25 @@ def logout_server(name: str) -> str | None:
         return str(exc)
 
 
+def clear_for_reauth_server(name: str, removed: list[str] | None = None) -> str | None:
+    """Remove ``name``'s credential for a REAUTH. Error body, or ``None``.
+
+    Reauth needs a different precondition from logout — "nothing is left for
+    the coming grant to reuse" rather than "something was deleted" — and
+    :func:`~local_operator.mcp.auth.clear_for_reauth` is the ONE place that
+    distinction is made, shared with the CLI's ``mcp reauth`` so the two
+    surfaces cannot disagree about the same state. This wrapper only supplies
+    the cwd and keeps a failure a notice rather than a crash, exactly as
+    :func:`logout_server` does for the logout verb.
+    """
+    from local_operator.mcp.auth import clear_for_reauth
+
+    try:
+        return clear_for_reauth(name, os.getcwd(), removed=removed)
+    except Exception as exc:  # noqa: BLE001 — a failed removal is a notice, not a crash
+        return str(exc)
+
+
 async def run_grant(
     manager: Any, sub: str, name: str, forgotten: list[str] | None = None
 ) -> tuple[str, NoticeKind]:
@@ -172,11 +191,20 @@ async def run_grant(
         )
 
     if sub == "reauth":
-        error = logout_server(name)
+        # NOT ``logout_server``: reauth's precondition is "nothing is left to
+        # reuse", which a no-op delete already satisfies and a FAILED delete
+        # does not. Using the logout gate here refused a url-only server that
+        # simply had nothing stored (the CLI's own bug, one gate over) while
+        # accepting a delete that raised with the row still on disk. Both
+        # answers now come from the same helper the CLI calls.
+        # ``forgotten`` is passed THROUGH rather than appended to here: the
+        # gate now returns success for a no-op removal too (a server holding
+        # nothing), and telling a user whose grant was cancelled that their
+        # credential is gone would be false for that case. Only a real
+        # deletion appends.
+        error = clear_for_reauth_server(name, forgotten)
         if error is not None:
             return f"MCP reauth failed for {name!r}: {error}", "warning"
-        if forgotten is not None:
-            forgotten.append(name)
         try:
             await manager.disconnect_server(name)
         except Exception:  # noqa: BLE001 — a stuck teardown must not block the grant

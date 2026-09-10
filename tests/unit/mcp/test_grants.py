@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.mcp import auth as auth_mod
 from local_operator.mcp.grants import (
     GRANT_SUBCOMMANDS,
     REMOTE_GRANT_NOTICE,
@@ -21,6 +22,12 @@ from local_operator.mcp.grants import (
     start_grant,
 )
 from local_operator.session.protocol import RuntimeLocality
+
+#: The genuine credential delete, captured at IMPORT time. The autouse fixture
+#: below replaces the module attribute for every test, so a test that needs the
+#: real deletion (against an injected store) cannot recover it by reading the
+#: module afterwards — it would get the fake back and pass vacuously.
+_REAL_MCP_LOGOUT = auth_mod.mcp_logout_server
 
 
 class _Conn:
@@ -88,7 +95,11 @@ def _no_real_credential_writes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Never touch the developer's real ``auth.db`` from a unit test."""
     removed: list[str] = []
 
-    def _fake_logout(name: str, cwd: str) -> str | None:
+    # Mirrors the real helper's full signature, ``store`` included: the reauth
+    # gate passes it positionally, and a two-argument fake would raise a
+    # TypeError that the gate reports as a failed removal — a green-looking
+    # refusal caused entirely by the stub.
+    def _fake_logout(name: str, cwd: str, store: Any = None) -> str | None:
         removed.append(name)
         return None
 
@@ -533,3 +544,138 @@ async def test_the_last_notice_never_claims_a_deleted_credential_is_intact(
     assert "the stored credential is unchanged" not in last, last
     # Whatever it says, it must leave the user with the step that fixes it.
     assert "/mcp login notion" in last, last
+
+
+@pytest.mark.asyncio
+async def test_reauth_run_grant_on_a_url_only_server_reconnects_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's bug: `/mcp reauth` 401'd where `/mcp login` then worked.
+
+    Runs the REAL credential delete (the autouse fake is opted out of via an
+    injected store) because the delete is where the defect lived. A
+    Codex-imported config is url-only, so the stored grant is its only evidence
+    under ``server_is_oauth_capable``; reauth deleted it and then re-asked the
+    same question, got False, attached no OAuth provider, and connected
+    unauthenticated. Intermittent only because the challenge ledger is
+    per-process — a session that had already seen this server 401 was warm.
+    """
+    from local_operator.mcp.config import MCPHttpServerConfig
+
+    url = "https://codex.example/mcp"
+    cfg = MCPHttpServerConfig(url=url)
+    auth_mod.OAUTH_CHALLENGES.clear()
+
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    store = FakeAuthStore()
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda cwd: ({"codex": cfg}, {}),
+    )
+    # Undo the autouse logout stub and run the REAL delete against an
+    # in-memory store: the delete is the code under test here, so a fake that
+    # skips it would leave the stored-grant evidence intact and pass either
+    # way. The store is injected, so the developer's real auth.db is untouched.
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd, _store=None: _REAL_MCP_LOGOUT(name, cwd, store),
+    )
+    # The gate re-reads the store directly to confirm nothing survived the
+    # delete, and resolves the REAL ``auth.db`` to do it unless pinned here.
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+
+    class _AuthAwareManager(_Manager):
+        """Records the answer ``_build_oauth_auth`` gets at reconnect time."""
+
+        capable_at_connect: bool | None = None
+
+        async def connect_configured_server(
+            self, name: str, *, timeout_ms: float | None = None
+        ) -> _Conn:
+            self.capable_at_connect = auth_mod.server_is_oauth_capable(cfg, store)
+            if not self.capable_at_connect:
+                raise RuntimeError(f"MCP server at {url} refused the connection (401)")
+            return await super().connect_configured_server(name, timeout_ms=timeout_ms)
+
+    manager = _AuthAwareManager(cfg=cfg)
+    text, kind = await run_grant(manager, "reauth", "codex")
+
+    # The row really was deleted — reauth stays destructive-then-constructive.
+    assert auth_mod.server_has_stored_grant(url, store) is False
+    # ...but the fact it proved survived the delete, so OAuth is still wired.
+    assert manager.capable_at_connect is True
+    assert kind == "success", text
+    assert "refused the connection (401)" not in text
+
+
+@pytest.mark.asyncio
+async def test_reauth_run_grant_agrees_with_the_cli_on_every_removal_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TUI and CLI reauth arms must answer one question identically.
+
+    This PR's thesis is that two gates disagreeing about one state is the
+    defect, so a fix that made the CLI fall through while ``run_grant`` still
+    refused would only move the defect rather than remove it (QA round 2, Q1
+    addendum). Both arms now call ``clear_for_reauth``; this pins the three
+    outcomes that used to diverge, driving the REAL gate over an injected store
+    so the answers come from the shipped code path rather than a stub.
+
+    The failed-delete row is the one that matters most: it must refuse on BOTH
+    surfaces, because a fresh grant would otherwise silently reuse a credential
+    that is still on disk.
+    """
+    from local_operator.mcp.config import MCPHttpServerConfig
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    class RefusingStore(FakeAuthStore):
+        def delete_credential(self, credential_id: int) -> None:
+            raise RuntimeError("database is locked")
+
+    url = "https://codex.example/mcp"
+    cfg = MCPHttpServerConfig(url=url)
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda cwd: ({"codex": cfg}, {}),
+    )
+    # Undo the autouse logout stub: the removal is the code under test.
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd, store=None: _REAL_MCP_LOGOUT(name, cwd, store),
+    )
+
+    async def _tui(store: Any) -> tuple[str, str]:
+        auth_mod.OAUTH_CHALLENGES.clear()
+        monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+        return await run_grant(_Manager(cfg=cfg), "reauth", "codex")
+
+    # 1. Nothing stored (the url-only Codex import): both proceed to the login.
+    empty = FakeAuthStore()
+    text, kind = await _tui(empty)
+    assert kind == "success", text
+    assert auth_mod.clear_for_reauth("codex", "/anywhere", empty) is None
+
+    # 2. A real grant: both delete it and proceed.
+    good = FakeAuthStore()
+    auth_mod.McpTokenStorage(url, good)._write({"tokens": {"access_token": "a"}})
+    text, kind = await _tui(good)
+    assert kind == "success", text
+    assert auth_mod.server_has_stored_grant(url, good) is False
+
+    # 3. The delete FAILS and the row survives: both refuse, and neither
+    #    reaches a connect that would reuse the surviving credential.
+    locked = RefusingStore()
+    auth_mod.McpTokenStorage(url, locked)._write({"tokens": {"access_token": "OLD-TOKEN"}})
+    manager = _Manager(cfg=cfg)
+    auth_mod.OAUTH_CHALLENGES.clear()
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or locked)
+    text, kind = await run_grant(manager, "reauth", "codex")
+    assert kind == "warning", text
+    assert "still in place" in text
+    assert manager.connected == []  # no grant ran over the surviving row
+    assert auth_mod.server_has_stored_grant(url, locked) is True
+    # ...and the CLI's gate says the same thing about the same state.
+    cli_error = auth_mod.clear_for_reauth("codex", "/anywhere", locked)
+    assert cli_error is not None and "still in place" in cli_error

@@ -1281,7 +1281,11 @@ def fake_mcp_logout(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """
     removed: list[str] = []
 
-    def _fake(name: str, cwd: str) -> str | None:
+    # Mirrors the real helper's full signature, ``store`` included: the reauth
+    # gate passes it positionally, and a narrower stub raises TypeError that
+    # the gate reports as a failed removal — a refusal caused by the stub
+    # rather than by the code under test.
+    def _fake(name: str, cwd: str, store: object | None = None) -> str | None:
         removed.append(name)
         return None
 
