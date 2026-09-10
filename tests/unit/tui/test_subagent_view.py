@@ -4778,9 +4778,10 @@ async def test_follower_pages_durable_history_from_the_projected_session_dir(
             session_dir=str(directory) if shape == "wired" else None,
         )
         session = FakeSession()
-        # What the production ``RemoteSession`` says of itself; it keeps the
-        # app from standing up an owner-side mobile registrant over a fake.
-        session.is_remote = True  # type: ignore[attr-defined]
+        # A VIEWER, as the production ``RemoteSession`` reports itself: this is
+        # what keeps the app from standing up an owner-side mobile registrant
+        # over a fake, since publication rights follow runtime ownership.
+        session.owns_runtime = False  # type: ignore[attr-defined]
         session.jobs = SnapshotJobs([row])
         session._subagent_comms = SnapshotSubagentComms([row])
         app = OperatorApp(_async_factory(session))
@@ -4899,7 +4900,7 @@ async def test_a_restored_swept_child_pages_its_transcript_on_a_follower(
         session_id=session_id,
     )
     session = FakeSession()
-    session.is_remote = True  # type: ignore[attr-defined]
+    session.owns_runtime = False  # type: ignore[attr-defined]
     session.jobs = SnapshotJobs([row])
     session._subagent_comms = SnapshotSubagentComms([row])
     app = OperatorApp(_async_factory(session))
@@ -4991,7 +4992,7 @@ async def test_a_swept_child_with_no_directory_anywhere_keeps_the_note(tmp_path)
         trajectory=[],
     )
     session = FakeSession()
-    session.is_remote = True  # type: ignore[attr-defined]
+    session.owns_runtime = False  # type: ignore[attr-defined]
     session.jobs = SnapshotJobs([row])
     comms = SnapshotSubagentComms([row])
     assert comms.session_dir_of("never-started") is None
@@ -5071,7 +5072,7 @@ async def test_a_follower_renders_the_delegated_brief_once_not_twice(tmp_path, m
     row = JobState.model_validate(json.loads(row.model_dump_json()))
 
     session = FakeSession()
-    session.is_remote = True  # type: ignore[attr-defined]
+    session.owns_runtime = False  # type: ignore[attr-defined]
     session.jobs = SnapshotJobs([row])
     session._subagent_comms = SnapshotSubagentComms([row])
     app = OperatorApp(_async_factory(session))

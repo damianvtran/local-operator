@@ -76,7 +76,7 @@ def scoped_state() -> FrontendSessionState:
 
 
 def install(session: Any, state: FrontendSessionState) -> None:
-    session.is_remote = True
+    session.owns_runtime = False
     session.frontend_state = state
     session.jobs = SnapshotJobs(state.jobs)
     session._subagent_comms = SnapshotSubagentComms(state.jobs)

@@ -67,9 +67,8 @@ class SidebarRemote(FakeSession):
     regression turns on.
     """
 
-    is_remote = True
     # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-    # viewer, so the predicates must agree with `is_remote` above.
+    # viewer: it owns no loop and learns outcomes over the wire.
     owns_runtime = False
     outcome_is_synchronous = False
     runtime_locality: RuntimeLocality = "this-machine"

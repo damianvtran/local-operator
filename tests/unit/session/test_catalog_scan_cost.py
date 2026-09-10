@@ -831,3 +831,60 @@ class TestTheHiddenSkipCannotHideRealWork:
         sidebar = {entry.id for entry in load_catalog(tmp_path)}
         assert sidebar == picker
         assert len(picker) == 20, "every subagent session must stay hidden from both"
+
+
+def test_a_live_exec_record_labels_its_row_as_an_exec_run(tmp_path) -> None:
+    """``kind`` reaches the row from the RECORD, through the real scan.
+
+    The picker's tag is only as honest as this plumbing: it reads
+    ``SessionRow.kind``, which nothing but ``decorate_rows`` sets. Asserted
+    against a published record and the real ``registry.scan`` rather than a
+    hand-built row, because the defect this guards is the two disagreeing.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import decorate_rows
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    (tmp_path / "run" / "mobile").mkdir(parents=True)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="exec",
+            session_id="bbbbbbbbbbbb",
+            conversation_name="nightly audit",
+            cwd=str(tmp_path),
+            model_label="p/m",
+            control_port=1234,
+            control_key="k",
+            detached=True,
+        ),
+        tmp_path,
+    )
+    rows = [
+        SessionRow(id="bbbbbbbbbbbb", mtime=0.0, name="nightly audit"),
+        SessionRow(id="cccccccccccc", mtime=0.0, name="no record at all"),
+    ]
+    by_id = {row.id: row for row in decorate_rows(tmp_path, rows)}
+    assert by_id["bbbbbbbbbbbb"].kind == "exec"
+    assert by_id["bbbbbbbbbbbb"].live_state == "idle"
+    # A row with no live record must not inherit a kind from anywhere.
+    assert by_id["cccccccccccc"].kind == ""
+
+
+def test_an_idle_exec_row_says_what_it_is_instead_of_ready(tmp_path) -> None:
+    """The words and the glyph may not disagree.
+
+    ``CatalogEntry.status`` mirrors ``row_state_mark``'s precedence exactly, so
+    the kind is allowed to speak only at the ``idle`` rung — a BUSY exec run
+    still reports "Working", because what it is doing outranks what kind it is.
+    """
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import CatalogEntry
+
+    idle = CatalogEntry(SessionRow("b", 0.0, "audit", live_state="idle", kind="exec"))
+    busy = CatalogEntry(SessionRow("c", 0.0, "audit", live_state="busy", kind="exec"))
+    mine = CatalogEntry(SessionRow("d", 0.0, "mine", live_state="idle"))
+    assert idle.status == "Running headless (exec)"
+    assert busy.status == "Working"
+    assert mine.status == "Ready"

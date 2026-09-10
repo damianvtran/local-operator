@@ -811,9 +811,8 @@ async def test_only_the_owning_process_prints_the_keep_notice(monkeypatch, tmp_p
     _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
 
     class AttachedSession(FakeSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"
@@ -955,9 +954,8 @@ async def test_only_the_process_that_owns_the_gate_prints_the_value(monkeypatch,
     ConfigManager(tmp_path).set_config_value("hosting", "")
 
     class AttachedSession(FakeSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"

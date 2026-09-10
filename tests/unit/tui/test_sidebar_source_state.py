@@ -207,9 +207,8 @@ async def test_pending_choice_snapshot_restores_typed_and_checked_state():
 @pytest.mark.parametrize("gate_kind", ["approval", "ask"])
 async def test_hidden_stopped_callback_cannot_answer_selected_sources_gate(gate_kind):
     class Watched(FakeSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"

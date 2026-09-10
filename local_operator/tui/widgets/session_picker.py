@@ -203,6 +203,43 @@ BODY_MATCH_MARKER = "” "
 #: and for the identical reason — see ``plan_columns``.
 FORK_MARKER = "[fork] "
 
+#: A live ``lop exec`` run: a machine-driven session, not a terminal someone is
+#: sitting at.
+#:
+#: These rows are not new — since #804 every ``lop exec`` publishes an ordinary
+#: attachable record, and ``decorate_rows(include_live=True)`` has been folding
+#: them into this list ever since. What was missing is that they rendered
+#: IDENTICALLY to a conversation the user started: same glyph, same "Ready".
+#: Two facts make that worth a tag rather than leaving it implicit.
+#:
+#: * **They are somebody else's work**, in the same sense a subagent directory
+#:   is — a supervisor composed the prompt. Resuming one is legitimate (that is
+#:   what an attachable record IS) but it is a deliberate reach, not the row a
+#:   user means when scanning for the conversation they had this morning.
+#: * **They are ephemeral by design.** ``exec_control`` calls its records
+#:   "deliberately ephemeral": a fast one-shot can be published and reaped
+#:   between the paint and the Enter. A row vanishing under the cursor reads as
+#:   a bug unless the row said what it was.
+#:
+#: Follows :data:`FORK_MARKER`'s form exactly — a bracketed word before the
+#: name, reserved as fixed chrome for the whole result set, painted `dim` as
+#: metadata about the row rather than part of the title — because it makes the
+#: same kind of statement about the same column, and a second visual vocabulary
+#: for "this row is qualified" would be the defect that pattern exists to avoid.
+#:
+#: Deliberately NOT a state glyph: the state column answers "what is it doing",
+#: which an exec run answers exactly like any other session (busy, idle, needs
+#: you). This answers "what KIND of thing is it", which is orthogonal, and
+#: folding it into the glyph would make the two unaskable at once.
+EXEC_MARKER = "[exec] "
+
+#: The record kinds this picker TAGS. ``"tui"`` is the unmarked default — the
+#: overwhelming majority, and tagging it would put a badge on every row to say
+#: "normal" — and ``"daemon"`` is deliberately absent for now: the phone daemon
+#: does not publish per-session records this list reads, so a tag for it would
+#: be untested chrome. Adding a kind here is one entry plus its marker.
+TAGGED_KINDS = frozenset({"exec"})
+
 #: The needs-you mark: this session has parked a question and is holding a
 #: runtime resident until somebody answers it. The one marker here that is
 #: about the USER's attention rather than the session's state, which is why it
@@ -560,6 +597,7 @@ def plan_columns(
     marked: bool = False,
     forked: bool = False,
     stated: bool = False,
+    tagged: bool = False,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -589,6 +627,11 @@ def plan_columns(
     appears as a forked row scrolls into view and disappears as it scrolls out
     makes every name on the list jump sideways on one arrow press.
 
+    ``tagged`` reserves :data:`EXEC_MARKER`'s cells identically. It is a
+    SEPARATE budget from ``forked`` rather than one shared "qualifier" column
+    because the two facts are independent — a forked session can be running
+    under exec — and sharing the cells would make one tag hide the other.
+
     Reserved as FIXED CHROME rather than subtracted from the name afterwards,
     which is what keeps the drop ladder honest — the id surrenders its cells
     before the age, and the age before the name, and a marker that helped
@@ -597,6 +640,7 @@ def plan_columns(
     """
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     marker_col += cell_len(FORK_MARKER) if forked else 0
+    marker_col += cell_len(EXEC_MARKER) if tagged else 0
     # The live-state column follows the same reserve-for-the-RESULT-SET rule as
     # the two above, and for the same reason: a column that appears as a
     # running row scrolls into view makes every name jump sideways on one
@@ -624,6 +668,7 @@ def render_rows(
     body_matched: AbstractSet[str] = frozenset(),
     forked: bool | None = None,
     frame: int = 0,
+    tagged: bool | None = None,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -660,10 +705,37 @@ def render_rows(
         getattr(row, "live_state", "") or getattr(row, "pending", None) or getattr(row, "wakes", 0)
         for row in rows
     )
-    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked, any_stated)
+    # And again for the kind tag. Asked of the result set, not the page, for the
+    # third time and the same reason — but it matters MORE here than for a fork:
+    # an exec record is ephemeral, so this column would otherwise appear and
+    # vanish on its own as a one-shot is reaped, moving every name sideways
+    # without the user touching anything.
+    #
+    # Result-set scoping alone is NOT ENOUGH here, and that is the difference
+    # from `forked`. It stabilises the column against SCROLLING, because the
+    # result set does not change as the page moves. It cannot stabilise it
+    # against REAPING: when the one-shot ends, the result set itself loses the
+    # tagged row, `any_tagged` flips to False, and every name shifts 7 cells
+    # left with no keystroke (round 1, D1 — measured `(67,6,12) → (76,6,12)`).
+    # That fires on the NORMAL END OF EVERY ONE-SHOT, so the first time a user
+    # observes the ephemerality this tag exists to explain, the feedback is the
+    # whole list lurching — the exact "reads as a bug" reaction `EXEC_MARKER`
+    # was added to prevent. So the SCREEN latches the fact for the lifetime of
+    # the open picker and passes it here; `None` keeps the derive-from-rows
+    # behaviour for callers with no paging and no lifetime to latch against
+    # (tests, a one-page list), exactly as `forked` above does.
+    any_tagged = (
+        bool(tagged)
+        if tagged is not None
+        else any(getattr(row, "kind", "") in TAGGED_KINDS for row in rows)
+    )
+    name_col, age_col, id_col = plan_columns(
+        rows, width, ages, marked, any_forked, any_stated, any_tagged
+    )
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
     state_col = STATE_COL_CELLS if any_stated else 0
+    exec_col = cell_len(EXEC_MARKER) if any_tagged else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -748,6 +820,16 @@ def render_rows(
         if fork_col:
             line.append(
                 _pad_cells(FORK_MARKER if getattr(row, "forked", False) else "", fork_col),
+                style=row_bg + Style(color=dim),
+            )
+        # Beside the fork tag and painted the same `dim`, for the reason given
+        # there: this is metadata ABOUT the row, and at name weight it would
+        # read as part of the conversation's title.
+        if exec_col:
+            line.append(
+                _pad_cells(
+                    EXEC_MARKER if getattr(row, "kind", "") in TAGGED_KINDS else "", exec_col
+                ),
                 style=row_bg + Style(color=dim),
             )
         # The live-state mark sits immediately before the name, where the eye
@@ -847,6 +929,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body: Static
         #: Spinner phase for the running marker, advanced by ``_tick``.
         self._frame = 0
+        #: Has this picker EVER shown an exec row? Latched, never cleared while
+        #: the screen lives — see :meth:`_exec_column_latched` for why the
+        #: column may widen but must not narrow.
+        self._saw_tagged = False
         #: Re-reads each row's live state, supplied by the host that knows how
         #: (``OperatorApp._overlay_live_state``). Optional: a host that does
         #: not pass one gets the pre-refresh behaviour — markers from open,
@@ -1193,6 +1279,37 @@ class SessionPickerScreen(ModalScreen[str | None]):
         """Rows above the first session row: the header and its rule."""
         return 2
 
+    def _exec_column_latched(self, rows: Sequence[SessionRow]) -> bool:
+        """Should the exec column be reserved? Once yes, yes until the picker closes.
+
+        The column may WIDEN during a picker's life and must never NARROW, and
+        the asymmetry is the whole point. Widening is caused by the user's own
+        act — typing a filter that admits an exec row — so the movement has an
+        author and reads as a response. Narrowing is caused by a one-shot
+        ENDING, which nobody in front of the terminal did, and which happens on
+        the normal completion of every ``lop exec`` run rather than in some edge
+        case. Round 1 (D1) measured the result: `any_tagged` flips false,
+        `exec_col` goes 7 → 0, `plan_columns` `(67,6,12) → (76,6,12)`, and every
+        name on screen jumps 7 cells left with no keystroke — under the cursor,
+        on a timer. A list that lurches when a row quietly stops being special
+        reads as a glitch, which is precisely the reaction `EXEC_MARKER` exists
+        to prevent ("a row vanishing under the cursor reads as a bug unless the
+        row said what it was"). The reaped row still loses its own 7 characters
+        of tag, so the change that actually happened is still visible; what it
+        no longer does is move everything else.
+
+        Latched on the SCREEN, not on the row set, because "the result set for
+        one open picker" is the span the fixed-chrome rule is really about, and
+        a closed-and-reopened picker legitimately starts over from what is live
+        then. The cost is one reserved column of 7 cells persisting after the
+        last exec row is gone, which is the same tax the column charged a moment
+        earlier and which the drop ladder already knows how to shed at narrow
+        widths (round 1, D4 — accepted deliberately).
+        """
+        if any(getattr(row, "kind", "") in TAGGED_KINDS for row in rows):
+            self._saw_tagged = True
+        return self._saw_tagged
+
     # -- internals -----------------------------------------------------------
     def set_query(self, query: str) -> None:
         """Apply a filter and put the cursor on the FIRST match.
@@ -1311,17 +1428,54 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #: is D10, unfixed by its own fix, through 83 green picker tests
     #: (round 4, D10).
     #:
-    #: `mtime` is deliberately absent: it changes constantly and is rendered
-    #: as a coarse "when", so including it would repaint ten times a second
-    #: for nothing.
-    _SIGNATURE_FIELDS = ("id", "name", "forked", "live_state", "pending", "wakes", "wakes_dormant")
-    # A NAME THAT IS NOT A FIELD READS AS A CONSTANT. That is how the D10 fix
-    # shipped broken, so the names are checked against the row type itself
-    # rather than trusted: a rename in `resume.SessionRow` fails here loudly
-    # instead of silently dropping a column out of the comparison.
-    assert not set(_SIGNATURE_FIELDS) - set(SessionRow._fields), (
-        f"picker signature names unknown SessionRow fields: "
-        f"{sorted(set(_SIGNATURE_FIELDS) - set(SessionRow._fields))}"
+    _SIGNATURE_FIELDS = (
+        "id",
+        "name",
+        "forked",
+        "live_state",
+        "pending",
+        "wakes",
+        "wakes_dormant",
+        "kind",
+    )
+
+    #: Fields deliberately OUTSIDE the signature, each with the reason it is
+    #: safe to omit. Stated as data rather than as prose because the assertion
+    #: below consumes it — an exclusion nobody can name is not an exclusion.
+    #:
+    #: * `mtime` changes constantly and renders as a coarse "when", so
+    #:   including it would repaint ten times a second for nothing.
+    #: * `created_at` is immutable for the life of a session (#800 makes it the
+    #:   ordering key precisely because it never moves), so it cannot differ
+    #:   between two ticks of one open picker.
+    _SIGNATURE_EXCLUDED = ("mtime", "created_at")
+
+    # BIDIRECTIONAL, and that is the whole point of it. The previous form
+    # checked only that every signature NAME is a real field, which catches a
+    # rename but is blind to the opposite and more common error: a field ADDED
+    # to `SessionRow`, rendered by this widget, and never added here. `kind`
+    # shipped exactly that way (round 1, MAJOR-1/Q1) — the row painted `[exec]`,
+    # `_tick` compared two kinds equal, and the frame stayed stale. Both earlier
+    # D10 escapes are the same defect in the other direction, so the guard now
+    # answers both questions at once: every name must be a field, AND every
+    # field must be classified as either signature or documented exclusion.
+    # A new `SessionRow` field therefore fails HERE, at the moment it is added,
+    # rather than in a frame someone has to notice is stale.
+    #
+    # THIS ASSERTION AND THE PINNED TESTS ARE BOTH LOAD-BEARING; neither
+    # subsumes the other, so do not simplify one away as redundant. This one
+    # catches an UNCLASSIFIED field — the omission — at import. It cannot catch
+    # a MISCLASSIFIED one: moving `kind` into `_SIGNATURE_EXCLUDED` keeps the
+    # union equal and passes here, and only `tests/unit/tui/test_session_picker.py`
+    # (which asserts `kind` drives a repaint, and that the exclusions are the
+    # two fields whose immutability is argued above) fails. Verified by making
+    # exactly that mutation: import succeeds, two tests go red.
+    assert set(_SIGNATURE_FIELDS) | set(_SIGNATURE_EXCLUDED) == set(SessionRow._fields), (
+        "picker signature is out of step with SessionRow — "
+        f"unknown names: {sorted(set(_SIGNATURE_FIELDS) - set(SessionRow._fields))}; "
+        "unclassified fields (add to _SIGNATURE_FIELDS, or to _SIGNATURE_EXCLUDED "
+        "with the reason it cannot change under an open picker): "
+        f"{sorted(set(SessionRow._fields) - set(_SIGNATURE_FIELDS) - set(_SIGNATURE_EXCLUDED))}"
     )
 
     def _marker_signature(self) -> tuple[tuple[object, ...], ...]:
@@ -1452,6 +1606,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     # The animated phase. Without it every call took the
                     # default 0 and the running marker never moved (D1).
                     self._frame,
+                    # The LATCHED exec fact, for the reason `_exec_column_latched`
+                    # states. Passing it here also gives the exec column the
+                    # result-set scoping its own docstring claims and did not
+                    # have: `window` is one PAGE, so leaving this to derive from
+                    # `rows` made the column appear and vanish as the one-shot
+                    # scrolled in and out of view — the very jump the fork
+                    # argument above exists to prevent, measured at 7 cells.
+                    self._exec_column_latched(rows),
                 )
             ):
                 if index:
@@ -1464,38 +1626,85 @@ class SessionPickerScreen(ModalScreen[str | None]):
                     len(rows),
                 )
 
-        # Body, then one quiet row, then the card's META — the position and the
-        # key hints, which are the same KIND of row (statements ABOUT the list,
-        # not entries in it) and so travel together at the bottom. This is the
-        # usage card's grammar; the two overlays differ only by whether the
-        # position row is there at all. The counter is EMITTED only when the
-        # list scrolls: printing an empty line in its place left two blank rows
-        # and pushed the keys away from the block they belong to.
+        # Body, then one quiet row, then the card's META — the position, the
+        # legends and the key hints, which are the same KIND of row (statements
+        # ABOUT the list, not entries in it) and so travel together at the
+        # bottom. This is the usage card's grammar; the two overlays differ only
+        # by whether the position row is there at all. The counter is EMITTED
+        # only when the list scrolls: printing an empty line in its place left
+        # two blank rows and pushed the keys away from the block they belong to.
         out.append("\n\n")
-        if counter is not None:
-            # Numerals carry the fact at the readable ``dim`` step; grammar can
-            # stay quiet at ``faint`` because it is adjacent to those anchors.
-            first, last, total = counter
-            out.append("showing ", style=faint)
-            out.append(f"{first:,}–{last:,}", style=dim)
-            out.append(" of ", style=faint)
-            out.append(f"{total:,}", style=dim)
+        # The marker legend appears only when a marked row is actually on
+        # screen, so an empty query or a pure name match never advertises a mark
+        # the user cannot see (D2: teach the glyph where it is used, not always).
+        has_marked = bool(self.body_matched_ids)
+        # The SAME latched fact the column reserves on, deliberately: a legend
+        # explaining a column that is no longer reserved, or a reserved column
+        # with no legend, is the footer and the list disagreeing about what the
+        # user is looking at. One source, so they cannot.
+        has_exec = self._exec_column_latched(rows)
+        # LEGENDS SHARE THE COUNTER'S ROW, and that placement is the fix for
+        # design round 2's D2 rather than a tidier arrangement. They used to sit
+        # at the front of the key row, where the arithmetic made three of the
+        # four list shapes unreachable: the full key row is 69 cells against a
+        # card capped at PICKER_MAX_WIDTH = 74, so a 24-cell `[exec]` legend
+        # could only appear by evicting a key — and the shed order rightly makes
+        # the keys win, because keys OPERATE the card and a legend only teaches.
+        # The result was a legend that painted only on a list short enough not to
+        # scroll, i.e. never on this repo's own store of ~500 sessions, at any
+        # terminal width including 200 columns.
+        #
+        # This row is the one place with the width to spare and it costs no
+        # height: CARD_CHROME_ROWS reserves it UNCONDITIONALLY (so the card
+        # cannot change height as the user types, which is why the reservation
+        # is unconditional in the first place), and it is drawn empty on a list
+        # that fits one page. The counter is ~19 cells when present, leaving
+        # ~52 for legends against the 43 both together need.
+        #
+        # It is also the better home on the merits: a legend states what a mark
+        # in the list MEANS, which is a statement about the list — exactly what
+        # this row already carries — while the row below it is how the card is
+        # driven. The two kinds no longer compete for the same cells.
+        legends = _meta_legends(
+            width,
+            has_marked=has_marked,
+            has_exec=has_exec,
+            counter_cells=_counter_cells(counter),
+        )
+        if counter is not None or legends:
+            if counter is not None:
+                # Numerals carry the fact at the readable ``dim`` step; grammar
+                # can stay quiet at ``faint`` because it is adjacent to those
+                # anchors.
+                first, last, total = counter
+                out.append("showing ", style=faint)
+                out.append(f"{first:,}–{last:,}", style=dim)
+                out.append(" of ", style=faint)
+                out.append(f"{total:,}", style=dim)
+            for index, (glyph, meaning) in enumerate(legends):
+                if index or counter is not None:
+                    out.append(" · ", style=faint)
+                # The GLYPH at `dim` and its gloss at `faint`, the same split
+                # the keys below use: the thing being explained is the anchor,
+                # the explanation is subordinate to it.
+                out.append(glyph, style=dim)
+                out.append(f" {meaning}", style=faint)
             out.append("\n")
         # Key NAMES at `dim` and their labels at `faint`, matching the usage
         # card: at `faint` on this ground the keys themselves were 1.49:1.
         # Hints DROP to fit, in reverse order of need — the same discipline the
         # columns use. A footer that overflowed the card was the one row that
         # could not afford to: it is the only statement of how to get out.
-        # The marker legend appears only when a marked row is actually on
-        # screen, so an empty query or a pure name match never advertises a mark
-        # the user cannot see (D2: teach the glyph where it is used, not always).
-        has_marked = bool(self.body_matched_ids)
+        #
+        # This row carries KEYS ONLY since D2 — the legends moved up to the
+        # counter's row. ``scrolls`` still matters here because it reorders the
+        # shed between ``pgup/pgdn`` and ``type``: paging must not be the first
+        # thing sacrificed on a list that actually pages (round 1, D3).
         # ``counter`` is set exactly when the list is longer than a page, so it
         # is already the "does this scroll" fact the shed order needs.
         for index, (key, what) in enumerate(
             _footer_hints(
                 width,
-                has_marked=has_marked,
                 scrolls=counter is not None,
                 empty=not rows and bool(self._query),
             )
@@ -1537,24 +1746,70 @@ _FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "↑↓")
 #: so the legend and the mark are unmistakably the same thing.
 _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 
-#: Drop priority once the legend is in play. The full key-hint row is ~69 cells
-#: against a ~74-cell card, so a legend can only appear by DISPLACING a hint —
-#: dropping it "first" would make it never show, i.e. no fix at all. So it
-#: outranks the two genuinely disposable hints (``pgup/pgdn``, ``type``, which
-#: describe conveniences a user discovers anyway) and is shed BEFORE the
-#: movement and action keys. Because it is dropped before the bare-key stage,
-#: it never survives as an unlabelled glyph — a lone ``"`` in the footer would
-#: be exactly the artifact-looking mark D2 flagged.
-_FOOTER_DROP_ORDER_MARKED = ("pgup/pgdn", "type", _MARKER_LEGEND[0], "↑↓")
+#: Where the legends do NOT live: the key row below. The full key-hint row is 69
+#: cells against a card capped at :data:`PICKER_MAX_WIDTH` (74), so a 24-cell
+#: legend could only appear there by evicting a key — and the keys must win,
+#: because they OPERATE the card while a legend teaches. Design round 1 resolved
+#: that by ranking the legend above the two disposable hints, which made it
+#: paint on a list that FITS one page and never on one that scrolls; with
+#: :data:`PAGE_ROWS_MAX` at 10 and real stores in the hundreds, that is the
+#: ordinary case, at any terminal width (design round 2, D2). The legends
+#: therefore share the position counter's row and shed against their own budget
+#: — see :func:`_meta_legends`.
 
-#: Drop order once the list actually SCROLLS: the marker legend goes before the
-#: paging keys. With the fixed order above, a list that grew past one page shed
-#: ``pgup/pgdn`` to make room for the legend — so the picker advertised paging
-#: in the state where paging does nothing and withdrew it in the state where it
-#: is the fastest way through the list (design round 1, D3). Uncapping the store
-#: is what made scrolling the normal case rather than the rare one, so the shed
-#: order has to know whether there is anything to page through.
-_FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "↑↓")
+#: The same treatment for :data:`EXEC_MARKER`, and for a sharper reason than the
+#: body-match mark needed. `[exec]` is legible as a WORD — nobody mistakes it for
+#: a rendering artifact the way a lone `”` is mistaken — but legibility is not
+#: the problem it has. Its grammar is byte-identical to `[fork]`'s, deliberately,
+#: and `[fork]` states a permanent fact about ancestry: a row that will still be
+#: there tomorrow. An identical treatment therefore files the two under one
+#: class, and the user learns "this row came from somewhere else" — true, and the
+#: LESS important of the two things the tag means. What it does not tell them is
+#: that the row may be gone by the time they press Enter (design round 1, D2).
+#:
+#: The words that do carry lifetime already exist and are well judged
+#: (`CatalogEntry.status`'s "Running headless (exec)"), but they render only in
+#: the sidebar's hover tooltip — a surface the picker never shows, and they
+#: appeared in zero of nine captured picker frames. So the ephemerality is said
+#: HERE, in the one place the picker already reserves for explaining a mark.
+#:
+#: "one-shot" rather than "headless": both are established (`cli.py` calls exec a
+#: "one-shot headless task"), but headless describes HOW it runs and one-shot
+#: describes how long it lasts, which is the fact the legend exists to add
+#: (design round 1, D5). No new visual grammar, no third ink — an amber `[exec]`
+#: was the other candidate and is rejected on the record, because `warning` is
+#: already a two-member class this file's own comments call "at its capacity".
+_EXEC_LEGEND: tuple[str, str] = (EXEC_MARKER.strip(), "one-shot, may end")
+
+
+def _footer_drop_order(*, scrolls: bool) -> tuple[str, ...]:
+    """The shed order for the key hints, which is the only thing this row holds.
+
+    DERIVED rather than enumerated so the two documented constants above cannot
+    drift from the rule they state; the assertion below proves this function
+    still reproduces them byte for byte.
+
+    The rule, stated once:
+
+    * the genuinely disposable hints shed first (``pgup/pgdn`` and ``type``,
+      conveniences a user discovers anyway), EXCEPT that a scrolling list drops
+      ``type`` first instead — paging is the fastest way through a list that has
+      more than one page, so it must not be the first thing sacrificed;
+    * ``↑↓`` last of all the droppable hints;
+    * ``enter``/``esc`` never appear here — they are how the card is used and
+      how it is left.
+
+    Legends are NOT shed here any more. They live on the counter's row and shed
+    against their own budget in :func:`_meta_legends`, which is what made them
+    reachable at all — see that function and the call site.
+    """
+    return ("type", "pgup/pgdn", "↑↓") if scrolls else ("pgup/pgdn", "type", "↑↓")
+
+
+# The derivation must reproduce the documented constants exactly, or the
+# comments above them are describing a policy the code no longer follows.
+assert _footer_drop_order(scrolls=False) == _FOOTER_DROP_ORDER
+assert _footer_drop_order(scrolls=True) == _FOOTER_DROP_ORDER_SCROLLING
 
 
 #: The footer for a filter that matched nothing. Movement, paging and `enter
@@ -1565,8 +1820,75 @@ _FOOTER_DROP_ORDER_MARKED_SCROLLING = ("type", _MARKER_LEGEND[0], "pgup/pgdn", "
 _EMPTY_HINT: tuple[str, str] = ("backspace", "to widen")
 
 
+def _counter_cells(counter: tuple[int, int, int] | None) -> int:
+    """Cells the position counter will occupy, or 0 when it is not drawn.
+
+    Measured from the FORMATTED string rather than estimated, because the
+    numerals are thousands-grouped and the width therefore depends on the store
+    size: "showing 1–10 of 40" is 18 cells and "of 24,310" is 22. The legends
+    share this row, so an estimate here is a legend that overflows the card on
+    exactly the large stores that made the picker scroll in the first place.
+    """
+    if counter is None:
+        return 0
+    first, last, total = counter
+    return cell_len(f"showing {first:,}–{last:,} of {total:,}")
+
+
+def _meta_legends(
+    width: int,
+    *,
+    has_marked: bool,
+    has_exec: bool,
+    counter_cells: int = 0,
+) -> list[tuple[str, str]]:
+    """The mark legends that fit beside the counter, dropping the least needed.
+
+    Legends explain what a mark in the LIST means, which is a statement about
+    the list — the same kind of statement the position counter makes — so they
+    share its row. They used to lead the key row below and were unreachable
+    there: see the call site, where the 69-vs-74 cell arithmetic is set out.
+
+    Order and shed are unchanged from that row and keep their round-1 reasoning.
+    DISPLAYED, the body mark leads because that is the order the marks appear in
+    a row (body column, then the kind column to its right). SHED, ``[exec]`` goes
+    first: it is a readable word that still means something without its gloss,
+    while a lone right-quote with nothing explaining it is exactly the rendering
+    artifact :data:`_MARKER_LEGEND` exists to prevent.
+
+    A legend never survives as a bare glyph. Dropping the gloss would leave the
+    unexplained mark the legend was added for, so the whole pair goes.
+    """
+    legends = [
+        legend
+        for legend, present in ((_MARKER_LEGEND, has_marked), (_EXEC_LEGEND, has_exec))
+        if present
+    ]
+    # The counter's own cells plus the separator that would join it to the
+    # first legend: the budget is what is LEFT of the row, not the row.
+    room = width - counter_cells - (3 if counter_cells else 0)
+    while legends and _row_cells(legends) > room:
+        # Shed the readable word first — reverse of display order, per above.
+        legends.pop()
+    return legends
+
+
+def _row_cells(pairs: Sequence[tuple[str, str]]) -> int:
+    """Cells ``pairs`` occupy when joined by the card's ``" · "`` separator.
+
+    One definition for both meta rows, so a legend and a key hint can never
+    disagree about what a row costs.
+    """
+    return sum(cell_len(f"{key} {what}".strip()) for key, what in pairs) + 3 * max(
+        0, len(pairs) - 1
+    )
+
+
 def _footer_hints(
-    width: int, *, has_marked: bool = False, scrolls: bool = False, empty: bool = False
+    width: int,
+    *,
+    scrolls: bool = False,
+    empty: bool = False,
 ) -> list[tuple[str, str]]:
     """The key hints that fit in ``width`` cells, dropping the least needed.
 
@@ -1576,35 +1898,24 @@ def _footer_hints(
     LABELS and keep the keys. Two bare keys still say which keys exist, which
     is more than a clipped row says.
 
-    ``has_marked`` adds the ``"``-marker legend (see :data:`_MARKER_LEGEND`)
-    so the glyph the list is drawing is explained where the reader already
-    looks for meaning. It sits at the FRONT (adjacent to nothing that could be
-    read as a key) and is shed under width pressure per
-    :data:`_FOOTER_DROP_ORDER_MARKED` — above the disposable hints so it can
-    actually appear on a normal card, below the movement and action keys.
+    KEYS ONLY. The mark legends moved to the counter's row in design round 2 —
+    see :func:`_meta_legends` — because the full key row is 69 cells against a
+    card capped at :data:`PICKER_MAX_WIDTH`, so a legend could only appear here
+    by evicting a key. This function no longer has to choose between teaching a
+    mark and stating how to leave the card.
 
-    ``scrolls`` says the list is longer than one page, which REORDERS the shed
-    rather than adding a hint: the paging keys outrank the legend exactly when
-    there is something to page through (see
-    :data:`_FOOTER_DROP_ORDER_MARKED_SCROLLING`). Without it the two features
-    fought — a list long enough to scroll is also long enough to contain a
-    marked row, so the legend evicted the very hint the reader needed.
+    ``scrolls`` says the list is longer than one page, which REORDERS the shed:
+    ``pgup/pgdn`` sheds first on a list that fits one page (paging there is a
+    no-op) and ``type`` sheds first on one that does not, because paging is then
+    the fastest way through the list (round 1, D3).
     """
     if empty:
         # Nothing to move through, page, or resume: offering those keys for an
-        # empty list advertises actions that do nothing, and the marker legend
-        # explains a glyph no row is drawing. `esc` stays because leaving is
-        # still available and is the other thing a user wants here.
+        # empty list advertises actions that do nothing. `esc` stays because
+        # leaving is still available and is the other thing a user wants here.
         return _shed_to_width([_EMPTY_HINT, ("esc", "cancel")], (_EMPTY_HINT[0],), width)
 
-    hints = list(_FOOTER_HINTS)
-    if has_marked:
-        hints = [_MARKER_LEGEND, *hints]
-        drop_order = _FOOTER_DROP_ORDER_MARKED_SCROLLING if scrolls else _FOOTER_DROP_ORDER_MARKED
-    else:
-        drop_order = _FOOTER_DROP_ORDER_SCROLLING if scrolls else _FOOTER_DROP_ORDER
-
-    return _shed_to_width(hints, drop_order, width)
+    return _shed_to_width(list(_FOOTER_HINTS), _footer_drop_order(scrolls=scrolls), width)
 
 
 def _shed_to_width(
