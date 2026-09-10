@@ -125,14 +125,14 @@ class SessionProtocol(Protocol):
     def owns_runtime(self) -> bool:
         """Whether THIS process runs the turn loop and writes the transcript.
 
-        True on an owner (`lop exec`, the server host, a subagent host), False
-        on a facade attached to a runtime that lives somewhere else. It is the
+        True on the runtime (`lop exec`, the server host, a subagent host),
+        False on a facade attached to a runtime that lives elsewhere. It is the
         lifecycle question: may this process end the session in-process, does
         an in-process abort reach the loop, is auto-naming this process's job.
 
         Not the same as :attr:`outcome_is_synchronous` even though both are
-        False for every `lop` TUI session today — an owner could in principle
-        admit a turn without running it to completion, and the two answers
+        False for every `lop` TUI session today — a runtime could in
+        principle admit a turn without running it to completion, and the two answers
         would then diverge. Keeping them separate is the point: the sites that
         ask them are asking different things.
         """
@@ -145,7 +145,7 @@ class SessionProtocol(Protocol):
         True where ``prompt()`` returns after the pipeline's ``finally`` has
         flushed ``agent_end``, so the caller HOLDS the outcome and may mark the
         turn failed or succeeded from its own stack. False where it returns on
-        the owner's durable-admission ACK — mid-turn, before the outcome exists
+        the runtime's durable-admission ACK — mid-turn, before the outcome exists
         — so the caller must wait for the event stream instead and must not
         infer success from the call returning.
 
@@ -489,9 +489,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     """The surface a VIEWER offers on top of :class:`SessionProtocol`.
 
     A viewer is a facade attached to a runtime that executes turns somewhere
-    else. It cannot run the loop, but it can do things an owner has no need to
-    do: page a display window it did not build, ask the owner to stop, adopt a
-    takeover, report which build the owner is running.
+    else. It cannot run the loop, but it can do things a runtime has no need
+    to do: page a display window it did not build, ask the runtime to stop,
+    adopt a takeover, report which build the runtime is running.
 
     **Why this is declared.** These members exist only on ``RemoteSession``,
     and its hosts reached all of them through ``getattr(session, "name", None)``
@@ -506,8 +506,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     exactly how ``/info`` reported zero subagents for a session that had
     several (see ``RemoteSession.subagent_comms``).
 
-    **Why it is a separate protocol and not more of SessionProtocol.** Owners
-    genuinely do not have these members and should not be forced to grow
+    **Why it is a separate protocol and not more of SessionProtocol.**
+    Runtimes genuinely do not have these members and should not be forced to grow
     no-op stubs for them; a stub that returns a plausible empty value is worse
     than an absent attribute, because the caller cannot tell "nothing to show"
     from "not this kind of session".
@@ -600,14 +600,14 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         * never bound \u2014 a session id and a transcript but nothing executing:
           `lop` launched, the user opened the picker, nothing typed;
-        * bound and now unreachable \u2014 the socket dropped, the owner died, or
-          the facade is redialing a replacement.
+        * bound and now unreachable \u2014 the socket dropped, the runtime
+          died, or the facade is redialing a replacement.
 
         The implementation is "no client, or not connected, or not ready for
         events", so the second case is deliberate rather than incidental.
         ``app.py:23470`` states the dependency outright ("``is_cold`` is a
-        superset of the drop: it is also true while the facade is redialing an
-        owner that died"), and narrowing it to "never bound" would silently
+        superset of the drop: it is also true while the facade is redialing a
+        runtime that died"), and narrowing it to "never bound" would silently
         re-open the #625 shape at that site.
 
         So it does NOT distinguish never-bound from lost. A caller needing
@@ -631,7 +631,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Whether leaving this session would leave a runtime running."""
         ...
 
-    # --- the owner on the other end ---------------------------------------
+    # --- the runtime on the other end -------------------------------------
     #: The BUILD the runtime is running, read off its discovery record at
     #: dial. ``""`` on a facade that has never bound AND on one bound to a
     #: runtime older than the field; hosts distinguish those by ``is_cold``,
@@ -646,11 +646,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     saved_preview_partial: bool
 
     def owner_idle(self) -> bool:
-        """Whether the owner reports no turn in flight."""
+        """Whether the runtime reports no turn in flight."""
         ...
 
     def owner_model_catalogue(self) -> list[dict[str, Any]]:
-        """The model catalogue as the OWNER resolves it.
+        """The model catalogue as the RUNTIME resolves it.
 
         A viewer must not answer from its own machine's catalogue: the runtime
         may hold different credentials and therefore offer different models.
@@ -658,10 +658,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     async def attach_existing(self) -> bool:
-        """Bind to an owner if one is already live, without starting one.
+        """Bind to a runtime if one is already live, without starting one.
 
         The desktop host calls this on a cold viewer so that serving a history
-        read never promotes a reader into an executor: losing the owner must
+        read never promotes a reader into an executor: losing the runtime must
         not move execution into the HTTP worker.
         """
         ...
@@ -702,10 +702,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     @property
     def supports_completion_ack(self) -> bool:
-        """Whether the attached owner can acknowledge completion attention.
+        """Whether the attached runtime can acknowledge completion attention.
 
         Read by the DESKTOP host rather than the TUI: it decides whether the
-        phone portal is told completion-attention is supported. An owner too
+        phone portal is told completion-attention is supported. A runtime too
         old to carry the ack answers ``False``, which is why the host pairs
         this with ``is_cold`` instead of reading absence as a capability.
         """
@@ -713,7 +713,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     # --- display history paging -------------------------------------------
     # A viewer renders a window over a transcript it does not own, so paging is
-    # a request to the owner rather than a slice of a local list. The revision
+    # a request to the runtime rather than a slice of a local list. The revision
     # counter is what lets the TUI tell "same window, redrawn" from "the window
     # moved" without diffing rows.
 
@@ -729,7 +729,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     @property
     def history_message_count(self) -> int:
-        """How many messages the owner's transcript holds in total."""
+        """How many messages the runtime's transcript holds in total."""
         ...
 
     @property
@@ -744,7 +744,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         The head notice branches its copy on this: rows behind the compaction
         cut are real history the model can no longer see, which is a different
         kind of row from "older messages" rather than merely an earlier one.
-        ``False`` on an owner too old to page them, so that viewer keeps the
+        ``False`` on a runtime too old to page them, so that viewer keeps the
         copy it always had.
         """
         ...
@@ -803,7 +803,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    # --- driving the owner -------------------------------------------------
+    # --- driving the runtime -----------------------------------------------
     async def prompt_and_wait(
         self,
         text: str,
@@ -814,17 +814,17 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Submit a turn and wait for its terminal outcome.
 
         The counterpart to :meth:`SessionProtocol.prompt`, which on a viewer
-        returns on the owner's admission ACK rather than on the outcome (see
+        returns on the runtime's admission ACK rather than on the outcome (see
         :attr:`SessionProtocol.outcome_is_synchronous`). A host that needs the
         result \u2014 exec mode, a scripted turn \u2014 must await THIS.
         """
         ...
 
     async def bind_runtime(self) -> None:
-        """Bind this viewer before an explicitly requested owner operation.
+        """Bind this viewer before an explicitly requested runtime operation.
 
         Declared because the desktop ROUTES call it as a HARD access on every
-        path that mutates owner state (``desktop_lifecycle.py`` /mcp,
+        path that mutates runtime state (``desktop_lifecycle.py`` /mcp,
         /credential, /fork, aside completion and adoption;
         ``desktop_sessions.py`` routed slash), reached through the
         ``bridge.remote`` binding. A rename on the facade is therefore an
@@ -850,13 +850,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     async def admit_prompt(
         self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
     ) -> tuple[str, bool]:
-        """Submit a prompt and return the owner's ADMISSION receipt.
+        """Submit a prompt and return the runtime's ADMISSION receipt.
 
-        ``(detail, duplicate)``: the owner's receipt text, and whether the
+        ``(detail, duplicate)``: the runtime's receipt text, and whether the
         stable ``command_id`` matched a reservation it already holds. It does
         not wait for the turn's outcome — that is the point. The desktop routes
         serve an HTTP request, and an HTTP disconnect must not cancel work the
-        owner already accepted, which is what awaiting completion would allow.
+        runtime already accepted, which is what awaiting completion would allow.
 
         Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
         ``desktop_lifecycle.py`` and ``desktop_sessions.py``.
@@ -871,12 +871,12 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         approved: bool | None = None,
         question_index: int | None = None,
     ) -> str:
-        """Answer the owner's open approval gate; returns its receipt.
+        """Answer the runtime's open approval gate; returns its receipt.
 
         ``request_id`` is checked against the gate the facade currently holds
         before anything crosses the wire, so a stale desktop popup cannot
         answer a NEWER gate that a reconnect or a multi-question ask advanced
-        in another window. The owner validates again on its side; this check is
+        in another window. The runtime validates again on its side; this check is
         what keeps the wrong answer from being sent at all.
 
         Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
@@ -885,19 +885,19 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     async def request_stop(self) -> str:
-        """Ask the owner to end the session; returns its receipt."""
+        """Ask the runtime to end the session; returns its receipt."""
         ...
 
     async def request_refresh(self) -> str:
-        """Ask the owner to re-send canonical state."""
+        """Ask the runtime to re-send canonical state."""
         ...
 
     async def retire_if_unused(self) -> str:
-        """Ask the owner to retire itself if nothing else is attached."""
+        """Ask the runtime to retire itself if nothing else is attached."""
         ...
 
     async def set_working_directory(self, cwd: str) -> str:
-        """Change the OWNER's working directory; returns its receipt."""
+        """Change the RUNTIME's working directory; returns its receipt."""
         ...
 
     async def route_shared_slash(
@@ -906,7 +906,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         args: str,
         images: Sequence[ImageContent] | None = None,
     ) -> Any:
-        """Run a slash command on the owner and return its result."""
+        """Run a slash command on the runtime and return its result."""
         ...
 
     def move_will_wait(self) -> bool:
@@ -924,7 +924,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     # --- approval gates across a detach ------------------------------------
     # A viewer that leaves must not strand a gate the user never answered, and
-    # one that returns must not replay a gate the owner already resolved.
+    # one that returns must not replay a gate the runtime already resolved.
 
     def suspend_viewer_gates(
         self, *, auto_approve: bool = False, keep_answer: bool = False
@@ -950,7 +950,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     @property
     def has_pending_gate_reply(self) -> bool:
-        """Whether a latched answer is still in flight to the owner.
+        """Whether a latched answer is still in flight to the runtime.
 
         The sidebar reads this to avoid tearing down a source whose committed
         reply has not reached the runtime yet. Probed as a 3-arg ``getattr``
@@ -959,28 +959,28 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    # --- owner-lifecycle callbacks -----------------------------------------
+    # --- runtime-lifecycle callbacks ---------------------------------------
     # Installed once at adoption. They are how a viewer learns about outcomes
-    # it cannot poll for: the owner died and this process won the lease, the
-    # owner ended the session, the owner retired itself for a newer build.
+    # it cannot poll for: the runtime died and this process won the lease, the
+    # runtime ended the session, the runtime retired itself for a newer build.
 
     def set_takeover_callback(self, callback: Callable[[Any], Any]) -> None:
-        """Called with a real owner session when this process wins the lease."""
+        """Called with a runtime-owning session when this process wins the lease."""
         ...
 
     def set_stopped_callback(self, callback: Callable[[], Any]) -> None:
-        """Called when the owner ENDED the session deliberately."""
+        """Called when the runtime ENDED the session deliberately."""
         ...
 
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
-        """Called when the owner retired itself for a newer build."""
+        """Called when the runtime retired itself for a newer build."""
         ...
 
     def set_cancel_resolution(self, resolver: Callable[[int], None] | None) -> None:
         """Arm the seam that rewrites an optimistic cancel count.
 
         A follower's Esc reports the count it can see synchronously; the
-        authoritative number resolves on the owner and arrives later.
+        authoritative number resolves on the runtime and arrives later.
         """
         ...
 
