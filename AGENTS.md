@@ -809,6 +809,76 @@ then either hand it to the window's release owner or become that owner. It
 does not bump the version on its own branch, and it does not release
 one PR alone while other merged work is sitting on `main` unreleased.
 
+## Releasing the browser extension to the Chrome Web Store
+
+The extension and the runtime release on separate tracks. The runtime uses the
+combined-release protocol above; the extension uses the Chrome Web Store's own
+two-phase review model, driven by two workflow_dispatch workflows. Both live in
+`.github/workflows/` and run against the `chrome-web-store` (stage) and
+`chrome-web-store-production` (promote) protected environments. The store
+credentials are environment-scoped variables — they are not readable from a
+local shell or a workflow token, so there is no local path to the store API.
+
+**The extension version in `extension/manifest.json` and
+`extension/package.json` tracks the extension code, not the review queue.** It
+must be bumped in the same PR that changes extension behaviour, so that every
+submitted version identifies exactly one tree. A PR that changes extension
+source without bumping the version has created an ambiguous artifact — the
+version number no longer pins a tree. This happened with 0.1.9 (PR #798 changed
+9 extension files including `protocol.gen.ts` without a bump), and the fix was
+to bump to 0.1.10 before the next submission.
+
+### Phase 1: Submit for review
+
+```sh
+gh workflow run chrome-web-store.yml -R damianvtran/local-operator \
+  --ref main -f ref=<origin/main sha> -f version=<manifest version>
+```
+
+This builds the extension from the named commit, validates the zip, and calls
+the store's upload + `STAGED_PUBLISH` endpoint. The item enters Google's review
+queue as `PENDING_REVIEW`. While an item is in review, the store refuses all
+further uploads with `HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE`. That
+rejection is non-destructive and leaves the queued item untouched, so
+re-dispatching the stage workflow is the practical way to read the queue state
+(observed across runs 34184188091, 34211464472, 34259291271, 34316525125,
+34385550911, 34452314995 while 0.1.8 sat in review). The script itself
+deliberately does not translate error reasons into behaviour — it only prints
+the store's body — so treat the rejection as an observation, not a contract.
+
+Google publishes no SLA for review. Extensions using the `debugger` permission
+with broad host access routinely draw extended manual review (the 0.1.8 review
+took ~4.5 days). **Do not cancel a pending review to force a new submission** —
+cancelling forfeits the accrued queue position with no visibility into how
+close it was. Once the review finishes, promote the approved revision; that
+clears the queue and the next version can be staged immediately.
+
+### Phase 2: Publish an approved staged revision
+
+When the store dashboard shows "Ready to publish" (or `fetchStatus` reports
+`STAGED` at 100% deploy), publish it:
+
+```sh
+gh workflow run chrome-web-store-promote.yml -R damianvtran/local-operator \
+  --ref main -f version=<approved version>
+```
+
+This skips the build entirely — it reads the store's own `fetchStatus`,
+refuses unless the submitted revision is STAGED at 100% for exactly that
+version, then calls `publish` and polls until `PUBLISHED`. It is the automated
+equivalent of the dashboard's Publish button, behind the same environment
+guards and main-only ancestry check as a stage upload.
+
+### What to record
+
+After every submission or promotion, post the outcome on the relevant PR:
+the workflow run URL, the exact API response (not a summary of it), the
+version, and the source commit. The release record (`docs/store/release-record.md`)
+is updated with the artifact SHA-256, source commit, and protocol version once
+the version is live on the public listing. Never claim a version is live from
+a merged PR or a workflow's success — only from the public listing or a
+successful publish call.
+
 ## Who may merge: two tiers, by code ownership
 
 `main` is governed by a ruleset that requires one approving review from a code
