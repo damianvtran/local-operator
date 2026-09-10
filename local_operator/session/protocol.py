@@ -40,6 +40,36 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.session.frontend_state import FrontendSessionState
 
 
+def unanswered_tail_call_ids(messages: Sequence[Any]) -> set[str]:
+    """Calls in the CURRENT turn's latest group that have no result yet.
+
+    The one scan behind both "this row is not finished" display questions
+    (``pending_display_tool_ids`` and ``executing_display_tool_ids``), which
+    differ only in what makes the call unfinished — a gate parked in front of
+    it, or the tool still executing. Held here rather than on either session
+    class because the rule is a property of the MESSAGE TAIL, not of the
+    transport: the local owner reads its in-memory context and a remote
+    viewer its display window, and the two must answer identically for the
+    same conversation or the same resumed row settles differently depending
+    on which surface replayed it.
+
+    The latest call group after the latest user boundary is the only eligible
+    group, so old interrupted turns keep their ``⊘`` and are never revived by
+    a later turn's liveness.
+    """
+    answered: set[str] = set()
+    for message in reversed(messages):
+        role = getattr(message, "role", "")
+        if role == "user":
+            break
+        if role == "tool":
+            answered.add(str(getattr(message, "tool_call_id", "")))
+        calls = getattr(message, "tool_calls", None)
+        if role == "assistant" and calls:
+            return {call.id for call in calls} - answered
+    return set()
+
+
 @dataclass(frozen=True, slots=True)
 class CompactionOutcome:
     """What one explicit compaction request did — see :meth:`SessionProtocol.compact_now`.
