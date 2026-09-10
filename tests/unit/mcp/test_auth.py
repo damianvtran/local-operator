@@ -31,6 +31,7 @@ from local_operator.mcp.auth import (
     mcp_oauth_credential_id,
     oauth_server_names,
     parse_oauth_callback_input,
+    payload_carries_grant,
     wire_oauth_auth,
 )
 from local_operator.mcp.config import (
@@ -631,6 +632,52 @@ class TestClearForReauth:
         assert clear_for_reauth("codex", Path("/anywhere"), store, removed) is None
         assert store.list_credentials(MCP_OAUTH_PROVIDER) == []
         assert removed == ["codex"]
+
+    def test_a_client_info_only_row_that_cannot_be_deleted_refuses(self, monkeypatch) -> None:
+        """The SECOND arm's failed delete — the one no test reached.
+
+        The two cases above cover this gate's arms separately: a grant row
+        whose delete fails (refused) and a ``client_info``-only row that
+        deletes cleanly (removed). Their intersection is its own path — the
+        direct removal in the second arm, reached only when the capability
+        test was False — and mutating away either of its guards left all 261
+        tests green, so nothing pinned it.
+
+        It has to refuse for the same reason the first arm does, and the
+        reason is stronger here than "a row survived": a surviving
+        ``client_info`` short-circuits DCR, so the login would reuse the very
+        registration the user ran reauth to replace, and would do it while
+        reporting success. ``removed`` must stay empty — a caller that warns
+        "your credential is gone" after a cancelled grant must not say so for
+        a row that is still on disk.
+
+        The refusal is DOUBLE-COVERED and both layers are load-bearing:
+        the ``except`` here, and the re-read below that asks the store rather
+        than trusting the call's return. Measured, not assumed — swallowing
+        the exception alone still leaves this test green, because the re-read
+        catches it; only removing BOTH lets the reauth proceed. That is
+        defence in depth against a racing writer, not redundancy, so neither
+        layer may be deleted as "already handled by the other".
+        """
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        store = RefusingStore()
+        McpTokenStorage(self.URL, store).seed_client_info("client-1")
+        self._pin(monkeypatch, store)
+        # The precondition that puts us in the second arm at all: no grant, so
+        # the strict capability test is False and the first removal declines.
+        # Asserted rather than assumed — if this were a grant the test would
+        # silently exercise the arm above and prove nothing new.
+        assert payload_carries_grant(McpTokenStorage(self.URL, store)._read()) is False
+
+        removed: list[str] = []
+        error = clear_for_reauth("codex", Path("/anywhere"), store, removed)
+        assert error is not None and "still in place" in error
+        assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 1  # really survived
+        assert removed == []
 
     def test_an_unreadable_store_refuses_rather_than_assuming_empty(self, monkeypatch) -> None:
         """ "Cannot rule out a surviving credential" is not "there is none".

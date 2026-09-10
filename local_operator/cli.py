@@ -3756,9 +3756,29 @@ def mcp_command(args: argparse.Namespace) -> int:
 
         return asyncio.run(_mcp_login_server(args.name, Path.cwd()))
     if args.mcp_command == "logout":
-        from local_operator.mcp.auth import mcp_logout_server
+        from local_operator.mcp.auth import McpCredentialDeleteError, mcp_logout_server
 
-        error = mcp_logout_server(args.name, Path.cwd())
+        try:
+            error = mcp_logout_server(args.name, Path.cwd())
+        except McpCredentialDeleteError as exc:
+            # The row was FOUND and its delete FAILED, so the credential is
+            # still on disk and this server is still logged in. That is a
+            # retryable condition — a sibling session holding an EXCLUSIVE
+            # sqlite transaction is enough to cause it — so it is reported as
+            # one error line like every other failure at this boundary.
+            #
+            # Caught rather than left to propagate: an escaping exception
+            # reaches ``main``'s generic handler, which prints a stack trace
+            # and "Please review and correct the error to continue". That
+            # frames a locked store as a bug in local-operator rather than
+            # something the user can act on, and buries the one sentence that
+            # matters — the credential survived — under 30 lines of traceback.
+            print(
+                f"error: MCP logout failed: {exc}. Retry once the process holding "
+                "the credential store has released it.",
+                file=sys.stderr,
+            )
+            return 1
         if error is not None:
             print(f"error: MCP logout failed: {error}", file=sys.stderr)
             return 1

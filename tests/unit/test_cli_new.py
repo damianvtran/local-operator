@@ -750,6 +750,82 @@ def test_mcp_logout_command_reports_removal(
     assert "nothing" not in capsys.readouterr().out  # reason goes to stderr
 
 
+def test_mcp_logout_reports_a_failed_delete_as_one_actionable_line(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A locked store must produce ONE error line, not a stack-trace banner.
+
+    ``McpTokenStorage.clear`` RAISES when a row is found and its delete fails,
+    so that a caller cannot read it as the benign "nothing was stored". The
+    logout branch is the one caller with no reauth gate in front of it: left
+    bare, the exception reached ``main``'s generic handler, which printed
+    "Error: ...", a 30-line traceback, and "Please review and correct the
+    error to continue" for a sibling process holding a sqlite write lock.
+
+    That framing is wrong twice — it presents a retryable, user-fixable
+    condition as a defect in local-operator, and it buries the sentence that
+    matters (the credential is still there) under the trace.
+
+    Driven through the real ``main()`` over a real ``AuthStore``, because the
+    defect lived in the seam BETWEEN the helper and the entry point: every
+    layer below was already correct and a test calling ``mcp_command``
+    directly still passes the generic handler by. The store is a real one on
+    ``tmp_home`` whose delete raises the real ``OperationalError`` a locked
+    db raises, rather than a mock raising the app's own exception type.
+    """
+    import json
+    import sqlite3
+
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.providers.auth_store import AuthStore
+
+    class LockedStore(AuthStore):
+        """Real store, real rows — but its delete hits a held write lock."""
+
+        deletes_attempted = 0
+
+        def delete_credential(self, credential_id: int) -> None:
+            type(self).deletes_attempted += 1
+            raise sqlite3.OperationalError("database is locked")
+
+    url = "https://locktest.example/mcp"
+    (tmp_home / ".local-operator").mkdir(parents=True, exist_ok=True)
+    (tmp_home / ".local-operator" / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"locktest": {"url": url}}})
+    )
+    store = LockedStore(tmp_home / ".local-operator" / "auth.db")
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+    # A stored grant is what makes the server OAuth-capable AND what the
+    # delete then fails on — both preconditions come from this one row.
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "SURVIVOR"}})
+    auth_mod.OAUTH_CHALLENGES.clear()
+
+    # The observation path must be LIVE before its silence means anything: a
+    # missing row, or a config the loader never saw, would make the command
+    # fail for an unrelated reason and this test pass without ever reaching
+    # the raise. Assert the setup landed instead of assuming it.
+    assert auth_mod.server_has_stored_grant(url, store) is True
+
+    monkeypatch.setattr(sys, "argv", ["program", "mcp", "logout", "locktest"])
+    assert main() == 1
+
+    err = capsys.readouterr().err
+    # The delete was really attempted — this is the failed-delete path and not
+    # some earlier refusal (unknown name, not-OAuth) wearing the same rc.
+    assert LockedStore.deletes_attempted == 1
+    # The credential really did survive, which is what the message must say.
+    assert auth_mod.server_has_stored_grant(url, store) is True
+    assert "still in place" in err
+    assert "Retry once" in err  # actionable: names what the user can do
+    # NOT the old message, which claimed nothing was stored while the row
+    # survived — the conflation this PR removed.
+    assert "nothing to log out of" not in err
+    # The regression itself: no traceback banner, and one line of output.
+    assert "Stack Trace" not in err
+    assert "Please review and correct the error" not in err
+    assert len([line for line in err.splitlines() if line.strip()]) == 1
+
+
 @pytest.mark.asyncio
 async def test_mcp_reauth_removes_then_logs_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

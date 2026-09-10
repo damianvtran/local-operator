@@ -1066,9 +1066,23 @@ def mcp_logout_server(
     A FAILED delete is none of those three and does not come back as a string
     at all: it raises :class:`McpCredentialDeleteError`, because the row is
     still on disk and a caller must not be able to mistake that for the benign
-    "nothing was stored" outcome. Every caller either handles it (see
-    :func:`clear_for_reauth`) or already funnels exceptions into its own
-    failure notice.
+    "nothing was stored" outcome.
+
+    That raise is part of the contract, so every call site handles it. Named
+    rather than asserted, because "all callers handle this" is a claim that
+    silently decays the moment somebody adds the next caller — and it already
+    did once: ``mcp logout`` was left bare when the raise was introduced, and
+    a locked store printed a stack trace where it used to print one line.
+
+    * :func:`clear_for_reauth` catches it explicitly in both of its arms and
+      converts it into the refusal that stops the login;
+    * ``cli.mcp_command``'s ``logout`` branch catches it and prints one error
+      line, because reaching ``main``'s generic handler means a traceback;
+    * :func:`~local_operator.mcp.grants.logout_server` and
+      :func:`~local_operator.mcp.grants.clear_for_reauth_server` funnel it
+      through their ``except Exception`` into a notice body;
+    * the TUI's ``_mcp_logout`` wraps both verbs in one ``except Exception``
+      that becomes a system notice.
 
     The deletion goes through the REAL store (``_resolve_store(None)``), not
     the session manager's possibly-injected one: logout must remove the
