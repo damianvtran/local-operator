@@ -204,7 +204,28 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
         outcome_is_synchronous = True
         runtime_locality: RuntimeLocality = "this-process"
 
-        pass
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
 
     # A bare stand-in would re-create the defect's blind spot; the point is
     # that the PRODUCTION attribute name resolves. Use the real Session's

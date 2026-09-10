@@ -16,8 +16,10 @@ can never be recalled from.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual import events
@@ -934,6 +936,64 @@ def test_the_store_key_is_usable_by_a_real_variable_store() -> None:
     assert store.credential_names() == [key]
 
 
+class _SlowRouteSession(FakeSession):
+    """A credential route that answers LATE, to open the await window.
+
+    The submit seam now awaits the store round-trip inside the message
+    handler. Whether that is safe is a property of the Textual App pump (it
+    awaits each handler to completion before the next dispatch — verified by
+    probe in ``tests/e2e/test_inline_credential_e2e.py``'s companion probe),
+    and this double is how that property is pinned at the seam it protects:
+    an Enter that arrives DURING the round-trip must queue behind the handler,
+    not interleave with it.
+    """
+
+    def __init__(self, delay_s: float = 0.25) -> None:
+        super().__init__()
+        self._delay_s = delay_s
+
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        await asyncio.sleep(self._delay_s)
+        return await super().credential_op(action, key, value)
+
+
+@pytest.mark.asyncio
+async def test_an_enter_arriving_during_the_store_await_queues_behind_it() -> None:
+    """No double-send and no interleave: the await holds the pump (plan §4.3).
+
+    Enter ends the secret; a second Enter sends the next message. If the
+    handler's await let the second submit interleave, the model could receive
+    the second message BEFORE the first — or the first turn could start with a
+    citation the store had not answered yet. Both orders are asserted against.
+    """
+    session = _SlowRouteSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        await _armed_capture(pilot, editor, "deploy with ")
+        await pilot.press("enter")
+        # The round-trip is now open (0.25s). A second line submitted while it
+        # runs must NOT pass the first handler mid-flight.
+        await pilot.pause()
+        for char in "second message":
+            await pilot.press(char)
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause()
+
+        # Exactly two prompts, in order, and no double-send of either.
+        assert len(session.prompts) == 2, session.prompts
+        first = str(session.prompts[0])
+        assert "credential" in first and "deploy with" in first
+        assert "second message" == str(session.prompts[1])
+        # The store answered before the first prompt left the seam: the first
+        # message names the stored key, never a NOT-stored citation.
+        assert "NOT stored" not in first
+        assert SECRET not in first and SECRET not in str(session.prompts[1])
+
+
 class _ViewerSession(FakeSession):
     """A follower: no local variable store, exactly as a real viewer has none.
 
@@ -1085,12 +1145,27 @@ async def test_a_store_refusal_is_reported_to_the_operator_not_only_the_model() 
 
 
 def test_the_refusal_phrase_names_the_cause_that_actually_applied() -> None:
-    """Q3: "no session store available" is false when a store refused the write."""
-    assert "no session store available" in describe_unstored(None)
-    # A present store that refused must not blame an absent one.
+    """Q3: the phrase must blame what actually happened.
+
+    The ``None`` arm is the ROUND-TRIP failure — the session's store could not
+    be reached — which is what the submit seam degrades to when the runtime is
+    gone. It used to read "no session store available", copy that described a
+    topology rather than an outcome; a store that WAS reached and refused an
+    empty value was told apart from it by the ``reason`` arm, and that half is
+    unchanged.
+    """
+    unreachable = describe_unstored(None)
+    assert "NOT stored" in unreachable, "the outcome leads, whatever the cause"
+    assert "could not be reached" in unreachable
+    # A reached store that refused must not blame an unreachable one.
     refused = describe_unstored("empty-value")
-    assert "no session store available" not in refused
+    assert "could not be reached" not in refused
     assert "NOT stored" in refused, "the outcome leads, whatever the cause"
+    # Neither arm may name a privileged process: the failure is an event, not
+    # a topology the operator is invited to reason about.
+    for phrase in (unreachable, refused):
+        low = phrase.lower()
+        assert "owner" not in low and "viewer" not in low, phrase
 
 
 # -- the armed state is legible and cannot be disarmed by accident (D1/D2) ----
