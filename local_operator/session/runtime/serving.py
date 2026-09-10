@@ -2838,33 +2838,39 @@ class ServingSessionHandle(SessionHandle):
                 turns = await cast("Awaitable[list[Any]]", materialize())
             else:
                 turns = list(session.history()) if hasattr(session, "history") else []
-            result = await naming.refresh_title(current, complete_once, turns=turns)
+            # Bounded by the INVOKER's deadline, not the model's: a terminal or
+            # phone is holding a socket open for this receipt and abandons the
+            # request at `ACK_TIMEOUT_S`. See `ROUTED_TITLE_TIMEOUT_S`.
+            result = await naming.refresh_title(
+                current, complete_once, turns=turns, timeout=naming.ROUTED_TITLE_TIMEOUT_S
+            )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
             logger.debug("routed title refresh failed", exc_info=True)
-            result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
+            result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
         # The second condition is the rename-during-the-call guard: a `/rename`
         # landing while this was in flight outranks an answer decided against a
         # title no longer in force, and storing over it would strip the latch
         # protecting the words the user just typed.
         standing = getattr(session, "conversation_name", "") or ""
         if not result.changed or standing != current:
-            text = (
-                "nothing to title yet — /title <words> names it by hand"
-                if result.outcome == naming.TITLE_NOTHING_YET
-                else f"title unchanged: {standing}"
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, standing, stored=False),
+                style="info",
             )
-            return SlashResult(kind="notice", text=text, style="info")
         state = getattr(session, "conversation_name_state", None)
         release = getattr(state, "release_user_set", None)
         if callable(release):
             # Released only on success, and only here: a refresh that changed
             # nothing must leave a name the user typed exactly as they left it.
             release()
-        stored = setter(result.title, user_set=False)
+        # `setter` came off a duck-typed handle, so its return is untyped; the
+        # stored title is the string the receipt has to quote.
+        stored = str(setter(result.title, user_set=False) or result.title)
         self._publish_name()
-        return SlashResult(kind="notice", text=f"title refreshed: {stored}", style="info")
+        return SlashResult(kind="notice", text=naming.refresh_receipt(result, stored), style="info")
 
     def _publish_name(self) -> None:
         """Push a changed conversation name onto every surface that shows it.

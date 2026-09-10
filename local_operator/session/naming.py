@@ -648,13 +648,30 @@ def provisional_title(text: str) -> str:
     return label
 
 
-async def _ask_for_title(system: str, prompt: str, complete_fn, timeout: float) -> str | None:
-    """One bounded call, every failure resolving to ``None``.
+#: Returned by :func:`_ask_for_title` when the CALL failed, as opposed to the
+#: model answering "no title". Both still resolve to ``None`` for the automatic
+#: callers — the instruction to them is identical, leave the title alone — but a
+#: user who typed a command is owed the difference between "the name still fits"
+#: and "the model could not be reached", because only one of those is worth
+#: retrying. A sentinel rather than an exception keeps the isolation absolute:
+#: nothing propagates out of a naming call into the turn beside it.
+CALL_FAILED = object()
 
-    Shared by :func:`generate_title` and :func:`generate_retitle` so the two
-    have exactly one error policy between them. There is no retry here and
-    none underneath (the session marks the request single-attempt), so the
-    timeout is the entire budget.
+
+async def _ask_for_title(
+    system: str, prompt: str, complete_fn, timeout: float
+) -> str | object | None:
+    """One bounded call. ``None`` is "no title"; :data:`CALL_FAILED` is a failure.
+
+    Shared by :func:`generate_title`, :func:`generate_retitle` and
+    :func:`refresh_title` so they have exactly one error policy between them.
+    There is no retry here and none underneath (the session marks the request
+    single-attempt), so the timeout is the entire budget.
+
+    The two automatic callers collapse :data:`CALL_FAILED` back onto ``None``,
+    which is what they have always done and still correct: a failed check and an
+    unchanged subject are the same instruction to them. Only ``refresh_title``
+    keeps the distinction, because only it has a user waiting for an answer.
     """
     try:
         raw = await asyncio.wait_for(complete_fn(system, prompt), timeout)
@@ -662,13 +679,13 @@ async def _ask_for_title(system: str, prompt: str, complete_fn, timeout: float) 
         # CancelledError is caught deliberately: the naming task is detached
         # and routinely cancelled at shutdown, and letting that propagate
         # would surface a teardown traceback for a feature nobody waited on.
-        return None
+        return CALL_FAILED
     except Exception:
         # EVERY provider failure, 429 included. The turn is running alongside
         # this call and must never learn it happened; the request is `isolated`
         # so the failure cannot have moved the turn's route or credential
         # either. See ``ChatRequest.isolated``.
-        return None
+        return CALL_FAILED
     return parse_title(str(raw or ""))
 
 
@@ -817,7 +834,10 @@ async def generate_title(
     """
     if is_low_signal(text):
         return None
-    return await _ask_for_title(TITLE_SYSTEM_PROMPT, _errand_prompt(text), complete_fn, timeout)
+    title = await _ask_for_title(TITLE_SYSTEM_PROMPT, _errand_prompt(text), complete_fn, timeout)
+    # A failed call collapses back onto "no title": this caller has no user
+    # waiting and no receipt to write, so the two are one instruction to it.
+    return title if isinstance(title, str) else None
 
 
 async def generate_retitle(
@@ -866,7 +886,9 @@ async def generate_retitle(
     if not context:
         return None
     title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
-    if title is None:
+    if not isinstance(title, str):
+        # Both "no change" and a failed call: the same instruction to an
+        # automatic caller, which is why this path keeps the collapse.
         return None
     # A model that "changes" the title to the one it already has has answered
     # "no change" in the expensive spelling. Treat it as the sentinel so the
@@ -909,22 +931,71 @@ async def generate_retitle(
 #: word ends up accepted on a terminal and typed into a title on a phone.
 TITLE_REFRESH_WORDS = frozenset({"refresh", "update", "retitle"})
 
-#: What an on-demand refresh did, for a receipt that has to tell the user
-#: something true. The automatic path collapses all of these onto ``None``
-#: because its only instruction to itself is "leave the title alone", but a
-#: user who typed the command is owed the difference between "the name still
-#: fits" and "there is nothing to title yet" — two outcomes that would
-#: otherwise share one unhelpful line.
+#: The refresh budget for a call made INSIDE a request/response op — the routed
+#: ``slash_result`` path and the detached runtime's, where a follower or a phone
+#: is holding a socket open waiting for the receipt.
 #:
-#: A FAILED provider call is deliberately absent from this vocabulary. It is
-#: not observable here: ``_ask_for_title`` resolves every failure to ``None``
-#: on purpose, which is what keeps a naming call from ever touching the turn
-#: beside it, and unpicking that to report a 429 would trade the isolation for
-#: a distinction that changes nothing the user can act on — the title stands
-#: either way. So a failure reads as :data:`TITLE_UNCHANGED`.
+#: Sized against that client's deadline, not against the model. An attach client
+#: abandons its request at ``ACK_TIMEOUT_S`` (15 s), which is also
+#: :data:`TITLE_TIMEOUT_S` — so a routed refresh on the slow tail would store the
+#: new title, republish the record, and STILL report `owner connection lost`,
+#: because the answer arrived after nobody was listening. Reporting failure for
+#: work that succeeded is worse than a shorter ceiling: the title is decoration,
+#: the receipt is what the user reads.
+#:
+#: 8 s leaves room for the ``materialize_history`` that precedes the call (it
+#: pages a remote journal) and still lands comfortably inside the ack. The TUI
+#: worker keeps the full :data:`TITLE_TIMEOUT_S`: it paints into its own
+#: transcript when the answer arrives and nothing is holding a socket for it.
+ROUTED_TITLE_TIMEOUT_S = 8.0
+
+#: What an on-demand refresh did, for a receipt that has to tell the user
+#: something true. The automatic path collapses all of these onto ``None``,
+#: correctly: its only instruction to itself is "leave the title alone", and
+#: every outcome below says that. A user who typed the command is owed more.
+#:
+#: The distinction that costs the most to get wrong is UNAVAILABLE against
+#: UNCHANGED. Told "the name still fits", a user has been given a judgement
+#: about their conversation and no reason to try again; told the model could
+#: not be reached, they know the judgement never happened. Reporting a wedged
+#: provider as the former is the one outcome here that actively misinforms, so
+#: ``_ask_for_title`` distinguishes a failed CALL from a declined rename (see
+#: :data:`CALL_FAILED`) even though the isolation itself is unchanged — nothing
+#: propagates out of a naming call either way.
 TITLE_REFRESHED = "refreshed"
 TITLE_UNCHANGED = "unchanged"
+TITLE_UNAVAILABLE = "unavailable"
 TITLE_NOTHING_YET = "nothing-yet"
+
+
+#: The receipt each outcome earns, in the words every surface says them in.
+#: ONE spelling for three handlers (the TUI worker, the routed ``slash_result``
+#: path, the detached runtime), for the reason :data:`TITLE_REFRESH_WORDS` lives
+#: here: the change deliberately shares the CALL and the release rule across
+#: those surfaces so a phone and a terminal cannot drift, and the strings are
+#: the one part that still could — while being the only part the user reads.
+def refresh_receipt(result: "TitleRefresh", standing: str, *, stored: bool = True) -> str:
+    """The user-facing line for ``result``, given the title now in force.
+
+    ``standing`` rather than ``result.title`` because most branches report a
+    name the refresh did NOT choose: an unchanged answer names what is staying,
+    and a declined store names whatever won instead.
+
+    ``stored`` is what separates the two REFRESHED cases, and it has to be the
+    caller's word rather than something inferred here. The model producing a new
+    title and that title reaching the conversation are different events: a
+    ``/rename`` landing mid-call outranks the answer, so the caller declines the
+    store — and a receipt reading "title refreshed: <the rename>" would credit
+    this command with a name it did not choose and claim a store that never
+    happened. Same outcome, opposite receipts.
+    """
+    if result.outcome == TITLE_REFRESHED:
+        return f"title refreshed: {standing}" if stored else f"title unchanged: {standing}"
+    if result.outcome == TITLE_NOTHING_YET:
+        return "nothing to title yet — /title <words> names it by hand"
+    if result.outcome == TITLE_UNAVAILABLE:
+        return "could not reach the model — the title is unchanged"
+    return f"title unchanged: {standing}"
 
 
 @dataclass(frozen=True)
@@ -977,8 +1048,8 @@ async def refresh_title(
 
     What is deliberately NOT dropped is the isolation: this is the same single
     bounded tools-free call through :func:`_ask_for_title`, so a provider
-    failure resolves to :data:`TITLE_UNCHANGED` and can never reach the turn
-    running alongside it.
+    failure surfaces as :data:`TITLE_UNAVAILABLE` and can never reach the turn
+    running alongside it as an exception.
     """
     context = build_theme_context(turns or (), newest, current_title=current)
     if not context:
@@ -987,15 +1058,19 @@ async def refresh_title(
         # resolves itself as soon as the conversation has content.
         return TitleRefresh(TITLE_NOTHING_YET)
     title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
+    if title is CALL_FAILED:
+        # The model was never reached. Reported apart from "unchanged" because
+        # the two differ in the only way that matters to someone who typed a
+        # command: "the name still fits" is a judgement that happened and is
+        # not worth retrying, while this one never happened and is.
+        return TitleRefresh(TITLE_UNAVAILABLE)
     if title is None:
-        # Either the model answered with the ``<title/>`` sentinel ("the name
-        # still fits") or the call failed. They are indistinguishable here, and
-        # the difference does not matter to a user who has a title already: the
-        # name stands either way. With NO title, though, the sentinel is the
-        # model declining to name small talk, which is the nothing-yet case
-        # wearing a different hat, so it is reported as such rather than as a
-        # failure the user might retry forever.
+        # The ``<title/>`` sentinel: the model declined to rename. With a title
+        # in force that means "the name still fits"; with none it means there
+        # was nothing worth titling, which is the nothing-yet case arriving from
+        # the model rather than from an empty transcript.
         return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
+    assert isinstance(title, str)  # narrowed: CALL_FAILED and None returned above
     if current and title.casefold() == current.casefold():
         return TitleRefresh(TITLE_UNCHANGED, current)
     return TitleRefresh(TITLE_REFRESHED, title)

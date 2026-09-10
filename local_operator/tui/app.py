@@ -21861,17 +21861,18 @@ class OperatorApp(App[None]):
                 result = await naming.refresh_title(current, session.complete_once, turns=turns)
             except asyncio.CancelledError:
                 return
+            except Exception:  # noqa: BLE001 — silence is the one defect here
+                # `refresh_title` swallows the NAMING call's failures, but
+                # `materialize_history` is outside it and raises on ordinary
+                # reconnect races ("history changed while materializing").
+                # Uncaught, the worker dies with `refreshing the title…` still on
+                # screen and no answer ever — precisely what this method's
+                # contract forbids. The routed twins already resolve it this way.
+                logger.debug("title refresh could not read the history", exc_info=True)
+                result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
             # Superseded (a reload) or belonging to a session no longer on
             # screen: touch neither the title nor the transcript.
             if generation != source.naming.generation or source.retired:
-                return
-            if not result.changed:
-                if result.outcome == naming.TITLE_NOTHING_YET:
-                    self._notice_for(
-                        source, "nothing to title yet — /title <words> names it by hand"
-                    )
-                else:
-                    self._notice_for(source, f"title unchanged: {session.conversation_name}")
                 return
             # Re-read rather than trusting `current`, the rule
             # `_retitle_conversation_worker` follows: a `/rename` may have landed
@@ -21880,8 +21881,9 @@ class OperatorApp(App[None]):
             # would strip the very latch protecting the name the user just typed,
             # and the refresh would overwrite it — silently revoking their most
             # recent instruction in favour of their previous one.
-            if session.conversation_name != current:
-                self._notice_for(source, f"title unchanged: {session.conversation_name}")
+            standing = session.conversation_name
+            if not result.changed or standing != current:
+                self._notice_for(source, naming.refresh_receipt(result, standing, stored=False))
                 return
             # Released only once a replacement is actually in hand. Released
             # before the call instead, a refresh that came back "unchanged"
@@ -21889,7 +21891,7 @@ class OperatorApp(App[None]):
             # the user typed and is keeping.
             session.conversation_name_state.release_user_set()
             stored = self._store_title_for(source, session, result.title)
-            self._notice_for(source, f"title refreshed: {stored}")
+            self._notice_for(source, naming.refresh_receipt(result, stored))
         finally:
             source.active_workers -= 1
             # Naming fires ONCE per conversation, and the only thing that re-arms
@@ -32500,14 +32502,25 @@ class OperatorApp(App[None]):
         )
 
     async def _title_refresh_slash_result(self, session: Any, SlashResult: Any) -> Any:
-        """``/title refresh`` over the control path — same policy as the TUI's.
+        """``/title refresh`` routed from a follower, with this app as owner.
 
-        Shares :func:`naming.refresh_title` and the release-on-success rule with
-        :meth:`_title_refresh_worker` rather than reimplementing either, so a
-        phone and a terminal cannot drift on what a refresh does to the
-        ``user_set`` flag. What differs is only the delivery: a receipt returned
-        as data instead of painted through ``notice``.
+        Shares :func:`naming.refresh_title`, the release-on-success rule and
+        :func:`naming.refresh_receipt` with :meth:`_title_refresh_worker` rather
+        than reimplementing any of them, so a phone and a terminal cannot drift
+        on what a refresh does to the ``user_set`` flag or on what it says.
+        What differs is the delivery — a receipt returned as data rather than
+        painted — and the deadline: a client is holding a socket open for this
+        answer, so the call gets :data:`naming.ROUTED_TITLE_TIMEOUT_S` instead
+        of the worker's full budget.
+
+        ``source`` is captured at DISPATCH here for the same reason the worker
+        does it, and it is easy to miss on this path precisely because there is
+        no worker in sight: the two awaits below are just as long, so
+        ``self._interaction`` is just as much a moving target, and
+        ``_store_title``'s convenience wrapper (which re-reads it) is safe only
+        for callers that do not suspend.
         """
+        source = self._interaction
         current = session.conversation_name
         turns = None
         if not hasattr(session, "materialize_history"):
@@ -32515,28 +32528,41 @@ class OperatorApp(App[None]):
         try:
             if turns is None:
                 turns = await getattr(session, "materialize_history")()
-            result = await naming.refresh_title(current, session.complete_once, turns=turns)
+            result = await naming.refresh_title(
+                current,
+                session.complete_once,
+                turns=turns,
+                timeout=naming.ROUTED_TITLE_TIMEOUT_S,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
             logger.debug("routed title refresh failed", exc_info=True)
-            result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
+            result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
         # The rename-during-the-call guard the TUI worker documents: a `/rename`
         # that landed while this was in flight outranks an answer decided
         # against a title no longer in force, and storing over it would strip
         # the latch protecting the words the user just typed.
-        if not result.changed or session.conversation_name != current:
-            text = (
-                "nothing to title yet — /title <words> names it by hand"
-                if result.outcome == naming.TITLE_NOTHING_YET
-                else f"title unchanged: {session.conversation_name}"
+        standing = session.conversation_name
+        if not result.changed or standing != current:
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, standing, stored=False),
+                style="info",
             )
-            return SlashResult(kind="notice", text=text, style="info")
-        session.conversation_name_state.release_user_set()
-        stored = self._store_title(session, result.title)
+        # Probed rather than called outright: `session` is `Any` on this path
+        # (it is whatever facade the follower's owner holds), and the sibling in
+        # `owned.py` guards for the same reason. An AttributeError here would
+        # surface as a failed routed op rather than as a missing rename.
+        release = getattr(
+            getattr(session, "conversation_name_state", None), "release_user_set", None
+        )
+        if callable(release):
+            release()
+        stored = self._store_title_for(source, session, result.title)
         return SlashResult(
             kind="notice",
-            text=f"title refreshed: {stored}",
+            text=naming.refresh_receipt(result, stored),
             style="info",
             data={"stored": stored},
         )
