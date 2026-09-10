@@ -1221,18 +1221,59 @@ class OAuthCallbackFlow(ABC):
 
         if not done:
             raise LoginTimeoutError(self._timeout_message())
-        for task in done:
+
+        # ``done`` is a SET, and more than one waiter can land in it: futures
+        # that resolve in the same event-loop pass are all reported together,
+        # so iterating it directly lets HASH ORDER pick the outcome. That is
+        # not a theoretical concern -- a browser callback arriving as a sibling
+        # login pokes ``/cancel`` co-resolves ``_captured`` with ``_cancelled``
+        # and discarded an authorization code we already held (28% of
+        # concurrent trials), and it downgraded a genuine
+        # ``_capture_error`` -- the forged-redirect/state-mismatch check -- to a
+        # cancellation that hosts render as a quiet "login cancelled" with no
+        # remedy offered.
+        #
+        # So the outcomes are ranked and the most significant one wins,
+        # regardless of which future the set happens to yield first:
+        #
+        #   0 success -- we hold a code. NEVER lose one that was captured:
+        #     the user already approved in the browser, and a cancellation
+        #     racing it does not un-approve it.
+        #   1 failure -- a real error the user must see.
+        #   2 cancellation -- correct only when nothing better happened.
+        #
+        # A cancelled waiter carries no outcome at all (the ``finally`` above
+        # cancels every waiter, and ``.exception()`` on one raises rather than
+        # returning), so it is ranked last and skipped.
+        def _outcome_rank(task: asyncio.Future[Any]) -> int:
+            if task.cancelled():
+                return 3
+            exc = task.exception()
+            if exc is not None:
+                # ``_abort_watch`` signals ctrl+C by RAISING; every other
+                # exception is a real failure and outranks a cancellation.
+                return 2 if isinstance(exc, LoginCancelledError) else 1
+            # ``_captured`` and the manual-paste task both resolve to a
+            # ``(code, state)`` tuple; only the string-valued futures below
+            # describe a non-success.
+            if isinstance(task.result(), str):
+                return 2 if task is self._cancelled else 1
+            return 0
+
+        for task in sorted(done, key=_outcome_rank):
+            if task.cancelled():
+                continue
             exc = task.exception()
             if exc is not None:
                 raise exc
             result = task.result()
             if isinstance(result, str):
-                # Both string-valued futures land here, and which one resolved
-                # decides the EXCEPTION TYPE: a superseded login is a
-                # cancellation (hosts report it quietly and offer no remedy),
-                # while `_capture_error` is a real failure worth surfacing.
+                # Which future resolved decides the EXCEPTION TYPE: a
+                # superseded login is a cancellation (hosts report it quietly
+                # and offer no remedy), while `_capture_error` is a real
+                # failure worth surfacing.
                 if task is self._cancelled:
                     raise LoginCancelledError(result)
                 raise LoginError(result)
             return result
-        raise LoginTimeoutError()  # unreachable
+        raise LoginTimeoutError()  # every waiter was cancelled during teardown

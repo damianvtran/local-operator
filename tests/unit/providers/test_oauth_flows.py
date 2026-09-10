@@ -2167,6 +2167,87 @@ async def test_a_real_sibling_login_stands_down_when_poked() -> None:
             await sibling_run
 
 
+async def _await_outcome(flow: OAuthCallbackFlow, resolve: list[tuple[str, Any]]) -> str:
+    """Drive `_await_code` with several futures resolving in ONE event-loop pass.
+
+    The race this guards is co-resolution: `asyncio.wait` reports every future
+    that settled before the waiter was rescheduled, and `done` is a SET, so
+    iterating it lets hash order pick the outcome. Resolving without awaiting
+    in between is what actually holds that window open — a test that yields
+    between the two resolutions can never lose the race and therefore proves
+    nothing about it.
+    """
+    loop = asyncio.get_running_loop()
+    flow._captured = loop.create_future()
+    flow._capture_error = loop.create_future()
+    flow._cancelled = loop.create_future()
+    task = asyncio.create_task(flow._await_code())
+    await asyncio.sleep(0)  # let `_await_code` reach `asyncio.wait`
+    for which, value in resolve:  # deliberately no await between these
+        getattr(flow, which).set_result(value)
+    try:
+        got = await asyncio.wait_for(task, timeout=5)
+        return "SUCCESS" if got == ("real-code", "st") else f"UNEXPECTED:{got}"
+    except LoginCancelledError:
+        return "CANCELLED"
+    except LoginError:
+        return "ERROR"
+
+
+@pytest.mark.parametrize(
+    "resolve",
+    [
+        [("_captured", ("real-code", "st")), ("_cancelled", "superseded")],
+        [("_cancelled", "superseded"), ("_captured", ("real-code", "st"))],
+    ],
+    ids=["code-first", "cancel-first"],
+)
+async def test_a_captured_code_survives_a_concurrent_cancel(
+    resolve: list[tuple[str, Any]],
+) -> None:
+    """A `/cancel` racing a successful callback must NOT discard the code.
+
+    The user already approved in the browser and the provider already issued a
+    code; a sibling login wanting the port does not un-approve that. Losing it
+    here would be worse than the bug the `/cancel` route fixes, so this is
+    asserted over repeated trials in BOTH resolution orders — a single trial
+    can pass on set order alone.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, resolve) for _ in range(40)}
+    assert outcomes == {"SUCCESS"}, f"a captured code was lost to a cancel: {outcomes}"
+
+
+@pytest.mark.parametrize(
+    "resolve",
+    [
+        [("_capture_error", "state mismatch"), ("_cancelled", "superseded")],
+        [("_cancelled", "superseded"), ("_capture_error", "state mismatch")],
+    ],
+    ids=["error-first", "cancel-first"],
+)
+async def test_a_real_error_is_not_downgraded_to_a_cancellation(
+    resolve: list[tuple[str, Any]],
+) -> None:
+    """A genuine failure racing a cancel must still surface AS a failure.
+
+    Distinct from the code-loss case above and tested separately: hosts render
+    `LoginCancelledError` as a quiet outcome offering no remedy, so a
+    forged-redirect/state-mismatch silently downgraded to "login cancelled"
+    tells the user nothing about a security-relevant event.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, resolve) for _ in range(40)}
+    assert outcomes == {"ERROR"}, f"a real error was silenced as a cancel: {outcomes}"
+
+
+async def test_a_cancel_alone_is_still_a_cancellation() -> None:
+    """The control: ranking outcomes must not have broken the plain cancel."""
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, [("_cancelled", "superseded")]) for _ in range(20)}
+    assert outcomes == {"CANCELLED"}
+
+
 async def test_cancel_route_answers_200_not_404() -> None:
     """The route itself: our server must ANSWER `/cancel`, not 404 it.
 
