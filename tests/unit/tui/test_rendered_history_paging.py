@@ -1034,12 +1034,21 @@ def test_the_compaction_marker_fits_an_80_column_terminal() -> None:
     once per seam on exactly the sessions audit paging exists for.
 
     The budget is NOT the terminal width, which is why round 1's arithmetic
-    ("under ~76") produced a 71-character string that still wrapped. An
-    80-column terminal yields a 78-column screen, the notice block's padding
-    takes more, and the `· ` glyph costs 2 — measured at 68 columns of text in
-    a rendered frame, so 66 for the string. Kept as a cheap unit guard beside
-    the frame capture (`scripts/audit_history_shot.py <dir> marker 80x30`),
-    which is the instrument that established the number.
+    ("under ~76") produced a 71-character string that still wrapped. At 80
+    columns the budget is 70 text columns, and the mechanical check is
+    ``NoticeBlock.body_budget(76) == 70`` rather than hand arithmetic (D6): an
+    80-column terminal gives a 78-column screen, ``scrollbar-gutter: stable``
+    reserves one more (77), the view's left padding one (76, the painted block
+    width), ``_build`` folds at ``max(width - 2, 12)`` (74), and ``GLYPH_COLS``
+    is 4 rather than 2 (70). Do not re-derive it from the superseded "68
+    usable, so 66" arithmetic, which reached a safe number through compensating
+    errors and does not transfer to any other width.
+
+    This guard pins 66, not the 70 budget, so a copy change that wants the
+    4 columns of headroom has to move the number here deliberately. Kept as a
+    cheap unit guard beside the frame capture
+    (`scripts/audit_history_shot.py <dir> marker 80x30`), which is the
+    instrument that established the number.
     """
     from local_operator.tui.session_presentation import COMPACTION_MARKER_NOTICE
 

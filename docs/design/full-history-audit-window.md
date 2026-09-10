@@ -260,11 +260,21 @@ the original sentence were wrong.
 frame.** The original 82-character string wrapped and orphaned its last two
 words at every compaction (D2). Arithmetic alone is not enough to settle this:
 round 1 derived a "~76 character" budget and the 71-character string it produced
-*still wrapped*. The budget is not the terminal width — an 80-column terminal
-gives a 78-column screen, the notice block's padding takes more, and the `· `
-glyph costs 2, leaving 68 columns of text and so 66 for the string. Check it
-with `scripts/audit_history_shot.py <dir> marker 80x30`, which is the only
-instrument that answers the question.
+*still wrapped*. The budget at 80 columns is **70 text columns**, and the
+mechanical check is `NoticeBlock.body_budget(76) == 70` rather than hand
+arithmetic (D6). The chain: an 80-column terminal gives a 78-column screen;
+`scrollbar-gutter: stable` on `TranscriptView` permanently reserves one more
+column whether or not the bar is visible (77); the view's own left padding takes
+one (76, the width the block is actually painted at); `_build` folds at
+`max(width - 2, 12)` (74); and the hanging glyph field is `GLYPH_COLS` =
+`SPINE_INDENT + 2` = 4, not 2 (70). The shipped string is 66, so it sits 4
+columns inside the budget. Do **not** re-derive this from the older "68 usable,
+so 66" arithmetic that earlier drafts of this document carried: it reached a safe
+number through two compensating errors — subtracting neither the reserved
+scrollbar column nor the fold clamp, and charging the glyph 2 where it costs 4 —
+so it cannot be carried to any other width. Check a copy change in a rendered
+frame with `scripts/audit_history_shot.py <dir> marker 80x30`, which is the
+instrument that settles the question.
 
 Head notice copy, by state — this is the full state table for
 `_reconcile_head_notice`:
