@@ -4278,7 +4278,12 @@ class FakeProviderController:
         # and reports as "login failed", which looks exactly like a real failure.
         self.login_callbacks = factory
 
-    async def login(self, provider):
+    async def login(self, provider, **_kwargs):
+        # ``**_kwargs`` mirrors the real ``ProviderController.login``, which
+        # takes ``signal=`` (and ``open_browser=``) so a host can cancel a
+        # pending login. A double pinning the older narrower signature makes
+        # the app's call raise TypeError, which the flow reports as "login
+        # failed" — indistinguishable from a real provider failure.
         self.logins.append(provider)
         return f"logged in {provider}"
 

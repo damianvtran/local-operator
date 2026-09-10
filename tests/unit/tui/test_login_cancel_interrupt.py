@@ -191,6 +191,12 @@ async def test_the_cancel_releases_the_port_and_a_retry_works(
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
         await _start_login(pilot, app, "anthropic")
+        # THE PRECONDITION, ASSERTED BEFORE THE CANCEL. A fast "cancelled" only
+        # means something if a login was genuinely pending and genuinely held
+        # the port: a setup that quietly did not take looks exactly like a
+        # feature that works. Both facts are checked — the flow published its
+        # signal, and the OS says the socket is taken.
+        assert await _settle(lambda: app._login_signal is not None), "no login was ever pending"
         assert await _settle(lambda: _port_held(port)), "the listener never came up"
 
         await pilot.press("ctrl+c")

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import socket
 import sys
 from typing import Any
 
@@ -226,6 +227,19 @@ raise SystemExit(code)
 """
 
 
+def _listener_is_up(port: int) -> bool:
+    """True when something already holds ``port`` on loopback."""
+    probe = socket.socket()
+    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("127.0.0.1", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="pty is POSIX-only")
 @pytest.mark.parametrize("provider", ["anthropic", "alibaba"])
 def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
@@ -277,33 +291,67 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
             output.extend(chunk)
 
     try:
-        # Wait until the flow is genuinely pending: it has asked for input.
+        # THE PRECONDITION, ASSERTED. "Cancelled in 40 ms" is worthless if the
+        # login never started — a setup that silently did not take is
+        # indistinguishable from a feature that works. So this waits for proof
+        # the flow is genuinely PARKED (it has printed its prompt) and, for a
+        # loopback provider, that the listener is really BOUND. Without both,
+        # the cancel below could be measuring an empty process exiting.
         deadline = time.monotonic() + 60
         while b"empty to cancel" not in bytes(output) and time.monotonic() < deadline:
             drain(0.2)
-        assert b"empty to cancel" in bytes(output), bytes(output).decode(errors="replace")
+        assert b"empty to cancel" in bytes(output), (
+            "the login never reached its prompt, so there was nothing pending to "
+            f"cancel:\n{bytes(output).decode(errors='replace')}"
+        )
+        if provider == "anthropic":
+            assert _listener_is_up(54545), (
+                "the loopback listener was never bound, so a fast 'cancel' would "
+                "prove nothing about releasing it"
+            )
 
         started = time.monotonic()
         os.write(fd, b"\x03")  # a real Ctrl+C keypress
 
-        status = None
+        # Wait for the CHILD to report its own exit rather than for waitpid to
+        # win a race. Under xdist the worker process has other machinery that
+        # reaps children, so `waitpid` can return ECHILD even though the
+        # command exited perfectly — observed on CI, where the captured output
+        # contained "EXIT_CODE=130" while this loop concluded the process was
+        # still running. The pty EOF and the child's own printed exit code are
+        # facts about the product; `waitpid` succeeding is a fact about the
+        # test runner.
+        status: int | None = None
         while time.monotonic() - started < 30.0:
             drain(0.1)
-            done, waited = os.waitpid(pid, os.WNOHANG)
+            if b"EXIT_CODE=" in bytes(output):
+                break
+            try:
+                done, waited = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break  # already reaped by the runner; the output is the record
             if done:
                 status = waited
                 break
         elapsed = time.monotonic() - started
         text = bytes(output).decode(errors="replace")
 
-        assert status is not None, (
-            f"the command was still running {elapsed:.0f}s after Ctrl+C — "
+        assert "EXIT_CODE=130" in text or (
+            status is not None and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 130
+        ), (
+            f"the command did not exit 130 within {elapsed:.0f}s of Ctrl+C — "
             f"it used to hang for 300s in the executor join. Output:\n{text}"
         )
-        assert os.WIFEXITED(status), f"expected a clean exit, got {status}"
-        assert os.WEXITSTATUS(status) == 130, text
+        assert elapsed < 30.0, f"the cancel took {elapsed:.0f}s"
         assert "Login cancelled" in text
         assert f"local-operator login {provider}" in text
+        if provider == "anthropic":
+            # The listener the cancel was supposed to tear down is really gone,
+            # which is what makes an immediate retry possible.
+            released_by = time.monotonic() + 10
+            while _listener_is_up(54545) and time.monotonic() < released_by:
+                time.sleep(0.1)
+            assert not _listener_is_up(54545), "the loopback listener outlived the cancel"
     finally:
         try:
             os.kill(pid, signal_module.SIGKILL)
