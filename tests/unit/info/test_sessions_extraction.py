@@ -140,6 +140,11 @@ EXPECTED = [
         "source_ref": "4311eb653aa9",
         "subagents_running": 2,
         "subagents_queued": 1,
+        # The stored row's clock (transcript activity); None on a live row,
+        # which reports uptime_s/heartbeat_age_s instead. Present on every row
+        # so the published shape is stable — a consumer never branches on key
+        # existence.
+        "last_activity_s": None,
     },
     {
         "state": "live",
@@ -160,6 +165,7 @@ EXPECTED = [
         "source_ref": "",
         "subagents_running": None,
         "subagents_queued": None,
+        "last_activity_s": None,
     },
     {
         "state": "stale",
@@ -183,6 +189,7 @@ EXPECTED = [
         # whole point of the pair — see ``SessionsInfo.subagents_unreported``.
         "subagents_running": None,
         "subagents_queued": None,
+        "last_activity_s": None,
     },
 ]
 
@@ -233,7 +240,9 @@ def test_cli_sessions_command_uses_the_shared_builder(monkeypatch: Any, capsys: 
     from local_operator import cli
 
     _install_fixture(monkeypatch)
-    code = cli.sessions_command(argparse.Namespace(json=True, sessions_command=None))
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=False, limit=None)
+    )
     assert code == 0
 
     import json
@@ -248,7 +257,9 @@ def test_cli_table_still_renders_every_row(monkeypatch: Any, capsys: Any) -> Non
     from local_operator import cli
 
     _install_fixture(monkeypatch)
-    code = cli.sessions_command(argparse.Namespace(json=False, sessions_command=None))
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
     assert code == 0
 
     out = capsys.readouterr().out
@@ -261,3 +272,89 @@ def test_cli_table_still_renders_every_row(monkeypatch: Any, capsys: Any) -> Non
     assert out.count("\n") == 4  # header + one row per fixture record
     # And the key never reaches a terminal either.
     assert "control_key" not in out
+
+
+def test_sessions_all_without_limit_passes_the_advertised_default(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """QA Q1/MAJOR-2 at the CLI wiring: ``None`` must reach collect as 50.
+
+    The default cap is applied inside ``_stored_lines``; this pins that the
+    CLI's argparse default (``None``) is what reaches it and becomes
+    ``STORED_SESSIONS_DEFAULT_LIMIT`` there — the exact wiring whose absence
+    made round 1 list the entire store. The scan is recorded rather than
+    faked wholesale so the argument itself is the assertion.
+    """
+    import argparse
+
+    from local_operator import cli
+    from local_operator.info import collect as collect_mod
+
+    _install_fixture(monkeypatch)
+    seen: list[Any] = []
+
+    class _Row:
+        id = "dead00000001"
+        name = "old work"
+        mtime = 5.0
+
+    def _record(directory: Any, limit: Any = None) -> list[Any]:
+        seen.append(limit)
+        return [_Row()]
+
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", _record)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=True, limit=None)
+    )
+    assert code == 0
+    capsys.readouterr()
+    assert seen == [collect_mod.STORED_SESSIONS_DEFAULT_LIMIT]
+
+
+def test_sessions_limit_rejects_zero_and_negative(capsys: Any) -> None:
+    """QA Q2: ``--limit 0`` parsed, listed nothing, and read as "no sessions".
+
+    Zero and negative caps are typos, not requests — "no stored rows" is what
+    plain `lop sessions` already means — so argparse refuses them up front
+    rather than printing an empty listing that lies about the store.
+    """
+    import pytest as _pytest
+
+    from local_operator import cli
+
+    for bad in ("0", "-1"):
+        with _pytest.raises(SystemExit) as raised:
+            cli.build_cli_parser().parse_args(["sessions", "--all", "--limit", bad])
+        assert raised.value.code == 2
+        assert "positive integer" in capsys.readouterr().err
+
+
+def test_sessions_empty_copy_names_the_search_that_was_asked_for(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """MINOR-5: `--all` on an empty store must not answer "no ACTIVE sessions".
+
+    The live-only line re-teaches the old vocabulary on the very flag that
+    opts into the store; the default listing keeps its established copy.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    from local_operator.session.runtime import registry
+
+    monkeypatch.setattr(registry, "scan", lambda root=None: [])
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=True, limit=None)
+    )
+    assert code == 0
+    assert "live or stored" in capsys.readouterr().out
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    assert capsys.readouterr().out.strip() == "no active lop sessions"

@@ -16,7 +16,9 @@ guard. The self-send test targets the registrant's OWN record to trip the guard.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -276,7 +278,10 @@ async def test_no_matching_target_is_a_clean_error() -> None:
         _context(),
     )
     assert result.is_error is True
-    assert "no live session matches" in result.text
+    # The send now searches BOTH the live registry and the stored session store
+    # before refusing, and the error says so rather than implying only the live
+    # fleet was checked.
+    assert "searched live and stored sessions" in result.text
 
 
 @pytest.mark.asyncio
@@ -453,3 +458,104 @@ async def test_addressing_by_pid_and_session_id() -> None:
         assert len([c for c in handle.calls if c[0] == "receive_peer_message"]) == 2
     finally:
         registrant.close()
+
+
+# -- the stored fallback's entry guard (review round 1) ----------------------
+#
+# BLOCKER-1 and MAJOR-1 both live in ONE decision: the stored fallback runs
+# only when the live resolver said "no match anywhere". Every other
+# no-record outcome — a conflicting target+selector pair, a unique match that
+# is wedged — is a refusal about a live session the call DID reach, and
+# round 1 delivered those to a stored session that merely shared the
+# substring. Both tests fake ONLY the live resolver and put a REAL stored
+# session on disk, so a regressed guard spools a real file and is caught.
+
+
+def _plant_stored_session(monkeypatch, tmp_path, session_id: str, name: str) -> Path:
+    """A real store row the fallback would find if its guard regresses.
+
+    The transcript is what both the name scan and the activity clock read, so
+    this is the store the picker would list — not a mock of it. The line is the
+    writer's envelope (``type: message`` wrapping a ``payload``; the text nested
+    in a ``content`` list): a bare ``{"role": ..., "text": ...}`` row yields an
+    EMPTY name from the scan, which once made an earlier version of this
+    fixture vacuous — the fallback found no name match, so a regressed guard
+    passed the test anyway.
+    """
+    from local_operator.mobile import peer_send
+
+    session_dir = tmp_path / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    entry = json.dumps(
+        {
+            "type": "message",
+            "payload": {
+                "role": "user",
+                "content": [{"type": "text", "text": name}],
+            },
+        }
+    )
+    (session_dir / "transcript.jsonl").write_text(entry + "\n")
+    monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
+    return session_dir
+
+
+@pytest.mark.asyncio
+async def test_a_live_target_conflict_is_refused_not_stored_delivered(
+    monkeypatch, tmp_path
+) -> None:
+    """BLOCKER-1: `target` + `pid` is a refusal, never a stored-session send."""
+    from local_operator.mobile import peer_send
+
+    _plant_stored_session(monkeypatch, tmp_path, "dead00000abc", "credential work")
+
+    def _conflict(**_kwargs: Any) -> tuple[None, list[Any], str]:
+        return (
+            None,
+            [],
+            "pass either a target substring or an exact pid/session, not both — "
+            "they name different sessions",
+        )
+
+    monkeypatch.setattr(peer_send, "resolve_peer_target", _conflict)
+    result = await execute_send(
+        "t12",
+        {"target": "credential", "pid": 12345, "message": "hello", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+    assert result.is_error is True
+    assert "not both" in result.text
+    assert "searched live and stored" not in result.text
+    # The refusal is the answer: nothing was spooled to the lookalike store row.
+    assert not (tmp_path / "sessions" / "dead00000abc" / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_unique_live_match_is_refused_not_stored_delivered(
+    monkeypatch, tmp_path
+) -> None:
+    """MAJOR-1: a wedged live session is still THE session — no cold send."""
+    from local_operator.mobile import peer_send
+
+    _plant_stored_session(monkeypatch, tmp_path, "wedge0000abc", "credential work")
+
+    def _wedged(**_kwargs: Any) -> tuple[None, list[Any], str]:
+        return (
+            None,
+            [],
+            "the only match for 'credential' is not responding (pid 4242); " "try again shortly",
+        )
+
+    monkeypatch.setattr(peer_send, "resolve_peer_target", _wedged)
+    result = await execute_send(
+        "t13",
+        {"target": "credential", "message": "hello", "wake": False},
+        None,
+        None,
+        _context(),
+    )
+    assert result.is_error is True
+    assert "not responding" in result.text
+    assert not (tmp_path / "sessions" / "wedge0000abc" / "inbox.jsonl").exists()
