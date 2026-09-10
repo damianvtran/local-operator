@@ -27,16 +27,19 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    _EXEC_LEGEND,
     _MARKER_LEGEND,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
+    EXEC_MARKER,
     GUTTER_CELLS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
     _footer_hints,
+    _meta_legends,
     filter_rows,
     matched_in_body,
     plan_columns,
@@ -289,6 +292,237 @@ def test_the_cursor_marks_exactly_one_row() -> None:
     rows = [_row("a1", "one"), _row("b2", "two"), _row("c3", "three")]
     lines = [line.plain for line in render_rows(rows, 1, 74, NOW)]
     assert [line.startswith("❯") for line in lines] == [False, True, False]
+
+
+def test_a_live_exec_run_is_named_as_one_rather_than_passing_as_a_conversation() -> None:
+    """The discoverability gap this tag closes.
+
+    Since #804 every ``lop exec`` publishes an ordinary attachable record, and
+    ``decorate_rows(include_live=True)`` has been folding those into this list
+    ever since — rendered identically to a conversation the user started. An
+    idle one-shot and a session they were sitting in both read as a bare ``●``.
+    """
+    rows = [
+        _row("aaaaaaaaaaaa", "my own conversation")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec"),
+    ]
+    mine, execrun = (line.plain for line in render_rows(rows, 0, 74, NOW))
+    assert EXEC_MARKER.strip() in execrun
+    assert EXEC_MARKER.strip() not in mine
+
+
+def test_the_exec_column_is_reserved_for_every_row_so_names_stay_flush() -> None:
+    """The same fixed-chrome rule ``FORK_MARKER`` follows, and for its reason.
+
+    Painting the tag only on tagged rows moves the start of the name between
+    rows, ragging the left edge of the one field the user reads down the list.
+    Asserted as a column position rather than as a substring because that is
+    the property the eye actually reads.
+    """
+    rows = [
+        _row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "beta")._replace(live_state="idle", kind="exec"),
+    ]
+    plain = [line.plain for line in render_rows(rows, 0, 74, NOW)]
+    assert plain[0].index("alpha") == plain[1].index("beta")
+
+
+def test_a_list_with_no_exec_run_reserves_no_exec_column() -> None:
+    """A column nobody needs costs the name its cells on every row."""
+    rows = [_row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle")]
+    with_exec = plan_columns(rows, 74, ["1m ago"], False, False, True, True)
+    without = plan_columns(rows, 74, ["1m ago"], False, False, True, False)
+    assert without[0] == with_exec[0] + cell_len(EXEC_MARKER)
+
+
+def test_the_repaint_signature_covers_every_field_the_rows_render() -> None:
+    """The guard that failed to catch `kind` (agent review round 1, MAJOR-1/Q1).
+
+    The previous assertion only checked that every signature NAME is a real
+    ``SessionRow`` field, which catches a rename and is blind to the error that
+    actually shipped: a field ADDED to the row, rendered by the picker, and
+    never added to the signature. ``_tick`` then compares two different rows
+    equal and leaves stale pixels on screen.
+
+    Asserted as the partition rather than as a membership test, so a future
+    field must be classified one way or the other and cannot simply be
+    forgotten.
+    """
+    covered = set(SessionPickerScreen._SIGNATURE_FIELDS)
+    excluded = set(SessionPickerScreen._SIGNATURE_EXCLUDED)
+    assert covered.isdisjoint(excluded), "a field cannot be both compared and excluded"
+    assert covered | excluded == set(SessionRow._fields)
+    # The specific escape, pinned by name: `kind` drives EXEC_MARKER and the
+    # reserved column, so it must be compared.
+    assert "kind" in covered
+
+
+def test_a_kind_only_change_is_visible_to_the_repaint_decision() -> None:
+    """Two rows identical but for ``kind`` must not compare equal.
+
+    The rendered proof that the signature fix matters: these two rows paint
+    differently, so a repaint decision that called them equal would show the
+    first row's `[exec]` for a session that is no longer one.
+    """
+    was_exec = _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec")
+    now_tui = was_exec._replace(kind="tui")
+
+    def signature(row: SessionRow) -> tuple[object, ...]:
+        return tuple(getattr(row, f, None) for f in SessionPickerScreen._SIGNATURE_FIELDS)
+
+    assert signature(was_exec) != signature(now_tui)
+    # ... and they really do render differently, so the comparison is load-bearing.
+    painted_exec = render_rows([was_exec], 0, 74, NOW)[0].plain
+    painted_tui = render_rows([now_tui], 0, 74, NOW)[0].plain
+    assert EXEC_MARKER.strip() in painted_exec
+    assert EXEC_MARKER.strip() not in painted_tui
+
+
+def test_the_exec_column_does_not_collapse_when_the_one_shot_is_reaped() -> None:
+    """Design round 1, D1: the reserved column may widen, never narrow.
+
+    A reap is not a user action, and it happens at the NORMAL END of every
+    one-shot. Letting the column collapse then moved every name 7 cells left
+    with no keystroke — the list lurching at exactly the moment the tag exists
+    to explain. The reaped row loses its own tag (that change is real and must
+    stay visible); nothing else moves.
+    """
+    live = [
+        _row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec"),
+    ]
+    # The same rows after the one-shot ends: the record is gone, so is the kind.
+    reaped = [live[0], live[1]._replace(live_state="", kind="")]
+
+    screen = SessionPickerScreen(live, NOW)
+    assert screen._exec_column_latched(live) is True
+    before = plan_columns(live, 74, ["1m ago"] * 2, False, False, True, True)
+
+    # The reap: the result set itself no longer carries a tagged row.
+    assert not any(row.kind == "exec" for row in reaped)
+    assert screen._exec_column_latched(reaped) is True, "the column must stay reserved"
+    after = plan_columns(reaped, 74, ["1m ago"] * 2, False, False, True, True)
+    assert before == after, "no column may move because a one-shot ended"
+
+    # Without the latch the same reap collapses the column — the defect, pinned.
+    unlatched = plan_columns(reaped, 74, ["1m ago"] * 2, False, False, True, False)
+    assert unlatched[0] == after[0] + cell_len(EXEC_MARKER)
+
+    # A picker that has never seen an exec row still pays nothing.
+    fresh = SessionPickerScreen([live[0]], NOW)
+    assert fresh._exec_column_latched([live[0]]) is False
+
+
+def test_the_footer_explains_the_exec_tag_where_the_picker_can_show_it() -> None:
+    """Design round 1, D2: `[exec]` states provenance; the legend states lifetime.
+
+    The words that carry ephemerality ("Running headless (exec)") render only in
+    the sidebar's hover tooltip, a surface the picker never shows. The legend is
+    the picker's own established mechanism for explaining a mark, so the fact
+    lands there — and only when an exec row is actually present, on the same
+    "teach the mark where it is used" rule the body-match legend follows.
+    """
+    with_exec = _meta_legends(74, has_marked=False, has_exec=True)
+    assert _EXEC_LEGEND in with_exec
+    assert _EXEC_LEGEND not in _meta_legends(74, has_marked=False, has_exec=False)
+    # It says how long the row lasts, not merely what it is.
+    assert "one-shot" in _EXEC_LEGEND[1]
+
+    # AT THE WIDTHS THE CARD CAN ACTUALLY PASS, and in the shape the user is
+    # overwhelmingly in. Design round 2 (D2) found this legend structurally
+    # unreachable because the tests asserted it at `_footer_hints(100, ...)` —
+    # a width `_card_width()` caps at PICKER_MAX_WIDTH = 74 and can never
+    # produce — and because `scrolls` defaulted to False while a real store
+    # (PAGE_ROWS_MAX = 10 against hundreds of sessions) always scrolls. A check
+    # that cannot observe the case it exists for certifies nothing.
+    for counter_cells in (0, len("showing 1–10 of 501")):
+        legends = _meta_legends(74, has_marked=False, has_exec=True, counter_cells=counter_cells)
+        assert _EXEC_LEGEND in legends, f"unreachable at counter_cells={counter_cells}"
+
+    # Legends teach; keys operate. On a card too narrow for both, the legend
+    # goes and never survives as a bare unlabelled glyph.
+    narrow = _meta_legends(30, has_marked=False, has_exec=True, counter_cells=19)
+    assert _EXEC_LEGEND not in narrow
+    assert (_EXEC_LEGEND[0], "") not in narrow
+    keys = [key for key, _ in _footer_hints(30)]
+    assert "enter" in keys and "esc" in keys
+
+
+def test_both_legends_coexist_and_the_cryptic_one_survives_longer() -> None:
+    """Two marks, one footer, and a deliberate order.
+
+    Displayed, the body mark leads because that is the order the marks appear
+    in a row. Shed, `[exec]` goes first: it is a readable word that still means
+    something without its gloss, while a lone right-quote with nothing
+    explaining it is the rendering artifact its legend exists to prevent.
+    """
+    wide = [key for key, _ in _meta_legends(74, has_marked=True, has_exec=True)]
+    assert wide.index(_MARKER_LEGEND[0]) < wide.index(_EXEC_LEGEND[0])
+
+    # Under pressure the readable word gives up its gloss first. Squeezed by a
+    # REAL constraint — the counter sharing the row on a narrow card — rather
+    # than by a width the card cannot pass.
+    squeezed = [
+        key for key, _ in _meta_legends(58, has_marked=True, has_exec=True, counter_cells=19)
+    ]
+    assert _EXEC_LEGEND[0] not in squeezed
+    assert _MARKER_LEGEND[0] in squeezed
+
+
+def test_the_exec_legend_paints_on_a_scrolling_list_which_is_the_ordinary_case() -> None:
+    """Design round 2, D2: the legend was unreachable in the shape users are in.
+
+    Driven through the REAL card rather than the shed helper, because that is
+    exactly the gap the finding exploited: `_footer_hints` was correct about its
+    own inputs while the card could never supply the width those tests used.
+    `_card_width()` caps at PICKER_MAX_WIDTH, so the assertion below fails on
+    the pre-fix tree at every terminal size, including 200 columns.
+
+    The legend is read off the META row specifically. A grep over the whole
+    frame would match the `[exec]` tag in the LIST and pass without the legend
+    existing at all — a false pass this PR's QA round hit with that instrument.
+    """
+    rows = [
+        SessionRow(
+            id=f"{index:012d}",
+            name=f"session number {index}",
+            mtime=NOW - index * 60,
+            created_at=NOW - index * 60,
+            forked=False,
+            live_state="",
+            pending=None,
+            wakes=0,
+            wakes_dormant=False,
+            kind="exec" if index == 1 else "",
+        )
+        for index in range(PAGE_ROWS_MAX * 3)
+    ]
+    screen = SessionPickerScreen(rows, NOW)
+    screen._screen_size = lambda: (100, 30)  # type: ignore[method-assign]
+
+    assert len(rows) > screen._page_rows(), "this list must scroll or it tests the wrong shape"
+    lines = screen.render_lines_for_test()
+    meta = lines[-2]
+
+    assert EXEC_MARKER.strip() in meta, f"legend absent from the meta row: {meta!r}"
+    assert "one-shot" in meta
+    # The keys kept their whole row: the legend no longer buys its place by
+    # evicting a hint, which is what made it unreachable when it did.
+    assert "pgup/pgdn" in lines[-1]
+    # CANARY: the list really is drawing the tag, so the legend has something to
+    # explain and this is not a frame that would pass with no exec row at all.
+    assert any(EXEC_MARKER.strip() in line for line in lines[:-2])
+
+
+def test_a_cold_row_carries_no_kind_so_a_reaped_exec_run_stops_claiming_to_be_one() -> None:
+    """``kind`` comes off the LIVE record, so it must vanish with the record.
+
+    An exec record is deliberately ephemeral. If the tag outlived it the picker
+    would keep labelling a plain cold transcript as a running headless job.
+    """
+    cold = _row("bbbbbbbbbbbb", "nightly audit")
+    assert cold.kind == ""
+    assert EXEC_MARKER.strip() not in render_rows([cold], 0, 74, NOW)[0].plain
 
 
 def test_an_unnamed_session_says_so_rather_than_rendering_a_blank() -> None:
@@ -1209,33 +1443,44 @@ async def test_a_row_matched_only_by_a_past_name_is_shown_and_marked() -> None:
 def test_footer_legend_appears_only_when_a_row_is_marked() -> None:
     """D2: the ``"`` marker is meaningless without a legend, but advertising it
     when nothing is marked would explain a glyph the user cannot see. So the
-    legend is present exactly when the footer has room AND a marked row exists,
+    legend is present exactly when the row has room AND a marked row exists,
     and absent otherwise."""
-    # A card wide enough to hold the legend beside the essential keys.
-    with_legend = _footer_hints(74, has_marked=True)
-    assert _MARKER_LEGEND in with_legend
-    # Same width, nothing marked: no legend, and the full key row is intact.
-    without = _footer_hints(74, has_marked=False)
-    assert _MARKER_LEGEND not in without
-    assert ("pgup/pgdn", "page") in without
+    # A card at its widest, in BOTH list shapes: the counter shares this row on
+    # a scrolling list, and a legend that only fits when it is absent is the
+    # unreachable-in-the-ordinary-case defect of round 2 (D2).
+    for counter_cells in (0, len("showing 1–10 of 501")):
+        with_legend = _meta_legends(
+            74, has_marked=True, has_exec=False, counter_cells=counter_cells
+        )
+        assert _MARKER_LEGEND in with_legend, f"unreachable at counter_cells={counter_cells}"
+        # Same width, nothing marked: no legend.
+        without = _meta_legends(74, has_marked=False, has_exec=False, counter_cells=counter_cells)
+        assert _MARKER_LEGEND not in without
+    # The key row is untouched either way — legends no longer buy space from it.
+    assert ("pgup/pgdn", "page") in _footer_hints(74)
 
 
 def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
-    """The legend teaches; it must never crowd out the keys that OPERATE the
-    card. Under width pressure it sheds after the two disposable hints but
-    before movement/resume/cancel, and it never survives as a bare unlabelled
-    glyph (which would be the very artifact-looking mark D2 flagged)."""
-    # Wide: legend shown, and it displaced only a disposable hint (pgup/pgdn).
-    wide = _footer_hints(74, has_marked=True)
+    """The legend teaches; the keys OPERATE the card, so they never compete.
+
+    Since round 2 (D2) they do not even share a row: a legend sheds against the
+    counter's row and cannot evict a key at all. What must still hold is that a
+    card too narrow for a legend keeps every essential key, and that a legend
+    never survives as a bare unlabelled glyph (the artifact-looking mark D2
+    flagged in round 1).
+    """
+    # Wide: legend shown, and the full key row survives beside it.
+    wide = _meta_legends(74, has_marked=True, has_exec=False)
     assert _MARKER_LEGEND in wide
-    assert ("pgup/pgdn", "page") not in wide
-    # Narrow: the essential keys survive and the legend is gone entirely — not
-    # reduced to a lone glyph.
-    narrow = _footer_hints(40, has_marked=True)
+    assert ("pgup/pgdn", "page") in _footer_hints(74)
+    # Narrow: the legend is gone entirely — not reduced to a lone glyph — and
+    # the essential keys survive.
+    narrow = _meta_legends(30, has_marked=True, has_exec=False, counter_cells=19)
     assert _MARKER_LEGEND not in narrow
     assert (_MARKER_LEGEND[0], "") not in narrow
-    assert ("enter", "resume") in narrow
-    assert ("esc", "cancel") in narrow
+    keys = _footer_hints(40)
+    assert ("enter", "resume") in keys
+    assert ("esc", "cancel") in keys
 
 
 @pytest.mark.asyncio
@@ -1524,29 +1769,28 @@ async def test_the_soft_tier_runs_only_when_the_exact_tiers_are_empty() -> None:
                 assert typed in ran, f"soft tier did not run at {typed!r} with no name/id hit"
 
 
-def test_the_paging_hint_outranks_the_marker_legend_once_the_list_scrolls() -> None:
+def test_the_paging_hint_outranks_the_filter_hint_once_the_list_scrolls() -> None:
     """The paging hint was offered where paging does nothing and withdrawn where
-    it is the fastest way through the list.
+    it is the fastest way through the list (design round 1, D3).
 
-    A scrolling list is also long enough to contain a marked row, so the legend
-    shed `pgup/pgdn` to make room for itself. Uncapping the store made that the
-    normal case rather than the rare one (design round 1, D3).
+    Round 2 moved the legends off this row, so the competition `pgup/pgdn` now
+    survives is against `type to filter` — the genuinely disposable hint, since
+    a user who is filtering already knows they can type and the query is echoed
+    in the header regardless.
     """
-    width = 62  # narrow enough that legend and paging cannot both fit
+    width = 56  # narrow enough that both disposable hints cannot fit
 
-    not_scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=False)]
-    scrolling = [key for key, _ in _footer_hints(width, has_marked=True, scrolls=True)]
+    not_scrolling = [key for key, _ in _footer_hints(width, scrolls=False)]
+    scrolling = [key for key, _ in _footer_hints(width, scrolls=True)]
 
-    assert _MARKER_LEGEND[0] in not_scrolling, "the legend should win when nothing scrolls"
-    assert "pgup/pgdn" not in not_scrolling
-
+    assert "pgup/pgdn" not in not_scrolling, "paging is a no-op on a list that fits"
     assert "pgup/pgdn" in scrolling, "paging must survive when the list actually pages"
-    assert _MARKER_LEGEND[0] not in scrolling
+    assert "type" not in scrolling
 
-    # A wide card keeps both regardless: the reorder is a shed policy, not a
+    # A card at its widest keeps both: the reorder is a shed policy, not a
     # removal, so nothing is lost when there is room for everything.
-    wide = [key for key, _ in _footer_hints(100, has_marked=True, scrolls=True)]
-    assert "pgup/pgdn" in wide and _MARKER_LEGEND[0] in wide
+    wide = [key for key, _ in _footer_hints(74, scrolls=True)]
+    assert "pgup/pgdn" in wide and "type" in wide
 
 
 def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
@@ -1558,12 +1802,12 @@ def test_the_paging_hint_survives_on_a_plain_scrolling_list() -> None:
     picker the DEFAULT state, so that was the usual case rather than an edge.
     """
     for width in (56, 60, 66):
-        scrolling = [key for key, _ in _footer_hints(width, has_marked=False, scrolls=True)]
+        scrolling = [key for key, _ in _footer_hints(width, scrolls=True)]
         assert "pgup/pgdn" in scrolling, f"paging hint dropped at width {width}: {scrolling}"
 
     # A list that fits on one page may still shed it first: there is nothing to
     # page through, so the hint is the least useful thing on the row.
-    settled = [key for key, _ in _footer_hints(60, has_marked=False, scrolls=False)]
+    settled = [key for key, _ in _footer_hints(60, scrolls=False)]
     assert "pgup/pgdn" not in settled
 
 
@@ -1574,7 +1818,7 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
     `backspace` is what widens the query and is the key a user in this state is
     already reaching for; `esc` stays because leaving is still available.
     """
-    hints = _footer_hints(100, empty=True)
+    hints = _footer_hints(74, empty=True)
     keys = [key for key, _ in hints]
     assert keys == ["backspace", "esc"], keys
 
@@ -1583,7 +1827,7 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
         assert [key for key, _ in _footer_hints(width, empty=True)] == ["backspace", "esc"]
 
     # And the populated footer is untouched.
-    populated = [key for key, _ in _footer_hints(100, empty=False)]
+    populated = [key for key, _ in _footer_hints(74, empty=False)]
     assert "↑↓" in populated and "enter" in populated
 
 

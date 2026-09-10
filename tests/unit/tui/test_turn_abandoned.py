@@ -118,9 +118,8 @@ class HangingFollowerSession(JobsSession):
     #: know this worker's `error=None` means "the owner did not tell me" rather
     #: than "the turn succeeded". A follower fake without it models the wire
     #: ORDER while claiming the authority of an in-process session.
-    is_remote = True
     # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-    # viewer, so the predicates must agree with `is_remote` above.
+    # viewer: it owns no loop and learns outcomes over the wire.
     owns_runtime = False
     outcome_is_synchronous = False
     runtime_locality: RuntimeLocality = "this-machine"
@@ -152,9 +151,8 @@ class OwnerEndRacingFollowerSession(JobsSession):
     #: See :class:`HangingFollowerSession`. Load-bearing here: it is what makes
     #: this fallback decline to announce an outcome it was never told, so the
     #: owner's real end behind it is what speaks.
-    is_remote = True
     # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-    # viewer, so the predicates must agree with `is_remote` above.
+    # viewer: it owns no loop and learns outcomes over the wire.
     owns_runtime = False
     outcome_is_synchronous = False
     runtime_locality: RuntimeLocality = "this-machine"
@@ -1493,14 +1491,14 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
     owner (disposed session, queue full, owner reconnecting). `is_streaming`
     is False, no `TurnStarted` ever arrives, and the worker's `finally` is the
     only thing that clears the band `_start_turn` lit — exactly the "KEPT"
-    case the in-process refusal test pins. Gating the write on `is_remote`
-    alone would have left THIS band lit forever.
+    case the in-process refusal test pins. Gating the write on the session's
+    kind alone — rather than on whether its outcome is synchronous AND it is
+    still streaming — would have left THIS band lit forever.
     """
 
     class RefusingFollowerSession(JobsSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"
@@ -1582,9 +1580,8 @@ async def test_a_followers_loop_turn_holds_working_between_iterations() -> None:
     class CapabilitylessFollowerSession(JobsSession):
         """A follower whose owner advertised nothing — every cold viewer."""
 
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"

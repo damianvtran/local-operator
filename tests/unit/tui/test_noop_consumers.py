@@ -494,7 +494,11 @@ async def test_a_cold_viewer_may_still_set_its_default_model(tmp_path, monkeypat
     try:
         assert viewer.session_id, "the production cold viewer always carries an id"
         assert viewer.is_cold is True
-        assert viewer.is_remote is True
+        # The production viewer's runtime role: it owns no loop, and a COLD one
+        # reports "this-machine" rather than "unknown" — which is precisely why
+        # the write below is allowed.
+        assert viewer.owns_runtime is False
+        assert viewer.runtime_locality == "this-machine"
         app = OperatorApp.__new__(OperatorApp)
         app._session = viewer  # type: ignore[attr-defined]
         assert app._session_runs_elsewhere() is False, (

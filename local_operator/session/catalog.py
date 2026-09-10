@@ -272,7 +272,13 @@ class CatalogEntry:
             count = self.row.wakes
             return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
         if self.row.live_state == "idle":
-            return "Ready"
+            # An exec run is named by what it IS rather than by "Ready", which
+            # invites the user to treat a supervisor's one-shot as their own
+            # idle conversation. Only at THIS rung: a busy or needs-you exec run
+            # says so above, because what it is doing outranks what kind it is —
+            # the same precedence ``row_state_mark`` follows, so the words and
+            # the glyph still cannot disagree.
+            return "Running headless (exec)" if self.row.kind == "exec" else "Ready"
         if self.row.wakes:
             # Dormant: the schedule exists but the session was stopped, so it is
             # not going to fire. Named rather than hidden — a user who sees the
@@ -367,6 +373,7 @@ def decorate_rows(
         record_state = live.get(row.id)
         live_state = ""
         pending: str | None = None
+        kind = ""
         if record_state is not None:
             record, state = record_state
             if state == "wedged":
@@ -378,6 +385,10 @@ def decorate_rows(
             else:
                 live_state = "idle"
             pending = getattr(record, "pending", None) or None
+            # Only a LIVE record has a kind. A cold row keeps "" so the picker
+            # says nothing rather than claiming a session is still an exec run
+            # after the process that made it that has gone.
+            kind = str(getattr(record, "kind", "") or "")
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         updated.append(
@@ -386,6 +397,7 @@ def decorate_rows(
                 pending=pending,
                 wakes=len(schedules),
                 wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
+                kind=kind,
             )
         )
     return sorted(updated, key=lambda row: 0 if row.pending else 1)

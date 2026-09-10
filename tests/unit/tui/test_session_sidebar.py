@@ -593,6 +593,17 @@ async def test_speculative_prepare_does_not_ensure_bound_on_a_cold_owner():
 
     bound = AsyncMock()
     remote = MagicMock(spec=RemoteSession)
+    # STATED, not inherited from the spec. ``owns_runtime`` is a property, and
+    # ``spec=`` only constrains which names exist — it does not run them, so a
+    # spec'd mock auto-fabricates a truthy ``Mock`` for it and therefore claims
+    # to OWN its runtime, which is the exact opposite of the viewer this stands
+    # in for. That was invisible while the sidebar tested ``isinstance(...,
+    # RemoteSession)`` (a spec'd mock passes that) and became visible the moment
+    # it started asking the declared predicate. The fake must answer the
+    # question the production object answers.
+    remote.owns_runtime = False
+    remote.outcome_is_synchronous = False
+    remote.runtime_locality = "this-machine"
     remote.session_id = "other"
     remote.is_cold = True
     remote._ensure_bound = bound
@@ -685,6 +696,14 @@ async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
 
     def lease(app, session_id: str, *, kind: str) -> SessionInteraction:
         remote = MagicMock(spec=RemoteSession)
+        # See the note in ``test_speculative_prepare_does_not_ensure_bound_on_a
+        # _cold_owner``: a spec'd mock fabricates a TRUTHY ``owns_runtime``, so
+        # without this the drain treats every leased viewer as an owner and
+        # skips it — which is the leak this test exists to catch, reported as a
+        # failure of the fix rather than of the fake.
+        remote.owns_runtime = False
+        remote.outcome_is_synchronous = False
+        remote.runtime_locality = "this-machine"
         remote.session_id = session_id
         remote.is_cold = False
         remote.has_pending_gate_reply = False

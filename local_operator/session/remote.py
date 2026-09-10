@@ -496,9 +496,16 @@ def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
 
 
 class RemoteSession:
-    """A SessionProtocol facade backed by one owner's v5 attach socket."""
+    """A SessionProtocol facade backed by one owner's v5 attach socket.
 
-    is_remote = True
+    Satisfies :class:`ViewerSessionProtocol`; hosts ask ``owns_runtime`` /
+    ``outcome_is_synchronous`` / ``runtime_locality`` rather than testing for
+    this class. The ``is_remote`` flag that used to live here is gone: it named
+    a transport axis that collapsed in 0.46.0 when `lop` began building a
+    viewer for every local user, leaving it constant-True for every TUI session
+    and unable to distinguish the four questions its readers were really
+    asking. See :class:`SessionProtocol`'s runtime-role block.
+    """
 
     def __init__(
         self,
@@ -4409,8 +4416,8 @@ class RemoteSession:
     # -- SessionProtocol runtime role --------------------------------------
     # This facade owns no loop: turns execute in the runtime process on the
     # other end of the attach socket. See ``SessionProtocol.owns_runtime`` for
-    # why these are three predicates rather than the single ``is_remote`` flag
-    # above, which Stage 3 removes.
+    # why these are three predicates rather than the one transport flag they
+    # replaced.
 
     @property
     def owns_runtime(self) -> bool:
@@ -4779,7 +4786,8 @@ class RemoteSession:
         """Whether replacing this viewer leaves execution in another process.
 
         Legacy owner recovery can install an in-process takeover target behind
-        this facade, so ``is_remote`` alone is not a survival guarantee.
+        this facade, so being a viewer is not on its own a survival guarantee —
+        the takeover target is what decides it.
         """
         return self._takeover_target is None
 

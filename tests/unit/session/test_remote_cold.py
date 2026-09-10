@@ -358,8 +358,8 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
 async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkeypatch) -> None:
     """`/model … d` must keep working once EVERY session is remote.
 
-    The refusal was keyed on ``is_remote``, which meant "somebody else's
-    session" before the viewer model and means "any session at all" after it.
+    The refusal was keyed on a transport flag, which meant "somebody else's
+    session" before the viewer model and "any session at all" after it.
     Left as it was, a user on their own machine \u2014 whose runtime is a child
     process on that same machine \u2014 was told to run the command "on the
     terminal whose launches it should govern", which was the terminal they

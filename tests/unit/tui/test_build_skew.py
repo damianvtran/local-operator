@@ -76,16 +76,15 @@ MOVES_OVER = "will switch to the new version when it is next idle"
 class _BoundViewer(FakeSession):
     """A follower facade that has already bound to a runtime.
 
-    ``is_remote`` plus a resolved ``owner_version`` is what a real
+    Not owning the runtime, plus a resolved ``owner_version``, is what a real
     ``RemoteSession`` looks like after ``_dial``; ``is_cold`` False is what
     makes the owner comparison meaningful, since a cold viewer has not dialled
     anything and its empty stamp would otherwise read as a prehistoric
     runtime.
     """
 
-    is_remote = True
     # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-    # viewer, so the predicates must agree with `is_remote` above.
+    # viewer: it owns no loop and learns outcomes over the wire.
     owns_runtime = False
     outcome_is_synchronous = False
     runtime_locality: RuntimeLocality = "this-machine"

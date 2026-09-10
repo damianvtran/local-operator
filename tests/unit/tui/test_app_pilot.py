@@ -1762,9 +1762,8 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
     from local_operator.tui.widgets.transcript import NoticeBlock
 
     class RemoteishSession(FakeSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"
@@ -1976,9 +1975,8 @@ async def test_takeover_preserves_the_status_band_verbatim() -> None:
             return self._st.conversation_title
 
     class Remoteish(StatefulSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"
@@ -2126,9 +2124,8 @@ async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, t
     session = FakeSession()
 
     class _RemoteFake(FakeSession):
-        is_remote = True
         # Runtime role (SessionProtocol): this fake emulates an ATTACHED
-        # viewer, so the predicates must agree with `is_remote` above.
+        # viewer: it owns no loop and learns outcomes over the wire.
         owns_runtime = False
         outcome_is_synchronous = False
         runtime_locality: RuntimeLocality = "this-machine"
