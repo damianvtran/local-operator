@@ -3249,6 +3249,21 @@ def test_the_origin_cache_re_reads_a_marker_that_changed(tmp_path: Path) -> None
 
     This is the backfill's path: a session unmarked at one open can be stamped
     before the next, and a session's marker can be corrected by hand.
+
+    The two directions are deliberately NOT symmetric, and the asymmetry is the
+    design rather than an oversight. HIDING is immediate: absence is never
+    cached, so a directory the backfill stamps takes the slow path and is
+    hidden on the very next scan. UN-HIDING is bounded instead of immediate,
+    because the hidden-skip fast path answers from the cache without touching
+    the directory at all, and a marker rewritten IN PLACE moves the marker's
+    ``(mtime, size)`` without moving the DIRECTORY's inode — the only fact the
+    skip consults. ``REVALIDATE_EVERY`` is what repairs it: ~5 minutes at the
+    sidebar's poll rate, or immediately on restart.
+
+    The failure direction matters here. Being slow to un-hide costs a session
+    that is still resumable by id and reappears within five minutes; being slow
+    to hide would leak every subagent run into the picker, which is the bug the
+    marker exists to fix.
     """
     sessions = tmp_path / "sessions"
     (sessions / "s1").mkdir(parents=True)
@@ -3261,9 +3276,14 @@ def test_the_origin_cache_re_reads_a_marker_that_changed(tmp_path: Path) -> None
     resume_mod.mark_session_origin(sessions / "s1", resume_mod.ORIGIN_SUBAGENT)
     assert resume_mod.recent_sessions(tmp_path, limit=10**9) == []
 
-    # Corrected back by hand: a changed marker re-derives rather than serving
-    # the cached "subagent".
+    # Corrected back by hand. The verdict cache keyed on the marker would
+    # re-derive immediately, but the skip above it does not look at the marker,
+    # so this is repaired at the epoch rather than at the next poll.
     (sessions / "s1" / resume_mod.ORIGIN_NAME).write_text('{"origin": ""}', encoding="utf-8")
+    assert resume_mod.recent_sessions(tmp_path, limit=10**9) == [], "stale while armed, by design"
+
+    # The epoch (equivalently: a restart, which starts the counter at 0).
+    resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
     assert [row[0] for row in resume_mod.recent_sessions(tmp_path, limit=10**9)] == ["s1"]
 
 
