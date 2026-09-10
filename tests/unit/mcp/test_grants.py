@@ -89,6 +89,34 @@ class _Session:
     def __init__(self, manager: Any) -> None:
         self.mcp_manager = manager
 
+    @property
+    def variables(self) -> Any:
+        """Memory-only store for ``/credential``. Created on first use so
+        tests that never touch credentials pay nothing for the property."""
+        store = getattr(self, "_variables", None)
+        if store is None:
+            from local_operator.variables import VariableStore
+
+            store = self._variables = VariableStore(cwd="/tmp", env={})
+        return store
+
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """The REAL verb table against this fake's store, not a stub of it.
+
+        ``SessionProtocol`` declares this verb for every session shape, and
+        the TUI's submit seam probes it BY NAME — a double lacking it
+        silently degrades every credential gesture driven through it to
+        "this session cannot hold credentials", and a fake that swallows the
+        verb is how #891 passed four review streams on an unreachable path.
+        The canonical delegation rationale lives on
+        ``test_app_pilot.FakeSession.credential_op``.
+        """
+        from local_operator.session.credential_ops import run_credential_verb
+
+        return await run_credential_verb(
+            self.variables, getattr(self, "journal_credential_change", None), action, key, value
+        )
+
 
 @pytest.fixture(autouse=True)
 def _no_real_credential_writes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
