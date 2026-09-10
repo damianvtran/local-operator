@@ -2576,6 +2576,17 @@ class AnalyticsScreen(ModalScreen[None]):
             self._repaint()
         if anchored:
             self._scroll_cursor_into_view()
+        # Same re-resolve as ``_set_expanded``, for the case it exists to
+        # close: ``e`` moves rows under a resting pointer even when the
+        # viewport does not. Children appear below every expandable root (or
+        # vanish on collapse), sliding the table under the pointer — but the
+        # ``scroll_y`` watch only fires when the cursor reveal above happens
+        # to scroll, and with the cursor row already visible the reveal is a
+        # no-op. No notification, no re-resolve, and the highlight stays
+        # painted on a row the pointer is not over: the wheel-gotcha defect
+        # via a keypress (review R1). ``_viewport_moved`` coalesces this with
+        # any watch callback the reveal did fire.
+        self.call_after_refresh(self._viewport_moved)
         self.call_after_refresh(self._sync_hint)
 
     def _forest(self) -> list["SessionNode"]:

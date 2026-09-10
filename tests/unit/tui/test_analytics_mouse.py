@@ -691,3 +691,173 @@ def test_expanding_a_row_re_resolves_the_highlight_under_a_still_pointer():
             assert screen._hover != before_id, "30 rows were inserted above it and it did not move"
 
     asyncio.run(run())
+
+
+def test_expand_all_re_resolves_the_highlight_without_moving_the_viewport():
+    """``e`` moves rows under a resting pointer EVEN WHEN THE VIEWPORT DOES NOT.
+
+    This is the case the wheel test cannot be and QA's round-1 expand-all row
+    (M5c) did not cover: their geometry scrolled the viewport, so the ``scroll_y``
+    watch fired and re-resolved the highlight for them. Here the cursor row stays
+    visible across ``e`` — mount parks the cursor on table row 0, expanding root 0
+    inserts its children BELOW it, and the reveal inside ``action_toggle_all`` is
+    therefore a no-op — so ``scroll_y`` never notifies and the ONLY thing that can
+    re-resolve the highlight is the action's own deferred ``_viewport_moved``.
+    Without it the highlight stays painted on a row the pointer is not over: the
+    wheel-gotcha defect via a keypress (review R1).
+
+    The ``scroll_offset`` assertion is the pin, not a comment. A test that let the
+    viewport move would pass against the broken code exactly like M5c did, because
+    the watch would do the re-resolve the action failed to schedule.
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg(kids=30))
+            _show_table(screen)
+            await pilot.pause()
+
+            scroll = screen._scroll
+            # Precondition: the cursor is on table row 0 and ON SCREEN, so the
+            # reveal inside ``action_toggle_all`` has nothing to scroll and no
+            # ``scroll_y`` notification can fire.
+            assert screen._cursor == screen._layout.session_rows[0].session_id
+            assert screen._cursor_on_screen(), "fixture: cursor row is not visible"
+
+            # Rest the pointer two rows below the expandable root. Expand-all
+            # inserts 30 children at indices 1..30, so the row under this FIXED
+            # coordinate changes from a root to a child.
+            x, y = _row_x(screen), _row_y(screen, 2)
+            await pilot.hover(screen, offset=(x, y))
+            await pilot.pause()
+            before_id = screen._hover
+            assert before_id == screen._layout.session_rows[2].session_id
+            assert screen._layout.session_rows[2].depth == 0, "fixture: index 2 is not a root"
+            scroll_y_before = scroll.scroll_offset.y
+
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            # THE PIN: the viewport did not move, so no watch fired and nothing
+            # but the action's own deferred re-resolve could have moved the
+            # highlight. If this assertion ever fails the test has silently
+            # degraded into the M5c case and no longer pins R1.
+            assert scroll.scroll_offset.y == scroll_y_before, (
+                "the viewport moved, so this no longer pins the no-scroll path — "
+                "the scroll_y watch would re-resolve the highlight on its own"
+            )
+            # The highlight followed the COORDINATE into the inserted block.
+            assert _hover_index(screen) == 2, "the highlight did not follow the coordinate"
+            assert screen._hover != before_id, "30 rows were inserted above it and it did not move"
+            assert screen._layout.session_rows[2].depth == 1, "fixture: index 2 is not a child"
+
+    asyncio.run(run())
+
+
+def test_collapse_all_re_resolves_the_highlight_without_moving_the_viewport():
+    """The other direction of R1: collapsing every row also moves them.
+
+    Staged so the pointer rests on a CHILD that collapse-all removes: the row
+    under the fixed coordinate changes from a child back to a root, and — as in
+    the expand direction — the cursor row stays visible so ``scroll_y`` never
+    notifies. The re-resolve can only come from ``action_toggle_all`` itself.
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg(kids=30))
+            _show_table(screen)
+            await pilot.pause()
+
+            scroll = screen._scroll
+            # Expand everything first, so the second ``e`` is a collapse-all.
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+            assert len(screen._layout.session_rows) > 41, "fixture: expand-all did not expand"
+            assert screen._cursor_on_screen(), "fixture: cursor row is not visible after expand"
+
+            x, y = _row_x(screen), _row_y(screen, 2)
+            await pilot.hover(screen, offset=(x, y))
+            await pilot.pause()
+            before_id = screen._hover
+            assert screen._layout.session_rows[2].depth == 1, "fixture: index 2 is not a child"
+            assert before_id == screen._layout.session_rows[2].session_id
+            scroll_y_before = scroll.scroll_offset.y
+
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            assert (
+                scroll.scroll_offset.y == scroll_y_before
+            ), "the viewport moved, so this no longer pins the no-scroll path"
+            assert _hover_index(screen) == 2, "the highlight did not follow the coordinate"
+            assert screen._hover != before_id, "the children vanished and it did not move"
+            assert screen._layout.session_rows[2].depth == 0, "fixture: index 2 is not a root"
+
+    asyncio.run(run())
+
+
+def test_the_empty_scrollbar_gutter_takes_no_hover_and_no_click():
+    """The stable gutter is RESERVED space, not a row — even when it is empty.
+
+    ``#analytics-scroll`` sets ``scrollbar-gutter: stable``, so the column is
+    there whether or not a bar is drawn. On a frame whose body does NOT overflow
+    there is no bar widget to capture events, so gutter coordinates really reach
+    the screen — and the viewport guard in ``_row_at`` is the only thing standing
+    between them and a row. Review R2 measured exactly that: under a
+    ``scroll.region.contains`` mutant a gutter hover highlights a row and a
+    gutter click on the root line TOGGLES it. The shipped guard is correct; this
+    is the pin that was missing.
+
+    The preconditions ARE the test. Without asserting that the frame does not
+    overflow and that the gutter column sits inside ``scroll.region`` but outside
+    the viewport, a passing run cannot distinguish "the guard rejected it" from
+    "nothing was ever delivered".
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _nested_screen_agg())
+            _show_table(screen)
+            await pilot.pause()
+
+            scroll = screen._scroll
+            viewport = scroll.scrollable_content_region
+            gutter_x = viewport.x + viewport.width
+            row_y = _row_y(screen, 0)
+
+            # Precondition 1: the body does NOT overflow, so no bar is drawn and
+            # the gutter is empty — events there really reach the screen.
+            assert (
+                scroll.max_scroll_y == 0
+            ), "fixture overflows: a drawn bar would capture the gutter"
+            # Precondition 2: the gutter column is inside the container's region
+            # (what the R2 mutant guards with) but outside the viewport (what the
+            # shipped guard uses), so the guard is genuinely exercised rather
+            # than trivially satisfied.
+            assert scroll.region.contains(gutter_x, row_y), "gutter is not inside scroll.region"
+            assert not viewport.contains(gutter_x, row_y), "gutter is inside the viewport"
+            # Precondition 3: the coordinate is over a visible, EXPANDABLE row,
+            # so a click there would toggle it under the mutant.
+            assert screen._layout.session_rows[0].expandable, "fixture: row 0 is not expandable"
+
+            await pilot.hover(screen, offset=(gutter_x, row_y))
+            await pilot.pause()
+            assert screen._hover is None, "the empty gutter took a hover"
+            assert str(screen.styles.pointer) == "default", "the gutter promised a click"
+
+            before = set(screen._expanded)
+            await pilot.click(screen, offset=(gutter_x, row_y))
+            await pilot.pause()
+            assert screen._expanded == before, "the empty gutter took a click"
+
+    asyncio.run(run())
