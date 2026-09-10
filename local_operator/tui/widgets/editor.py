@@ -598,6 +598,47 @@ CREDENTIAL_TOKEN = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)(?!\S)", re.IGN
 #: the operator writing ``deploy with /credential the prod key`` stays armed.
 CREDENTIAL_ARGUMENT = re.compile(r"[ \t]+-", re.IGNORECASE)
 
+#: The cell painted in place of each character of a TYPED secret.
+#:
+#: One mask cell per typed character, so the operator can see their typing is
+#: being received and can count what they have entered — the same feedback a
+#: password field gives, and the reason a fixed-width blob was rejected: an
+#: operator who cannot see the count cannot tell a swallowed keystroke from a
+#: registered one, and the whole point of the length in the chip label is that
+#: a capture is verifiable without being visible.
+#:
+#: U+2022 BULLET rather than ``*``: it is the idiom every password field in
+#: this app and outside it already uses, and it is visually distinct from the
+#: prose around it so the masked span reads as a distinct region rather than as
+#: typed punctuation. It is a single-width cell in every font the composer is
+#: rendered in, which matters because the mask must be a 1:1 substitution for
+#: the character it hides — a wide glyph would make the span's width disagree
+#: with the count the chip later reports.
+CREDENTIAL_MASK_CHAR = "•"
+
+#: What OPENS a typed capture: a single space typed at the end of an armed
+#: token. Space rather than the token itself because the operator must be able
+#: to type ``/credential`` as prose, to reach the picker, and to complete the
+#: word — none of which should start swallowing keystrokes. The space is the
+#: operator committing to the gesture, and it is the same separator the command
+#: has always taken its argument after, so nothing new has to be learned.
+#:
+#: BOTH ROUTES INTO IT ARE THE SAME KEYSTROKE by construction: a hand-typed
+#: space and the trailing space `_apply_command` inserts when a picker row is
+#: accepted are the same character at the same place, so the capture opens from
+#: the completion route without that route knowing anything about credentials.
+#: See :meth:`_open_credential_typing` for why that equivalence is enforced at
+#: the buffer rather than at the two call sites.
+CREDENTIAL_OPEN_SPACE = " "
+
+#: The command words whose completion ARMS a capture rather than running the
+#: command. The same two spellings ``CREDENTIAL_ARM`` matches, kept beside it so
+#: the completion route and the typing route can never come to disagree about
+#: what the token is — they are two doors into one mode, and a mode reachable by
+#: one spelling through one door is the kind of asymmetry this feature's history
+#: is made of.
+CREDENTIAL_COMMAND_NAMES = frozenset({"credential", "cred"})
+
 #: Random-name alphabet: Crockford-ish base32 WITHOUT the letters that read as
 #: digits. The name is quoted back to the operator in a notice and may be typed
 #: into a shell by hand, so ``0/O`` and ``1/I/L`` confusions are worth the
@@ -1378,12 +1419,21 @@ class CredentialArmChanged(Message):
     needs no words (the marker is the receipt) and ``"gone"`` was the operator
     deleting the token, but ``"argument"`` is the one where they typed on and
     the mode changed under them.
+
+    ``typing`` distinguishes the TWO armed states, which owe the operator
+    different words: merely armed is "the next paste is captured", while typing
+    is "the keys you are pressing right now are being masked". Carried on the
+    message rather than read back off the editor because the app's handler is
+    where the hint is chosen, and a handler that asked the widget would race the
+    next keystroke — the state it painted would be the one after the transition
+    it was told about.
     """
 
-    def __init__(self, active: bool, *, reason: str = "") -> None:
+    def __init__(self, active: bool, *, reason: str = "", typing: bool = False) -> None:
         super().__init__()
         self.active = active
         self.reason = reason
+        self.typing = typing
 
 
 class ShellModeChanged(Message):
@@ -2089,6 +2139,30 @@ class Editor(TextArea):
         #: the secret on screen (design round 1, D2). The app follows via
         #: :class:`CredentialArmChanged`, exactly as it follows bang-mode.
         self._credential_arm: tuple[int, int] | None = None
+        #: WHERE the typed secret begins, once the operator has opened the
+        #: masked span by pressing SPACE after an armed token — or ``None``
+        #: while no typed capture is open.
+        #:
+        #: This is the TYPED half of the gesture, and it needs its own state
+        #: because the armed span cannot express it. ``_credential_arm`` covers
+        #: the TOKEN (the range spliced out at capture time); this covers the
+        #: SECRET being typed after it. An offset rather than a span because
+        #: only the START is stable — the end is implied by how much has been
+        #: typed, so there are never two values to disagree.
+        #:
+        #: THE SECRET IS HELD OUT OF THE DOCUMENT. Characters typed while this
+        #: is open never enter ``self.text``; they accumulate in
+        #: :attr:`_credential_typed` and the buffer gets mask cells in their
+        #: place. That is the whole safety property, and it is why the mask is
+        #: not a render-time effect painted over real characters: a buffer that
+        #: HELD the secret would leak it through every seam that reads the
+        #: buffer — history, the draft store, undo, ``ctrl+o``, and the submit
+        #: path that leaked it in the first place. Nothing can read a secret
+        #: out of a document that never contained it.
+        self._credential_typing: int | None = None
+        #: The characters typed into the open masked span, in order. The ONLY
+        #: place a typed secret lives before it becomes a `PastedCredential`.
+        self._credential_typed: str = ""
         self.set_commands(commands or [])
 
     def render_line(self, y: int) -> Strip:
@@ -2411,6 +2485,25 @@ class Editor(TextArea):
         lowered = name.lower()
         return lowered in self.MODEL_COMMANDS or lowered in self._required_argument_commands
 
+    def arms_a_capture(self, name: str) -> bool:
+        """Whether completing ``name`` opens a credential capture instead of running.
+
+        The same shape as :meth:`opens_a_list` and for the same reason: for these
+        commands, completing the word IS the outcome of the keystroke, so an
+        Enter that also submitted would run a command the operator was in the
+        middle of using as a gesture.
+
+        THIS IS WHAT SEPARATES THE TWO ENTERS. Accepting the row inserts
+        ``/credential `` and that trailing space opens the masked span; the NEXT
+        Enter mints the chip, and it reaches a completely different handler
+        because a capture is open by then. Without this predicate the accepting
+        Enter fell through to `_run_command_from_buffer`, which submitted
+        ``/credential `` on the spot — so the operator's very next keystrokes
+        were typed into an ordinary, unmasked composer and the secret went to the
+        model in plaintext. That was one of the three reproduced leaks.
+        """
+        return name.lower() in CREDENTIAL_COMMAND_NAMES
+
     def _is_name_argument_command(self, name: str | None) -> bool:
         """Whether ``name``'s argument is a NAME followed by a free-text message.
 
@@ -2667,6 +2760,146 @@ class Editor(TextArea):
         # then a typed character must stop the turn, then type the character).
         if self._pending_escape is not None:
             self._flush_escape()
+        # A LIVE TYPED CAPTURE OWNS THE KEYBOARD, ahead of the prompt router,
+        # both pickers, history and submit. It has to be first, and the reason
+        # is the defect this whole mode exists to close rather than a matter of
+        # precedence: every branch below can put the pressed character somewhere
+        # the operator can read it — the prompt router answers a question with
+        # it, a picker completes on it, `_submit` sends the line. While the mask
+        # is up the ONLY safe default is that no other handler sees the key at
+        # all, so this block returns on every key it recognises and falls
+        # through only for the ones it has deliberately decided to allow.
+        if self._credential_typing is not None:
+            if key == "escape":
+                # NOT deferred, unlike every other Esc in this handler. The
+                # deferral exists so an Esc-prefixed `⌥←` is not read as a bare
+                # Escape, and it costs a message-loop tick — during which, here,
+                # the operator would keep typing INTO A CAPTURE THEY HAVE ALREADY
+                # CANCELLED, and those keystrokes would be masked and then
+                # restored in the wrong order. Cancelling synchronously is also
+                # what makes the unredaction land on the frame the operator
+                # pressed the key for. The chord risk is accepted knowingly: the
+                # worst case is that `⌥←` cancels a capture and returns the
+                # operator's own text, which is visible and one keystroke from
+                # being redone, whereas a tick of ambiguity while masking is a
+                # keystroke landing in the wrong buffer.
+                self._cancel_credential_typing()
+                event.stop()
+                event.prevent_default()
+                return
+            if key == "enter":
+                # THE SECOND OF THE TWO ENTERS (see `_mint_typed_credential`).
+                # The first is the picker's accept, which cannot reach here: a
+                # capture is only open once the completion has been applied and
+                # the picker closed, so the two Enters are separated by STATE,
+                # not by timing or by a flag. That is what makes them impossible
+                # to confuse — at any instant exactly one of "a picker is open"
+                # and "a capture is typing" is true, and each owns Enter in its
+                # own state. `_open_credential_typing` closes the picker as it
+                # opens the capture precisely so this stays an invariant rather
+                # than an ordering accident.
+                if self._mint_typed_credential():
+                    event.stop()
+                    event.prevent_default()
+                    return
+                # Empty secret: fall through to the ordinary Enter. The capture
+                # stays open (see the method), so this is a submit of whatever
+                # the draft already held, not a silent disarm.
+            elif key in ("backspace", "ctrl+h"):
+                if self._credential_typed:
+                    # Backspace inside the span retracts the last character from
+                    # the held value AND removes its mask cell, so the two can
+                    # never disagree about how long the secret is. Falls through
+                    # to TextArea's own delete for the cell itself.
+                    self._credential_typed = self._credential_typed[:-1]
+                else:
+                    # Backspace at the START of the span deletes the delimiting
+                    # space, which un-terminates the token — the operator is
+                    # backing out of the gesture, so the capture closes and the
+                    # ordinary delete takes the space. `_sync_credential_arm`
+                    # then re-derives the arm from the shortened buffer.
+                    self._abandon_credential_typing("gone")
+            elif event.is_printable and event.character is not None:
+                # `event.is_printable`/`event.character` and NEVER the key NAME.
+                # Textual spells punctuation keys as words — `minus`,
+                # `full_stop`, `plus`, `equals_sign` — so a `len(key) == 1` gate
+                # masks letters and digits while every punctuation character
+                # falls straight through into the document. MEASURED: the canary
+                # `zQ7-TYPED-LEAK-CANARY-4417` rendered as `•••-TYPED-LEAK-
+                # CANARY-4417`, i.e. the first hyphen ended the masking and the
+                # rest of the secret was typed in PLAINTEXT and submitted. Real
+                # credentials are full of `-`, `_`, `.` and `/`, so that gate
+                # leaked almost every actual secret while looking correct
+                # against an alphanumeric test value.
+                if not self._credential_typed and event.character == "-":
+                    # A LEADING ``-`` IS THE COMMAND, NOT A SECRET, and it must
+                    # escape the mask before it is masked. This is the same
+                    # partition `CREDENTIAL_ARGUMENT` already draws for the
+                    # pasted path, honoured here so the two agree: the credential
+                    # verbs are flag-shaped (`--forget`, `--forget-all`)
+                    # PRECISELY so they can never collide with a key, because
+                    # keys normalize to `[A-Z0-9_]` and cannot begin with `-`
+                    # (see variables.py).
+                    #
+                    # Without this the destructive verbs became untypable: the
+                    # opening space starts masking, so `/credential --forget-all`
+                    # went in as a masked eight-character "secret" and Enter
+                    # minted a chip instead of forgetting anything. That is a
+                    # regression of the shipped command, which the brief requires
+                    # stay reachable exactly as it was.
+                    #
+                    # Only the FIRST character is tested. A `-` inside a secret is
+                    # an ordinary character (and common in base64url), so once any
+                    # character has been typed the operator is entering a value
+                    # and the flag reading is gone.
+                    self._abandon_credential_typing("argument")
+                    self._disarm_credential("argument")
+                    # Falls through: the `-` is inserted as ordinary text.
+                else:
+                    # THE MASKING ITSELF. One printable character is held out of
+                    # the document and a mask cell takes its place.
+                    #
+                    # THIS INCLUDES THE SPACE, which is deliberate: a space
+                    # inside the span is part of the SECRET, not a terminator.
+                    # Passphrases contain spaces, and the operator has an
+                    # explicit, advertised Enter to end the entry, so there is no
+                    # need to overload the space with a second meaning.
+                    # Overloading it would fail in the unrecoverable direction —
+                    # a passphrase would be truncated at its first space and the
+                    # remainder typed in PLAINTEXT, which is this feature's
+                    # original defect reappearing inside its own fix.
+                    self._type_credential_char(event.character)
+                    event.stop()
+                    event.prevent_default()
+                    return
+            elif key == "tab":
+                # Tab has no completion meaning inside a secret (no list is
+                # open), and a literal tab in the middle of a masked span is far
+                # more likely to be a reach for a picker that is not there.
+                # Swallowed so it can neither insert whitespace into the value
+                # nor move focus out of the composer mid-capture.
+                event.stop()
+                event.prevent_default()
+                return
+            elif key == "shift+enter":
+                # AN EXPLICIT NEWLINE ENDS THE CAPTURE, and this is a
+                # correctness requirement rather than a preference. The masked
+                # span is a CONTIGUOUS run of cells starting at
+                # `_credential_typing`, and the mint splices
+                # ``[token_start, _credential_typing + len(typed))``. A newline
+                # inserted mid-capture occupies an offset that is NOT a mask
+                # cell, so every character typed after it puts the computed end
+                # one further out of step with the cells actually on screen —
+                # measured: the splice then left an orphaned bullet in the
+                # buffer and mis-reported the span.
+                #
+                # Ending it is also the honest reading of the gesture: a secret
+                # is a single-line value, Enter already terminates it, and an
+                # operator pressing shift+enter is composing the prose around the
+                # chip. Abandoned rather than cancelled, for the same reason a
+                # caret move is — they did not ask for the plaintext back.
+                self._abandon_credential_typing("moved")
+                # Falls through: the newline is inserted as usual.
         # An advertised answer key, while a question is up and the buffer is
         # empty, answers the question instead of being typed.
         #
@@ -2892,7 +3125,18 @@ class Editor(TextArea):
                         # argument phase — `_apply_command` moved the caret to the
                         # end of the completed word, so the run path re-parses at
                         # that caret and finds this token.
-                        if key == "enter" and not self.opens_a_list(name):
+                        #
+                        # `arms_a_capture` joins `opens_a_list` for the same
+                        # reason it exists: completing `/credential` OPENS the
+                        # masked span (the trailing space does it), so running
+                        # the command as well would submit the bare word and
+                        # drop the operator into an unmasked composer with a
+                        # secret half-typed. See that predicate for the leak.
+                        if (
+                            key == "enter"
+                            and not self.opens_a_list(name)
+                            and not self.arms_a_capture(name)
+                        ):
                             self._run_command_from_buffer()
                     elif key == "tab":
                         # Tab never sends, so it can safely take the highlighted
@@ -3885,6 +4129,14 @@ class Editor(TextArea):
         # captured or lands in plaintext.
         if self._credential_arm is not None:
             start, end = self._credential_arm
+            # The masked span is painted as ONE run with the token, so the
+            # amber ink covers the whole gesture rather than stopping at the
+            # command word. The bullets are the part the operator is actually
+            # looking at while they type, and leaving them in ordinary prose
+            # colour made the mask read as characters that had simply come out
+            # wrong — the ink is what says "this region is the mode".
+            if self._credential_typing is not None:
+                end = max(end, self._credential_typing + len(self._credential_typed))
             before = self.text[:start]
             line_index = before.count("\n")
             line_start = len(before) - len(before.rpartition("\n")[2])
@@ -4681,6 +4933,42 @@ class Editor(TextArea):
         claim = getattr(self, "_click_selection", None)
         if claim is not None and claim != selection:
             self._click_selection = None
+        # THE CARET LEAVING A MASKED SPAN ENDS THE CAPTURE, and the question is
+        # asked HERE — at the reactive that every caret move funnels through —
+        # rather than on the caret KEYS. Key-level checks covered only the keys
+        # they enumerated: `move_cursor` from a completion, a mouse click, a
+        # selection set by the app and `ctrl+u`-style edits all moved the caret
+        # without pressing one, leaving the capture open with its span no longer
+        # under the caret. The next typed character was then appended to the
+        # secret while its mask cell was inserted somewhere else entirely, and
+        # the mint spliced a range that did not match what was on screen.
+        #
+        # The span is contiguous and ends at `_credential_typing + len(typed)`,
+        # so "still inside" is a position test: anywhere from the start of the
+        # secret to its end is fine (the operator may be mid-word), anything
+        # outside is a departure. Abandoned, never cancelled — a caret move is
+        # not a request for the plaintext back, so the value is dropped rather
+        # than written into the buffer behind them.
+        start = getattr(self, "_credential_typing", None)
+        if start is not None:
+            end = start + len(self._credential_typed)
+            caret = self._offset_at(*selection.end)
+            if not start <= caret <= end:
+                self._abandon_credential_typing("moved")
+        elif getattr(self, "_credential_arm", None) is not None:
+            # AND THE CARET RETURNING RE-OPENS IT. The pair makes the masked
+            # span POSITIONAL — it is open exactly while the caret is in it —
+            # which is the only rule that behaves the same however the caret
+            # got there. Without the reopen, leaving and coming back left an
+            # armed token whose next typed character landed in PLAINTEXT: the
+            # capture only ever opened on the edit that inserted the space, and
+            # that space had already been typed.
+            #
+            # Cheap and safe to ask on every caret move: `_open_credential_typing`
+            # re-derives from the buffer and refuses unless the caret is exactly
+            # at the end of the armed token's trailing space, so a caret parked
+            # anywhere else is a no-op.
+            self._open_credential_typing()
         # A caret move changes the ghost's answer: it renders AT the caret, so
         # one set while the caret sat at the end of `/mcp login` renders
         # mid-word once the caret moves back into it (`/mcp loGHOSTgin notion`,
@@ -4793,6 +5081,37 @@ class Editor(TextArea):
         """
         arm = self._credential_arm
         if arm is not None:
+            if self._credential_typing is not None and self._credential_typed:
+                # PASTING INTO A SPAN THE OPERATOR HAS ALREADY TYPED INTO appends
+                # to the secret rather than minting beside it. Typing a prefix
+                # and pasting the rest is an ordinary way to enter a key that is
+                # partly memorised, and two chips would split one credential into
+                # two values the model cannot recombine. Masked through the same
+                # path as typing, so the pasted characters never enter the
+                # document either.
+                #
+                # Scoped to a NON-EMPTY typed value on purpose. The opening space
+                # now starts a capture immediately, so a plain `/credential ` +
+                # paste — the gesture that shipped in v0.53.0 and the one most
+                # operators have in their fingers — arrives here with an OPEN but
+                # EMPTY span. That must still mint instantly in place, so it
+                # falls through to `_capture_credential` below exactly as it did
+                # before this mode existed. Appending there instead would have
+                # left the paste masked and unchipped until a further Enter,
+                # which is a regression of the paste path dressed up as
+                # consistency.
+                pasted = event.text
+                if pasted:
+                    event.prevent_default()
+                    event.stop()
+                    for char in pasted:
+                        self._type_credential_char(char)
+                    return
+            if self._credential_typing is not None:
+                # An empty open span is closed before the paste mints, so the
+                # capture state cannot outlive the chip that supersedes it and
+                # leave the composer masking keystrokes after a visible receipt.
+                self._close_credential_typing()
             captured = self._capture_credential(event.text)
             if captured is not None:
                 event.prevent_default()
@@ -5643,6 +5962,258 @@ class Editor(TextArea):
         # the operator keeps typing inline.
         return marker + " "
 
+    # -- the TYPED capture ----------------------------------------------------
+    #
+    # THE STATE MACHINE, written down once here because a future agent has to be
+    # able to reconstruct why each key does what it does:
+    #
+    #     (1) token typed / completed      ->  ARMED      (`_credential_arm`)
+    #     (2) SPACE at the end of the token ->  TYPING     (`_credential_typing`)
+    #     (3) printable key while TYPING    ->  held in `_credential_typed`,
+    #                                           one mask cell into the buffer
+    #     (4) Enter while TYPING            ->  MINT the chip, leave the caret
+    #                                           in the composer (state: ARMED
+    #                                           ends, composer keeps the draft)
+    #     (5) Esc while TYPING              ->  CANCEL: the typed characters are
+    #                                           restored as ordinary text
+    #     (6) Paste while ARMED             ->  chip in place, unchanged
+    #
+    # (1), (2) and (6) already existed or are one predicate each; (3), (4) and
+    # (5) are what this feature adds. The invariant that makes the whole thing
+    # safe is stated at `_credential_typing`: BETWEEN (2) AND (4) THE SECRET IS
+    # NEVER IN THE DOCUMENT. Every seam that could disclose it reads the
+    # document, so holding it outside closes all of them at once rather than one
+    # at a time — which is the failure mode the pasted path had to be audited
+    # for across six separate expansion seams.
+
+    def credential_typing(self) -> bool:
+        """True while a TYPED secret is open and being masked.
+
+        The third public read of credential state, beside
+        :meth:`credential_armed` and :meth:`credential_cited`, and it is a
+        distinct question from both: "armed" is *before* the secret arrives,
+        "typing" is *while it arrives*, "cited" is *after*. The app paints a
+        different hint for each, so collapsing any two would make the composer
+        say the wrong thing about what the next keystroke means.
+        """
+        return self._credential_typing is not None
+
+    def _open_credential_typing(self) -> bool:
+        """Turn the space just typed after an armed token into a masked span.
+
+        Returns whether the capture opened, so the caller knows whether the
+        space was consumed as the mode's opening delimiter.
+
+        THE SPACE IS A DELIMITER, NOT PART OF THE SECRET. It stays in the
+        buffer (the token still needs terminating, and the picker closes on it)
+        and the masked span begins at the offset AFTER it. That is what keeps
+        the chip's reported length honest: ``K`` counts the characters of the
+        secret, and a leading space silently included would make the receipt
+        disagree with the value by one — precisely the kind of off-by-one an
+        operator cannot check, because they can never see the value again.
+
+        ONE OPENING RULE FOR BOTH ROUTES, and it is enforced HERE rather than at
+        the two call sites, which is the reason this reads the buffer instead of
+        taking a flag. The hand-typed route arrives as a `space` keystroke; the
+        accepted-completion route arrives as the trailing space
+        :meth:`_apply_command` appends. Those are the same character at the same
+        offset, so a rule stated about the BUFFER cannot treat them differently
+        — whereas two call-site flags would be two rules that drift, and the
+        divergence would be invisible until one route silently stopped masking.
+        """
+        arm = self._credential_arm
+        if arm is None or self._credential_typing is not None:
+            return False
+        offset = self._caret_offset()
+        # The space must be the character the caret just passed, and it must sit
+        # at the END of the armed token: `/credential ` opens, but a caret parked
+        # mid-line after an unrelated space does not. `_sync_credential_arm` has
+        # already extended the arm over the token's trailing whitespace, so the
+        # armed span's own end IS the offset after the space.
+        if offset != arm[1] or not self.text[:offset].endswith(CREDENTIAL_OPEN_SPACE):
+            return False
+        self._credential_typing = offset
+        self._credential_typed = ""
+        # THE PICKER IS DELIBERATELY LEFT OPEN. It is the surface that says what
+        # the mode is doing — its notice row carries
+        # `CREDENTIAL_TYPING_NOTICE` — and closing it would remove the guidance
+        # at the exact moment the composer starts turning keystrokes into
+        # bullets, which is when the operator most needs telling why.
+        #
+        # It cannot claim the keys that matter: `_on_key` routes a live capture
+        # AHEAD of the picker, so Enter mints and Esc cancels regardless of what
+        # the list is showing. And the rows it would offer are already withheld
+        # while armed (`_credential_choices`), so there is no highlighted row for
+        # a stray key to act on either.
+        self._invalidate_slash_runs()
+        self.post_message(CredentialArmChanged(True, typing=True))
+        return True
+
+    def _type_credential_char(self, char: str) -> None:
+        """Absorb one typed character into the secret; paint one mask cell.
+
+        The buffer receives :data:`CREDENTIAL_MASK_CHAR`, never ``char``. The
+        substitution is 1:1 so the span's width tracks the secret's length,
+        which is what lets the operator verify the count against the chip label
+        the mint produces.
+
+        Inserted through the ordinary edit funnel rather than by assigning to
+        ``text``, so the mask cells participate in the document exactly as typed
+        text does — the caret advances, the width recomputes, and the arm
+        re-syncs — while the value itself accumulates out of band.
+        """
+        self._credential_typed += char
+        # Insertion at the caret, which is by construction the end of the masked
+        # span: `_credential_typing` + len(typed) is where the caret must be, and
+        # any key that could have moved it away has already closed the capture
+        # (see `_credential_caret_left_span`).
+        self.insert(CREDENTIAL_MASK_CHAR)
+
+    def _mint_typed_credential(self) -> bool:
+        """Enter while TYPING: turn token + masked span into a chip.
+
+        Returns whether a chip was minted, so the caller knows whether Enter was
+        consumed by the capture or should fall through to submit.
+
+        ENTER ENDS THE SECRET; IT DOES NOT SUBMIT THE MESSAGE. The gesture is
+        specified as "hand over a secret and then describe it" — the operator
+        types ``/credential``, the secret, Enter, and then keeps typing prose
+        around the chip. An Enter that also submitted would make that
+        description impossible to write: the message would leave the moment the
+        secret ended, so the only reachable prompt would be a bare chip with no
+        explanation of what the credential is for. The operator presses Enter a
+        SECOND time to send, which is the same shape as every other completion
+        in this composer (a picker row, a name argument) — Enter finishes the
+        thing you are in the middle of, and sends only when you are in the
+        middle of nothing.
+
+        AN EMPTY SECRET MINTS NOTHING. ``/credential `` + Enter with no
+        characters typed falls through as an ordinary Enter, matching the empty
+        PASTE decision at :meth:`_capture_credential`: a zero-length credential
+        would advertise a key to the model that can never hold anything, and
+        `store_credential` refuses a blank value regardless. The capture stays
+        open rather than closing, so the operator who simply has not typed yet
+        is not silently disarmed by a stray keypress.
+        """
+        if self._credential_typing is None:
+            return False
+        secret = self._credential_typed
+        if not secret:
+            return False
+        arm = self._credential_arm
+        start = arm[0] if arm is not None else self._credential_typing
+        end = self._credential_typing + len(secret)
+        marker = self._capture_credential(secret)
+        self._close_credential_typing()
+        if marker is None:
+            return False
+        # ONE edit replaces the token, the delimiting space AND every mask cell.
+        # Doing it as a single `replace` (rather than a delete plus an insert)
+        # keeps it a single undoable step, and there is no intermediate document
+        # state in which some of the mask cells have been resolved — an undo
+        # therefore returns the operator to the buffer as it was before the
+        # gesture, never to one holding a partially revealed secret. It cannot
+        # reveal the secret in any case: the document never held it.
+        self.replace(
+            marker,
+            self._offset_to_location(start),
+            self._offset_to_location(end),
+            maintain_selection_offset=False,
+        )
+        self.move_cursor(self._offset_to_location(start + len(marker)))
+        return True
+
+    def _cancel_credential_typing(self) -> bool:
+        """Esc while TYPING: give the operator their characters back.
+
+        Returns whether a capture was cancelled, so Esc falls through to its
+        other meanings (dismiss a list, leave shell mode, stop the turn) when no
+        capture is open.
+
+        UNREDACTS RATHER THAN DISCARDS. The spec says Esc "unredacts and/or
+        cancels", and restoring the text is the reading that cannot lose work:
+        an operator who typed a long secret and pressed Esc because they meant
+        it as prose gets exactly what they typed, while an operator who wanted
+        it gone deletes it with the keystrokes they would use for any other
+        text. Discarding silently would be unrecoverable in the one direction
+        that matters — retyping a secret is precisely what an operator cannot do
+        from memory.
+
+        THE ARM ENDS TOO. Esc means "I am not handing over a secret", so leaving
+        the token armed would put the composer in a state where the next paste
+        is still swallowed as a credential after the operator has visibly backed
+        out. That is the false-POSITIVE direction, which costs one backspace;
+        the alternative (staying armed) is the direction D2 calls unrecoverable.
+        """
+        if self._credential_typing is None:
+            return False
+        secret = self._credential_typed
+        start = self._credential_typing
+        end = start + len(secret)
+        self._close_credential_typing()
+        self._disarm_credential("cancelled")
+        # The mask cells become the characters they were standing in for. This
+        # is the ONLY route by which the typed secret enters the document, and
+        # it is the operator explicitly asking for it — at which point it is
+        # their prose, not a credential.
+        self.replace(
+            secret,
+            self._offset_to_location(start),
+            self._offset_to_location(end),
+            maintain_selection_offset=False,
+        )
+        self.move_cursor(self._offset_to_location(start + len(secret)))
+        return True
+
+    def _close_credential_typing(self) -> None:
+        """Drop the typed-capture state and the secret it held.
+
+        Called by every exit from the TYPING state. The value is cleared here
+        and nowhere else, so there is exactly one place a secret stops being
+        held — a second clearing site is how one path comes to leave it behind.
+        """
+        if self._credential_typing is None:
+            return
+        self._credential_typing = None
+        self._credential_typed = ""
+        self._invalidate_slash_runs()
+        self.post_message(CredentialArmChanged(self._credential_arm is not None))
+
+    def _abandon_credential_typing(self, reason: str) -> None:
+        """End a typed capture WITHOUT restoring the secret, leaving the mask.
+
+        The exit for the states where the operator has moved on rather than
+        cancelled: the caret left the masked span, the buffer was replaced, the
+        draft was submitted. Restoring the plaintext there would push a secret
+        into the document behind the operator's back, at a moment they are not
+        looking at the span — the opposite of what Esc does, and deliberately
+        so, because Esc is an explicit request and these are not.
+
+        The mask cells are LEFT IN THE BUFFER as ordinary bullets. They are not
+        the secret and carry no way back to it: the value is dropped here, so
+        what remains is a visible run of ``•`` the operator can see and delete.
+        Silently deleting them instead would make a caret movement erase text
+        the operator watched themselves type, which reads as data loss even
+        though the characters were never real.
+
+        THE ARM IS LEFT ALONE, which is the whole difference between this and
+        :meth:`_cancel_credential_typing`. The token is still in the buffer and
+        the operator has not withdrawn it, so disarming here would silently
+        revoke the safety property while the gesture is still on screen — the
+        false-NEGATIVE direction D2 calls unrecoverable, and it is reachable by
+        something as ordinary as clicking elsewhere in the draft and clicking
+        back. The routes that genuinely end the gesture (the buffer being
+        replaced, a submit) disarm on their own account at their own call site.
+        """
+        # `getattr`, because `load_text` calls this and TextArea's constructor
+        # calls `load_text` BEFORE this widget's own `__init__` body has run —
+        # the same ordering `_picker` is built ahead of `super().__init__()` for.
+        # A capture cannot be open at that point, so "absent" and "closed" are
+        # the same answer.
+        if getattr(self, "_credential_typing", None) is None:
+            return
+        self._close_credential_typing()
+
     async def _attach_pasted_images(self, pasted: str) -> str | None:
         """Load every path in ``pasted`` as an attachment; return the markers.
 
@@ -5992,6 +6563,19 @@ class Editor(TextArea):
         # leave it a message-loop tick behind the text — and that tick is the
         # one in which a paste decides whether it is a secret.
         self._sync_credential_arm()
+        # THE OPENING SPACE, asked on the funnel BOTH routes converge on. The
+        # hand-typed space and the trailing space `_apply_command` appends when
+        # a picker row is accepted are the same insertion at the same offset, so
+        # asking here is what makes the two routes identical by construction
+        # rather than by two call sites agreeing. Asking in `_on_key` instead
+        # would have covered only the typed route and left the completion route
+        # silently unmasked — which is exactly the shape of the defect being
+        # fixed, one level down.
+        #
+        # After `_sync_credential_arm`, because the arm's span is what the open
+        # is checked against and the space is the character that just extended it.
+        if self._credential_typing is None and self._credential_arm is not None:
+            self._open_credential_typing()
         if touched:
             self._release_uncited(touched)
         return result
@@ -6142,6 +6726,15 @@ class Editor(TextArea):
         # which replace the buffer for `/team`, `/model` and friends; a
         # completion is not the arming gesture either, and letting one preserve
         # an arm would reopen the migration route through a second door.
+        #
+        # A TYPED CAPTURE ENDS HERE TOO, and it is ABANDONED rather than
+        # cancelled: the buffer is being replaced wholesale, so restoring the
+        # plaintext would write a secret into a document the operator is in the
+        # middle of navigating away from — into a recalled prompt, or a draft
+        # about to be stored. The held value is dropped instead, which is the
+        # only outcome that cannot disclose it. This must run BEFORE the text is
+        # gone, and it does: the state is closed here on the same call.
+        self._abandon_credential_typing("gone")
         self._disarm_credential("gone")
 
     def _caret_offset(self) -> int:
@@ -6180,6 +6773,29 @@ class Editor(TextArea):
         finally:
             self._suspend_picker_sync = False
         self._sync_picker()
+        # THE ARM IS RE-DERIVED AT THE SETTLED CARET, and only here, for exactly
+        # the reason the picker is: `load_text` DISARMS (deliberately — arriving
+        # text must never inherit an arm), and it runs with the caret still at
+        # the origin, so a completion that just wrote `/credential ` ended with
+        # no arm at all. That is why accepting the picker row produced no chip
+        # and leaked: the gesture was complete on screen and the state said
+        # otherwise.
+        #
+        # Safe against the migration route `load_text`'s disarm exists to close.
+        # That route is about an arm SURVIVING a buffer swap and re-anchoring
+        # onto a token the operator never typed; this re-derives from scratch at
+        # the caret the completion just placed, using the same `CREDENTIAL_ARM`
+        # end-of-line rule a hand-typed token must satisfy. So a recalled prompt
+        # or a restored draft still cannot arm — neither routes through here, and
+        # neither leaves the caret at the end of a `/credential` token.
+        self._sync_credential_arm()
+        # The completion's own trailing space is the opening delimiter, and it
+        # was inserted by the buffer replacement above rather than by `edit()`,
+        # so the funnel that normally opens the capture never saw it. Asking here
+        # is what makes the accepted-completion route land in the SAME masked
+        # state as the hand-typed one.
+        if self._credential_typing is None and self._credential_arm is not None:
+            self._open_credential_typing()
 
     def _location_at_offset(self, offset: int) -> tuple[int, int]:
         """A whole-buffer ``offset`` as a ``(row, column)`` document location.

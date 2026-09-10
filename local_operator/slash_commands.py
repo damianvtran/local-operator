@@ -488,7 +488,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # notice that already names what was stored or forgotten.
     SlashCommand(
         "credential",
-        "Hand the agent a secret it can use but never read; paste is masked",
+        # Describes the GESTURE, and describes it FIRST. The old copy ("paste is
+        # masked") named only the clipboard route, so the operator who TYPED the
+        # secret — the obvious human gesture — had no reason to expect it to
+        # work, and in fact it did not: the line fell through to this command
+        # with the secret as its argument.
+        #
+        # THE LEAD IS LOAD-BEARING, not a style choice. The picker ellipsizes the
+        # description's TAIL, and measured on the real app it keeps ~47
+        # characters at 100 columns and fewer at 80 — the previous copy rendered
+        # as "Hand the agent a secret it can use but never re…", dropping its
+        # own verb. So the two words that tell the operator the mode exists
+        # ("Type or") have to come before the guarantee, because the guarantee is
+        # the half that survives cropping either way.
+        "Type or paste a secret the agent can use but never reads",
         aliases=("cred",),
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.credential",

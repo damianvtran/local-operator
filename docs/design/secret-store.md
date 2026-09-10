@@ -861,6 +861,88 @@ event, arms the next paste for capture. Because `consumes_prompt` and
 command, the inline form is an editor-level concern, not a slash-command one —
 the existing `/credential` command keeps working unchanged for the leading case.
 
+### 11.1 The TYPED capture
+
+The paste path above shipped in v0.53.0 and was, for two releases, the **only**
+path. Typing the secret — `/credential 12345`, the obvious human gesture —
+produced no chip at all: the line fell through to the legacy `/credential <KEY>`
+command with the secret as its **key argument**, so the app answered "Paste the
+value for 12345" and the secret sat in the transcript in plaintext. No chip, no
+error, no warning. That is a security defect rather than a missing convenience,
+and it is what this section closes.
+
+**The state machine.**
+
+```
+token typed or completed  ──▶ ARMED
+ARMED + SPACE             ──▶ TYPING   (characters masked as typed)
+TYPING + printable        ──▶ held out of the document, one mask cell painted
+TYPING + Enter            ──▶ chip minted; composer keeps the draft
+TYPING + Esc              ──▶ unredacted: the characters come back as text
+ARMED + paste             ──▶ chip in place, instantly (unchanged)
+```
+
+**The space is the boundary, and it arms from both routes.** A hand-typed space
+and the trailing space `_apply_command` inserts when a picker row is accepted
+are the same character at the same offset, so the capture opens on the shared
+edit funnel rather than at either call site — the two routes are identical *by
+construction* instead of by two code paths agreeing. The space is a delimiter
+and is **not** part of the secret, so `K` in `[Credential #N, K chars]` counts
+the value alone.
+
+**Two different Enters, separated by state, not by timing.** While the picker is
+open Enter accepts the completion; once a capture is open Enter mints the chip.
+Exactly one of those states holds at any instant, which is what makes them
+impossible to confuse. Accepting the row therefore must not *run* the command —
+`Editor.arms_a_capture` is the predicate that suppresses it, beside
+`opens_a_list` and for the same reason.
+
+**Enter ends the secret; it does not submit.** The gesture is specified as "hand
+over a secret and then describe it", so an Enter that also sent the message
+would make the description impossible to write. The operator presses Enter a
+second time to send.
+
+**The secret is held out of the document.** Characters typed while a capture is
+open never enter `self.text`; they accumulate in `Editor._credential_typed`
+while the buffer receives `CREDENTIAL_MASK_CHAR` cells. This is the whole safety
+property, and it is why the mask is *not* a render-time effect over real
+characters: every disclosure seam (history, the draft store, undo, `ctrl+o`,
+the submit path) reads the buffer, so a document that never held the secret
+closes all of them at once rather than one at a time.
+
+**Esc unredacts rather than discards.** Retyping a secret from memory is exactly
+what an operator cannot do, so the recoverable reading is the only safe one. Esc
+also ends the arm: the operator has visibly backed out, so the next paste must
+not still be swallowed.
+
+**The masked span is positional.** It is open exactly while the caret is inside
+it, asked on `watch_selection` — `move_cursor`, a mouse click and an app-set
+selection all move the caret without a caret key being pressed, and a capture
+left open after the caret moved would append to the value in one place while
+painting its cell in another.
+
+**A leading `-` escapes the mask**, so `--forget-all` stays typable. The
+credential verbs are flag-shaped precisely so they cannot collide with a key
+(keys normalize to `[A-Z0-9_]`), which is the same partition `CREDENTIAL_ARGUMENT`
+already draws on the pasted path. Only the *first* character is tested: `-` is
+common inside real keys.
+
+**A trap worth recording.** Textual spells punctuation keys as words (`minus`,
+`full_stop`), so a handler gated on `len(event.key) == 1` masks letters and
+digits while every punctuation character falls through into the document.
+Measured, the canary `zQ7-TYPED-LEAK-CANARY-4417` rendered as
+`•••-TYPED-LEAK-CANARY-4417` — the first hyphen ended the masking and the rest
+was typed in plaintext and submitted. Real credentials are mostly punctuation,
+so that gate leaks nearly every actual secret while passing against an
+alphanumeric test value. Gate on `event.is_printable`, never on the key name.
+
+**Cost accepted.** Prose typed after the token — `fix the /credential command` —
+is masked, because no rule keyed on the buffer can separate it from
+`deploy with /credential the prod key`, which must stay armed (design round 1,
+D2). The mask is loud and immediate and Esc restores the text in one keystroke,
+which is the false-positive direction; the alternative fails toward a plaintext
+secret in scrollback that nothing can recall.
+
 **Random naming.** The operator does not invent a name; the store does:
 
 ```

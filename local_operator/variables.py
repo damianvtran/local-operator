@@ -122,8 +122,17 @@ class CredentialCommand:
     message: str = ""
 
 
+#: The operator-facing help for the command, shown on every parse error.
+#:
+#: The INLINE gesture leads, because it is the one an operator reaches for and
+#: the one that used to fail silently: typing `/credential <secret>` fell
+#: through to the `<KEY>` form below with the secret as its key argument, and
+#: the value landed in the transcript in plaintext. Naming the space and the
+#: terminating Enter here is what makes the mode discoverable from the error an
+#: operator sees when they get it wrong.
 CREDENTIAL_USAGE = (
-    "Usage: /credential <KEY>\n"
+    "Usage: /credential <space> then type or paste it  # masked; Enter chips it\n"
+    "       /credential <KEY>         # name it yourself, value via a prompt\n"
     "       /credential                # list\n"
     "       /credential --persist <KEY>  # also save to the encrypted long-term store\n"
     "       /credential --forget <KEY>\n"

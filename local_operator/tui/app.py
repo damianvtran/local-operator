@@ -1564,13 +1564,28 @@ COMPOSER_CREDENTIAL_CLASS = "-composer-credential"
 #: and the amber ink on the token itself, plus the picker's own notice row
 #: while its list is open. Anything counting channels here must count what
 #: PAINTS — the attribute being set correctly is not the same claim.
-CREDENTIAL_PLACEHOLDER = "Paste the secret… — it is captured, not shown"
+CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it"
 
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
 #: list that simply vanished would read as the gesture having been dropped —
 #: so the row says what the composer is waiting for instead.
-CREDENTIAL_ARMED_NOTICE = "armed — paste the secret; it is captured, never shown"
+CREDENTIAL_ARMED_NOTICE = "armed — type or paste the secret; it is never shown"
+
+#: Shown in the same row once the operator has STARTED TYPING a secret and the
+#: composer is masking their keystrokes.
+#:
+#: A separate string from :data:`CREDENTIAL_ARMED_NOTICE` because the two states
+#: owe different words, and this is the state where the operator most needs
+#: them: their keystrokes are producing bullets instead of characters, which is
+#: alarming rather than reassuring unless something says it is deliberate AND
+#: says how it ends. So this names the mask, the key that finishes the entry and
+#: the key that backs out — the three facts that cannot be read off the frame.
+#:
+#: Same width budget as the held notice (~82 cells at 120 columns, and the row
+#: ellipsizes its TAIL): the tail here is "Esc cancels", the way out, which is
+#: exactly the half that must not be the part that crops.
+CREDENTIAL_TYPING_NOTICE = "masked as you type — Enter turns it into a chip, Esc cancels"
 
 #: Shown where those same rows would be once a capture has LANDED and the
 #: buffer still cites it (design round 3, D9). The armed notice cannot be
@@ -14283,11 +14298,18 @@ class OperatorApp(App[None]):
         # only ever narrows what the list offers, so no disarm can hand back a
         # destructive row the fill above withheld.
         if editor.argument_command in ("credential", "cred"):
-            editor.picker.set_notice(
-                CREDENTIAL_ARMED_NOTICE
-                if message.active
-                else (CREDENTIAL_HELD_NOTICE if editor.credential_cited() else "")
-            )
+            # THREE states, three strings. `message.typing` is read from the
+            # message rather than from the editor because this handler runs a
+            # message-loop tick after the transition, by which time the widget
+            # may already have moved on — the row would then describe a state
+            # the operator has left. See `CredentialArmChanged.typing`.
+            if message.typing:
+                notice = CREDENTIAL_TYPING_NOTICE
+            elif message.active:
+                notice = CREDENTIAL_ARMED_NOTICE
+            else:
+                notice = CREDENTIAL_HELD_NOTICE if editor.credential_cited() else ""
+            editor.picker.set_notice(notice)
         if not message.active and message.reason == "argument":
             self._notice(
                 "credential capture disarmed — that is an argument to "
@@ -28085,9 +28107,19 @@ class OperatorApp(App[None]):
             armed = editor.credential_armed()
             cited = editor.credential_cited()
             picker.set_choices(self._credential_choices(armed=armed, cited=cited))
-            picker.set_notice(
-                CREDENTIAL_ARMED_NOTICE if armed else (CREDENTIAL_HELD_NOTICE if cited else "")
-            )
+            # TYPING outranks ARMED here for the same reason ARMED outranks
+            # CITED: it is the state the operator is currently IN, and it is the
+            # one whose keys they need told. Asked off the editor rather than
+            # off a message because this is the list-OPENING path — there is no
+            # transition being reported, only a list being filled over whatever
+            # state already holds, so the widget is the authority.
+            if editor.credential_typing():
+                notice = CREDENTIAL_TYPING_NOTICE
+            elif armed:
+                notice = CREDENTIAL_ARMED_NOTICE
+            else:
+                notice = CREDENTIAL_HELD_NOTICE if cited else ""
+            picker.set_notice(notice)
             return
         if message.command in ("team", "teams", "agent", "agents"):
             # Rows and the render-time name snapshot are one fill operation. The
