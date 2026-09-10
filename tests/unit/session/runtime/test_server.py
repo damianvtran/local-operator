@@ -1185,7 +1185,8 @@ class TestLiveStateReachesTheRecord:
 
         The boot-seed path probes ``handle._session`` (the owned-handle shape
         — the daemon child and exec) and derives ``started`` from the
-        transcript FILE, so the fake only needs the path to be real.
+        transcript FILE via the session's declared ``transcript_path``, so the
+        fake only needs the path to be real.
         """
         from types import SimpleNamespace
 
@@ -1193,9 +1194,7 @@ class TestLiveStateReachesTheRecord:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(row + "\n" for row in rows))
         handle = FakeHandle()
-        handle._session = SimpleNamespace(  # type: ignore[attr-defined]
-            transcript=SimpleNamespace(path=path)
-        )
+        handle._session = SimpleNamespace(transcript_path=path)  # type: ignore[attr-defined]
         return handle
 
     @pytest.mark.asyncio
@@ -1234,6 +1233,41 @@ class TestLiveStateReachesTheRecord:
             server = RuntimeServer(handle, kind="daemon")
             assert server._started is False
             assert server._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_peer_note_only_transcript_boots_unstarted(self, tmp_path) -> None:
+        """QA Q4: a quiet-dialled peer note persists as a MESSAGE row (kind
+        ``custom``, a ``peer_message`` CustomMessage) WITHOUT a turn running,
+        so a message row alone cannot seed ``started`` — that marks the
+        session started, after which a peer ``--wake`` or a broadcast drives
+        an assistant turn into a session the owner never typed in. Only a
+        plain ``Message`` row (kind ``message``, or a legacy row that
+        predates the marker) counts."""
+        peer_note = (
+            '{"id":"p1","ts":1,"type":"message","payload":{"kind":"custom",'
+            '"custom_type":"peer_message","attribution":"user","details":{"text":"hi"}}}'
+        )
+        peer_notes_only = self._handle_over_transcript(tmp_path, "noted", [peer_note, peer_note])
+        mixed = self._handle_over_transcript(
+            tmp_path,
+            "mixed",
+            [
+                peer_note,
+                '{"id":"m1","ts":4,"type":"message","payload":{"kind":"message","role":"user"}}',
+            ],
+        )
+        legacy = self._handle_over_transcript(
+            tmp_path,
+            "legacy",
+            ['{"id":"m2","ts":5,"type":"message","payload":{"role":"assistant"}}'],
+        )
+        server = RuntimeServer(peer_notes_only, kind="daemon")
+        assert server._started is False
+        assert server._record.started is False
+        for handle in (mixed, legacy):
+            server = RuntimeServer(handle, kind="daemon")
+            assert server._started is True
+            assert server._record.started is True
 
     @pytest.mark.asyncio
     async def test_started_is_one_way_and_deduplicated(self) -> None:

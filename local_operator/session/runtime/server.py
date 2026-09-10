@@ -67,6 +67,7 @@ from local_operator.session.runtime.types import (
     ClientLocality,
     SessionRecord,
 )
+from local_operator.session.transcript import durable_conversation_path
 
 logger = logging.getLogger(__name__)
 
@@ -565,37 +566,30 @@ class ProjectionSink(Protocol):
 
 
 def has_durable_history(session: Any) -> bool:
-    """Whether this session's transcript already holds a conversation.
+    """Whether this session's transcript already holds a REAL conversation turn.
 
     The seed signal for the record's ``started`` bit at two call sites that
     face the same question — ``RuntimeServer.__init__`` (a resumed boot must
     publish ``started=True`` before any turn runs in the NEW process) and
     ``TuiSessionHandle.rebind`` (a ``/resume`` mid-flight re-seeds the bit for
-    the swapped identity). A MESSAGE row is the discriminator, not just any
-    row: bookkeeping rows (a persisted ``system_prefix`` epoch, a title) can
-    precede the first turn, and counting those would mark a fresh composer as
-    started — the exact window the flag exists to gate. Read from the FILE
-    rather than the in-memory index — the index is built by replay and is not
-    guaranteed populated at the moment either call site asks — and
-    defensively: a session shape with no readable transcript (a reduced
-    host) answers False, the conservative "unstarted" direction a first
-    real turn immediately corrects.
+    the swapped identity). Thin wrapper over
+    :func:`~local_operator.session.transcript.durable_conversation_path`,
+    where the discriminator lives with the row shapes it reads: only a plain
+    ``Message`` row counts — a CustomMessage row (a quiet-dialled
+    ``peer_message`` note, a wake prompt) is persisted WITHOUT a turn running,
+    and counting one seeds ``started=True`` on a session whose owner never
+    typed, after which a peer ``--wake`` or broadcast drives an assistant
+    turn into it (QA Q4). Read off the session's declared
+    ``transcript_path`` rather than ``session.transcript.path`` — the same
+    read, through the session's own contract instead of two privates deep;
+    a session shape without one (a reduced host) answers False, the
+    conservative "unstarted" direction a first real turn immediately
+    corrects.
     """
-    path = getattr(getattr(session, "transcript", None), "path", None)
+    path = getattr(session, "transcript_path", None)
     if path is None:
         return False
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for row in handle:
-                try:
-                    entry = json.loads(row)
-                except ValueError:
-                    continue  # a torn line says nothing about history
-                if isinstance(entry, dict) and entry.get("type") == "message":
-                    return True
-    except OSError:
-        return False
-    return False
+    return durable_conversation_path(path)
 
 
 class RuntimeServer:

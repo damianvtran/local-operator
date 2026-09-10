@@ -3194,6 +3194,23 @@ class Session:
         return self._transcript
 
     @property
+    def transcript_path(self) -> Any:
+        """The transcript FILE path, or None on an in-memory store.
+
+        The ``started``-bit seeds answer one question — has this session run a
+        real turn — and only the durable file can answer it at construction
+        (the replayed index is not populated yet). Exposed so the seed reads
+        the session's declared contract instead of reaching two privates deep
+        (``session.transcript.path``) — and because a session whose transcript
+        attribute is None (a reduced host) must read as unstarted, not probe
+        an attribute that is not there.
+        """
+        transcript = self._transcript
+        if transcript is None:
+            return None
+        return getattr(transcript, "path", None)
+
+    @property
     def agent_id(self) -> str:
         return self._agent_id
 

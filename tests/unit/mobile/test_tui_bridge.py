@@ -224,7 +224,7 @@ def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
             path = tmp_path / session_id / "transcript.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("".join(row + "\n" for row in transcript_rows))
-            self.transcript = SimpleNamespace(path=path)
+            self.transcript_path = path
 
         # FakeSession pins a constant "sess"; the rebind path copies this
         # onto the projection, so the test needs per-session values.
@@ -278,3 +278,17 @@ def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
     handle.rebind()
     assert newer._publish_session_started == handle._publish_session_started
     assert registrant.resets == [True, False]
+
+    # QA Q4: a transcript whose only message rows are quiet-dialled peer
+    # notes (``peer_message`` CustomMessages, persisted without a turn) is
+    # NOT durable history — the bit must stay False on rebind to it.
+    noted = _Session(
+        "noted-id",
+        [
+            '{"id":"p1","ts":4,"type":"message","payload":{"kind":"custom",'
+            '"custom_type":"peer_message","attribution":"user","details":{"text":"hi"}}}',
+        ],
+    )
+    handle._app = _App(noted)  # type: ignore[assignment]
+    handle.rebind()
+    assert registrant.resets == [True, False, False]
