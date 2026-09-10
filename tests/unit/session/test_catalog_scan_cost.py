@@ -15,16 +15,31 @@ The first fix (#867) reordered the two gates, which improved the CONSTANT —
 stats remained, the origin marker in the scan and the desktop marker in
 ``load_catalog``.
 
-The second fix removed the scaling itself. A directory already known to be
-hidden is now skipped whole, for ZERO syscalls, because both facts that
-decision needs — the name and the inode — come free from the ``readdir`` batch
-``scandir`` already paid for. Per-directory cost therefore tracks the USER's
-own sessions: measured flat at 266 syscalls per poll while the store grew from
-100 to 8,000 directories with users held at 50, against 366 -> 16,166 before.
+The second fix removed the scaling for the population that dominates a real
+store. A directory already known to be hidden is now skipped whole, for ZERO
+syscalls, because both facts that decision needs — the name and the inode —
+come free from the ``readdir`` batch ``scandir`` already paid for. Per-directory
+cost is therefore **O(user sessions + directories that are neither listed nor
+cached-hidden)**: measured flat at 266 syscalls per poll while the store grew
+from 100 to 8,000 directories with users held at 50, against 366 -> 16,166
+before.
+
+That middle term is not a rounding error and is stated rather than elided. A
+directory with neither an origin marker nor any activity is in neither the
+listing nor the hidden set, so it never arms the skip and pays ~4 syscalls per
+poll forever while never being listable — 266 / 2,266 / 8,266 / 32,266 over
+0 / 500 / 2,000 / 8,000 of them with both other populations fixed
+(``bench_catalog_scan.py unmarked-axis``; agent review round 1, R1 measured the
+same 4.0 slope on a counter with a different constant). "Tracks the user's own
+sessions" is true of the hidden population
+and false of this one, and
+``test_the_cost_is_linear_in_directories_that_are_neither_listed_nor_hidden``
+pins the limit so it cannot quietly detach from the claim again.
+
 What remains O(total entries) is the single batched ``scandir`` — the poll
 still touches the store, it just stops stat-ing it — and the verdict cache's
-own parse (704 KB / 5.6 ms at 7,950 markers), which is now the dominant
-remaining term.
+own parse (704 KB / 5.6 ms at 7,950 markers). Those and the never-active
+population are the dominant remaining terms.
 
 Neither fix is allowed to buy that with a different answer: no second source of
 truth, and above all **no second ranking clock**. These tests pin both halves —
@@ -367,6 +382,56 @@ class TestThePollsPerDirectoryCostIsBounded:
 
         assert measurements[0] == measurements[1] == measurements[2], measurements
 
+    def test_the_cost_is_linear_in_directories_that_are_neither_listed_nor_hidden(
+        self, tmp_path: Path
+    ) -> None:
+        """WHERE THE FLATNESS ABOVE STOPS — recorded, not left to be discovered.
+
+        A directory with neither an origin marker nor any activity is in
+        neither ``rows`` nor ``hidden_names``. It therefore can never arm the
+        zero-syscall skip, and pays its origin stat on every poll forever while
+        never being listable. The test above grows the store with HIDDEN
+        directories, which is exactly the population the skip handles, so it
+        reports flat while this cost rises — the same blind spot that let #867
+        present a true statement about one axis as a general scaling property
+        (agent review round 1, R1).
+
+        This is deliberately a POSITIVE assertion of the limit rather than a
+        bound to be improved: the honest claim is O(user sessions + directories
+        that are neither listed nor cached-hidden), and a test that merely
+        capped the cost would let the qualifier quietly detach from the number.
+        Fixing the cost is refused on purpose — caching "unmarked" would serve a
+        stale verdict for a directory the backfill stamps later — so this pins
+        the consequence of that refusal.
+
+        Asserted as a strict rise per batch rather than an exact slope: the
+        per-directory constant is an implementation detail (~4 syscalls today,
+        origin stat plus desktop probe), while "not flat" is the property.
+        """
+        for index in range(10):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(50):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0)
+
+        measurements = []
+        for batch in range(3):
+            for index in range(100):
+                # No transcript and no origin marker: the shape an idle
+                # open-and-quit launch leaves behind.
+                (tmp_path / "sessions" / f"idle{batch:03x}{index:06x}").mkdir(parents=True)
+            _recent_sessions_with_origin(tmp_path)
+            _recent_sessions_with_origin(tmp_path)
+            with _counting() as counter:
+                rows = _recent_sessions_with_origin(tmp_path)
+            measurements.append(counter.total)
+            assert len(rows) == 10, "a never-active directory is never listable"
+
+        assert measurements[0] < measurements[1] < measurements[2], measurements
+        first_step = measurements[1] - measurements[0]
+        second_step = measurements[2] - measurements[1]
+        assert first_step == second_step, (measurements, "linear, not accelerating")
+        assert first_step >= 100, "at least one syscall per never-active directory"
+
     def test_the_desktop_probe_skips_known_hidden_directories(self, tmp_path: Path) -> None:
         """``load_catalog``'s SECOND O(store) stat, removed the same way.
 
@@ -389,6 +454,45 @@ class TestThePollsPerDirectoryCostIsBounded:
         # equality because ``load_catalog`` also reads the registry and the
         # attention store, whose constant is not this test's subject.
         assert counter.counts["stat"] < 60
+
+    def test_a_directory_carrying_both_markers_resolves_to_the_origin_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """PINS THE CROSS-MODULE INVARIANT THE PROBE SKIP RESTS ON.
+
+        The skip above is sound because ``desktop.json`` has exactly one writer
+        (``DesktopSessions.create``), which mints a fresh directory and never
+        writes an origin marker into it — so a directory cannot carry both.
+        That is correct today, but it is a coupling between two modules
+        enforced only by prose: a future writer in ``desktop_sessions.py`` that
+        stamped a desktop marker into an existing session directory would
+        silently drop that row, with nothing failing (agent review round 1, R4).
+
+        This asserts what the code does today so that change trips HERE, next to
+        the reasoning, rather than as a missing sidebar row somebody bisects
+        later. The behaviour pinned is deliberately the current one, not a
+        wished-for one: the origin verdict WINS, the both-marker directory is
+        hidden and its draft is not offered, and a legitimate desktop draft
+        beside it is unaffected. If the single-writer premise is ever
+        intentionally broken, this test is the place to state the new rule.
+        """
+        both = tmp_path / "sessions" / ("b" * 12)
+        both.mkdir(parents=True)
+        (both / "origin.json").write_text(json.dumps({"origin": "subagent"}), encoding="utf-8")
+        (both / "desktop.json").write_text(json.dumps({"title": "draft"}), encoding="utf-8")
+        # The shape the probe legitimately exists to find, as a control: if the
+        # skip ever swallowed drafts wholesale this row would vanish too.
+        draft = tmp_path / "sessions" / ("c" * 12)
+        draft.mkdir(parents=True)
+        (draft / "desktop.json").write_text(json.dumps({"title": "real"}), encoding="utf-8")
+
+        # Across an armed poll as well as the cold one: the skip is what makes
+        # the second cheap, so the verdict must not differ between them.
+        for poll in range(3):
+            rows = _recent_sessions_with_origin(tmp_path)
+            catalog = [entry.id for entry in load_catalog(tmp_path)]
+            assert [row[0] for row in rows] == [], f"poll {poll}: origin marker hides the row"
+            assert catalog == ["c" * 12], f"poll {poll}: the legitimate draft is still offered"
 
 
 # ---------------------------------------------------------------------------

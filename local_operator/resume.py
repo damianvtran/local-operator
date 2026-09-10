@@ -166,9 +166,39 @@ ORIGIN_CACHE_VERSION = 2
 #: process always revalidates on its first scan), and the cache being derived
 #: data under ``cache/`` that a user may delete at any time.
 #:
-#: Cost of the epoch, measured at 4,000 directories / 50 users: a fast poll is
-#: 151 syscalls and a revalidating one 4,101, so the AMORTISED figure is 177
-#: against main's 8,052. 177 is the honest number to quote, not 151.
+#: THE COUNTER ADVANCES PER POLL, NOT PER SECOND, so the "~5 minutes" ceiling
+#: holds only for a sidebar that is actually polling. A closed sidebar pauses
+#: its timer (``_sidebar_timer.pause()``), which freezes the counter: wall-clock
+#: staleness is UNBOUNDED while the sidebar is shut, and reopening it does not
+#: force a revalidation — the first poll after reopening serves the armed fast
+#: path and the epoch resumes from wherever it stopped. A cold start still
+#: revalidates, so this is bounded per PROCESS, never per wall-clock. The
+#: variable-poll-rate case below is the same hazard in continuous form.
+#:
+#: One caller opts out of all of this rather than living with the window:
+#: ``session.cleanup`` passes ``revalidate=True`` through
+#: :func:`recent_sessions`, because its listing is the recent-N deletion guard
+#: and a stale row there is an irreversible loss rather than a late redraw
+#: (agent review round 1, R2). That forced scan does NOT make a reopened
+#: sidebar fresh — it is scoped to the cleanup call and restarts the epoch as a
+#: side effect of being a genuine revalidation.
+#:
+#: Cost of the epoch, measured at 4,000 directories / 50 users. Quote the
+#: figure for the surface you mean — these are FULL ``load_catalog`` polls,
+#: which is what the sidebar actually pays, and they differ from a bare
+#: :func:`_scan_sessions` call by ``load_catalog``'s own per-row work (the
+#: scan alone is 151 armed / 4,101 revalidating on the same store, which is
+#: what an earlier revision of this comment quoted without saying so):
+#:
+#: * a fast poll is 266 syscalls, a revalidating one 4,216, so the AMORTISED
+#:   figure is 292 against main's 8,166 — a 28.0x reduction.
+#: * 292 is the honest number to quote, not 266.
+#:
+#: Independently reproduced in QA round 1 as 265 / 4,215 / 291.3 / 8,165, and
+#: the PR body's table matches; the ~1-syscall spread is where each counter
+#: hooks ``os``, not a disagreement. The earlier 151 / 4,101 / 177 / 8,052
+#: figures in this comment were the SCAN-only path quoted as if they were the
+#: poll — same structure and ratio, wrong surface (QA round 1, Q2).
 REVALIDATE_EVERY = 150
 
 #: Scans issued so far, per store, driving :data:`REVALIDATE_EVERY`.
@@ -1168,7 +1198,9 @@ def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
         return
 
 
-def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[str, float]]:
+def recent_sessions(
+    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
 
     ``limit=None`` means NO TRUNCATION and is the default, so a caller that says
@@ -1204,14 +1236,40 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     notes in :func:`_scan_sessions`, which is where the per-directory cost is
     actually decided.
 
-    So per-directory cost tracks the USER's own sessions, not the store:
-    measured flat at 266 syscalls per poll while the store grew 100 -> 8,000
-    directories with users held at 50 (``scripts/bench_catalog_scan.py
-    store-axis``), against 366 -> 16,166 before. What is still O(total
-    entries) is the single batched ``scandir`` — the poll has stopped
-    stat-ing the store, not stopped touching it — and the verdict cache's own
-    parse, which at 7,950 markers is 704 KB / 5.6 ms and is now the dominant
-    remaining term. Anyone optimising this path next should start there, and
+    So per-directory cost is **O(user sessions + directories that are neither
+    listed nor cached-hidden)**, not O(the store): measured flat at 266
+    syscalls per poll while the store grew 100 -> 8,000 directories with users
+    held at 50 (``scripts/bench_catalog_scan.py store-axis``), against
+    366 -> 16,166 before.
+
+    STATE THAT MIDDLE TERM, do not round it away. A directory with NEITHER an
+    origin marker NOR any activity is in neither ``rows`` nor
+    ``hidden_names``: it can never arm the skip, so it pays its origin stat
+    and ``load_catalog``'s desktop probe on EVERY poll, forever, while never
+    being listable. Measured with users fixed at 50 and hidden fixed at 500,
+    varying only that third population (``bench_catalog_scan.py
+    unmarked-axis``): 266 / 2,266 / 8,266 / 32,266 at 0 / 500 / 2,000 / 8,000
+    — strictly linear at 4.0 syscalls each (agent review round 1, R1, which
+    measured 268 -> 32,268 with a counter that also counts ``open`` and
+    ``listdir``; the slope is the claim, not the constant). Pinned by
+    ``unmarked-axis`` and
+    ``test_the_cost_is_linear_in_directories_that_are_neither_listed_nor_hidden``).
+    A corrupt marker and ``{"origin": ""}`` behave identically, and the
+    corrupt case is the very fail-safe this design preserves. The store
+    accumulates these from idle open-and-quit launches — 23 on the reporting
+    machine. It is a real limit, RECORDED here rather than left to be
+    rediscovered: "tracks the user's own sessions" is true of the hidden
+    population and false of this one.
+
+    Fixing that cost is a separate change and is deliberately NOT attempted
+    here: caching "unmarked" is refused for the reason stated at the marker
+    stat below, and the refusal is load-bearing.
+
+    What is still O(total entries) is the single batched ``scandir`` — the
+    poll has stopped stat-ing the store, not stopped touching it — and the
+    verdict cache's own parse, which at 7,950 markers is 704 KB / 5.6 ms.
+    Those two and the never-active population above are the dominant
+    remaining terms; anyone optimising this path next should start there, and
     should count :func:`~local_operator.session.catalog.load_catalog`'s
     desktop probe too — it is the second site, and the hidden set returned by
     :func:`_scan_sessions` is what removed it.
@@ -1236,9 +1294,20 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     ``limit`` truncates the RESULT, never the work: every directory is visited
     regardless, so a caller asking for all sessions costs the same as one
     asking for ten.
+
+    ``revalidate=True`` opts OUT of the skip for this call, re-reading every
+    marker so the answer reflects the store as it is now rather than as the
+    last revalidating scan found it. It is for a caller whose decision is
+    IRREVERSIBLE — ``session.cleanup`` protects the recent-N by this listing,
+    so a stale row there is a deleted conversation, not a missing one. A caller
+    that merely DISPLAYS the listing must not set it: the whole point of the
+    epoch is that a 2-second poll does not pay a full scan.
     """
     return [
-        (name, mtime) for name, mtime, _origin in _recent_sessions_with_origin(config_dir, limit)
+        (name, mtime)
+        for name, mtime, _origin in _recent_sessions_with_origin(
+            config_dir, limit, revalidate=revalidate
+        )
     ]
 
 
@@ -1259,7 +1328,7 @@ def _is_hidden_origin(origin: str) -> bool:
 
 
 def _recent_sessions_with_origin(
-    config_dir: Path, limit: int | None = None
+    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
 ) -> list[tuple[str, float, str]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
@@ -1273,14 +1342,23 @@ def _recent_sessions_with_origin(
     CLI's recovery listing pins its shape. Callers that also want the hidden
     names — only ``session.catalog.load_catalog``, to skip a second per-directory
     stat — use :func:`_scan_sessions` directly.
+
+    ``revalidate`` is forwarded verbatim; see :func:`_scan_sessions`.
     """
-    return _scan_sessions(config_dir, limit)[0]
+    return _scan_sessions(config_dir, limit, revalidate=revalidate)[0]
 
 
 def _scan_sessions(
-    config_dir: Path, limit: int | None = None
+    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
 ) -> tuple[list[tuple[str, float, str]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
+
+    ``revalidate=True`` forces this scan to re-read every marker instead of
+    serving the armed fast path — the caller declaring that a stale verdict is
+    not acceptable to IT, whatever the epoch says. Only a caller that ACTS on
+    the listing rather than displaying it should ask for this; see
+    ``session.cleanup._picker_rows``, which is a deletion authority and must
+    never decide from a speculatively-stale answer.
 
     ``hidden_names`` is every directory this scan established is NOT the user's
     own session — whether it was skipped from cache or re-read. It exists for
@@ -1306,8 +1384,19 @@ def _scan_sessions(
     # still advances the counter — otherwise a session started before its
     # config dir exists would sit at 0 and revalidate on every poll forever.
     scans_so_far = _SCAN_COUNT.get(str(config_dir), 0)
-    _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
-    revalidate = scans_so_far % REVALIDATE_EVERY == 0
+    if revalidate:
+        # A FORCED revalidation is the epoch's expensive scan, merely arriving
+        # early, so it RESTARTS the epoch rather than counting as one more
+        # armed poll. Leaving the counter to advance would let the fast path
+        # stay armed on a scan that just re-read the store — the counter would
+        # then describe polls issued rather than staleness accrued since the
+        # last fresh verdict, which is the only thing it exists to bound. 1,
+        # not 0, because this scan IS the revalidating one: the next poll is
+        # legitimately allowed to be cheap.
+        _SCAN_COUNT[str(config_dir)] = 1
+    else:
+        _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
+        revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
     rows: list[tuple[str, float, str]] = []
     # Every directory this scan established is not the user's own session. See

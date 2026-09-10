@@ -8,6 +8,8 @@ Usage:
         [--sizes 100,500,1000,2000,4000,8000] [--users 50] [--json out.json]
     PYTHONPATH=. .venv/bin/python scripts/bench_catalog_scan.py users-axis \
         [--users 10,50,200] [--dirs 4000] [--json out.json]
+    PYTHONPATH=. .venv/bin/python scripts/bench_catalog_scan.py unmarked-axis \
+        [--counts 0,500,2000,8000] [--users 50] [--hidden 500] [--json out.json]
     PYTHONPATH=. .venv/bin/python scripts/bench_catalog_scan.py real \
         [--store ~/.local-operator] [--json out.json]
 
@@ -40,6 +42,22 @@ O(total directories) rises linearly. ``users-axis`` is its complement: it fixes
 the store and varies users, showing the remaining per-user cost is linear and
 small rather than the design being O(1) by answering the wrong question. Any
 performance claim about this poll must be backed by both, not by the ladder.
+
+**``unmarked-axis`` is where the claim STOPS, and it is not optional either.**
+Both axes above grow the store with directories the skip can arm on, so both
+report a flat column while a third population costs linearly forever: a
+directory with neither an origin marker nor any activity is in neither the
+listing nor the hidden set, never arms the skip, and pays ~4 syscalls per poll
+for the life of the store while never being listable. Measured by this mode
+with users fixed at 50 and hidden at 500: 266 / 2,266 / 8,266 / 32,266 over
+0 / 500 / 2,000 / 8,000, a slope of exactly 4.0 (agent review round 1, R1,
+which measured the same slope at 268 -> 32,268 with a counter that also hooks
+``open`` and ``listdir`` — the slope is the claim, the constant is the
+instrument). The honest statement of the result is
+therefore **O(user sessions + directories that are neither listed nor
+cached-hidden)**, and this mode is what keeps that qualifier attached to a
+number instead of to a memory. A flat ``store-axis`` alone is precisely the
+evidence that let #867 overstate its scaling.
 
 The ``real`` mode measures the operator's own store. It is strictly READ-ONLY:
 it never writes to the store it measures, so it is safe to point at a live
@@ -238,13 +256,22 @@ def _build_store(root: Path, total: int) -> None:
                 os.utime(d / name, (stamp, stamp))
 
 
-def _build_axis_store(root: Path, *, users: int, hidden: int) -> None:
-    """A store with the two populations controlled INDEPENDENTLY.
+def _build_axis_store(root: Path, *, users: int, hidden: int, unmarked: int = 0) -> None:
+    """A store with the three populations controlled INDEPENDENTLY.
 
     ``_build_store`` mixes them at a fixed ratio, which is right for modelling
     the real store but useless for separating "cost tracks the store" from
     "cost tracks the user's sessions" — both rise together there. Here the
     caller pins one and varies the other.
+
+    ``unmarked`` is the THIRD population, and it is the one that bounds the
+    claim. A directory with neither an origin marker nor any activity is in
+    neither the listing nor the hidden set, so it can never arm the
+    zero-syscall skip and pays its stats on every poll forever while never
+    being listable. ``store-axis`` and ``users-axis`` both hold it at 0, which
+    is exactly how a cost that is linear in it stays invisible to them — the
+    same shape of blind spot that let #867 overstate its scaling. Defaulting to
+    0 keeps those two experiments unchanged; ``unmarked-axis`` varies it.
 
     Names are prefixed rather than sequential hex so a reader of a failing
     assertion can see at a glance which population a directory belongs to. The
@@ -268,6 +295,12 @@ def _build_axis_store(root: Path, *, users: int, hidden: int) -> None:
         )
         stamp = now - 100000 - index
         os.utime(directory / "transcript.jsonl", (stamp, stamp))
+    for index in range(unmarked):
+        # No marker and no transcript: the shape an idle open-and-quit launch
+        # leaves behind. Deliberately not given an origin marker — that would
+        # make it hidden and therefore skippable, which is the population this
+        # one exists to be distinguished from.
+        (sessions / f"idle{index:08x}").mkdir(exist_ok=True)
 
 
 def _steady_state(root: Path) -> dict[str, Any]:
@@ -340,6 +373,51 @@ def _users_axis(user_counts: list[int], dirs: int) -> list[dict[str, Any]]:
             )
         finally:
             shutil.rmtree(root, ignore_errors=True)
+    return results
+
+
+def _unmarked_axis(counts: list[int], users: int, hidden: int) -> list[dict[str, Any]]:
+    """THE LIMIT OF THE CLAIM: both listed populations fixed, never-active varied.
+
+    ``store-axis`` proves the poll is flat as the store grows, but it grows the
+    store with HIDDEN directories only — the population the skip can arm on. A
+    directory that is neither listed nor hidden is in neither set, so it never
+    arms and never stops costing. This axis is the same experimental design run
+    against the one input the other two do not vary, so the linear term is
+    RECORDED rather than discovered later by whoever inherits the claim.
+
+    Reported as syscalls per never-active directory, because the honest way to
+    state a linear cost is its slope: a flat column here would be a genuinely
+    O(user sessions) poll, and it is not one.
+    """
+    results = []
+    for count in counts:
+        root = Path(tempfile.mkdtemp(prefix=f"lo-unmarked-{count}-"))
+        try:
+            _build_axis_store(root, users=users, hidden=hidden, unmarked=count)
+            row = {
+                "dirs": users + hidden + count,
+                "users": users,
+                "hidden": hidden,
+                "unmarked": count,
+                **_steady_state(root),
+            }
+            results.append(row)
+            print(
+                f"  {count:>5} never-active (+{users} users, {hidden} hidden): "
+                f"rows={row['rows']:<4} syscalls/poll={row['syscalls']:>6}",
+                flush=True,
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    if len(results) > 1:
+        span = results[-1]["unmarked"] - results[0]["unmarked"]
+        rise = results[-1]["syscalls"] - results[0]["syscalls"]
+        if span:
+            print(
+                f"  slope: {rise / span:.1f} syscalls per never-active directory per poll "
+                "(a flat column here would mean O(user sessions); it is not flat)"
+            )
     return results
 
 
@@ -490,6 +568,21 @@ def main() -> int:
             dirs = int(argv[argv.index("--dirs") + 1])
         print(f"complementary axis: store FIXED at {dirs} directories, users varied")
         payload["users_axis"] = _users_axis(user_counts, dirs)
+    elif mode == "unmarked-axis":
+        counts = [0, 500, 2000, 8000]
+        if "--counts" in argv:
+            counts = [int(x) for x in argv[argv.index("--counts") + 1].split(",")]
+        users = 50
+        if "--users" in argv:
+            users = int(argv[argv.index("--users") + 1])
+        hidden = 500
+        if "--hidden" in argv:
+            hidden = int(argv[argv.index("--hidden") + 1])
+        print(
+            f"LIMIT OF THE CLAIM: users FIXED at {users}, hidden FIXED at {hidden}, "
+            "never-active directories varied"
+        )
+        payload["unmarked_axis"] = _unmarked_axis(counts, users, hidden)
     elif mode == "compare":
         # Not a measurement: an assertion over two JSON files this script wrote.
         if "--before" not in argv or "--after" not in argv:

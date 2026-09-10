@@ -1148,3 +1148,66 @@ def test_any_viewer_takes_the_record_once_the_writer_is_gone(tmp_path: Path) -> 
     _record(sessions, writer.pid)
     taken = take_unannounced_cleanup(sessions, runtime_pid=None)
     assert taken is not None and taken["removed"] == 2
+
+
+def test_a_stale_hidden_verdict_cannot_cost_a_session_its_recent_guard(tmp_path: Path) -> None:
+    """THE DELETION AUTHORITY MUST NOT DECIDE FROM A SPECULATIVELY-STALE SCAN.
+
+    ``resume``'s catalog scan serves an armed fast path that can keep reporting
+    a directory as hidden for up to ``REVALIDATE_EVERY`` polls after its origin
+    marker was removed. For the sidebar that is a cheap, self-healing display
+    lag. For this module it is not a display at all: the recent-N guard IS the
+    picker's rows, so a session missing from that listing is not merely
+    invisible, it is UNPROTECTED — and removal is irreversible while a late
+    redraw is not.
+
+    Reproduced by agent review round 1 (R2) in production order, which is what
+    this test replays: the TUI's ``on_mount`` opens the sidebar and polls once
+    (arming the path), the operator deletes ``origin.json`` by hand — the
+    SUPPORTED un-hide gesture, which the backfill deliberately never undoes —
+    and startup maintenance runs ``cleanup_from_config`` 0.75 s later
+    (``_STORE_MAINTENANCE_IDLE_DELAY_SECONDS``). Before the fix that sequence
+    chose the un-hidden session for deletion; a scan one epoch later protected
+    it as "one of the 10 most recent".
+
+    The assertion is deliberately the STRONG one — the stale-window result must
+    equal the fresh-scan result — rather than merely "the victim survives".
+    Anything weaker would pass again the moment some other guard happened to
+    cover this particular victim, which is how the window would return
+    unnoticed.
+    """
+    from local_operator.resume import _SCAN_COUNT, mark_session_origin, recent_sessions
+
+    mark_store(tmp_path / "sessions")
+    # Twelve sessions, all idle past ``max_inactive_days`` so the limit has
+    # something to take; only the recent-N guard stands between them and it.
+    for index in range(12):
+        _session(tmp_path, f"v{index:011d}", age_days=40 + index)
+    victim = tmp_path / "sessions" / "v00000000001"
+    mark_session_origin(victim, "subagent", label="reviewer")
+
+    policy = CleanupPolicy(
+        enabled=True, max_sessions=0, max_inactive_days=30, max_total_bytes=0, remove_empty=False
+    )
+
+    _SCAN_COUNT.clear()
+    # Poll #1: the cold start, which always revalidates and arms the path.
+    recent_sessions(tmp_path, limit=None)
+    # The operator un-hides the session by deleting the marker by hand.
+    (victim / "origin.json").unlink()
+    # Poll #2: the fast path is armed, so the sidebar still shows it hidden.
+    assert "v00000000001" not in [
+        name for name, _stamp in recent_sessions(tmp_path, limit=None)
+    ], "precondition: the display lag this test exists to keep OUT of the policy"
+
+    stale = run_cleanup(tmp_path, policy, now=NOW, dry_run=True, force=True)
+
+    # The policy re-read the store rather than inheriting the sidebar's verdict.
+    assert ("v00000000001", "one of the 10 most recent") in stale.protected
+    assert "v00000000001" not in [candidate.session for candidate in stale.chosen]
+
+    # And it decided exactly as a scan with no stale state at all would.
+    _SCAN_COUNT.clear()
+    fresh = run_cleanup(tmp_path, policy, now=NOW, dry_run=True, force=True)
+    assert sorted(c.session for c in stale.chosen) == sorted(c.session for c in fresh.chosen)
+    assert sorted(stale.protected) == sorted(fresh.protected)
