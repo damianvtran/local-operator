@@ -1350,13 +1350,34 @@ class RuntimeServer:
                     # non-attach peer, or a bug — each of which is worth one
                     # greppable line rather than a vanished session.
                     #
-                    # THIS line is the one that always fires, which is why it
-                    # names the limit rather than the size: a frame only
-                    # marginally over produces a single raise whose separator
-                    # lands inside the discarded chunk, so no read succeeds
-                    # until the peer sends something else and the summary below
-                    # may never come at all (QA round 1, Q2). The operator
-                    # learns a frame was dropped, and why, from this row alone.
+                    # ONCE PER RUN of consecutive discards, not once per frame,
+                    # and it names the limit rather than the size because it is
+                    # the row that arrives FIRST: a frame only marginally over
+                    # produces a single raise whose separator lands inside the
+                    # discarded chunk, so no read succeeds until the peer sends
+                    # something else and the summary below may not come for a
+                    # while (QA round 1, Q2). The operator learns a frame was
+                    # dropped, and why, from this row alone.
+                    #
+                    # BE PRECISE ABOUT THE GAP, because an earlier version of
+                    # this comment claimed the line "always fires" and it does
+                    # not. The gate is ``overrun_bytes``, which clears only on a
+                    # successful read, so an unbroken run of marginal frames
+                    # logs this row for the FIRST one and nothing for the rest
+                    # — measured at 4 marginal frames with no readable traffic
+                    # between: 1 row, 3 silent. A large frame self-clears the
+                    # latch through its own readable tail, which is why the run
+                    # looks unconditional in testing (QA round 2, Q4).
+                    #
+                    # Kept as a run-level latch rather than made per-frame: the
+                    # two cases are distinguishable only by the wording of
+                    # CPython's own ``LimitOverrunError`` ("Separator is found"
+                    # vs "is not found"), and pinning diagnostics to an
+                    # undocumented message string trades a quiet log for a
+                    # silent breakage on the next CPython. The frames are still
+                    # discarded and the session still survives on every one of
+                    # them — this is a diagnostic gap, not a delivery one — and
+                    # the byte total below still accounts for the whole run.
                     if overrun_bytes == 0:
                         logger.error(
                             "session runtime: dropping an inbound frame from %s client %s "

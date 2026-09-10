@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import logging
 import random
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,13 +30,16 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import ModelSpec, ToolResult, Usage
+from local_operator.harness.types import ImageContent, ModelSpec, ToolResult, Usage
 from local_operator.media import sniff_image
 from local_operator.mobile.attach_client import (
+    _FRAME_ENCODING_SLACK_BYTES,
     _READ_LIMIT_BYTES,
     AttachClient,
     OversizedRequest,
+    _frame_overhead_bytes,
     _megabytes,
+    _RefitReport,
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -2696,22 +2701,319 @@ async def test_a_refusal_quotes_the_marker_the_user_can_see(tmp_path: Path, monk
     try:
         record = await _record(tmp_path)
         await client.connect(record, "s1")
-        # Sixteen attachments is where even the tightest rung cannot fit, which
-        # is what makes the refusal reachable at all (design round 1, D6).
-        images = [{**_wire_image(1024, 1024), "marker": 20 + index} for index in range(16)]
+        # THIRTY-TWO attachments, not the sixteen this test was written with.
+        # The smallest-first reclaim (review round 1, MINOR-2) raised capacity,
+        # so the old fixture REFITS successfully at this head and a test built
+        # on it asserts nothing about a refusal at all (QA round 2). The
+        # `pytest.raises` below is what keeps that honest.
+        images = [{**_wire_image(1024, 1024), "marker": 20 + index} for index in range(32)]
 
         with pytest.raises(OversizedRequest) as refusal:
             await client.prompt("compare these", images=images)
 
         message = str(refusal.value)
-        assert "image 2" in message, f"the refusal quoted a wire position: {message}"
-        assert "image 1 " not in message, f"the refusal quoted a wire position: {message}"
+        named = re.search(r"image (\d+)", message)
+        assert named is not None, f"the refusal named no image at all: {message}"
+        quoted = int(named.group(1))
+        assert quoted >= 20, (
+            "the refusal quoted a wire position rather than the block's marker: " f"{message}"
+        )
         assert "per-image budget" in message, f"the refusal hides the ceiling: {message}"
-        assert "16 attachments" in message, f"the refusal hides the share's cause: {message}"
+        assert "32 attachments" in message, f"the refusal hides the share's cause: {message}"
         assert client.connected
     finally:
         client.close()
         registrant.close()
+
+
+def test_the_composer_stamps_the_chip_number_onto_every_image_it_sends() -> None:
+    """The PRODUCER half of the refusal's marker, pinned from a real draft.
+
+    ``_refit_images`` prefers ``image["marker"]`` and falls back to the wire
+    position. That lookup shipped in round 1 with NOTHING populating it:
+    ``ImageContent`` had no marker field and ``_image_to_wire`` emitted only
+    ``data_b64``/``mime_type``, so every refusal still quoted the position and
+    the fix was the old behaviour under a new name (design round 2, D8).
+
+    Starting from a DRAFT rather than a wire dict is the whole point. The
+    round-1 test hand-injected ``"marker"`` into its blocks, which pins the
+    lookup and can never see the producer go missing; this walks
+    ``resolve_markers`` -> ``_image_to_wire``, so deleting either end fails it.
+
+    The gap is what makes it a real test: marker numbers do not renumber on
+    delete, so a draft that lost ``#2`` sends chips 1 and 3 from wire positions
+    0 and 1.
+    """
+    from local_operator.session.remote import _image_to_wire
+    from local_operator.tui.widgets.editor import Attachment, resolve_markers
+
+    def _attachment(index: int) -> Attachment:
+        payload = base64.b64encode(f"png{index}".encode()).decode()
+        return Attachment(
+            ImageContent(data=payload, mime_type="image/png"),
+            f"[Image #{index}]",
+        )
+
+    # Three pastes, then the middle chip deleted: the draft cites #1 and #3.
+    attachments = {1: _attachment(1), 2: _attachment(2), 3: _attachment(3)}
+    text = "compare [Image #1] and [Image #3]"
+
+    images = resolve_markers(text, attachments)
+    assert [image.marker for image in images] == [1, 3], (
+        "resolve_markers did not carry the chip number onto the images it "
+        f"resolved: {[image.marker for image in images]}"
+    )
+
+    blocks = [_image_to_wire(image) for image in images]
+    assert [block.get("marker") for block in blocks] == [
+        1,
+        3,
+    ], f"_image_to_wire dropped the marker on the way to the socket: {blocks}"
+    # The gap is real: wire position 1 is the chip labelled #3.
+    assert blocks[1]["marker"] == 3
+
+    # A producer with no chips to name leaves the key OFF rather than sending
+    # null, so the position fallback stays in charge for the phone relay.
+    bare = _image_to_wire(ImageContent(data="AAAA", mime_type="image/png"))
+    assert "marker" not in bare, f"a marker-less image put a key on the wire: {bare}"
+
+
+def test_the_marker_never_reaches_a_provider_or_a_transcript() -> None:
+    """``marker`` is presentation state, and must not become conversation content.
+
+    It rides ``ImageContent`` so the transport can name a chip, which puts it
+    one field away from every provider payload, transcript row and context
+    hash. ``exclude=True`` is what keeps it out; this pins that, because a
+    later change dropping the flag would silently start writing composer state
+    into persisted history and into the bytes sent to a model.
+    """
+    image = ImageContent(data="AAAA", mime_type="image/png", marker=7)
+
+    assert image.marker == 7, "the field must be readable in-process"
+    assert "marker" not in image.model_dump()
+    assert "marker" not in image.model_dump(exclude_defaults=True)
+    assert "marker" not in image.model_dump(mode="json")
+    assert "marker" not in image.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_a_refit_that_could_fit_is_never_refused_for_being_predicted_to_fail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The small-budget branch picks a SENTENCE; it must not veto the send.
+
+    An earlier version short-circuited to a refusal whenever the text left less
+    than ``_MIN_VIABLE_IMAGE_BUDGET_BYTES`` for the images, justified as a
+    guarantee that the refit would fail anyway. That premise holds for
+    continuous-tone photographs and is false for flat screenshots and line art,
+    which compress to a fraction of it — so messages the refit would have sent
+    were refused unsent (review round 2, MAJOR-4), the same defect MAJOR-1
+    filed against the old fixed reserve, one layer up.
+
+    A flat image is the fixture precisely because it is the shape the constant
+    mispredicts.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # A SMOOTH GRADIENT: heavy as PNG on the wire, so the frame really
+        # crosses the limit, but it re-encodes to a fraction of the budget the
+        # gate predicted it could not meet. That combination is the whole
+        # finding — a flat screenshot is small enough that the frame never
+        # crosses at all and the early return, not the gate, decides.
+        Image = pytest.importorskip("PIL.Image")
+        canvas = Image.new("RGB", (3000, 2000))
+        pixels = canvas.load()
+        for y in range(canvas.height):
+            for x in range(canvas.width):
+                pixels[x, y] = (
+                    (x * 255) // canvas.width,
+                    (y * 255) // canvas.height,
+                    ((x + y) * 255) // (canvas.width + canvas.height),
+                )
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        gradient = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        }
+
+        # THE FIXTURE MUST REACH THE BRANCH, or this asserts nothing. A mutation
+        # run caught exactly that: an earlier fixture never crossed the limit,
+        # so `fit_request_frame` returned at its first length check and the test
+        # passed with the defect restored.
+        text = "x" * 1_015_000
+        frame = {
+            "op": "prompt",
+            "req": 1,
+            "command_id": "00000000-0000-4000-8000-000000000000",
+            "text": text,
+            "images": [gradient],
+        }
+        assert (
+            len(json.dumps(frame).encode()) + 1 > _READ_LIMIT_BYTES
+        ), "the fixture no longer exceeds the line limit, so the refit never runs"
+        overhead = _frame_overhead_bytes(frame)
+        budget = _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES
+        assert 0 < budget < 32 * 1024, (
+            f"the fixture leaves {budget} bytes for its images; the branch under "
+            "test only runs for a positive budget under the gate"
+        )
+
+        assert await client.prompt(text, images=[gradient]) == "prompt ok"
+        assert client.connected
+
+        # THE OTHER DIRECTION: when the text genuinely leaves no room and the
+        # refit really cannot fit the image, the refusal still fires and still
+        # blames the text rather than the attachment.
+        heavy = _wire_image(1400, 1400)
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt("x" * 1_045_000, images=[heavy])
+        assert "text alone fills" in str(
+            refusal.value
+        ), f"a text-dominated refusal blamed the attachment: {refusal.value}"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@contextlib.contextmanager
+def _refit_report(entries: tuple[_RefitReport, ...]):
+    """Publish ``entries`` as the current task's refit report, then clear it.
+
+    ``_report_wire_refit_for`` CONSUMES the report, so a test that set the
+    ContextVar and left it would leak into the next one; the reset token is
+    what keeps these independent of ordering.
+    """
+    from local_operator.mobile.attach_client import _REFIT_REPORT
+
+    token = _REFIT_REPORT.set(entries)
+    try:
+        yield
+    finally:
+        _REFIT_REPORT.reset(token)
+
+
+def test_the_refit_caption_is_one_row_whatever_the_attachment_count() -> None:
+    """The caption's cost must not grow with the number of images.
+
+    ``_report_wire_refit_for`` used to join one ``#N WxH -> WxH`` clause per
+    downscaled image, in ``_refit_images``' internal smallest-first walk. The
+    rung that earns a caption is by construction the many-attachment case, so
+    the row a user actually got was three lines of 28 at 100x30 and **five of
+    20 at 60x22** — a quarter of a narrow viewport spent on a ``note`` about a
+    message that was delivered fine — enumerated in an order the user cannot
+    see, with six of eight clauses the identical string (design round 2, D9;
+    QA round 2, Q5).
+
+    Grouping by delivered size bounds the row by the ladder's RUNGS rather than
+    by the attachment count, so this asserts the property rather than a
+    specific sentence: the clause count can never exceed the number of edges
+    the refit can produce, whatever the user pastes.
+    """
+    from local_operator.imaging import IMAGE_WIRE_REFIT_EDGES
+    from local_operator.tui.app import OperatorApp
+
+    def caption(entries: list[Any]) -> str:
+        captured: list[str] = []
+        source = cast(Any, SimpleNamespace())
+        app = cast(Any, OperatorApp.__new__(OperatorApp))
+        app._notice_for = lambda _source, text, _kind: captured.append(text)
+        with _refit_report(tuple(entries)):
+            OperatorApp._report_wire_refit_for(app, source)
+        return captured[0] if captured else ""
+
+    for count in (1, 2, 8, 20, 60):
+        # Two rungs, interleaved by marker, so the grouping cannot pass by
+        # accident on a single-size fixture.
+        entries = [
+            _RefitReport(
+                marker=index + 1,
+                width=384 if index % 3 else 512,
+                height=384 if index % 3 else 512,
+                source_width=1400,
+                source_height=1400,
+            )
+            for index in range(count)
+        ]
+        row = caption(entries)
+        assert row.startswith(
+            f"{count} image"
+        ), f"the caption does not lead with the count it is claiming: {row!r}"
+        clauses = row.split(": ", 1)[1].split(", ")
+        assert len(clauses) <= len(IMAGE_WIRE_REFIT_EDGES), (
+            f"{count} attachments produced {len(clauses)} clauses; the caption "
+            f"grows with the attachment count again: {row!r}"
+        )
+        assert len(row) < 100, (
+            f"the caption is {len(row)} characters at {count} attachments, which "
+            f"wraps past one row at 100 columns: {row!r}"
+        )
+
+    # THE GLYPH BINDS TO THE COUNT, not to a trailing clause. Appended once
+    # after the last clause it read as the mark on that image alone, while the
+    # composer chips already carry their own for the ingest bound — two shrinks
+    # sharing one glyph, neither adjacent to what it qualified (design round 2,
+    # D10).
+    from local_operator.tui.widgets.editor import RESIZED_MARK
+
+    row = caption(
+        [
+            _RefitReport(marker=1, width=512, height=512, source_width=1400, source_height=1400),
+            _RefitReport(marker=2, width=384, height=384, source_width=1400, source_height=1400),
+        ]
+    )
+    assert row.startswith(
+        f"2 images{RESIZED_MARK} "
+    ), f"the resize glyph is not bound to the count it qualifies: {row!r}"
+    assert not row.endswith(RESIZED_MARK), f"the glyph is still trailing the last clause: {row!r}"
+
+    # IN THE USER'S ORDER: groups appear by their lowest chip number, not in
+    # the refit's internal smallest-first walk.
+    row = caption(
+        [
+            _RefitReport(marker=9, width=384, height=384, source_width=1400, source_height=1400),
+            _RefitReport(marker=2, width=512, height=512, source_width=1400, source_height=1400),
+        ]
+    )
+    assert row.index("512x512") < row.index(
+        "384x384"
+    ), f"the caption enumerates in the refit's order rather than the user's: {row!r}"
+
+
+def test_the_size_scale_never_prints_a_smaller_number_in_a_bigger_unit() -> None:
+    """``_megabytes`` must not move DOWN as the byte count goes up.
+
+    The switch used to be keyed on the rounded MB figure, which put the
+    boundary mid-KB: ``104,857`` printed ``102 KB`` and ``104,858`` printed
+    ``0.1 MB``, so a one-byte step showed a smaller number in a larger unit and
+    a user comparing two refusals a minute apart read them backwards (review
+    round 2, NIT-2).
+    """
+
+    def as_bytes(rendered: str) -> float:
+        figure, unit = rendered.split()
+        return float(figure) * (1024 if unit == "KB" else 1024 * 1024)
+
+    previous = -1.0
+    for size in range(0, 3 * 1024 * 1024, 311):
+        current = as_bytes(_megabytes(size))
+        assert current >= previous, (
+            f"{size} bytes rendered as {_megabytes(size)}, which is smaller than "
+            "the figure printed for fewer bytes"
+        )
+        previous = current
+
+    # The boundary is a whole megabyte, so both sides read as the same quantity.
+    assert _megabytes(1024 * 1024 - 1) == "1024 KB"
+    assert _megabytes(1024 * 1024) == "1.0 MB"
 
 
 @pytest.mark.asyncio

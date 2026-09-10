@@ -165,14 +165,27 @@ class _RefitReport(NamedTuple):
 _FRAME_ENCODING_SLACK_BYTES = 4 * 1024
 
 
-#: Below this much room for ALL the images, the text is the problem and the
-#: refusal must say so rather than blaming an attachment.
+#: Below this much room for ALL the images, blame the TEXT rather than an
+#: attachment — a COPY decision, and only that.
 #:
-#: The refit's tightest rung is a 384px JPEG at quality 85, which lands around
-#: 20-30 KB of base64 for ordinary content. 32 KiB is therefore "not even one
-#: image at its smallest could fit here": under it the per-image refusal is
-#: guaranteed and would quote a share rounding to ``0.0 MB``, pointing the user
-#: at a screenshot when only shortening the prompt can help.
+#: NOT A PREDICTION THAT THE REFIT WOULD FAIL, and the earlier version of this
+#: constant made exactly that claim: it short-circuited to a refusal before the
+#: refit ran, on the premise that the tightest rung "lands around 20-30 KB of
+#: base64" so a smaller budget guaranteed a per-image refusal. That premise
+#: holds for continuous-tone photographs and is false for the two shapes an
+#: operator most often pastes. A flat terminal screenshot compresses to ~6.6 KB
+#: of base64 and fits a quarter of this figure; line art is exempt from the
+#: JPEG rung by design and a 1024x1024 bilevel grid is ~1.4 KB. Measured, three
+#: smooth-gradient sends were refused here while the refit produced a fitting
+#: image and a frame under the limit (review round 2, MAJOR-4) — the same class
+#: of defect MAJOR-1 filed against the old fixed reserve, one layer up.
+#:
+#: So the refit ALWAYS runs, and this only decides which sentence a failure
+#: gets. Below this much room the per-image refusal would quote a share
+#: rounding to ``0.0 MB`` and point the user at a screenshot when only
+#: shortening the prompt can help; the frame-level refusal names the text
+#: instead. The cost of being wrong is now one re-encode rather than a message
+#: the user was told they could not send.
 _MIN_VIABLE_IMAGE_BUDGET_BYTES = 32 * 1024
 
 
@@ -264,29 +277,33 @@ async def fit_request_frame(frame: dict[str, Any]) -> dict[str, Any]:
     # (review round 1, MAJOR-1).
     overhead = _frame_overhead_bytes(frame)
     budget = max(0, _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES)
-    if budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES:
-        # THE TEXT IS THE BULK, and no image of any size would change that. The
-        # per-image refusal below would technically fire, but it would blame the
-        # attachment and quote a "0.0 MB budget" the user can do nothing with —
-        # telling them to remove a screenshot when shortening the prompt is the
-        # only thing that can work. Raised before the refit rather than after so
-        # a doomed re-encode of several megabytes is not spent to reach the same
-        # answer.
-        # "no room" rather than a figure once the remainder rounds away: a
-        # sentence ending "leaving only 0 KB" reads as a bug in the message.
-        room = f"only {_megabytes(budget)}" if budget >= 1024 else "no room"
-        raise OversizedRequest(
-            f"this message's text alone fills {_megabytes(overhead)} of the "
-            f"{_megabytes(_READ_LIMIT_BYTES)} limit, leaving {room} for its "
-            "attachments; shorten the text or send the images on their own"
-        )
-    fitted, report = await asyncio.to_thread(_refit_images, images, budget)
+    # THE REFIT ALWAYS RUNS, even on a budget this small. Whether an image fits
+    # is a question only the encoder can answer — a flat screenshot or line art
+    # fits a budget that no photograph would (see
+    # `_MIN_VIABLE_IMAGE_BUDGET_BYTES`), and predicting the answer here refused
+    # messages that would have sent (review round 2, MAJOR-4).
+    #
+    # `text_is_the_bulk` decides only which SENTENCE a genuine failure gets, so
+    # a refusal on a budget the text has eaten blames the text rather than
+    # quoting a per-image share that rounds to `0.0 MB`.
+    text_is_the_bulk = budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES
+    try:
+        fitted, report = await asyncio.to_thread(_refit_images, images, budget)
+    except OversizedRequest:
+        if not text_is_the_bulk:
+            raise
+        raise _text_is_the_bulk_refusal(overhead, budget) from None
     candidate = {**frame, "images": fitted}
     refitted_size = len(json.dumps(candidate).encode()) + 1
     if refitted_size > _READ_LIMIT_BYTES:
         # Every image reached its tightest rung and the frame is STILL over, so
         # the text is the bulk. Measured on the real frame rather than assumed,
         # so the refusal names the size the user can actually act on.
+        if text_is_the_bulk:
+            # "send fewer attachments" is not the move when the text alone has
+            # eaten the frame — the same copy call the pre-refit gate used to
+            # make, now made where the failure is real.
+            raise _text_is_the_bulk_refusal(overhead, budget)
         raise OversizedRequest(
             f"this message is {_megabytes(refitted_size)} even after its images were "
             f"resized, and the limit is {_megabytes(_READ_LIMIT_BYTES)}; shorten the "
@@ -295,16 +312,45 @@ async def fit_request_frame(frame: dict[str, Any]) -> dict[str, Any]:
     _REFIT_REPORT.set(report)
     logger.warning(
         "attach client: %s frame was %d bytes, over the %d-byte line limit; "
-        "resized %d image(s) to %d bytes so the message could be sent; "
-        "%d of them lost pixels",
+        "resized %d image(s) to %d bytes of image payload and the frame is now "
+        "%d bytes; %d of them lost pixels",
         frame.get("op", "request"),
         encoded_size,
         _READ_LIMIT_BYTES,
         len(images),
+        # THE IMAGES, summed from what was actually fitted. This said
+        # `refitted_size` — the WHOLE frame — inside a clause reading as the
+        # images, which was within ~6% while the reserve was a fixed 64 KiB and
+        # became an overstatement of 3.25x-16.75x once the overhead was measured
+        # and up to 1 MiB of the user's own text sat inside a number attributed
+        # to the attachments (QA round 2, Q3). Both quantities are named now,
+        # because the frame size is the one that explains the limit and the
+        # payload size is the one that explains the resize.
+        sum(len(_image_payload(image)) for image in fitted),
         refitted_size,
         sum(1 for entry in report if entry.downscaled),
     )
     return candidate
+
+
+def _text_is_the_bulk_refusal(overhead: int, budget: int) -> OversizedRequest:
+    """The refusal for a frame whose TEXT left no usable room for attachments.
+
+    A copy decision rather than a diagnosis: raised only where the refit has
+    already tried and failed, so the sentence blames the quantity the user can
+    actually act on. The per-image refusal would name a share rounding to
+    ``0.0 MB`` and point at a screenshot when only shortening the prompt can
+    help (review round 2, MAJOR-4).
+
+    "no room" rather than a figure once the remainder rounds away: a sentence
+    ending "leaving only 0 KB" reads as a bug in the message.
+    """
+    room = f"only {_megabytes(budget)}" if budget >= 1024 else "no room"
+    return OversizedRequest(
+        f"this message's text alone fills {_megabytes(overhead)} of the "
+        f"{_megabytes(_READ_LIMIT_BYTES)} limit, leaving {room} for its "
+        "attachments; shorten the text or send the images on their own"
+    )
 
 
 def taken_refit_report() -> tuple[_RefitReport, ...]:
@@ -355,11 +401,19 @@ def _megabytes(size_bytes: int) -> str:
     per-image budgets a refusal is trying to explain. A budget the sentence
     prints as zero tells the user their image did not fit in nothing, which is
     not a fact they can act on.
+
+    THE SWITCH IS AT 1024 KB, not at 0.1 MB, so the two scales cannot cross.
+    Keyed on the rounded MB figure the sentence would actually print, the
+    boundary sat mid-KB: ``104,857`` read ``102 KB`` and ``104,858`` read
+    ``0.1 MB``, so a one-byte step moved the number DOWN while moving the unit
+    up, and a user comparing two refusals a minute apart saw the smaller figure
+    in the larger unit (review round 2, NIT-2). Below a full megabyte the
+    KB figure is the honest one; at or above it the MB figure is.
     """
-    megabytes = size_bytes / (1024 * 1024)
-    if megabytes < 0.1:
-        return f"{size_bytes / 1024:.0f} KB"
-    return f"{megabytes:.1f} MB"
+    kilobytes = size_bytes / 1024
+    if kilobytes < 1024:
+        return f"{kilobytes:.0f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 def _refit_images(
@@ -406,9 +460,20 @@ def _refit_images(
     # same: marker numbers do not renumber when an attachment is deleted, so
     # after pasting three images and backspacing two the survivor is `[Image
     # #3]` while its wire position is 1 \u2014 and the refusal said "image 1",
-    # pointing at a chip that is not on screen (design round 1, D4). The block
-    # carries its own marker when the composer knows one; position is the
-    # fallback for producers that do not set it (the phone relay).
+    # pointing at a chip that is not on screen (design round 1, D4).
+    #
+    # THE PRODUCER IS `editor.resolve_markers`, which stamps the chip number on
+    # each `ImageContent`, and `remote._image_to_wire`, which puts it on the
+    # block. Both were added in review round 2: this lookup shipped first with
+    # nothing populating it, so every refusal still fell through to the position
+    # and the fix was the old behaviour renamed (design round 2, D8). A change
+    # that drops either end silently restores that, which is why
+    # `test_a_refusal_quotes_the_marker_a_real_paste_produced` starts at a real
+    # paste rather than at a hand-built wire dict.
+    #
+    # Position stays the fallback for producers with no chips to name - the
+    # phone relay, a tool result - where it is the only number that means
+    # anything.
     markers = {
         position: (
             int(image["marker"])

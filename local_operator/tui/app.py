@@ -3731,12 +3731,21 @@ class OperatorApp(App[None]):
         held, source.compaction.held_prompt = source.compaction.held_prompt, ""
         typed, source.compaction.held_typed = source.compaction.held_typed, ""
         images, source.compaction.held_images = source.compaction.held_images, {}
+        blocks, source.compaction.held_blocks = source.compaction.held_blocks, None
         accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
         message_id, source.compaction.accepted_message_id = (
             source.compaction.accepted_message_id,
             "",
         )
         if held or images:
+            # HANDED TO THE TURN, so the rows this prompt painted at submit are
+            # withdrawable by the worker that dispatches it. Set BEFORE
+            # `_start_turn_for` for the reason the direct path gives: the worker
+            # it starts can reach its `except` before a later line would run,
+            # and an echo the worker cannot see is one it cannot withdraw. The
+            # worker's `finally` clears it on every path (review round 2,
+            # MAJOR-3).
+            source.turn.submitted_blocks = blocks
             self._start_turn_for(
                 source,
                 held,
@@ -3872,11 +3881,14 @@ class OperatorApp(App[None]):
         SILENT ON THE COMMON CASE, deliberately. The composer already bounds
         every paste to ``IMAGE_INGEST_MAX_EDGE`` (1024px), so an ordinary
         message meets the refit's first rung — a re-encode at unchanged
-        dimensions — and every pixel survives. Measured across both shapes an
-        operator pastes, one to six attachments are a codec swap and nothing
-        else: stack traces and identifiers are equally readable before and
-        after. A row on every paste would be pure noise on a routine gesture
-        (design round 1, D2).
+        dimensions — and every pixel survives. Measured on composer-bounded
+        continuous-tone captures, **one and two** attachments are a codec swap
+        and nothing else; at three the ladder already gives up pixels. (An
+        earlier version of this note claimed one to six, which overstated the
+        rung's reach — design round 2 measured it, and it is what makes the row
+        below reachable often enough to be worth one line rather than five.) A
+        row on every paste would be pure noise on a routine gesture (design
+        round 1, D2).
 
         THE DOWNSCALE RUNG IS DIFFERENT IN KIND. Once the ladder gives up
         pixels the loss is not subtle — measured at ~40% edge energy at 768px,
@@ -3892,6 +3904,34 @@ class OperatorApp(App[None]):
         size I pasted?" — which is verbatim the question the wire refit
         provokes. Reusing the glyph means one idiom for one fact rather than a
         second convention for the same event two files apart.
+
+        ONE ROW, GROUPED BY DELIVERED SIZE, and that shape is the finding
+        rather than a preference. Enumerating a clause per image spent 220
+        characters on two facts — six of eight clauses were the identical
+        string — and cost 3 rows of 28 at 100x30 and **5 of 20 at 60x22**, a
+        quarter of a narrow user's scrollback for a note about a message that
+        was delivered fine. Worse, the clauses came out in ``_refit_images``'
+        internal smallest-first walk (``#4, #2, #7, #3 …``): deterministic, and
+        meaningless on screen, so a user scanning for "what happened to #1"
+        read six clauses before finding it (design round 2, D9).
+
+        THE GLYPH BINDS TO THE COUNT, not to a trailing clause. Appended once
+        after the last clause it read as the mark on that image and said
+        nothing about the others, while the chips in the composer already carry
+        their own ``↓`` from the ingest bound — so two different shrinks shared
+        one glyph and neither was adjacent to what it qualified (design round
+        2, D10). Here it sits on ``N images``, which is exactly what it is
+        claiming: these lost pixels.
+
+        COUNTS RATHER THAN MARKERS, which is what makes the row a fixed cost.
+        Naming the chips reads better at eight attachments and grows without
+        bound past it — measured, a marker list is 3 rows at 100 cols and 4 at
+        60 by 28 attachments, which is the same defect one step smaller. The
+        number of distinct delivered sizes is bounded by the ladder's rungs
+        (``IMAGE_WIRE_REFIT_EDGES``), so the count form is one row at 100 cols
+        and two at 60 for ANY number of attachments. The chips themselves are
+        on screen directly above this row, so "which of mine" is answerable by
+        looking; "how much did I lose" is not, and that is what this says.
 
         At ``note`` weight, not ``warning``: nothing is wrong and nothing needs
         acting on — the message was delivered — but it answers something the
@@ -3909,15 +3949,19 @@ class OperatorApp(App[None]):
         lost = [entry for entry in taken_refit_report() if entry.downscaled]
         if not lost:
             return
-        detail = ", ".join(
-            f"#{entry.marker} {entry.source_width}x{entry.source_height} → "
-            f"{entry.width}x{entry.height}"
-            for entry in lost
-        )
+        # BY DELIVERED SIZE, in the order the user's own chips run: sorting by
+        # marker first means a group appears at the position of its lowest chip
+        # number, so the row reads the way the composer does rather than in
+        # `_refit_images`' internal smallest-first walk (design round 2, D9).
+        grouped: dict[tuple[int, int], int] = {}
+        for entry in sorted(lost, key=lambda item: item.marker):
+            grouped[(entry.width, entry.height)] = grouped.get((entry.width, entry.height), 0) + 1
+        clauses = [f"{count} to {width}x{height}" for (width, height), count in grouped.items()]
         plural = "s" if len(lost) != 1 else ""
         self._notice_for(
             source,
-            f"image{plural} resized to fit this message: {detail}{RESIZED_MARK}",
+            f"{len(lost)} image{plural}{RESIZED_MARK} resized to fit this message: "
+            + ", ".join(clauses),
             "note",
         )
 
@@ -8406,6 +8450,11 @@ class OperatorApp(App[None]):
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
         typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
         held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
+        # DROPPED, never dispatched: this is the hand-back, and `clear_blocks()`
+        # below removes the very rows the tuple points at. Carrying it past here
+        # would leave a later refusal holding widgets that are no longer mounted
+        # (review round 2, MAJOR-3).
+        self._interaction.compaction.held_blocks = None
         if held:
             # The TYPED line goes back, not the payload: handing a user the
             # expanded body of a `$skill` they invoked would make them delete a
@@ -17945,6 +17994,14 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
+            # THE ECHO RIDES THE HOLD, for the same reason the attachments do:
+            # this prompt is dispatched by `_consume_compaction_input` minutes
+            # later, through the same worker and the same
+            # `except OversizedRequest` a direct submit uses. Without the rows
+            # travelling with it, a refusal on this route had nothing to
+            # withdraw and left the transcript asserting a message that never
+            # went (review round 2, MAJOR-3).
+            self._interaction.compaction.held_blocks = (user_block, image_blocks)
             self._interaction.compaction.accepted_draft = self._interaction.turn.submitted_draft
             self._interaction.compaction.accepted_message_id = self._echo_message_id(session.prompt)
             user_block.navigation_anchor_id = self._interaction.compaction.accepted_message_id

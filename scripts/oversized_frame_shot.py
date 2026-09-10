@@ -29,7 +29,10 @@ import asyncio  # noqa: E402
 
 import scripts.probe_isolation  # noqa: F401,E402  -- must precede app imports
 from local_operator.harness.types import ImageContent  # noqa: E402
-from local_operator.mobile.attach_client import OversizedRequest  # noqa: E402
+from local_operator.mobile.attach_client import (  # noqa: E402
+    OversizedRequest,
+    fit_request_frame,
+)
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from scripts.visual_capture import save_capture  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -44,12 +47,50 @@ def _delivered(session: FakeSession):
     return prompt
 
 
-def _png(width: int, height: int) -> str:
+def _photo(width: int, height: int, seed: int = 0) -> str:
+    """A base64 PNG of CONTINUOUS-TONE content, for the states about the REFIT.
+
+    The content decides whether this script tests anything. Line art and flat
+    fills compress to almost nothing, so a fixture built from them sails under
+    the limit and the refit never runs — a 64-attachment fixture of the drawn
+    raster below still refitted successfully, which would have captured a
+    delivered message while claiming to show a refusal. Blurred noise behaves
+    the way a photograph or screenshot does, which is the same reason
+    ``tests/unit/session/test_attach_frame_size.py`` builds its fixtures this
+    way.
+
+    ``seed`` makes attachments genuinely distinct: identical bytes compress to
+    identical sizes and the refit walks smallest first, so a fixture of eight
+    copies exercises a tie rather than the ordering the caption renders
+    (design round 2, D9).
+    """
+    import base64
+    import io
+    import random
+
+    from PIL import Image, ImageFilter
+
+    rng = random.Random(seed or width * height)
+    coarse = Image.frombytes(
+        "RGB",
+        (width // 4, height // 4),
+        bytes(rng.getrandbits(8) for _ in range((width // 4) * (height // 4) * 3)),
+    )
+    smooth = coarse.resize((width, height), Image.Resampling.BILINEAR)
+    image = smooth.filter(ImageFilter.GaussianBlur(1.2))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _png(width: int, height: int, seed: int = 11) -> str:
     """A base64 PNG the transcript can actually decode and paint.
 
     A real raster rather than a stub: ``ImageBlock`` sniffs the header for its
     aspect fit and paints a receipt instead of pixels when the bytes do not
-    decode, which would capture the wrong frame.
+    decode, which would capture the wrong frame. Cheap and legible on screen,
+    which is what the NON-refit states need; anything asserting on the refit
+    uses :func:`_photo` instead.
     """
     import base64
     import io
@@ -59,7 +100,7 @@ def _png(width: int, height: int) -> str:
 
     image = Image.new("RGB", (width, height), (24, 26, 32))
     draw = ImageDraw.Draw(image)
-    random.seed(11)
+    random.seed(seed)
     for row in range(8, height - 10, 16):
         x = 10
         while x < width - 40:
@@ -71,10 +112,49 @@ def _png(width: int, height: int) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-REFUSAL = (
-    "image 3 is 2.4 MB and will not fit in this message's 0.2 MB per-image "
-    "budget (4 attachments) even at its smallest size; remove it and send again"
-)
+#: How many attachments it takes to make the refit genuinely give up.
+#:
+#: NOT A DECORATIVE NUMBER, and it moved once already: at round 1 twenty
+#: attachments could not fit, and the smallest-first reclaim (review round 1,
+#: MINOR-2) raised capacity enough that the same fixture now REFITS and sends.
+#: A capture harness reusing the old figure would photograph a delivered
+#: message while claiming to show a refusal, so `_real_refusal` asserts the
+#: refusal actually happened rather than trusting this constant (QA round 2).
+REFUSAL_ATTACHMENTS = 32
+
+
+async def _real_refusal(images: list[ImageContent]) -> str:
+    """The refusal sentence the PRODUCT composes for ``images``, or raise.
+
+    Why this exists at all: the script used to carry the sentence as a string
+    literal, so the frames proved the layout of a row and nothing about the
+    words the code generates. Three design round-2 findings (D8, D9, D10) were
+    invisible from those captures precisely because the product's own text
+    never appeared in them (design round 2). A capture harness that cannot see
+    what the product says is a dead instrument.
+
+    ASSERTS THE REFUSAL HAPPENED. The reachable refusal moved from 20
+    attachments to 32 when the reclaim landed, so a fixture built on the old
+    figure refits successfully and returns no sentence at all — which would
+    read as a passing capture of a frame the product cannot reach.
+    """
+    from local_operator.session.remote import _image_to_wire
+
+    frame = {
+        "op": "prompt",
+        "req": 1,
+        "command_id": "00000000-0000-4000-8000-000000000000",
+        "text": "what does this screenshot show?",
+        "images": [_image_to_wire(image) for image in images],
+    }
+    try:
+        await fit_request_frame(frame)
+    except OversizedRequest as refusal:
+        return str(refusal)
+    raise AssertionError(
+        f"{len(images)} attachments were REFITTED, not refused — this fixture no "
+        "longer reaches the refusal path and the capture would prove nothing"
+    )
 
 
 async def main() -> None:
@@ -83,14 +163,24 @@ async def main() -> None:
     cols, rows = (sys.argv[2] if len(sys.argv) > 2 else "100x30").split("x")
     size = (int(cols), int(rows))
 
-    image = ImageContent(data=_png(1672, 941), mime_type="image/png")
+    # MARKERS ON THE IMAGES, exactly as `resolve_markers` stamps them for a
+    # real composer draft: the refusal names a chip, and a fixture without
+    # markers captures the positional fallback instead of the product's answer
+    # (design round 2, D8).
+    refused_images = [
+        ImageContent(data=_photo(1024, 1024, seed=index), mime_type="image/png", marker=index + 1)
+        for index in range(REFUSAL_ATTACHMENTS)
+    ]
+    refusal = await _real_refusal(refused_images)
+    print(f"REFUSAL (product-generated, {REFUSAL_ATTACHMENTS} attachments): {refusal}\n")
+
+    image = ImageContent(data=_png(1672, 941), mime_type="image/png", marker=1)
 
     for state in ("refusal", "resent", "recovery", "refit"):
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=size) as pilot:
             await pilot.pause()
-            source = app._interaction
 
             # THE REAL PATH: the refusal is raised by `prompt`, so the app's own
             # worker runs its `except OversizedRequest` branch — the withdrawal,
@@ -101,22 +191,46 @@ async def main() -> None:
 
                 async def refuse(text, images=None, **kwargs):
                     session.prompts.append(text)
-                    raise OversizedRequest(REFUSAL)
+                    raise OversizedRequest(refusal)
 
                 session.prompt = refuse  # type: ignore[method-assign]
 
             if state == "refit":
-                # A DELIVERED message: the row and its picture stay, and the
-                # caption is the only thing the refit adds.
-                app._submit_prompt("what does this screenshot show?", [image])
-                await pilot.pause()
-                source.turn.submitted_blocks = None
-                app._notice_for(
-                    source,
-                    "image resized to fit this message: #1 1672x941 → 768x432 ↓",
-                    "note",
-                )
-                await pilot.pause()
+                # A DELIVERED message whose attachments really went through the
+                # refit. The caption is composed by `_report_wire_refit_for`
+                # from the report the REAL `fit_request_frame` published, so
+                # this frame proves the WORDS as well as the layout — the
+                # previous version hand-called `_notice_for` with a literal,
+                # which is exactly what this script's own comment above warns
+                # against (review round 2, NIT-1; design round 2, D9/D10).
+                captioned = [
+                    ImageContent(
+                        data=_photo(1400, 1400, seed=index),
+                        mime_type="image/png",
+                        marker=index + 1,
+                    )
+                    for index in range(8)
+                ]
+
+                async def deliver_through_the_refit(text, images=None, **kwargs):
+                    from local_operator.session.remote import _image_to_wire
+
+                    session.prompts.append(text)
+                    await fit_request_frame(
+                        {
+                            "op": "prompt",
+                            "req": 1,
+                            "command_id": "00000000-0000-4000-8000-000000000000",
+                            "text": text,
+                            "images": [_image_to_wire(block) for block in (images or [])],
+                        }
+                    )
+
+                session.prompt = deliver_through_the_refit  # type: ignore[method-assign]
+                app._submit_prompt("what do these show?", captioned)
+                for _ in range(30):
+                    await pilot.pause()
+                    await asyncio.sleep(0.05)
             else:
                 if state == "recovery":
                     # The branch that parks the draft: the user started typing

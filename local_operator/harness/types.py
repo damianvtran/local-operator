@@ -107,11 +107,29 @@ class TextContent(BaseModel):
 
 
 class ImageContent(BaseModel):
-    """An image block. ``data`` is base64-encoded bytes of ``mime_type``."""
+    """An image block. ``data`` is base64-encoded bytes of ``mime_type``.
+
+    ``marker`` is the number on the composer chip that cites this image —
+    ``1`` for ``[Image #1]`` — carried so a transport that has to REFUSE an
+    attachment can name the one the user can see. Marker numbers do not
+    renumber when an attachment is deleted, so after twenty pastes and one
+    backspace the chips read ``#2..#20`` while wire positions run ``0..18``,
+    and a refusal quoting the position pointed at a different chip than the
+    one it refused (design round 1 D4, round 2 D8).
+
+    ``exclude=True`` because this is a PRESENTATION fact, not conversation
+    content: it must not reach a provider, a transcript row or a context hash.
+    Excluded from every ``model_dump``, so persisted history stays
+    byte-identical and only in-process consumers — the wire encoder here — can
+    read it. ``None`` for every producer that has no chips to name (the phone
+    relay, tool results, compaction frames), which is what makes the wire
+    encoder's fallback to position the honest answer rather than a guess.
+    """
 
     type: Literal["image"] = "image"
     data: str = ""
     mime_type: str = "image/png"
+    marker: int | None = Field(default=None, exclude=True)
 
 
 Content = TextContent | ImageContent

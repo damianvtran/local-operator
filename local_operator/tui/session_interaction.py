@@ -73,6 +73,24 @@ class CompactionInteraction:
     held_prompt: str = ""
     held_typed: str = ""
     held_images: dict[int, Any] = field(default_factory=dict)
+    #: The transcript rows painted for a prompt HELD through a compaction —
+    #: the same ``(UserBlock, [ImageBlock, ...])`` tuple ``turn.submitted_blocks``
+    #: carries, parked here for the minutes a pass can take.
+    #:
+    #: A held prompt is dispatched long after the submit that painted it, and
+    #: it can be refused exactly like a direct one. Without this the echo was
+    #: unreachable on that route: ``submitted_blocks`` was set only past the
+    #: compaction branch's ``return``, so the withdrawal found ``None`` and
+    #: D3's symptom survived — ``UserBlocks: 2`` with a phantom attachment
+    #: after the user follows the refusal's advice (review round 2, MAJOR-3).
+    #:
+    #: Held ALONGSIDE the text rather than assigned to ``turn.submitted_blocks``
+    #: at submit, for the reason the other held fields give: the hold's two
+    #: exits are dispatch and hand-back, and both already clear this state in
+    #: one tuple swap. Parking it on the turn instead would leave a reference
+    #: to torn-down rows behind on the hand-back, which is the stale-reference
+    #: hazard ``run_prompt``'s ``finally`` exists to prevent.
+    held_blocks: tuple[Any, list[Any]] | None = None
     accepted_message_id: str = ""
     accepted_draft: SessionDraft | None = None
 
