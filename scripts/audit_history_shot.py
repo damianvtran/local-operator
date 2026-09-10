@@ -9,11 +9,22 @@ lightweight test host declares no ``CSS_PATH`` and would show none of this.
 Usage::
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \\
-        scripts/audit_history_shot.py <out-dir> [state]
+        scripts/audit_history_shot.py <out-dir> [state] [COLSxROWS]
 
 States: ``context`` (rows the model still sees), ``audit`` (pre-compaction
 rows), ``exhausted`` (the journal's first row reached), ``marker`` (the
 compaction boundary mid-transcript), or ``all``.
+
+The geometry argument is not decoration. A head-notice state is a function of
+the VIEWPORT as well as the history: ``_reconcile_head_notice`` chooses between
+its scrollable and not-scrollable copy from ``virtual_size`` against
+``container_size``, so a frame captured at one size can show a state that does
+not reproduce at another. Capture the states you are claiming at more than one
+geometry, and say in the evidence which one each frame is.
+
+Two frames are written per capture, ``<state>.svg`` and ``<state>.settled.svg``,
+taken before and after a further settle. They must be identical for a static
+state; a difference is a reflow the reader sees as motion.
 """
 
 from __future__ import annotations
@@ -95,7 +106,7 @@ async def _seed(directory: Path, *, compactions: int, rows_each: int) -> None:
     transcript.flush()
 
 
-async def capture(out_dir: Path, state: str) -> None:
+async def capture(out_dir: Path, state: str, size: tuple[int, int] = (100, 34)) -> None:
     root = Path(os.environ["HOME"])
     config = root / "config"
     config.mkdir(parents=True, exist_ok=True)
@@ -122,7 +133,7 @@ async def capture(out_dir: Path, state: str) -> None:
 
     try:
         app = OperatorApp(factory)
-        async with app.run_test(size=(100, 34)) as pilot:
+        async with app.run_test(size=size) as pilot:
             for _ in range(300):
                 await pilot.pause()
                 if app._session is not None and app._transcript_view().blocks():
@@ -230,6 +241,12 @@ async def capture(out_dir: Path, state: str) -> None:
             )
             out_dir.mkdir(parents=True, exist_ok=True)
             save_capture(app, str(out_dir / f"{state}.svg"))
+            # Second frame after a further settle. A static state must produce
+            # a byte-identical pair; a difference is a reflow the reader sees
+            # as motion, and the evidence has to be able to show that.
+            for _ in range(30):
+                await pilot.pause()
+            save_capture(app, str(out_dir / f"{state}.settled.svg"))
     finally:
         await remote.dispose()
         server.close()
@@ -239,9 +256,12 @@ async def capture(out_dir: Path, state: str) -> None:
 async def main() -> None:
     out_dir = Path(sys.argv[1])
     requested = sys.argv[2] if len(sys.argv) > 2 else "all"
+    geometry = sys.argv[3] if len(sys.argv) > 3 else "100x34"
+    columns, _, rows = geometry.partition("x")
+    size = (int(columns), int(rows))
     states = ["context", "audit", "exhausted", "marker"] if requested == "all" else [requested]
     for state in states:
-        await capture(out_dir, state)
+        await capture(out_dir, state, size)
 
 
 if __name__ == "__main__":
