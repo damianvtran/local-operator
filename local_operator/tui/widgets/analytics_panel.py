@@ -29,7 +29,7 @@ it is the right way to pin what the screen SAYS.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Collection, Mapping, Protocol, Sequence
+from typing import Collection, Mapping, NamedTuple, Protocol, Sequence
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -489,6 +489,7 @@ def build_report(
     metric: str = METRIC_COST,
     expanded: "Collection[str] | None" = None,
     cursor: str | None = None,
+    hover: str | None = None,
     layout: ReportLayout | None = None,
     forest: list["SessionNode"] | None = None,
 ) -> list[Text]:
@@ -517,6 +518,11 @@ def build_report(
     for the same reason the expansion set is: expanding a row inserts rows above
     every later index, so an index-keyed cursor would slide onto a different
     session on the very keypress that is supposed to leave it where it is.
+
+    ``hover`` is the SESSION ID the POINTER is over, keyed by id for that same
+    reason, and it is independent of ``cursor``: the two selection models are
+    allowed to sit on different rows, and the report paints both marks at once.
+
     ``layout``, if given, receives which rows were painted and where, which the
     interactive screen needs to scroll the cursor into view; recomputing that
     outside this function would be a second, possibly disagreeing, notion of
@@ -899,6 +905,16 @@ def build_report(
             cursor_index = next(
                 (i for i, row in enumerate(structure) if row.session_id == cursor), None
             )
+        # Resolved to an index the same way, and by SESSION ID for the same
+        # reason: expanding a row inserts rows above every later index, so an
+        # index carried across a rebuild would land on a different session. A
+        # hovered id no longer on screen (its parent was collapsed) simply finds
+        # nothing and paints no highlight, which is the honest answer.
+        hover_index = None
+        if hover is not None:
+            hover_index = next(
+                (i for i, row in enumerate(structure) if row.session_id == hover), None
+            )
         lines.append(
             _session_section(
                 session_rows,
@@ -906,6 +922,7 @@ def build_report(
                 name_col,
                 meta,
                 cursor=cursor_index,
+                hover=hover_index,
                 suffixes=[suffixes[row.session_id] for row in structure],
             )
         )
@@ -1050,6 +1067,21 @@ _DISCLOSURE_CELLS = 2
 #: not as the position they are on). It is painted into the two leading indent
 #: cells every row already spends, so a cursor costs the label budget nothing.
 _ROW_CURSOR = "❯"
+
+
+class _PointerAt(NamedTuple):
+    """A bare screen coordinate with the two attributes the hit-test reads.
+
+    :meth:`AnalyticsScreen._row_at` takes an "event" but uses only
+    ``screen_x``/``screen_y``. Re-resolving the hover after the viewport moved
+    has a coordinate and NO event: synthesising a real ``events.MouseMove`` for
+    it would mean inventing a widget, a button state and deltas that no hit-test
+    reads, and posting it would re-enter the handler. This is the coordinate,
+    and nothing else — the same shape ``copy_picker`` uses for the same case.
+    """
+
+    screen_x: int
+    screen_y: int
 
 
 @dataclass(frozen=True)
@@ -1299,6 +1331,7 @@ def _session_section(
     meta: str = "",
     *,
     cursor: int | None = None,
+    hover: int | None = None,
     suffixes: Sequence[str] | None = None,
 ) -> Text:
     """The per-session table, pre-ordered and pre-indented by the forest walk.
@@ -1328,6 +1361,23 @@ def _session_section(
     cursor at all, which keeps the plain-text renderers and the scripts on the
     same output they had before the row cursor existed.
 
+    ``hover`` is the index the POINTER is over, and it is deliberately a second
+    and independent index from ``cursor``: the mouse and the keyboard are two
+    selection models that must be able to sit on different rows without either
+    dragging the other. It is painted as a background tint across the row's full
+    cell width and nothing else — no inserted glyph, no changed indent — because
+    this table's "no reflow on interaction" property is load-bearing (three
+    review rounds of #873 pinned it), and a hover that reflowed the table under
+    a moving pointer would move the very row the user is aiming at.
+
+    The tint is ``tint-select``, the same ground the ``/copy`` picker's hover
+    uses, so a highlighted row means one thing across the app. The caret is what
+    DISCRIMINATES hover from the keyboard cursor: on the cursor row the ground
+    is ``tint-select-hi`` (a step up, so "the pointer is on the row the keyboard
+    is also on" is its own visible state) and the ``❯`` is present either way.
+    Hover alone never paints a caret — two carets would be two claims about
+    where ``enter`` acts.
+
     ``suffixes`` is the ``+N subagents`` tail already composed into each label,
     handed over separately ONLY so it can be painted ``dim`` (review D3). It is
     metadata about the row, not part of the session's name, and at full
@@ -1351,11 +1401,17 @@ def _session_section(
     calls_col = _calls_col(pairs)
     for index, (label, depth, agg) in enumerate(rows):
         block.append("\n")
+        # Where this row's cells begin, so the hover tint can be laid over the
+        # WHOLE row once it is composed. Taken after the newline, which belongs
+        # to the row above: tinting it would paint a notch into the previous
+        # row's right edge.
+        row_start = len(block.plain)
         # A nested row is dimmed as well as indented: its dollars are already
         # inside the root above it, so it must not compete visually with the
         # rows that actually partition the total.
         style = fg if depth == 0 else dim
         on_cursor = cursor is not None and index == cursor
+        on_hover = hover is not None and index == hover
         if on_cursor:
             block.append(f"{_ROW_CURSOR} ", style=accent)
         else:
@@ -1383,6 +1439,24 @@ def _session_section(
         block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
         if show_cache:
             block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
+        if on_hover:
+            # A BACKGROUND laid over the finished row, never a re-styling of it:
+            # `Text.stylize` adds a span, so every foreground the row already
+            # chose (dim suffix, dim calls, accent caret) survives underneath and
+            # only the ground changes. Re-composing the row in a "hover style"
+            # would flatten those distinctions exactly on the row the user is
+            # looking at hardest.
+            #
+            # Spanned to the row's own composed cells rather than padded out to
+            # ``width``: the table is narrower than the card whenever the name
+            # column hits its cap (100 cells inside a 134-cell box), and a tint
+            # run to the box edge would highlight a band of empty margin that is
+            # not part of the table. Every row composes to the same cell count,
+            # so the tint is a clean rectangle down the table.
+            ground = "tint-select-hi" if on_cursor else "tint-select"
+            block.stylize(
+                Style(bgcolor=theme_mod.semantic_color(ground)), row_start, len(block.plain)
+            )
     return block
 
 
@@ -1541,6 +1615,19 @@ class AnalyticsScreen(ModalScreen[None]):
         #: Session ID the row cursor is on, or ``None`` before the first paint
         #: has told us which rows exist. Same keying rule, same reasons.
         self._cursor: str | None = None
+        #: Session ID the POINTER is over, or ``None``. A SECOND selection model
+        #: beside ``_cursor`` and deliberately independent of it: the pointer can
+        #: rest on one row while the keyboard cursor sits on another, and neither
+        #: may drag the other around. Same id-keying rule as ``_cursor``.
+        self._hover: str | None = None
+        #: Last known pointer position, in SCREEN coordinates. Kept because the
+        #: viewport moves under a resting pointer — a real terminal sends no
+        #: ``MouseMove`` while only the wheel turns — so the highlight has to be
+        #: re-resolved from a coordinate that has no event behind it. See
+        #: ``_refresh_hover``; this is ``copy_picker``'s ``_pointer_at`` and it
+        #: exists here for the identical reason, on a surface that scrolls much
+        #: further.
+        self._pointer_at: tuple[int, int] | None = None
         #: What the last paint put where — the rows it drew and the body line the
         #: first of them landed on. Written by ``build_report`` through the
         #: ``ReportLayout`` receiver so cursor movement and scroll-to-cursor read
@@ -1556,6 +1643,11 @@ class AnalyticsScreen(ModalScreen[None]):
         #: unchanged width cannot produce different output. So the width is the
         #: repaint's cache key.
         self._painted_width: int | None = None
+        #: Whether a hover re-resolve is already queued for after the next
+        #: refresh. ``scroll_y`` is an ANIMATED value — one ``pagedown`` fired 28
+        #: notifications — so the re-resolve is coalesced to one per frame rather
+        #: than run per notification at 12 ms a repaint. See ``_viewport_moved``.
+        self._hover_refresh_pending = False
         #: Lazily built by ``_forest()``; see there for why it is cached.
         self._forest_cache: list["SessionNode"] | None = None
         self._title: Static
@@ -1581,6 +1673,21 @@ class AnalyticsScreen(ModalScreen[None]):
         # body has been measured against the viewport.
         self.call_after_refresh(self._sync_hint)
         self.call_after_refresh(self._place_initial_cursor)
+        # THE WHEEL GOTCHA, covered at its source. A real terminal sends no
+        # ``MouseMove`` while only the wheel turns, so the rows slide under a
+        # resting pointer and the highlight stays painted on a row the pointer
+        # is no longer over. Watching the container's own ``scroll_y`` catches
+        # every way the viewport can move — wheel, scrollbar drag, page/home/end
+        # keys, and ``_scroll_cursor_into_view`` — as one hook, instead of a
+        # ``_refresh_hover()`` call bolted onto each of those paths that the
+        # next new one would forget.
+        #
+        # A wheel notch measurably never reaches a screen-level handler: Textual
+        # stops the event on the container while it can still scroll, so a
+        # ``on_mouse_scroll_*`` override here would run only at the ends of the
+        # travel (the trap AGENTS.md records for ``/settings``). The watcher sees
+        # all of them.
+        self.watch(self._scroll, "scroll_y", self._viewport_moved, init=False)
 
     def _place_initial_cursor(self) -> None:
         """Draw the caret from frame 1, without moving the viewport.
@@ -1622,6 +1729,10 @@ class AnalyticsScreen(ModalScreen[None]):
         # enter ``_card_width`` at all.
         self._repaint(force=False)
         self.call_after_refresh(self._sync_hint)
+        # A resize relays the rows under a pointer that did not move, so the
+        # highlight has to be re-resolved for the same reason a scroll does.
+        # After the refresh, because it reads the new geometry.
+        self.call_after_refresh(self._refresh_hover)
 
     def _card_width(self) -> int:
         # Track the CSS card (90% of the terminal, capped at 140 — see the
@@ -1804,6 +1915,7 @@ class AnalyticsScreen(ModalScreen[None]):
             metric=self._metric,
             expanded=self._expanded,
             cursor=self._cursor,
+            hover=self._hover,
             layout=self._layout,
             # Every arrow key repaints, and rebuilding the forest each time was
             # 34 ms of the ~0.25 s that made the cursor feel laggy rather than
@@ -1998,6 +2110,191 @@ class AnalyticsScreen(ModalScreen[None]):
         line = self._layout.session_first_line + index
         return top <= line <= top + height - 1
 
+    # -- mouse ----------------------------------------------------------------
+    # Public handler names on purpose: Textual dispatches ``_on_<event>`` and
+    # then ``on_<event>``, so overriding the PRIVATE name shadows the base
+    # ``Widget``'s own ``mouse_hover`` bookkeeping — the thing that drives every
+    # ``:hover`` rule — and silently latches it on. ``command_picker`` documents
+    # the same trap at its own mouse block.
+
+    def _row_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
+        """Index of the session row under a mouse event, or ``None``.
+
+        Resolved against the VIEWPORT plus the scroll offset, and deliberately
+        NOT against ``_body.region``. The two are arithmetically identical — the
+        body is ``height: auto`` inside the container, so ``body.y ==
+        viewport.y - scroll_offset.y`` held exactly at every offset measured —
+        but they are not equally CURRENT. ``body.region`` is recomputed by
+        layout and lags a scroll by a frame, while ``scroll_y`` is the reactive
+        whose change notifies ``_viewport_moved`` in the first place. Basing the
+        hit-test on the body read a stale ``body.y`` of -9 against an already
+        settled offset of 0 (measured), resolving the pointer 16 rows away from
+        the truth and leaving the highlight stuck on a row it had scrolled past.
+        This basis is correct at the instant the watcher runs.
+
+        Two guards, and the FIRST is mandatory rather than defensive:
+
+        - the point must be inside the SCROLL VIEWPORT, not merely inside the
+          body's region. The body overhangs the viewport by however much of the
+          report is scrolled out of sight — measured at 27 rows on a 40-row
+          frame — so ``body.region.contains`` alone resolves coordinates that
+          are clipped, including the hint line below the card (measured: the
+          hint at y=33 is inside ``body.region`` and outside the viewport). This
+          is a modal over the transcript, so the backdrop also bubbles events
+          from well outside the panel, which the same guard rejects;
+        - and the resulting index must be a row that EXISTS. The table is one
+          section of a long report: everything above it (totals, both charts,
+          the input attribution, the provider table) and the legend below it
+          resolve to indices outside ``session_rows`` and must be inert.
+
+        Rows are addressable by their whole width. Every row composes ``no_wrap``
+        to the same cell count, so the row is a clean rectangle and the ``x``
+        coordinate carries no information the ``y`` does not already have.
+        """
+        scroll = getattr(self, "_scroll", None)
+        if scroll is None or not scroll.is_mounted:
+            return None
+        viewport = scroll.scrollable_content_region
+        if not viewport.contains(event.screen_x, event.screen_y):
+            return None
+        line = event.screen_y - viewport.y + int(scroll.scroll_offset.y)
+        index = line - self._layout.session_first_line
+        return index if 0 <= index < len(self._layout.session_rows) else None
+
+    def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._pointer_at = (event.screen_x, event.screen_y)
+        self._apply_hover(self._row_at(event))
+
+    def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Drop the highlight when the pointer leaves the rows.
+
+        ``Leave`` bubbles from the body ``Static``, and its ORDERING relative to
+        the ``MouseMove`` that lands somewhere else was measured before relying
+        on it: moving row -> hint delivers ``move`` and then ``leave``, and hint
+        -> row delivers ``leave`` (of the hint) and then ``move``. In neither
+        direction does a stale ``leave`` arrive after the move that set a new
+        hover, so this cannot erase a highlight that was just correctly placed.
+        """
+        self._pointer_at = None
+        self._apply_hover(None)
+
+    def _apply_hover(self, index: int | None) -> None:
+        """Move the highlight to visible row ``index`` and set the pointer shape.
+
+        One place, because every path that resolves a hover — a real pointer
+        event and the eventless re-resolve after the viewport moved — must agree
+        about what a hover DOES, including the pointer shape. Splitting them is
+        how the shape ends up correct on one path and latched on the other.
+
+        The hand appears over EXPANDABLE rows only. A childless row still takes
+        the highlight — it is genuinely the row under the pointer and saying so
+        is honest — but its click does nothing, and a hand over it would promise
+        a click it does not keep. That is the majority case, not an edge one:
+        492 of the operator's 595 roots are childless.
+        """
+        rows = self._layout.session_rows
+        row = rows[index] if index is not None else None
+        session_id = row.session_id if row is not None else None
+        self.styles.pointer = "pointer" if row is not None and row.expandable else "default"
+        if session_id == self._hover:
+            return
+        self._hover = session_id
+        self._repaint()
+
+    def _refresh_hover(self) -> None:
+        """Re-resolve the highlight against the LAST KNOWN pointer position.
+
+        The rows move under a resting pointer — the wheel scrolls the report,
+        the scrollbar drags it, ``_scroll_cursor_into_view`` moves it for a key
+        — and a real terminal sends NO ``MouseMove`` for any of that. Without
+        this the highlight stays painted on a row the pointer is not over, and
+        on a report this tall it scrolls off the viewport entirely while the
+        hand cursor stays (the defect ``copy_picker._refresh_hover`` was written
+        for, on a surface that scrolls much further).
+
+        Takes a coordinate with no event behind it, which is what
+        ``_PointerAt`` is for: synthesising a ``MouseMove`` would mean inventing
+        a widget, a button state and deltas no hit-test reads, and POSTING one
+        would re-enter the handler.
+        """
+        if self._pointer_at is None:
+            return
+        self._apply_hover(self._row_at(_PointerAt(*self._pointer_at)))
+
+    def _viewport_moved(self) -> None:
+        """Re-resolve the hover after the viewport moved, at most once a frame.
+
+        ``scroll_y`` is watched rather than each mover being patched, but it is
+        an ANIMATED value: one ``pagedown`` on a real ledger fired 28 separate
+        notifications as the scroll eased to its target. A repaint per
+        notification is 12 ms each measured against the operator's 2,779-session
+        ledger — a third of a second of rebuilds for one keypress, which is the
+        freeze this panel's width cache already exists to prevent.
+
+        So the work is coalesced: the flag marks the viewport dirty and
+        ``call_after_refresh`` resolves it once, after the whole burst has been
+        applied and the geometry it reads is final.
+        """
+        if self._hover is None and self._pointer_at is None:
+            # Nothing to re-resolve and nothing painted: the common case (no
+            # pointer has ever been over this screen) costs one attribute read.
+            return
+        if self._hover_refresh_pending:
+            return
+        self._hover_refresh_pending = True
+        self.call_after_refresh(self._resolve_pending_hover)
+
+    def _resolve_pending_hover(self) -> None:
+        self._hover_refresh_pending = False
+        self._refresh_hover()
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Click a row to expand or collapse it.
+
+        **The WHOLE row is the target, not just the ``\u25b8`` glyph.** The glyph is
+        two cells against a hundred-cell row, and a two-cell target is a
+        precision the mouse was invited in to avoid — the sibling pickers
+        (`command_picker`, `copy_picker`, `session_picker`, `model_picker`) all
+        make the whole row clickable and a user who learned that here would find
+        this one screen demanding aim. The usual argument for the narrow target
+        is accidental toggles, and it does not apply: the rows carry no other
+        click action to collide with, and the mistake is instantly visible and
+        undone by clicking again. The cost of the wide target is one wrong
+        expand; the cost of the narrow one is a control most users never find.
+
+        **The click also moves the keyboard cursor to the row.** The two
+        selection models may sit apart while the pointer merely HOVERS — that is
+        what makes hover a preview — but an ACT is different: after clicking row
+        7 open, an ``enter`` that collapsed row 2 instead (because the caret
+        never left it) would be the two models visibly disagreeing about which
+        row is "current". Moving the caret on the acting gesture is what
+        `copy_picker` does for the same reason, and it keeps the hint honest:
+        ``enter expand`` names the row the user just acted on.
+
+        A click on a CHILDLESS row is a clean no-op — no cursor move, no
+        viewport move, no repaint. Not merely "toggling nothing": moving the
+        caret there would scroll the view for a gesture the user experienced as
+        doing nothing, and 492 of 595 real roots are childless, so this is the
+        majority click.
+
+        ``event.stop()`` because this is a modal over the transcript and a
+        bubbled click hands the gesture to a parent — one gesture must not move
+        two surfaces. Button 1 only, and the button is tested BEFORE any state
+        changes: a right-click asking for a context menu must not toggle a row
+        on its way to being ignored.
+        """
+        if getattr(event, "button", 1) != 1:
+            return
+        index = self._row_at(event)
+        if index is None:
+            return
+        event.stop()
+        row = self._layout.session_rows[index]
+        if not row.expandable:
+            return
+        self._cursor = row.session_id
+        self.action_toggle_row()
+
     def _move_cursor(self, delta: int) -> None:
         rows = self._layout.session_rows
         if not rows:
@@ -2157,6 +2454,16 @@ class AnalyticsScreen(ModalScreen[None]):
             self._rehome_to_ancestor(chain)
             self._repaint()
         self._scroll_cursor_into_view()
+        # An expand/collapse is the one mover the ``scroll_y`` watch does not
+        # see: it changes the body's height, and only moves the viewport when
+        # the cursor reveal above happens to scroll. Either way rows slide
+        # under a resting pointer — 30 children appearing below the cursor
+        # pushes every row beneath it down by 30 — so the highlight is
+        # re-resolved here too. Deferred rather than run in place: the new
+        # geometry is only settled after the refresh that paints it, and
+        # ``_viewport_moved`` already coalesces this with any watch callback
+        # the reveal fired, so one repaint carries both.
+        self.call_after_refresh(self._viewport_moved)
         # Expanding changes the body's height, so whether it overflows its
         # viewport — and therefore whether the scroll hint is honest — can change
         # with it. Deferred, because the new height is only known after the
@@ -2269,6 +2576,17 @@ class AnalyticsScreen(ModalScreen[None]):
             self._repaint()
         if anchored:
             self._scroll_cursor_into_view()
+        # Same re-resolve as ``_set_expanded``, for the case it exists to
+        # close: ``e`` moves rows under a resting pointer even when the
+        # viewport does not. Children appear below every expandable root (or
+        # vanish on collapse), sliding the table under the pointer — but the
+        # ``scroll_y`` watch only fires when the cursor reveal above happens
+        # to scroll, and with the cursor row already visible the reveal is a
+        # no-op. No notification, no re-resolve, and the highlight stays
+        # painted on a row the pointer is not over: the wheel-gotcha defect
+        # via a keypress (review R1). ``_viewport_moved`` coalesces this with
+        # any watch callback the reveal did fire.
+        self.call_after_refresh(self._viewport_moved)
         self.call_after_refresh(self._sync_hint)
 
     def _forest(self) -> list["SessionNode"]:
