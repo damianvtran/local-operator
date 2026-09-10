@@ -13,7 +13,13 @@ is present cannot show that the column lines up, that the tag reads as metadata
 rather than as part of the title, or that untagged rows still align.
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/exec_picker_shot.py out.svg [COLSxROWS]
+        scripts/exec_picker_shot.py out.svg [COLSxROWS] [--reap]
+
+``--reap`` captures the SECOND half of the D1 evidence: it opens the picker,
+kills the exec run's pid, drives the picker's own ``_tick`` until the record is
+gone from the scan, and shoots the frame the user actually sees when a one-shot
+ends underneath them. It also prints ``plan_columns`` before and after, because
+the stills show the symptom and only the numbers show whether the column moved.
 
 Rows are seeded through the real transcript writer and the real record
 publisher, so the picker's own scan/decorate path fills the live state — the
@@ -35,6 +41,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.session_picker import SessionPickerScreen, plan_columns
 from scripts.visual_capture import save_capture
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -50,8 +57,10 @@ SEEDED: list[tuple[str, str, Literal["tui", "exec", "daemon"] | None, bool]] = [
 
 
 async def main() -> None:
-    out = Path(sys.argv[1])
-    size = sys.argv[2] if len(sys.argv) > 2 else "100x30"
+    argv = [arg for arg in sys.argv[1:] if arg != "--reap"]
+    reap = "--reap" in sys.argv
+    out = Path(argv[0])
+    size = argv[1] if len(argv) > 1 else "100x30"
     cols, rows = (int(part) for part in size.lower().split("x"))
     cfg = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
 
@@ -62,7 +71,7 @@ async def main() -> None:
         subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]) for _ in SEEDED
     ]
     try:
-        await _seed_and_shoot(cfg, holders, out, cols, rows)
+        await _seed_and_shoot(cfg, holders, out, cols, rows, reap=reap)
     finally:
         for holder in holders:
             holder.terminate()
@@ -73,7 +82,7 @@ async def main() -> None:
                 holder.kill()
 
 
-async def _seed_and_shoot(cfg, holders, out, cols, rows) -> None:
+async def _seed_and_shoot(cfg, holders, out, cols, rows, *, reap: bool = False) -> None:
     for index, (sid, title, kind, busy) in enumerate(SEEDED):
         directory = cfg / "sessions" / sid
         transcript = Transcript(directory)
@@ -130,7 +139,73 @@ async def _seed_and_shoot(cfg, holders, out, cols, rows) -> None:
         app._cmd_resume("", app._system_notice)
         for _ in range(8):
             await pilot.pause()
+
+        # ASSERT THE PRECONDITION BEFORE TRUSTING A PIXEL. Both of this
+        # script's own earlier bugs produced convincing frames of nothing:
+        # without a resume factory `_cmd_resume` refuses and the refusal
+        # renders as an ordinary notice, and under one shared pid the records
+        # collapsed to one. A frame is only evidence once the screen it claims
+        # to show is the screen that is up.
+        screen = app.screen
+        assert isinstance(screen, SessionPickerScreen), f"picker never opened: {type(screen)}"
+        seeded_kinds = {row.id: row.kind for row in screen._all}
+        for sid, _title, kind, _busy in SEEDED:
+            expected = kind or ""
+            assert (
+                seeded_kinds.get(sid) == expected
+            ), f"{sid} scanned back as {seeded_kinds.get(sid)!r}, expected {expected!r}"
+        print(f"precondition OK: {seeded_kinds}")
+
+        if not reap:
+            save_capture(app, str(out))
+            return
+
+        # -- D1: the one-shot ends while the picker is open ------------------
+        # The measurement that matters is the COLUMN, not the tag: the reaped
+        # row is supposed to lose its own 7 characters. What must not happen is
+        # every other name moving because of it.
+        before = _columns(screen, cols)
+        # EVERY exec record, not just one: the column is reserved for the
+        # result set, so it only collapses once the LAST tagged row is gone.
+        # Killing one of two leaves the reservation legitimately standing and
+        # would capture a frame that proves nothing either way.
+        for index, (_sid, _title, kind, _busy) in enumerate(SEEDED):
+            if kind != "exec":
+                continue
+            holders[index].kill()
+            holders[index].wait(timeout=5)
+
+        # Drive the picker's OWN timer rather than mutating its rows: `_tick`
+        # captures its `before` snapshot as its first statement, so a mutation
+        # applied from outside makes the tick compare the new state against
+        # itself and the repaint decision under test never runs.
+        for _ in range(40):
+            screen._tick()
+            await pilot.pause()
+            if all(row.kind != "exec" for row in screen._all):
+                break
+        assert all(row.kind != "exec" for row in screen._all), "the record was never reaped"
+
+        after = _columns(screen, cols)
+        print(f"plan_columns before reap : {before}")
+        print(f"plan_columns after  reap : {after}")
+        print(f"COLUMNS UNCHANGED        : {before == after}")
         save_capture(app, str(out))
+
+
+def _columns(screen, cols: int) -> tuple[int, int, int]:
+    """``plan_columns`` as the open picker would compute it right now."""
+    rows = screen.visible_rows
+    ages = ["1m ago"] * len(rows)
+    return plan_columns(
+        rows,
+        min(cols - 4, 74),
+        ages,
+        bool(screen.body_matched_ids),
+        any(getattr(row, "forked", False) for row in rows),
+        True,
+        screen._exec_column_latched(rows),
+    )
 
 
 asyncio.run(main())

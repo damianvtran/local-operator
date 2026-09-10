@@ -512,29 +512,49 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 79 public members and a POSITIVE
+    than stylistic. This protocol carries 84 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
-    3.12.13, best-of-five per run:
+    3.12.13, min-of-seven over 2,000 iterations:
 
     ====================================================  ==================
-    ``isinstance(viewer, RemoteSession)`` (what it was)    0.027-0.029 us
-    ``isinstance(viewer, ViewerSessionProtocol)``            60-136 us
-    ``not session.owns_runtime`` (what it is now)          0.044-0.058 us
+    ``isinstance(viewer, RemoteSession)`` (what it was)    0.014-0.015 us
+    ``isinstance(viewer, ViewerSessionProtocol)``            55-58 us
+    ``not session.owns_runtime`` (what it is now)          0.021-0.024 us
     ====================================================  ==================
 
-    The protocol figure is quoted as a RANGE because it genuinely varies that
-    much run to run — a single number here would be a lucky sample presented as
-    a constant. The ratio is stable at ~1,300-3,000x against the predicate and
-    the conclusion does not depend on where in the range it lands. (The negative
-    case is cheap, ~1.3 us: it fails on the first missing member. Only the
-    positive path pays, and the sites below are overwhelmingly positive.)
+    The ratio is what the decision rests on and it is stable at ~2,400-2,700x
+    against the predicate; the absolute figures move with the host, so
+    re-measure them rather than inheriting them. (The negative case is cheap,
+    ~1-3 us: it fails on the first missing member. Only the positive path pays,
+    and the sites below are overwhelmingly positive.)
+
+    **HOW to re-measure, because the obvious method silently measures the wrong
+    path.** Only a FULLY CONSTRUCTED ``RemoteSession`` is a positive here — the
+    cost is 84 property getters actually executing, so anything cheaper to build
+    is cheaper to check for the wrong reason:
+
+    ==========================================  =========  ==========
+    construction                                positive?  measured
+    ==========================================  =========  ==========
+    ``RemoteSession(config_dir=..., ...)``       **yes**    ~55 us
+    ``RemoteSession.__new__(RemoteSession)``     no         ~15 us
+    ``MagicMock(spec=RemoteSession)``            no         ~3 us
+    a synthetic class from ``__protocol_attrs__``  no       ~1-2 us
+    ==========================================  =========  ==========
+
+    Each of the bottom three looks like a viewer and reports a figure one to two
+    orders of magnitude low, because it is timing the negative path that exits
+    on the first missing member. So **assert the positive before timing it** —
+    ``assert isinstance(v, ViewerSessionProtocol)`` — or the number produced is
+    an answer to a different question. This cost a round-1 reviewer three
+    attempts and produced one re-measurement (~7.5 us) that could not be
+    reproduced by two others; the earlier 60-136 us figure quoted here was
+    likewise never reproduced and has been replaced by the measurement above.
 
     Three of the converted sites are hot — the sidebar release sweep runs per
     source per pass, ``_relaunch_refusal`` loops every interaction — so
     dispatching on the type would put three orders of magnitude on a paint path
-    to buy a guarantee the ``TypeGuard`` already provides statically. If you
-    reach for ``isinstance`` against this protocol, these are the numbers to
-    weigh, and re-measure rather than inheriting them.
+    to buy a guarantee the ``TypeGuard`` already provides statically.
 
     Headless hosts need this surface too, which is why it lives here rather
     than in the TUI: ``server/utils/desktop_sessions.py`` already imports,

@@ -34433,21 +34433,25 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     whose ``False`` default silently meant "in-process".
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
-    The obvious conversion is the honest-looking one and it is ~1,300-3,000x
-    slower: that protocol is ``runtime_checkable`` with 79 public members, and a
+    The obvious conversion is the honest-looking one and it is ~2,400-2,700x
+    slower: that protocol is ``runtime_checkable`` with 84 public members, and a
     positive ``isinstance`` walks every one of them. Measured on an arm64 host,
-    CPython 3.12.13, best-of-five per run:
+    CPython 3.12.13, min-of-seven over 2,000 iterations:
 
     ==============================================  ===============
-    ``isinstance(viewer, RemoteSession)``            0.027-0.029 us
-    ``isinstance(viewer, ViewerSessionProtocol)``      60-136 us
-    ``not session.owns_runtime``                     0.044-0.058 us
+    ``isinstance(viewer, RemoteSession)``            0.014-0.015 us
+    ``isinstance(viewer, ViewerSessionProtocol)``      55-58 us
+    ``not session.owns_runtime``                     0.021-0.024 us
     ==============================================  ===============
 
-    The middle row is a RANGE because it varies that much between runs; the
-    ratio is stable and the conclusion does not turn on where it lands. See
-    ``ViewerSessionProtocol`` for the full note, including why the decorator
-    stays even though nothing dispatches on it.
+    The RATIO is the stable quantity and the decision rests on it; the absolute
+    figures move with the host. Re-measuring needs a fully constructed
+    ``RemoteSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
+    NOT a positive and times the cheap negative path instead, which is how the
+    same row has now been "re-measured" to three different values. See
+    ``ViewerSessionProtocol`` for the method, the table of what each stand-in
+    actually measures, and why the decorator stays even though nothing
+    dispatches on it.
 
     Three of the converted sites are hot — the sidebar release sweep runs this
     per source per pass, ``_relaunch_refusal`` loops every interaction, and the

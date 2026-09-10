@@ -27,6 +27,7 @@ from local_operator.resume import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
+    _EXEC_LEGEND,
     _MARKER_LEGEND,
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
@@ -331,6 +332,121 @@ def test_a_list_with_no_exec_run_reserves_no_exec_column() -> None:
     with_exec = plan_columns(rows, 74, ["1m ago"], False, False, True, True)
     without = plan_columns(rows, 74, ["1m ago"], False, False, True, False)
     assert without[0] == with_exec[0] + cell_len(EXEC_MARKER)
+
+
+def test_the_repaint_signature_covers_every_field_the_rows_render() -> None:
+    """The guard that failed to catch `kind` (agent review round 1, MAJOR-1/Q1).
+
+    The previous assertion only checked that every signature NAME is a real
+    ``SessionRow`` field, which catches a rename and is blind to the error that
+    actually shipped: a field ADDED to the row, rendered by the picker, and
+    never added to the signature. ``_tick`` then compares two different rows
+    equal and leaves stale pixels on screen.
+
+    Asserted as the partition rather than as a membership test, so a future
+    field must be classified one way or the other and cannot simply be
+    forgotten.
+    """
+    covered = set(SessionPickerScreen._SIGNATURE_FIELDS)
+    excluded = set(SessionPickerScreen._SIGNATURE_EXCLUDED)
+    assert covered.isdisjoint(excluded), "a field cannot be both compared and excluded"
+    assert covered | excluded == set(SessionRow._fields)
+    # The specific escape, pinned by name: `kind` drives EXEC_MARKER and the
+    # reserved column, so it must be compared.
+    assert "kind" in covered
+
+
+def test_a_kind_only_change_is_visible_to_the_repaint_decision() -> None:
+    """Two rows identical but for ``kind`` must not compare equal.
+
+    The rendered proof that the signature fix matters: these two rows paint
+    differently, so a repaint decision that called them equal would show the
+    first row's `[exec]` for a session that is no longer one.
+    """
+    was_exec = _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec")
+    now_tui = was_exec._replace(kind="tui")
+
+    def signature(row: SessionRow) -> tuple[object, ...]:
+        return tuple(getattr(row, f, None) for f in SessionPickerScreen._SIGNATURE_FIELDS)
+
+    assert signature(was_exec) != signature(now_tui)
+    # ... and they really do render differently, so the comparison is load-bearing.
+    painted_exec = render_rows([was_exec], 0, 74, NOW)[0].plain
+    painted_tui = render_rows([now_tui], 0, 74, NOW)[0].plain
+    assert EXEC_MARKER.strip() in painted_exec
+    assert EXEC_MARKER.strip() not in painted_tui
+
+
+def test_the_exec_column_does_not_collapse_when_the_one_shot_is_reaped() -> None:
+    """Design round 1, D1: the reserved column may widen, never narrow.
+
+    A reap is not a user action, and it happens at the NORMAL END of every
+    one-shot. Letting the column collapse then moved every name 7 cells left
+    with no keystroke — the list lurching at exactly the moment the tag exists
+    to explain. The reaped row loses its own tag (that change is real and must
+    stay visible); nothing else moves.
+    """
+    live = [
+        _row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec"),
+    ]
+    # The same rows after the one-shot ends: the record is gone, so is the kind.
+    reaped = [live[0], live[1]._replace(live_state="", kind="")]
+
+    screen = SessionPickerScreen(live, NOW)
+    assert screen._exec_column_latched(live) is True
+    before = plan_columns(live, 74, ["1m ago"] * 2, False, False, True, True)
+
+    # The reap: the result set itself no longer carries a tagged row.
+    assert not any(row.kind == "exec" for row in reaped)
+    assert screen._exec_column_latched(reaped) is True, "the column must stay reserved"
+    after = plan_columns(reaped, 74, ["1m ago"] * 2, False, False, True, True)
+    assert before == after, "no column may move because a one-shot ended"
+
+    # Without the latch the same reap collapses the column — the defect, pinned.
+    unlatched = plan_columns(reaped, 74, ["1m ago"] * 2, False, False, True, False)
+    assert unlatched[0] == after[0] + cell_len(EXEC_MARKER)
+
+    # A picker that has never seen an exec row still pays nothing.
+    fresh = SessionPickerScreen([live[0]], NOW)
+    assert fresh._exec_column_latched([live[0]]) is False
+
+
+def test_the_footer_explains_the_exec_tag_where_the_picker_can_show_it() -> None:
+    """Design round 1, D2: `[exec]` states provenance; the legend states lifetime.
+
+    The words that carry ephemerality ("Running headless (exec)") render only in
+    the sidebar's hover tooltip, a surface the picker never shows. The legend is
+    the picker's own established mechanism for explaining a mark, so the fact
+    lands there — and only when an exec row is actually present, on the same
+    "teach the mark where it is used" rule the body-match legend follows.
+    """
+    with_exec = _footer_hints(74, has_exec=True)
+    assert _EXEC_LEGEND in with_exec
+    assert _EXEC_LEGEND not in _footer_hints(74, has_exec=False)
+    # It says how long the row lasts, not merely what it is.
+    assert "one-shot" in _EXEC_LEGEND[1]
+    # Legends teach; keys operate. The legend sheds before either.
+    narrow = [key for key, _ in _footer_hints(40, has_exec=True)]
+    assert _EXEC_LEGEND[0] not in narrow
+    assert "enter" in narrow and "esc" in narrow
+
+
+def test_both_legends_coexist_and_the_cryptic_one_survives_longer() -> None:
+    """Two marks, one footer, and a deliberate order.
+
+    Displayed, the body mark leads because that is the order the marks appear
+    in a row. Shed, `[exec]` goes first: it is a readable word that still means
+    something without its gloss, while a lone right-quote with nothing
+    explaining it is the rendering artifact its legend exists to prevent.
+    """
+    wide = [key for key, _ in _footer_hints(100, has_marked=True, has_exec=True)]
+    assert wide.index(_MARKER_LEGEND[0]) < wide.index(_EXEC_LEGEND[0])
+
+    # Under pressure the readable word gives up its gloss first.
+    squeezed = [key for key, _ in _footer_hints(80, has_marked=True, has_exec=True)]
+    assert _EXEC_LEGEND[0] not in squeezed
+    assert _MARKER_LEGEND[0] in squeezed
 
 
 def test_a_cold_row_carries_no_kind_so_a_reaped_exec_run_stops_claiming_to_be_one() -> None:
