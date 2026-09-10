@@ -1,4 +1,5 @@
 import base64
+import mimetypes
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -138,6 +139,21 @@ class TestSaveBase64Attachment:
 
     def test_save_fails_if_cannot_write_file(self, temp_uploads_dir: Path):
         data_url = to_data_url("text/plain", b"test")
+        # Force `mimetypes`' LAZY init before `open` is patched. The module
+        # reads system mime.types files on first use, and this test patches
+        # `builtins.open` GLOBALLY -- so if nothing earlier in the shard has
+        # already initialised it, `guess_extension` inside the function under
+        # test opens those files, hits this mock, and the test fails on the
+        # wrong `open` call with the right exception type.
+        #
+        # That made the test order-dependent rather than wrong: it passed only
+        # when some neighbour happened to initialise `mimetypes` first, and
+        # failed in isolation (`pytest <this test> -p no:randomly`) on an
+        # unmodified tree. Any change to shard composition could surface it, as
+        # one did. Asserting `inited` keeps the guard honest if the stdlib ever
+        # stops exposing it.
+        mimetypes.init()
+        assert mimetypes.inited, "mimetypes did not initialise; the patch below would catch it"
         # Make the directory non-writable (not straightforward to do
         # robustly cross-platform for a dir)
         # Instead, mock open to raise IOError

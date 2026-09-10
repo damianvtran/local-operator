@@ -1370,6 +1370,85 @@ ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 #: the compositor's visible set (23 widgets) and keystroke latency (p90
 #: 88 vs 93 ms) are unchanged with 7 parked against 4.
 RETAINED_PRESENTATIONS = 12
+
+
+def _suppress_intermediate_paint() -> None:
+    """Stand in for ``Screen._compositor_refresh`` to drop one mid-commit paint.
+
+    The switch commit needs a synchronous LAYOUT so a freshly mounted page can
+    author its real height before the readiness gate reads the painted map, but
+    it must not put that layout on screen: at that moment the transcript has
+    been revealed while the composer still holds the outgoing draft's rows, and
+    a frame drawn from that arrangement shows an empty conversation (design
+    round 1, D1). Restoring the real method in a ``finally`` is what keeps this
+    to exactly one frame; see the call site in
+    :meth:`OperatorApp._prefill_resume_before_reveal` for the measurements.
+    """
+    return None
+
+
+def _set_transcript_parked(view: Widget, parked: bool) -> None:
+    """Park or un-park a transcript WITHOUT the disabled stylesheet cascade.
+
+    ``Widget.disabled`` does two unrelated jobs here, and only one of them is
+    wanted inside the switch commit.
+
+    * **Interactivity gating** reads the FIELD:
+      ``_self_or_ancestors_disabled`` (mouse routing in
+      ``check_message_enabled``), ``focusable``, and
+      ``allow_vertical_scroll`` / ``allow_horizontal_scroll`` all test
+      ``disabled`` directly. This is the job the park needs, and it is why the
+      field is still written.
+    * **Appearance** is ``watch_disabled`` → ``update_node_styles`` →
+      ``App.update_styles`` → a ``Stylesheet.apply`` over the WHOLE subtree, so
+      Textual's built-in ``*:disabled { opacity: 0.7 }`` can take effect. On a
+      45-81 block transcript that is 131 node applications — measured at
+      10.2 ms of the 18.8 ms commit, 54% of a section that deliberately never
+      awaits, paid on every switch.
+
+    The appearance half is worth nothing to a parked view WHILE IT IS PARKED:
+    it is ``overlay: screen`` at ``offset: 100vw``, so every cell of its ink is
+    clipped off-screen and no opacity it is given can be seen.
+
+    ``set_reactive`` writes the reactive's value while skipping its watcher,
+    which is precisely that split. Verified on a 40-block subtree: 44
+    ``Stylesheet.apply`` calls → 0, with ``disabled``,
+    ``_self_or_ancestors_disabled``, ``focusable``, ``allow_vertical_scroll``
+    and mouse-message refusal all identical. (The wall figures behind those
+    counts — ~4.1 ms → ~0 ms, and RC2's ~10.2 ms of an ~18.8 ms commit — were
+    taken on a box at load ~36 and are indicative only. The COUNTS are the
+    invariant worth defending; the milliseconds are not.)
+
+    THE TWO DIRECTIONS ARE NOT SYMMETRIC, which is why this is not simply
+    ``set_reactive`` both ways. Skipping the park cascade declines to dim a
+    view nobody can see. Skipping the UN-park cascade would decline to
+    **un-dim** one the user is about to look at — and the rule that dims it
+    already exists: Textual's own ``*:disabled:can-focus { opacity: 0.7 }``
+    matches because ``TranscriptView.can_focus`` is True. Any cascade over the
+    subtree while it is parked (a terminal resize and a theme change were both
+    reproduced) applies that 0.7, and without a watcher on the un-park it is
+    revealed still dimmed and never self-heals — measured across a reveal, a
+    keystroke, a scroll and a further switch, and visible in the rendered
+    palette (body text ``#3b3527`` → ``#2f2a1e``). So the un-park goes through
+    the real reactive and pays the one cascade Textual already pays on every
+    switch today; the saving this helper exists for is on the OUTGOING 45-81
+    block transcript, which is untouched by that.
+
+    ``watch_disabled`` also blurs ``screen.focused`` when the disabled widget
+    is its ancestor and queues a ``Leave`` for a hovered widget; ``set_reactive``
+    skips both on the park. That is safe here because the commit path refocuses
+    the composer independently — probed with focus placed inside the outgoing
+    transcript before the switch, focus afterwards lands on the ``Editor``
+    rather than being stranded in the parked offscreen view. Documented so the
+    next reader does not have to re-derive it.
+    """
+    if parked:
+        view.set_reactive(Widget.disabled, True)
+    else:
+        # The real reactive: see the asymmetry note above. Never `set_reactive`.
+        view.disabled = False
+
+
 #: Ranked entries warmed per catalog poll. Two is the top of the list — the
 #: rows the eye lands on — without turning every poll into a prepare storm.
 PREWARM_PER_REFRESH = 2
@@ -3356,6 +3435,19 @@ class OperatorApp(App[None]):
         self._sidebar_ready_frame: tuple[SessionInteraction, int, asyncio.Future[None]] | None = (
             None
         )
+        #: How many times the readiness gate refused a post-commit frame and
+        #: `post_display_hook` had to buy another relayout. A healthy switch
+        #: leaves this at zero — the arming refresh in `_await_sidebar_frame`
+        #: makes the first paint a full `LayoutUpdate` the gate can pass on.
+        #: Counted rather than logged so a regression test can assert the
+        #: recovery branch stays dead across N switches without measuring time.
+        self._sidebar_gate_recoveries = 0
+        #: How many post-commit displays reached the gate with a live readiness
+        #: future. Its only job is to keep `_sidebar_gate_recoveries == 0` from
+        #: being satisfiable by a rig that never armed the gate at all — a zero
+        #: that means "never asked" reads identically to one that means "never
+        #: refused", and only one of them is the property worth asserting.
+        self._sidebar_gate_reached = 0
         self._sidebar_frame_pending = False
         self._sidebar_focus_restore: ReferenceType[Widget] | None = None
         self._sidebar_presentations: dict[str, SessionPresentation] = {}
@@ -3399,6 +3491,14 @@ class OperatorApp(App[None]):
         #: draft). Its presence is what distinguishes the two ``pending("")``
         #: callers — the navigation makes both — without a second flag.
         self._sidebar_transition_from: SessionInteraction | None = None
+        #: The outgoing draft as it stood when the transition opened. The
+        #: editor keeps PAINTING it until commit loads the incoming draft over
+        #: it — a composer that empties at `pending` collapses to one row and
+        #: reflows the whole conversation column (see
+        #: :meth:`_begin_sidebar_transition`). Everything typed after the click
+        #: sits after this prefix, which is how the two are told apart.
+        self._sidebar_transition_prefix: str = ""
+        self._sidebar_transition_attachments: dict[int, Any] = {}
         self._sidebar_sources: dict[str, SessionInteraction] = {}
         self._sidebar_drafts = SessionDraftStore()
         self._sidebar_navigation = SessionNavigation(
@@ -4178,6 +4278,20 @@ class OperatorApp(App[None]):
                 raise RuntimeError("Sidebar navigation requires an owner-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
+            #
+            # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
+            # v0.52.16 (#849) bounds `_recover_owner` at 90s, so a
+            # `RemoteSession` can reach a TERMINAL cold state on a path that
+            # used to retry forever; a speculative prepare can therefore meet
+            # `is_cold` for real rather than only in transit. Verified by
+            # execution against a terminally cold session rather than reasoned
+            # about: the raise costs one discarded speculative preparation and
+            # nothing else -- source not retired, no paging lease held, no
+            # presentation admitted, ZERO redials, and a subsequent real click
+            # on the same session still prepares successfully. `speculative`
+            # is reached only from the prewarm worker, whose `except Exception`
+            # logs at debug and whose `finally` releases the preparation, so no
+            # user-visible surface observes it.
             if speculative and session.is_cold:
                 raise RuntimeError("The prepared owner is no longer ready")
             if speculative or refresh:
@@ -4253,7 +4367,12 @@ class OperatorApp(App[None]):
             # layout while clipping ALL ink/hit targets (unlike cached opacity).
             replay.view.styles.overlay = "screen"
             replay.view.styles.offset = ("100vw", 0)
-            replay.view.disabled = True
+            # Same seam as the commit's park: a view whose ink is clipped
+            # off-screen needs the interactivity half of `disabled` and none of
+            # its stylesheet cascade. Here the view has no children yet, so the
+            # saving is small — using the one helper is what keeps the two
+            # parks from drifting into different notions of "parked".
+            _set_transcript_parked(replay.view, True)
             replay.view.set_navigation_visible(False)
             for block in replay.blocks:
                 block.set_navigation_visible(False)
@@ -4520,6 +4639,27 @@ class OperatorApp(App[None]):
         future.add_done_callback(lambda _future: timer.stop())
         # The first target frame must cover its transcript, draft and gates,
         # not merely a sidebar/status fragment sharing the new geometry map.
+        #
+        # `refresh(layout=True)` alone asks for a LAYOUT; it does not ask for a
+        # FULL paint, and the compositor is free to satisfy the resulting
+        # render with a partial `ChopsUpdate` over whatever regions the reflow
+        # dirtied. Only a `LayoutUpdate` records `_sidebar_displayed_frame`
+        # (see `_display`), so the gate could NEVER pass on the first
+        # post-commit paint and every switch paid a forced second full-screen
+        # relayout from `post_display_hook`'s recovery branch below — measured
+        # on 21/21 switches, p50 15-71 ms and up to 215 ms at p90.
+        #
+        # Marking the whole screen region dirty is what makes the arming
+        # refresh PRODUCE the evidence rather than merely hope for it:
+        # `render_update` takes `render_full_update()` whenever the screen
+        # region is in `_dirty_regions`, so the very next paint is a
+        # `LayoutUpdate` carrying the complete compositor map. This does NOT
+        # weaken the gate — it still waits for a real painted map covering the
+        # target surfaces, exactly as the comment in
+        # `_sidebar_gate_surface_ready` requires. It only makes that map arrive
+        # on the frame the switch already pays for.
+        compositor = self.screen._compositor
+        compositor._dirty_regions.add(compositor.size.region)
         self.screen.refresh(layout=True)
         return future
 
@@ -4556,6 +4696,10 @@ class OperatorApp(App[None]):
         if pending is None:
             return
         source, generation, future = pending
+        if not future.done():
+            # Counted before the verdict, so "reached the gate" and "passed the
+            # gate" stay separable facts (see the attribute's own note).
+            self._sidebar_gate_reached += 1
         if future.done():
             self._sidebar_ready_frame = None
         elif generation == self._sidebar_navigation.generation and self._sidebar_gate_surface_ready(
@@ -4574,6 +4718,19 @@ class OperatorApp(App[None]):
             # scroll map. Request the actual follow-up layout/paint now rather
             # than waiting for the unrelated two-second catalog poll. The same
             # displayed-map gate still decides readiness; no timer waives it.
+            #
+            # THIS IS A RECOVERY PATH AND IT SHOULD NEVER FIRE ON A NORMAL
+            # SWITCH. It used to be the normal path: the arming refresh in
+            # `_await_sidebar_frame` produced a `ChopsUpdate`, the gate refused
+            # for NO_DISPLAYED_FRAME every single time, and this branch bought
+            # the second full relayout that finally satisfied it. The arming
+            # refresh now dirties the whole screen region, so the first
+            # post-commit paint is already a full `LayoutUpdate` and the gate
+            # passes on it. Kept — deliberately — because the case it was
+            # written for is real and the cost of an unnecessary recovery is
+            # one frame, while the cost of no recovery is a wedged switch.
+            # `test_switch_gate_is_never_refused` asserts it stays dead.
+            self._sidebar_gate_recoveries += 1
             self.screen.refresh(layout=True)
 
     def _sidebar_navigation_pending(self, session_id: str) -> None:
@@ -4625,9 +4782,29 @@ class OperatorApp(App[None]):
         buffer is a transition buffer, and its contents are attributed at the
         moment the outcome is known (commit → target, failure → outgoing).
         Synchronous, before any await, so nothing can slip in between the
-        snapshot and the empty buffer. A burst of clicks re-enters here with
+        snapshot and the frozen prefix. A burst of clicks re-enters here with
         a transition already open; the snapshot is kept and only the buffer
         is carried on.
+
+        THE BUFFER IS NOT EMPTIED HERE, and that is deliberate. It used to be:
+        ``load_text("")`` ran at ``pending`` while the incoming draft was only
+        loaded ~100 ms later inside commit, so every frame in between painted a
+        ONE-ROW composer regardless of either session's real height. ``Editor``
+        is ``height: auto`` (1..8) inside a ``height: auto`` docked
+        ``#input-dock``, so that collapse is not one widget resizing — the
+        transcript above it grows into the vacated rows and the whole
+        conversation column reflows. The operator sees his half-written
+        sentence vanish and come back, and the screen shudder around it.
+        Measured: 3 -> 1 -> 3 rows over two consecutive painted frames, 9
+        off-state frames per A/B arm, down to 0 once the emptying moves into
+        the commit that loads the incoming draft over it.
+
+        Attribution is unaffected because it never depended on the buffer being
+        VISIBLY empty — only on knowing where the outgoing draft ended.
+        :attr:`_sidebar_transition_prefix` is that boundary, and
+        :meth:`_take_sidebar_transition_buffer` subtracts it, so what the user
+        types during the switch is still attributed to the target on commit and
+        handed back to the outgoing session on failure.
         """
         if self._sidebar_transition_from is not None:
             return
@@ -4642,24 +4819,61 @@ class OperatorApp(App[None]):
         outgoing.draft.history_stash = recall.stash
         outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
         self._sidebar_transition_from = outgoing
-        # The buffer now belongs to no session. Leave recall as it was: a
-        # transition is not a prompt, and load_text must not reset the index
-        # the outgoing session will get back if this fails.
-        editor.load_text("")
-        editor.adopt_attachments({})
+        # The buffer now belongs to no session, but it keeps PAINTING the
+        # outgoing draft until commit swaps it (see the docstring). This is the
+        # frozen prefix everything typed from here on sits after. Recall is
+        # left exactly as it was: a transition is not a prompt, and nothing may
+        # reset the index the outgoing session gets back if this fails.
+        self._sidebar_transition_prefix = editor.text
+        self._sidebar_transition_attachments = editor.attachments()
 
     def _take_sidebar_transition_buffer(self) -> tuple[str, dict[int, Any]]:
+        """What the user typed AFTER the click, without the frozen prefix.
+
+        The buffer still holds the outgoing draft the transition froze, so the
+        prefix is subtracted here rather than having been erased at ``pending``.
+        The ``startswith`` test is the honest one: a user who EDITED the frozen
+        text rather than appending to it has not typed a separable suffix, and
+        guessing at a diff would attribute their edit to the wrong session.
+        Yielding nothing there is exactly what the old empty-at-pending buffer
+        produced for the same gesture, and the outgoing draft is still restored
+        whole by :meth:`_abandon_sidebar_transition`.
+
+        Attachments are subtracted BY KEY, never by count: a marker is an index
+        cited in the text, so an index the frozen prefix already carried belongs
+        to the outgoing draft whatever position it now occupies.
+        """
         editor = self._editor()
-        return editor.text, editor.attachments()
+        prefix = self._sidebar_transition_prefix
+        text = editor.text
+        if not prefix:
+            typed = text
+        else:
+            typed = text[len(prefix) :] if text.startswith(prefix) else ""
+        frozen = set(self._sidebar_transition_attachments)
+        return typed, {
+            index: marked for index, marked in editor.attachments().items() if index not in frozen
+        }
 
     def _abandon_sidebar_transition(self) -> None:
-        """Failure/cancel: the user stays put, so what they typed is theirs."""
+        """Failure/cancel: the user stays put, so what they typed is theirs.
+
+        ``draft.text + typed`` is still assembled from the two halves rather
+        than from the live buffer, even though the buffer now holds both. The
+        buffer is only equal to the sum while the user appended; an edit into
+        the frozen region makes ``typed`` empty (see
+        :meth:`_take_sidebar_transition_buffer`) and the snapshot is then the
+        record worth restoring. Taking the buffer must therefore happen BEFORE
+        the prefix is cleared, or the subtraction has nothing to subtract and
+        the outgoing draft is doubled.
+        """
         outgoing = self._sidebar_transition_from
-        self._sidebar_transition_from = None
         if outgoing is None or outgoing is not self._interaction:
+            self._clear_sidebar_transition()
             return
         editor = self._editor()
         typed, typed_attachments = self._take_sidebar_transition_buffer()
+        self._clear_sidebar_transition()
         editor.load_text(outgoing.draft.text + typed)
         merged = dict(outgoing.draft.attachments)
         merged.update(typed_attachments)
@@ -4673,6 +4887,19 @@ class OperatorApp(App[None]):
             )
         )
         editor.move_cursor(editor._end_of_buffer())
+
+    def _clear_sidebar_transition(self) -> None:
+        """Close the transition and drop its frozen prefix.
+
+        One seam for all three outcomes (commit, abandon, a stale abandon for
+        an interaction that is no longer current) so the prefix can never
+        outlive the transition it belongs to: a stale prefix would be
+        subtracted from the NEXT switch's buffer and silently eat the target's
+        own draft.
+        """
+        self._sidebar_transition_from = None
+        self._sidebar_transition_prefix = ""
+        self._sidebar_transition_attachments = {}
 
     def _sidebar_source_releasable(
         self, source: SessionInteraction, *, reason: str = "idle"
@@ -5064,9 +5291,13 @@ class OperatorApp(App[None]):
             self._close_settings_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
-            # The outgoing draft was frozen at ``pending``; the editor holds
-            # the transition buffer, which belongs to the TARGET. Take it now,
-            # before the incoming draft is loaded over it.
+            # The outgoing draft was frozen at ``pending`` and is STILL what the
+            # editor paints — that is what keeps the composer at a stable height
+            # through the switch. What the user typed after the click sits after
+            # the frozen prefix and belongs to the TARGET. Take it now, before
+            # the incoming draft is loaded over the whole buffer further down;
+            # that load is the point at which the outgoing text finally leaves
+            # the screen, in the same frame its replacement arrives.
             typed, typed_attachments = self._take_sidebar_transition_buffer()
         else:
             # No transition was opened (a programmatic swap); the buffer is
@@ -5080,7 +5311,7 @@ class OperatorApp(App[None]):
             outgoing.draft.history_index = recall.index
             outgoing.draft.history_stash = recall.stash
             outgoing.draft.history_stash_attachments = dict(recall.stash_attachments)
-        self._sidebar_transition_from = None
+        self._clear_sidebar_transition()
         if (not refreshing or source.scroll_revision != source.preview_scroll_revision) and (
             not outgoing.display_only
             or outgoing.scroll_revision != outgoing.preview_scroll_revision
@@ -5128,14 +5359,14 @@ class OperatorApp(App[None]):
         old_view.styles.layer = "session-cache"
         old_view.styles.overlay = "screen"
         old_view.styles.offset = ("100vw", 0)
-        old_view.disabled = True
+        _set_transcript_parked(old_view, True)
         old_view.styles.height = old_view.outer_size.height
         displaced = self._sidebar_presentations.pop(session_id, None)
         self._apply_sidebar_presentation(incoming)
         incoming.replay.view.styles.layer = "default"
         incoming.replay.view.styles.overlay = "none"
         incoming.replay.view.styles.offset = (0, 0)
-        incoming.replay.view.disabled = False
+        _set_transcript_parked(incoming.replay.view, False)
         incoming.replay.view.set_navigation_visible(True)
         if incoming.welcome is not None:
             incoming.welcome.set_navigation_visible(True)
@@ -5279,7 +5510,7 @@ class OperatorApp(App[None]):
             # A drawer cannot count as a correct visible conversation while it
             # covers the response. Pinned wide sidebars stay open.
             self._set_sidebar_open(False)
-        self._start_resume_fill()
+        self._prefill_resume_before_reveal()
         self._show_sidebar_connection(source)
         if not source.draft.following_tail and source.draft.scroll_anchor_id:
             scroll_revision = source.scroll_revision
@@ -5298,6 +5529,38 @@ class OperatorApp(App[None]):
                 # Offscreen measurement is not final visible geometry for a
                 # wrapped viewport. Re-anchor after reveal, and let the normal
                 # painted-map gate verify the resulting frame, not a timer.
+                #
+                # THIS IS LOAD-BEARING FOR WRAPPED CONTENT AND IT WAS MEASURED,
+                # in both directions. The audit (§6.2) could not falsify it and
+                # asked for the settling experiment; a first pass on blocks that
+                # re-wrap from 3 rows to 5 found parked and revealed geometry
+                # identical and concluded this was dead code. That conclusion
+                # was WRONG, and deleting it wedged
+                # `tests/e2e/test_sidebar_display_e2e.py`'s `wrapped` case:
+                # the readiness gate refused 1156 consecutive frames with the
+                # anchor block absent from the painted map, and the switch
+                # timed out. The difference is how hard the content wraps — that
+                # fixture's rows are ~10 screen rows each, where the in-prepare
+                # restore's position no longer survives the reveal.
+                #
+                # So the honest statement is the one the original comment made:
+                # the parked measurement is not final. The gate is what proves
+                # the resulting frame, which is why this may run after reveal
+                # without re-introducing a geometry lie.
+                #
+                # THE GUARD IS THE E2E `wrapped` PARAMETRISATION, not a unit
+                # test, and that is deliberate rather than an omission (QA round
+                # 1, Q3, which could not confirm this from outside because its
+                # rig never scheduled the callback). Re-verified by deleting
+                # this line: `test_sidebar_display_e2e.py::test_saved_view_
+                # switches_while_authenticated_owner_sync_is_held[...True-True
+                # -False]` fails with a TimeoutError. The unit rig in
+                # `test_sidebar_switch_smoothness.py` cannot reach here at all --
+                # its `_switch` helper installs a fresh lease per call, so the
+                # `SessionInteraction` carrying the saved anchor is replaced
+                # before the commit reads it, and the draft is re-captured from
+                # the on-screen view (which is at tail). Anyone tempted to
+                # delete this again: run the e2e stage, not just the unit suite.
                 view.restore_navigation_anchor(
                     source.draft.scroll_anchor_id,
                     source.draft.scroll_anchor_part,
@@ -5322,7 +5585,23 @@ class OperatorApp(App[None]):
     def _capture_sidebar_scroll(self, source: SessionInteraction) -> None:
         old_view = self._transcript_view()
         source.draft.following_tail = old_view.is_following_tail
-        if not source.draft.following_tail:
+        if source.draft.following_tail:
+            # A reader who scrolled up and then scrolled BACK to the tail wrote
+            # an anchor into the draft on the way up and nothing cleared it on
+            # the way down, so the record contradicted itself:
+            # `following_tail=True` alongside `anchor='6602e4b2…' offset=-1`.
+            # Every consumer today tests `not following_tail` first, so it is
+            # latent — but it is a loaded gun. Any future read of
+            # `scroll_anchor_id` that does not check the flag first would land
+            # the user at a position they left, and the nonsense `-1` offset
+            # would be clamped by `min(offset, max(0, height - 1))` into silent
+            # wrongness rather than into an error. The operator's instruction is
+            # that a session left at tail lands on the most recent message; this
+            # makes the stored record say exactly that.
+            source.draft.scroll_anchor_id = ""
+            source.draft.scroll_anchor_part = 0
+            source.draft.scroll_offset = 0
+        else:
             top = old_view.content_region.y
             anchor = next(
                 (
@@ -7353,6 +7632,206 @@ class OperatorApp(App[None]):
         # ones a reader sees, and they are exactly as provisional as the ones
         # between attempts.
         self._start_resume_fill()
+
+    def _prefill_resume_before_reveal(self) -> None:
+        """Fill the incoming projection to its goal INSIDE the commit.
+
+        WHAT THIS FIXES. `_start_resume_fill` schedules its first attempt with
+        `call_after_refresh`, which is strictly AFTER the frame that reveals the
+        view. The prepared window under-fills the viewport by construction —
+        `bound = max(12, height // 2)` yields 21 blocks / 14 scroll rows against
+        a 27-row viewport, and `_fill_resume_attempt`'s `goal = viewport +
+        prefix` is 27, so `14 < 27` fires the fill on essentially every switch.
+        The consequence is the operator's "tool traces load all into the same
+        view then shuffle upward": 24 further rows mount into the ALREADY
+        VISIBLE view and drag the viewport 14 -> 62, measured on 10/10 cold
+        switches. It is also the whole of the scroll bounce — the second painted
+        position comes from `_size_updated` reacting to that insert, not from
+        any anchor restore.
+
+        Running the same fill here, synchronously, while the incoming view is
+        still parked, means the rows arrive before anything is on screen: the
+        first painted state IS the settled state. Post-reveal insertions go to
+        zero and the switch paints exactly one scroll position.
+
+        THE TRADE, stated plainly: this moves work from after the reveal to
+        before it, so a COLD switch's `ready_ms` grows (measured +89 ms in the
+        audit's A/B) while its post-reveal movement goes to zero. Warm switches
+        already hold their rows and skip the fill entirely. If cold readiness
+        ever regresses beyond tolerance the fallback is to BOUND this pre-fill
+        (one extra page, then let the rest continue after reveal) rather than to
+        return to filling a view the user is looking at.
+
+        WHY THE LOOP IS BOUNDED THE WAY IT IS. `_fill_resume_attempt` normally
+        chains its next attempt through the settle callback `insert_blocks`
+        schedules, which needs event-loop turns this synchronous section
+        deliberately does not have (`session_navigation` documents that there is
+        no await between the final identity check and commit, and nothing here
+        may introduce one). So each pass is driven directly instead, and only
+        while it keeps making progress against locally held pages: the loop
+        stops as soon as `_resume_pending_head` is empty — a page that needs a
+        NETWORK fetch is left to the ordinary post-reveal path, because waiting
+        for a socket before showing anything is the one thing worse than a
+        shuffle.
+
+        NOTHING HERE MAY RAISE INTO `PreparationInvalidated`. That retry path
+        (`session_navigation._prepare_and_commit`) releases the prepared widgets
+        and re-prepares, and it is reached by the invalidation check ABOVE this
+        point in the commit; a failure here happens after ownership has already
+        moved, so a raise would tear down a presentation that is already live.
+        `_mount_older_resume_page` re-raises projection failures by design
+        (keeping the page retryable), so the pass is guarded and degrades to the
+        ordinary deferred fill, which is exactly the behaviour before this
+        change.
+        """
+        view = self._transcript_view()
+        viewport = view.container_size.height or view.size.height
+        # ONE PAGE, NOT A LOOP TO THE GOAL. A page mounted here cannot be
+        # measured here: `insert_blocks` schedules the settle that lets each
+        # block author its real height, and that needs refresh hops this
+        # synchronous section does not have. Measured at 100x100: the transcript
+        # grew 51 -> 75 blocks while `scroll_y`, `max_scroll_y` and
+        # `virtual_size.height` all stayed exactly where they started, so a loop
+        # here is measuring a ruler that cannot move and every extra iteration
+        # is a page mounted blind. It also left the paging lease HELD on exit —
+        # `_mount_older_resume_page` releases it from that same deferred settle
+        # — which made the ordinary fill stand down against a gate the commit
+        # had taken and never returned.
+        #
+        # One page is what this can honestly do: it is the page that closes the
+        # under-fill the reveal would otherwise show (21 blocks against a
+        # 27-row viewport), it is the page whose absence caused the visible
+        # 14 -> 62 scroll jump, and the `_start_resume_fill` below still reaches
+        # the real goal by the settling route that owns it.
+        if not viewport and self._resume_pending_head and not self._resume_paging:
+            # A FIRST-VISIT (`display_only`) presentation is mounted without the
+            # in-prepare layout round trip -- `_prepare_sidebar_session` skips it
+            # deliberately so a first saved view reveals its real rows without
+            # paying an extra frame first. The consequence here is that the view
+            # has no measured viewport yet, and a fill with no geometry to
+            # measure against would mount pages blindly. Resolve the geometry
+            # instead of giving up on it: this is the same layout pass the next
+            # frame would run, pulled forward, and it is SYNCHRONOUS -- no await
+            # is introduced between the navigation's final identity check and
+            # this commit (`session_navigation._prepare_and_commit`).
+            #
+            # Paint suppressed for the same reason as the settle below, and it
+            # is the same defect: this layout runs with the transcript revealed
+            # and the composer still holding the OUTGOING draft's rows, so the
+            # frame it would paint shows 21 mounted blocks and NONE of them in
+            # view (design round 1, D1, cold/draft2 f001 at dock 7 / editor 3
+            # against a settled 5 / 1). The layout is needed -- it is what gives
+            # this first-visit view a measurable viewport -- but its
+            # intermediate arrangement must not reach the screen.
+            screen = self.screen
+            paint = screen._compositor_refresh
+            screen._compositor_refresh = _suppress_intermediate_paint
+            try:
+                screen._refresh_layout()
+            finally:
+                screen._compositor_refresh = paint
+            viewport = view.container_size.height or view.size.height
+        if not viewport or self._resume_paging or not self._resume_pending_head:
+            # Nothing locally pending, or a fetch already owns the gate. The
+            # scheduled fill below still runs and reaches the same goal by the
+            # ordinary route.
+            self._start_resume_fill()
+            return
+        self._resume_fill_active = True
+        self._resume_fill_serial += 1
+        chained = False
+        try:
+            notice = self._resume_head_notice
+            prefix = (
+                notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
+            )
+            if view.scroll_y < viewport + prefix:
+                # CHAIN THE ORDINARY FILL TO THIS PAGE'S SETTLE, rather than
+                # scheduling it beside one. `_mount_older_resume_page` holds the
+                # single-flight paging lease until the settle callback
+                # `insert_blocks` schedules releases it, and
+                # `_fill_resume_attempt` stands down immediately while that gate
+                # is held. So a fill started independently of this page raced it
+                # and lost -- it saw `_resume_paging` true, returned, and the
+                # goal was never reached: `test_real_sidebar_projection_runs_
+                # rendered_fill` measured the view stranded at `scroll_y=0`
+                # against a 91-row viewport. Handing the continuation to
+                # `on_settled` is the seam that method documents for exactly
+                # this, and it is why the `finally` below only starts a fill
+                # when no page was mounted here.
+                self._mount_older_resume_page(on_settled=self._start_resume_fill)
+                # ONLY NOW is the deferred fill genuinely chained. Setting this
+                # BEFORE the mount meant a raising mount was swallowed by the
+                # `except` with `chained` already True, so the `finally` skipped
+                # the very fallback the docstring promises -- reproduced at 18
+                # blocks / scroll_y 15 against 42 / 63 normal. `_mount_older_
+                # resume_page` restores `_resume_pending_head` and releases the
+                # paging lease before re-raising, so the deferred fill that then
+                # starts runs against clean state.
+                chained = True
+                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
+                # handed to the readiness gate. A mounted block authors its real
+                # height during a layout pass, so without this the view is
+                # revealed with its tail block not yet in the compositor's
+                # painted map -- which the gate reads as NOT READY and pays a
+                # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
+                # 4 cold switches without this call, 0 with it. Synchronous, for
+                # the same reason as above: this commit may not await.
+                #
+                # THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout`
+                # ends in `_compositor_refresh()`, which calls `App._display`
+                # straight away -- so this settle PAINTED a frame of its own,
+                # mid-commit, and that frame is a half-arranged one: the
+                # transcript has already been revealed and tail-scrolled, while
+                # the composer still occupies the OUTGOING draft's rows (dock 7
+                # / editor 3 against the incoming draft's final 5 / 1). Content
+                # drawn against a box that is about to shrink lands outside the
+                # viewport, so the frame showed an EMPTY conversation -- design
+                # round 1, D1, reproduced at `blocks_mounted=46,
+                # blocks_in_view=0, scroll_y=84=max` immediately before a
+                # settled `82`. On a warm switch that was the FIRST painted
+                # frame, i.e. the fastest switch opened on a blank screen, and
+                # at 80x24 the whole screen blanked. It also produced the
+                # `84 -> 82` scroll excursion (D4) and showed the incoming
+                # draft inside the outgoing-sized box (D2).
+                #
+                # Suppressing just the paint keeps every reason this call is
+                # here -- the mounted page still authors its height, the gate
+                # still gets a complete painted map from the NEXT real frame --
+                # while the user never sees the intermediate arrangement.
+                # Measured across warm/cold/draft2 at 120x36 and 80x24: blank
+                # frames 1-3 -> 0 in every arm, painted frames 12 -> 9 (cold)
+                # and 11 -> 8 (draft2), the scroll excursion collapses to a
+                # single settled position, and gate refusals stay 0.
+                #
+                # `_compositor_refresh` rather than `App.batch_update()`: the
+                # batch defers this paint to a `call_later`, which still paints
+                # the same stale arrangement one turn later (measured: blanks
+                # unchanged at `[0]`). The frame must not exist at all, not
+                # arrive late.
+                screen = self.screen
+                paint = screen._compositor_refresh
+                screen._compositor_refresh = _suppress_intermediate_paint
+                try:
+                    screen._refresh_layout()
+                finally:
+                    screen._compositor_refresh = paint
+        except Exception:
+            # See the docstring: a projection failure must degrade to the
+            # deferred fill, never propagate into the invalidation retry.
+            logger.debug("pre-reveal resume fill failed; deferring", exc_info=True)
+        finally:
+            # Start the ordinary fill only when no page was mounted above; when
+            # one was, it is chained to that page's settle instead (see there),
+            # so the two can never race for the same paging lease.
+            # That fill re-measures against real laid-out geometry, tops up
+            # anything this synchronous pass could not reach (a page behind a
+            # network fetch), and settles `_resume_fill_active` and the head
+            # notice through the one path that owns them. When the goal is
+            # already met its first attempt exits immediately, which is the
+            # normal case after this pre-fill.
+            if not chained:
+                self._start_resume_fill()
 
     def _start_resume_fill(self, *, target: float | None = None) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
