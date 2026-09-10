@@ -12,6 +12,34 @@ import pytest
 from local_operator.session.attention import AttentionStore, conversation_identity
 
 
+def _provisional_anchor(token: str) -> str:
+    """The provisional shape, spelled out rather than imported from the product.
+
+    DELIBERATE DUPLICATION. Importing `provisional_anchor` here made these tests
+    fail against pre-fix code with `ImportError` — which proves only that the
+    symbol is new, not that the behaviour changed, and would fail identically
+    against a tree where supersession was implemented WRONGLY (QA round 1, Q2).
+    Writing the literal makes every assertion below discriminate on behaviour.
+    `test_the_provisional_shape_is_what_the_product_actually_writes` pins this
+    against the product's own writer so the duplication cannot drift silently.
+    """
+    return f"completion-{token}"
+
+
+def test_the_provisional_shape_is_what_the_product_actually_writes() -> None:
+    """Anchor the test-local literal to the product, so it cannot rot.
+
+    This is the ONE test allowed to import the helper, and it is a shape
+    assertion rather than a behaviour one: if the product ever changes the
+    provisional anchor format, this fails loudly instead of letting the
+    duplicated literal above quietly stop matching anything.
+    """
+    from local_operator.session.attention import provisional_anchor
+
+    token = str(uuid.uuid4())
+    assert provisional_anchor(token) == _provisional_anchor(token)
+
+
 def test_delayed_duplicate_and_foreign_acknowledgements(tmp_path: Path) -> None:
     path = tmp_path / "attention.db"
     store = AttentionStore(path)
@@ -379,7 +407,6 @@ async def test_a_completed_turn_supersedes_its_own_interrupted_marker(tmp_path: 
     from local_operator.session.attention import (
         ATTENTION_CUSTOM_TYPE,
         bootstrap_transcript,
-        provisional_anchor,
     )
     from local_operator.session.transcript import Transcript
 
@@ -401,7 +428,7 @@ async def test_a_completed_turn_supersedes_its_own_interrupted_marker(tmp_path: 
 
     store = AttentionStore(tmp_path / "attention.db")
     # What a bootstrap observing the turn in flight leaves behind.
-    store.publish(identity, token, provisional_anchor(token), "interrupted")
+    store.publish(identity, token, _provisional_anchor(token), "interrupted")
     assert store.state(identity)["kind"] == "interrupted"
 
     # SELF-HEALING: an already-poisoned store reconciles on next load, with no
@@ -428,11 +455,9 @@ def test_supersession_never_relaxes_the_cross_conversation_refusal(tmp_path: Pat
     stored record looks. Nor may an authoritative record be dragged back to a
     synthetic anchor by a late bootstrap racing a finished turn.
     """
-    from local_operator.session.attention import provisional_anchor
-
     store = AttentionStore(tmp_path / "attention.db")
     token = str(uuid.uuid4())
-    store.publish("session/owner", token, provisional_anchor(token), "interrupted")
+    store.publish("session/owner", token, _provisional_anchor(token), "interrupted")
     # Same provisional shape, different conversation: still a hard error.
     with pytest.raises(ValueError):
         store.publish("session/fork", token, "message-1", "complete")
@@ -442,7 +467,7 @@ def test_supersession_never_relaxes_the_cross_conversation_refusal(tmp_path: Pat
     store.publish("session/owner", token, "message-1", "complete")
     # No downgrade: a real outcome is not replaced by a provisional one.
     with pytest.raises(ValueError):
-        store.publish("session/owner", token, provisional_anchor(token), "interrupted")
+        store.publish("session/owner", token, _provisional_anchor(token), "interrupted")
     assert store.state("session/owner")["anchor_id"] == "message-1"
     # Nor by a different real outcome under the same token.
     with pytest.raises(ValueError):
@@ -458,11 +483,9 @@ def test_superseding_does_not_resurrect_an_acknowledged_turn_as_unread(
     row would sort above the acknowledgement and re-announce a result the human
     has already read — the exact flood `_BASELINE_DELIVERIES` exists to prevent.
     """
-    from local_operator.session.attention import provisional_anchor
-
     store = AttentionStore(tmp_path / "attention.db")
     token = str(uuid.uuid4())
-    store.publish("session/a", token, provisional_anchor(token), "interrupted")
+    store.publish("session/a", token, _provisional_anchor(token), "interrupted")
     before = store.state("session/a")["revision"][0]
     store.acknowledge("session/a", token)
     assert store.state("session/a")["unseen"] is False
@@ -533,3 +556,119 @@ def test_bootstrap_swallows_and_logs_a_broken_conversation(
         bootstrap_transcript(Unreadable(), AttentionStore(tmp_path / "attention.db"))
     assert "broken" in caplog.text
     assert "transcript is unreadable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_broken_attention_import_cannot_stop_a_session_from_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path the OUTER guard uniquely exists for: the import itself failing.
+
+    `test_a_failing_attention_bootstrap_cannot_stop_a_session_from_loading`
+    monkeypatches `bootstrap_transcript`, so it exercises a failure the INNER
+    guard in `attention.py` would have absorbed anyway — it proves the pair
+    works, not that the outer half is load-bearing (review round 1, minor-4).
+    The outer guard's own coverage is the `from ... import bootstrap_transcript`
+    STATEMENT raising: a circular import, a half-installed package, a broken
+    .pyc. There is no inner guard to fall back on there, because the module
+    holding it never loads, and an unguarded ImportError would brick boot
+    exactly as the original defect did.
+
+    Simulated by making the import machinery itself raise for that one module,
+    which is what a genuinely broken install looks like from inside `__init__`.
+    """
+    import builtins
+
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    real_import = builtins.__import__
+    attempted: list[str] = []
+
+    def broken_import(  # type: ignore[no-untyped-def]
+        name, globals=None, locals=None, fromlist=(), level=0
+    ):
+        if name == "local_operator.session.attention" and "bootstrap_transcript" in (
+            fromlist or ()
+        ):
+            attempted.append(name)
+            raise ImportError("cannot import name 'bootstrap_transcript'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    session = make_session(tmp_path, ScriptedStream([]))
+    monkeypatch.setattr(builtins, "__import__", real_import)
+    try:
+        assert attempted, "the import must actually have been attempted and failed"
+        # Boot survived an ImportError with no inner guard available.
+        assert session._transcript.directory.name == "sess"
+        assert session.session_id
+    finally:
+        await session.dispose()
+
+
+def test_a_heal_moves_the_change_detector_without_moving_the_watermark(
+    tmp_path: Path,
+) -> None:
+    """A supersede must be DETECTABLE, or the phone keeps serving the stale row.
+
+    `revision()` is the store's cheap change detector and two consumers gate on
+    it: the desktop bridge skips `refresh_attention` when it is unchanged, and
+    the TUI's background notifier skips its catalog scan. An in-place UPDATE
+    moves neither `MAX(sequence)` nor `SUM(acknowledged)`, so a healed record
+    reached neither of them — a phone could show "Interrupted" for a turn that
+    completed successfully until some unrelated session happened to publish
+    (review round 1, major-1).
+
+    The two properties are in tension only if they share a counter, so they do
+    not: `sequence` stays pinned (no resurrected unread, no re-fired toast) and
+    a third term moves. This test pins BOTH halves — the fix is wrong if either
+    the revision fails to move or the watermark does move.
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, _provisional_anchor(token), "interrupted")
+    store.acknowledge("session/a", token)
+    # Announced already, so a re-claim after the heal would be a SECOND toast
+    # for one turn — the flood the pinned sequence exists to prevent.
+    assert store.claim_delivery("session/a", token, "test") is True
+    before = store.revision()
+    sequence_before = store.state("session/a")["revision"][0]
+
+    store.publish("session/a", token, "message-real", "complete")
+
+    after = store.revision()
+    assert after != before, "a heal must be visible to the change detector"
+    # The watermark terms specifically must NOT be what moved.
+    assert after[0] == before[0]
+    assert after[1] == before[1]
+    assert store.state("session/a")["revision"][0] == sequence_before
+    assert store.state("session/a")["unseen"] is False
+    assert store.claim_delivery("session/a", token, "test") is False
+    # Read cross-process, since the consumers gating on this are other processes.
+    assert AttentionStore(store.path).revision() == after
+
+
+def test_a_mismatched_provisional_anchor_cannot_supersede(tmp_path: Path) -> None:
+    """An incoming anchor belonging to ANOTHER token is not a heal.
+
+    `_supersedes_provisional` checked the STORED anchor's shape but nothing
+    checked the incoming one, so a publish for T carrying `completion-<U>`
+    superseded successfully and left a row wearing an anchor matching no token:
+    unviewable, and permanently unhealable, because no later real outcome could
+    supersede a record whose stored anchor is no longer `completion-<T>` — a
+    one-way trip into a dead state (review round 1, minor-2).
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    token, other = str(uuid.uuid4()), str(uuid.uuid4())
+    store.publish("session/a", token, _provisional_anchor(token), "interrupted")
+
+    with pytest.raises(ValueError):
+        store.publish("session/a", token, _provisional_anchor(other), "complete")
+
+    # Refused, and — the point of the finding — still healable afterwards.
+    with sqlite3.connect(store.path) as conn:
+        stored = conn.execute("SELECT anchor FROM completions WHERE token=?", (token,)).fetchone()
+    assert stored[0] == _provisional_anchor(token)
+    store.publish("session/a", token, "message-real", "complete")
+    assert store.state("session/a")["kind"] == "complete"
+    assert store.state("session/a")["anchor_id"] == "message-real"

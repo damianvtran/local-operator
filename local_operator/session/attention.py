@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
 
+#: Named once because BOTH the minting side (`provisional_anchor`) and the
+#: recognising side (`_supersedes_provisional`, on the stored AND the incoming
+#: anchor) key on this exact shape; a literal in one of them drifting from the
+#: other silently turns supersession off.
+_PROVISIONAL_PREFIX = "completion-"
+
 #: The delivery watermark. `delivered` is a highwater mark on the SAME
 #: `completions.sequence` that `receipts.acknowledged` uses, which is what makes
 #: the two comparable and the arbitration clock-free: sequence is assigned by
@@ -58,6 +64,33 @@ _BASELINE_DELIVERIES = (
     "GROUP BY conversation"
 )
 
+#: THE THIRD TERM OF `revision()`, and the reason it exists: a supersede is the
+#: one durable change that moves NEITHER `completions.sequence` NOR
+#: `receipts.acknowledged`, so without a counter it is invisible to every
+#: consumer that gates on `revision()` (review round 1, major-1).
+#:
+#: The obvious alternative -- mint a new completions row so `sequence` moves --
+#: is ruled out by the no-flood rule: `sequence` IS the receipt watermark, so a
+#: new row resurrects an already-acknowledged turn as unread and re-fires a
+#: notification for a result the human has read. Correcting a record is not a
+#: new completion. The counter is therefore how a heal stays sequence-preserving
+#: and still DETECTABLE.
+#:
+#: A single row by construction (`CHECK(id=1)`): this counts machine-global
+#: mutations, exactly like the rest of `revision()`, not per-conversation ones.
+_CREATE_MUTATIONS = (
+    "CREATE TABLE mutations (id INTEGER PRIMARY KEY CHECK(id=1), supersedes INTEGER NOT NULL)"
+)
+
+#: Upsert rather than UPDATE so the counter cannot silently stick at its seed on
+#: a database whose additive migration never ran -- a no-op UPDATE would leave
+#: every heal undetectable again, which is the defect this table exists to fix.
+#: Same self-healing form `acknowledge` already uses for `receipts`.
+_BUMP_SUPERSEDES = (
+    "INSERT INTO mutations(id,supersedes) VALUES(1,1) "
+    "ON CONFLICT(id) DO UPDATE SET supersedes=mutations.supersedes+1"
+)
+
 
 def conversation_identity(directory: Path) -> str:
     """Use the durable namespace, never the currently selected agent profile."""
@@ -73,13 +106,14 @@ def provisional_anchor(token: str) -> str:
     lets :meth:`AttentionStore.publish` recognise a record as provisional and
     therefore safe to replace once the real outcome lands.
     """
-    return f"completion-{token}"
+    return f"{_PROVISIONAL_PREFIX}{token}"
 
 
 def _supersedes_provisional(
     existing: Any,
     conversation: str,
     token: str,
+    anchor: str,
 ) -> bool:
     """May the incoming outcome overwrite the stored one for this token?
 
@@ -87,8 +121,22 @@ def _supersedes_provisional(
     provisional shape. Cross-conversation reuse and overwrites of an already
     authoritative record both stay refusals — see :meth:`AttentionStore.publish`
     for why each half of that is load-bearing.
+
+    THE INCOMING ANCHOR IS CHECKED TOO, not just the stored one (review round 1,
+    minor-2). A publish for token T carrying `provisional_anchor(U)` — some
+    OTHER token's synthetic anchor — otherwise superseded happily, and the row
+    it left behind wore an anchor matching no token: unviewable, and permanently
+    unhealable, because no later real outcome could ever supersede a record
+    whose stored anchor is not `provisional_anchor(T)`. A one-way trip into a
+    dead state. Reachability is low (`_publish_attention_outcome` always mints
+    the anchor for the same token, and the journal path is gated on conversation
+    identity), which is why the guard is cheap rather than elaborate: an
+    incoming provisional anchor is legitimate only when it belongs to the token
+    being published.
     """
     stored_conversation, stored_anchor, stored_kind = tuple(existing)
+    if anchor.startswith(_PROVISIONAL_PREFIX) and anchor != provisional_anchor(token):
+        return False
     return (
         stored_conversation == conversation
         and stored_kind == "interrupted"
@@ -120,6 +168,12 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
             "attention: skipping outcome import for %s (%r)",
             getattr(directory, "name", directory),
             exc,
+            # An arbitrary unknown exception is being swallowed here, and `%r`
+            # names its type but not the frame that raised it. The destination
+            # is a real file (a spawned runtime's `log_dir()/mobile.log`), so
+            # the traceback is what makes the next novel failure recoverable
+            # from disk instead of only reproducible.
+            exc_info=True,
         )
 
 
@@ -215,6 +269,7 @@ class AttentionStore:
                     # there is no backlog to baseline against — an empty
                     # delivery watermark IS the correct starting point.
                     conn.execute(_CREATE_DELIVERIES)
+                    conn.execute(_CREATE_MUTATIONS)
                 else:
                     # Missing tables/columns in an established database are
                     # corruption, not permission to rebuild an empty watermark.
@@ -250,6 +305,21 @@ class AttentionStore:
                     ).fetchone():
                         conn.execute(_CREATE_DELIVERIES)
                         conn.execute(_BASELINE_DELIVERIES, (time.time(),))
+                    # `mutations` is additive for the SAME reason and stays out
+                    # of the probe above for the same reason: every database
+                    # written before this fix legitimately lacks it, and
+                    # probing for it would read all of them as corrupt.
+                    #
+                    # NO BASELINE, unlike `deliveries`. That table baselines
+                    # because `unseen` is a LEVEL and an unbaselined watermark
+                    # would re-announce history. A change detector is an EDGE:
+                    # it only has to move when something changes AFTER this
+                    # point, so seeding at 0 is correct and a historical
+                    # supersede count would be meaningless anyway.
+                    if not conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
+                    ).fetchone():
+                        conn.execute(_CREATE_MUTATIONS)
             return conn
         except BaseException:
             conn.close()
@@ -385,6 +455,20 @@ class AttentionStore:
         not a new completion. Holding the sequence also means a corrected old
         turn stays where it belongs in the order instead of jumping ahead of
         newer ones.
+
+        THAT CHOICE HAS A COST, and it is paid explicitly rather than left
+        implicit (review round 1, major-1). Holding ``sequence`` means the heal
+        moves neither term of the OLD ``revision()``, and two consumers gate on
+        that value: the desktop bridge skips ``refresh_attention`` and keeps
+        serving the stale ``interrupted`` record with its synthetic anchor to
+        phone and desktop subscribers, and the TUI's background notifier skips
+        its catalog scan. On a quiet machine a phone could show "Interrupted"
+        for a turn that completed successfully, until some unrelated session
+        happened to publish. So a supersede bumps ``mutations.supersedes``,
+        which ``revision()`` folds into its tuple: the heal moves the change
+        detector WITHOUT moving the watermark, and an acknowledged turn stays
+        read. Detectable and flood-free are not in tension once they are
+        separate counters.
         """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
@@ -403,12 +487,17 @@ class AttentionStore:
                 "SELECT conversation, anchor, kind FROM completions WHERE token=?", (token,)
             ).fetchone()
             if existing and tuple(existing) != (conversation, anchor, kind):
-                if not _supersedes_provisional(existing, conversation, token):
+                if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
                     "UPDATE completions SET anchor=?, kind=? WHERE token=?",
                     (anchor, kind, token),
                 )
+                # Inside the SAME transaction as the UPDATE: a reader must
+                # never observe a healed row whose change the detector has not
+                # yet counted, or it would cache the new state under the old
+                # revision and then ignore the next real change.
+                conn.execute(_BUMP_SUPERSEDES)
             conn.execute(
                 "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
                 (conversation, token, anchor, kind),
@@ -423,21 +512,43 @@ class AttentionStore:
                 )
             return self._state(conn, conversation)
 
-    def revision(self) -> tuple[int, int]:
-        """Cheap process-independent change detector for existing polling loops."""
+    def revision(self) -> tuple[int, int, int]:
+        """Cheap process-independent change detector for existing polling loops.
+
+        Three terms, because there are three kinds of durable change and the
+        first two do not cover the third: ``MAX(sequence)`` moves on a publish,
+        ``SUM(acknowledged)`` on a read, and ``supersedes`` on a heal that
+        deliberately moves NEITHER of the others (see :meth:`publish`). Callers
+        compare the tuple for equality and never interpret the terms, so widening
+        it is safe for them; the per-conversation ``state()["revision"]`` pair is
+        a separate, unchanged wire contract (``AttentionState.revision``, mirrored
+        by the mobile client) and deliberately does not grow a third element.
+        """
         if not self.path.exists():
-            return (0, 0)
+            return (0, 0, 0)
         with closing(
             sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
         ) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
-                return (0, 0)
+                return (0, 0, 0)
+            # This connection is READ-ONLY, so it cannot run the additive
+            # migration itself: a database written before this fix, whose owner
+            # has not reconnected yet, legitimately has no `mutations` table and
+            # must read as 0 rather than raising. A poller that raised here
+            # would lose cross-process read sync for the life of the loop.
             row = conn.execute(
                 "SELECT COALESCE(MAX(sequence),0), "
-                "(SELECT COALESCE(SUM(acknowledged),0) FROM receipts) FROM completions"
+                "(SELECT COALESCE(SUM(acknowledged),0) FROM receipts), "
+                "(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mutations') "
+                "FROM completions"
             ).fetchone()
-            return (row[0], row[1])
+            supersedes = 0
+            if row[2]:
+                supersedes = conn.execute(
+                    "SELECT COALESCE(MAX(supersedes),0) FROM mutations"
+                ).fetchone()[0]
+            return (row[0], row[1], supersedes)
 
     def acknowledge(self, conversation: str, token: str) -> dict[str, Any]:
         """Advance only through the observed token, never through server 'now'."""

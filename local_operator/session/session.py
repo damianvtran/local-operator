@@ -1774,6 +1774,16 @@ class Session:
         # "Connection unavailable". Knowing whether a result is unread can
         # never be worth losing the conversation, so the import is attempted
         # and its failure is logged rather than propagated.
+        #
+        # DO NOT DELETE THIS AS "COVERED BY THE INNER GUARD" (review round 1,
+        # minor-4). The inner guard catches everything the import CALL can
+        # raise, so the live coverage unique to this half is the `import`
+        # STATEMENT itself failing — a circular import, a partially installed
+        # package, a broken .pyc — which would brick boot exactly as the
+        # original defect did. That is why the import sits inside the `try`
+        # rather than above it, and it is the path
+        # `test_a_broken_attention_import_cannot_stop_a_session_from_loading`
+        # exercises.
         try:
             from local_operator.session.attention import bootstrap_transcript
 
@@ -1781,8 +1791,17 @@ class Session:
         except Exception as exc:  # noqa: BLE001 — must not break session boot
             logger.warning(
                 "attention bootstrap failed for %s (%r); continuing without it",
-                transcript.directory.name,
+                # `getattr` because a handler that can itself raise is not a
+                # guard: a transcript whose `.directory` raises would be
+                # survived by the inner guard and then killed by this one,
+                # which is the exact failure this block exists to prevent.
+                # Mirrors the same defensive read in `attention.py`.
+                getattr(getattr(transcript, "directory", None), "name", None),
                 exc,
+                # The traceback, because this swallows an ARBITRARY unknown
+                # exception: `%r` alone names the type but not the frame, and
+                # the next novel failure here is diagnosed from a log file.
+                exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
         self._attention: dict[str, Any] = {}
