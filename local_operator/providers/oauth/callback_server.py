@@ -607,16 +607,26 @@ class OAuthCallbackFlow(ABC):
                 except Exception:
                     pass
 
-    async def _try_bind(self, port: int) -> bool:
-        """Bind ``port``, retrying briefly while it is merely in teardown.
+    async def _try_bind(self, port: int, *, required: bool) -> bool:
+        """Bind ``port``. Returns True on success.
 
-        Returns True on success. The first failure triggers one best-effort
-        ``/cancel`` at the incumbent, then the attempts play out; a port still
-        busy at the end of the budget is reported as unavailable so the caller
-        can move to the next rung or fail.
+        ``required`` says whether this port is the only acceptable answer, and
+        it decides whether waiting is worth anything. When the provider
+        validates the redirect URI, a busy port is the difference between a
+        login and no login, so it is worth ~2 s of retries to outlast a sibling
+        login still tearing down. When ANY port will do, that same wait buys
+        nothing: an OS-assigned port is one syscall away and just as valid, so
+        retrying only delays every login that happens to find the preferred
+        port occupied. Spending the budget there was a straight regression --
+        3.8 s added to a case that used to be instant.
+
+        The ``/cancel`` poke follows the same rule for a subtler reason: it is
+        aimed at a stale login server of OURS, and standing one down is only
+        justified when we actually need its port.
         """
+        attempts = PORT_RETRY_ATTEMPTS if required else 1
         cancel_attempted = False
-        for attempt in range(PORT_RETRY_ATTEMPTS):
+        for attempt in range(attempts):
             try:
                 self._server = await asyncio.start_server(
                     self._handle_connection, "127.0.0.1", port
@@ -624,10 +634,12 @@ class OAuthCallbackFlow(ABC):
                 self._bound_port = self._socket_port()
                 return True
             except OSError:
+                if not required:
+                    return False
                 if not cancel_attempted:
                     cancel_attempted = True
                     await self._cancel_stale_server(port)
-                if attempt < PORT_RETRY_ATTEMPTS - 1:
+                if attempt < attempts - 1:
                     await asyncio.sleep(PORT_RETRY_DELAY_SECONDS)
         return False
 
@@ -642,7 +654,7 @@ class OAuthCallbackFlow(ABC):
         candidates = opts.candidate_ports if pinned else (opts.preferred_port,)
 
         for port in candidates:
-            if await self._try_bind(port):
+            if await self._try_bind(port, required=pinned):
                 return
 
         if pinned:
