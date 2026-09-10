@@ -53,7 +53,11 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
-from local_operator.mcp.auth import McpAuthChallengeError, McpAuthRequiredError
+from local_operator.mcp.auth import (
+    REFRESH_CONTENTION,
+    McpAuthChallengeError,
+    McpAuthRequiredError,
+)
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
     MCPServerConfig,
@@ -1729,6 +1733,13 @@ class McpManager:
                 await stack.aclose()
             except BaseException as ce:  # noqa: BLE001 — examined below, never lost
                 close_exc = ce
+            # ONE pop for the whole classification, whatever the exception turns
+            # out to be, so a record cannot leak into a later connect of the
+            # same server. It is consumed below only by the cancellation arm,
+            # and only when this cancellation did NOT come from outside — a
+            # record armed by a refused unlocked refresh must never turn a
+            # genuine dispose/epoch teardown into a reconnect.
+            contended = REFRESH_CONTENTION.pop(url) if isinstance(url, str) and url else False
             # A GENUINE external cancellation (dispose/reload/esc) keeps its
             # priority even when the teardown surfaced a grouped auth error:
             # the task itself was asked to cancel (``cancelling() > 0``), and
@@ -1765,12 +1776,22 @@ class McpManager:
             # cancellation's priority, so a recorded abandonment here can be
             # re-voiced as the receipt the user reads.
             if isinstance(exc, asyncio.CancelledError):
+                # The refusal arm comes FIRST: a coordinator that declined to
+                # spend the refresh token without exclusivity recorded that on
+                # its way out, and the transport rewrote the reason into this
+                # bare cancellation. Re-voicing it is what lands it in
+                # ``_reconnect``'s generic arm (backoff retry, no auth block)
+                # instead of looking like a dispose.
+                if contended:
+                    from local_operator.mcp.auth import McpRefreshContendedError
+
+                    assert isinstance(url, str)
+                    raise McpRefreshContendedError(url) from exc
                 from local_operator.mcp.auth import (
                     ABANDONED_GRANTS,
                     McpLoginCancelledError,
                 )
 
-                url = getattr(cfg, "url", None)
                 flow = self._oauth_flows.pop(url, None) if isinstance(url, str) else None
                 if flow is not None and ABANDONED_GRANTS.pop(flow):
                     raise McpLoginCancelledError(
