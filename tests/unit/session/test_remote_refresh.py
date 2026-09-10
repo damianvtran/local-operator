@@ -119,14 +119,14 @@ async def test_request_refresh_never_raises(tmp_path, monkeypatch):
     assert await remote.request_refresh() == "retiring"
 
 
-def test_owner_idle_reads_the_snapshot(tmp_path, monkeypatch):
+def test_runtime_idle_reads_the_snapshot(tmp_path, monkeypatch):
     """Cold → not idle (nothing to refresh); streaming, a running job or a
     parked gate → busy; otherwise idle."""
     from types import SimpleNamespace
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
-    assert remote.owner_idle() is False, "a cold viewer has no owner to refresh"
+    assert remote.runtime_idle() is False, "a cold viewer has no owner to refresh"
 
     class Client:
         connected = True
@@ -144,14 +144,14 @@ def test_owner_idle_reads_the_snapshot(tmp_path, monkeypatch):
         remote._frontend_store = store(**fields)  # type: ignore[assignment]
 
     with_state()
-    assert remote.owner_idle() is True
+    assert remote.runtime_idle() is True
     with_state(streaming=True)
-    assert remote.owner_idle() is False
+    assert remote.runtime_idle() is False
     with_state(pending_gate=object())
-    assert remote.owner_idle() is False
+    assert remote.runtime_idle() is False
     with_state(jobs=[SimpleNamespace(status="running")])
-    assert remote.owner_idle() is False
+    assert remote.runtime_idle() is False
     with_state(jobs=[SimpleNamespace(status="completed")])
-    assert remote.owner_idle() is True
+    assert remote.runtime_idle() is True
     remote._streaming = True
-    assert remote.owner_idle() is False
+    assert remote.runtime_idle() is False

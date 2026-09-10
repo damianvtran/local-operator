@@ -636,20 +636,20 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     #: dial. ``""`` on a facade that has never bound AND on one bound to a
     #: runtime older than the field; hosts distinguish those by ``is_cold``,
     #: not by this value.
-    owner_version: str
-    #: The source ref of that build, same lifecycle as ``owner_version``.
-    owner_source_ref: str
+    runtime_version: str
+    #: The source ref of that build, same lifecycle as ``runtime_version``.
+    runtime_source_ref: str
     #: Why this viewer opened WITHOUT live state, when that was not the
     #: ordinary "no runtime was running" case. ``""`` when it was ordinary.
     degraded_reason: str
     #: Whether the saved preview this viewer opened against was partial.
     saved_preview_partial: bool
 
-    def owner_idle(self) -> bool:
+    def runtime_idle(self) -> bool:
         """Whether the runtime reports no turn in flight."""
         ...
 
-    def owner_model_catalogue(self) -> list[dict[str, Any]]:
+    def runtime_model_catalogue(self) -> list[dict[str, Any]]:
         """The model catalogue as the RUNTIME resolves it.
 
         A viewer must not answer from its own machine's catalogue: the runtime
