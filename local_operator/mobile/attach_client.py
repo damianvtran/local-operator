@@ -56,6 +56,14 @@ from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
 #: surfaces as an error rather than a hang.
 ACK_TIMEOUT_S = 15.0
 
+#: How long to wait for ``complete_aside`` — a full provider round trip, not a
+#: control-plane op. Matched to ``providers/clients.py`` ``STREAM_READ_TIMEOUT_S
+#: = 180.0``, the layer below's own budget for silence from a stream in flight:
+#: shorter and this client kills requests that layer still considers healthy;
+#: much longer and a genuinely wedged owner stops surfacing at all. See
+#: docs/design-aside-deadline.md §3.
+ASIDE_DEADLINE_S = 180.0
+
 #: Disconnect reason marking a DELIBERATE stop, as opposed to owner death.
 #: Consumers compare against this exact string to decide whether to recover.
 STOPPED_REASON = "owner stopped the session"
@@ -88,6 +96,18 @@ class _OversizedFrame(Exception):
     handler cannot confuse it with a ``ValueError`` a frame CALLBACK raised —
     the two mean opposite things (owner sent too much vs. this side refused
     what it sent) and were logged as the same overrun before this existed."""
+
+
+class OwnerAckTimeout(ConnectionError, TimeoutError):
+    """The owner is alive; it did not answer THIS request in time.
+
+    Both bases are load-bearing. ``ConnectionError`` preserves every existing
+    caller: ``session/remote.py:5183`` and ``:5192`` catch ``ConnectionError``
+    ALONE, so a plain ``TimeoutError`` would escape ``compact_now`` as a raw
+    exception instead of a ``CompactionOutcome``. ``TimeoutError`` lets code
+    that wants to tell a slow owner from a dead one ask, rather than parse the
+    message. See docs/design-aside-deadline.md §2.
+    """
 
 
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
@@ -409,8 +429,19 @@ class AttachClient:
                     # and re-engages rather than chasing a record for 8 s.
                     reason = RETIRING_REASON
                 elif op in ("ack", "error", "result"):
-                    future = self._pending.pop(frame.get("req"), None)
-                    if future is not None and not future.done():
+                    req = frame.get("req")
+                    future = self._pending.pop(req, None)
+                    if future is None:
+                        # A paid-for answer arriving after its waiter gave up
+                        # (or after the user closed the card). Dropping it is
+                        # correct; dropping it SILENTLY is not — this is the
+                        # only trace that the owner did the work.
+                        logger.warning(
+                            "attach client: reply for unknown request %s (op %s) discarded",
+                            req,
+                            op,
+                        )
+                    elif not future.done():
                         future.set_result(frame)
         except _OversizedFrame:
             reason = OVERSIZED_FRAME_REASON
@@ -455,9 +486,9 @@ class AttachClient:
 
     # -- requests ---------------------------------------------------------------
 
-    async def _request(self, op: str, **fields: Any) -> str:
+    async def _request(self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any) -> str:
         """Send one op and await its ack detail (or raise its error message)."""
-        reply = await self._request_frame(op, **fields)
+        reply = await self._request_frame(op, deadline_s=deadline_s, **fields)
         if reply.get("op") == "error":
             from local_operator.session.errors import admission_error
 
@@ -488,7 +519,9 @@ class AttachClient:
             raise RuntimeError(str(reply.get("message", "request failed")))
         return str(reply.get("detail", "")), bool(reply.get("duplicate", False))
 
-    async def _request_frame(self, op: str, **fields: Any) -> dict[str, Any]:
+    async def _request_frame(
+        self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any
+    ) -> dict[str, Any]:
         """Send one op and return its whole reply frame.
 
         The shared body of :meth:`_request` and
@@ -505,13 +538,21 @@ class AttachClient:
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
-            return await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
+            return await asyncio.wait_for(future, timeout=deadline_s)
+        except TimeoutError as exc:
+            # MUST stay above the OSError arm. On 3.11+ TimeoutError subclasses
+            # OSError and str(TimeoutError()) is '', so an OSError arm placed
+            # first swallows every ack timeout and renders it as the dangling
+            # "owner connection lost:" this fix exists to remove.
+            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:.0f}s") from exc
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
             self._pending.pop(req, None)
 
-    async def _request_payload(self, op: str, **fields: Any) -> Any:
+    async def _request_payload(
+        self, op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields: Any
+    ) -> Any:
         """Send one op and await its structured ``result`` payload.
 
         The sibling of :meth:`_request` for ops whose answer is data rather
@@ -528,9 +569,11 @@ class AttachClient:
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
-            reply = await asyncio.wait_for(future, timeout=ACK_TIMEOUT_S)
+            reply = await asyncio.wait_for(future, timeout=deadline_s)
+        except TimeoutError as exc:
+            # See _request_frame: this arm MUST precede the OSError one.
+            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:.0f}s") from exc
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
-            self._pending.pop(req, None)
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
             self._pending.pop(req, None)
@@ -763,7 +806,7 @@ class AttachClient:
             return -1
 
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
-        return await self._request("complete_aside", turns=turns)
+        return await self._request("complete_aside", deadline_s=ASIDE_DEADLINE_S, turns=turns)
 
     async def set_model(self, provider: str, model_id: str) -> str:
         return await self._request("set_model", provider=provider, model_id=model_id)

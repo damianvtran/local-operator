@@ -4,12 +4,19 @@ correlation, and the no-reconnect contract."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
-from local_operator.mobile.attach_client import AttachClient, find_owner_record
+from local_operator.mobile.attach_client import (
+    ACK_TIMEOUT_S,
+    ASIDE_DEADLINE_S,
+    AttachClient,
+    OwnerAckTimeout,
+    find_owner_record,
+)
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
@@ -371,5 +378,195 @@ async def test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one(
             await asyncio.sleep(0.05)
         assert disconnected == ["owner connection reset"]
         assert not client.connected
+    finally:
+        r.close()
+
+
+class SlowEffortHandle(FakeHandle):
+    """An owner that is alive and healthy but slow to answer one op.
+
+    ``set_effort`` is a real dispatched wire op (``runtime/server.py`` ``_dispatch``)
+    whose ack is sent only after the handle returns, so sleeping here reproduces
+    exactly the shape of the reported bug: nothing wrong with the socket, the
+    answer simply has not arrived yet.
+    """
+
+    #: Long enough to outlast the 0.05 s deadlines these tests use by two
+    #: orders of magnitude, short enough that the owner's inline dispatch
+    #: drains inside the test rather than being torn down mid-await.
+    ANSWER_AFTER_S = 0.5
+
+    async def set_effort(self, effort):  # noqa: ANN001, ANN202
+        await asyncio.sleep(self.ANSWER_AFTER_S)
+        return "effort"
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_request_is_a_timeout_not_a_lost_connection(config: Path) -> None:
+    """A slow owner is not a dead one, and it must not be reported as one.
+
+    ``asyncio.wait_for`` raises ``TimeoutError``, which subclasses ``OSError``
+    on 3.11+ and whose ``str()`` is ``''``. Caught by the arm meant for dead
+    sockets it rendered as the dangling ``owner connection lost:`` this fix
+    removes. See docs/design-aside-deadline.md §2.
+    """
+    handle = SlowEffortHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        client = AttachClient(lambda p: None, lambda reason: None)
+        await client.connect(record, "sess-a")
+        with pytest.raises(OwnerAckTimeout) as caught:
+            await client._request_frame("set_effort", deadline_s=0.05, effort="hi")
+        assert isinstance(caught.value, OwnerAckTimeout)
+        assert isinstance(caught.value, ConnectionError)
+        assert isinstance(caught.value, TimeoutError)
+        assert str(caught.value)
+        assert "owner connection lost" not in str(caught.value)
+        assert "set_effort" in str(caught.value)
+        # Let the owner finish the op it is still parked on, so teardown does
+        # not cancel a dispatch mid-await and emit a pending-task warning.
+        await asyncio.sleep(SlowEffortHandle.ANSWER_AFTER_S + 0.2)
+        await client.detach()
+    finally:
+        r.close()
+
+
+def test_the_timeout_arm_must_stay_above_the_oserror_arm() -> None:
+    """Pins the clause ORDER that IS the fix (design §7 risk 2).
+
+    ``TimeoutError`` subclasses ``OSError``, so the two arms are not
+    independent: an ``OSError`` arm placed first catches every ack timeout and
+    silently restores the bug. Nothing about the source says so, and no
+    behavioural test can see the difference without waiting out a real
+    deadline, so the order is asserted directly — the way
+    ``test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one``
+    pins the pump's equally invisible clause order.
+    """
+    import inspect
+
+    from local_operator.mobile import attach_client as attach_client_module
+
+    for func in (
+        attach_client_module.AttachClient._request_frame,
+        attach_client_module.AttachClient._request_payload,
+    ):
+        source = inspect.getsource(func)
+        timeout_at = source.index("except TimeoutError")
+        oserror_at = source.index("except (ConnectionResetError, BrokenPipeError, OSError)")
+        assert timeout_at < oserror_at, (
+            f"{func.__name__}: TimeoutError subclasses OSError, so an OSError arm placed "
+            "first swallows every ack timeout and restores the dangling "
+            "'owner connection lost:' bug"
+        )
+
+
+@pytest.mark.asyncio
+async def test_only_the_aside_waits_longer_than_the_ack_budget(config: Path) -> None:
+    """The long deadline is scoped to one op; the other 18 keep the 15 s budget.
+
+    Asserted on the deadline PASSED, never by waiting one out: a test that
+    really waited 15 s or 180 s would hang the suite (there is no
+    ``pytest-timeout`` here).
+    """
+    assert ACK_TIMEOUT_S == 15.0
+    assert ASIDE_DEADLINE_S == 180.0
+
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        client = AttachClient(lambda p: None, lambda reason: None)
+        await client.connect(record, "sess-a")
+
+        seen: list[tuple[str, float]] = []
+
+        async def recorder(op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields) -> str:
+            seen.append((op, deadline_s))
+            return "recorded"
+
+        client._request = recorder  # type: ignore[assignment]
+
+        await client.complete_aside([])
+        await client.abort()
+        await client.request_stop()
+        await client.set_effort("hi")
+
+        deadlines = dict(seen)
+        assert deadlines["complete_aside"] == ASIDE_DEADLINE_S == 180.0
+        for op in ("abort", "stop", "set_effort"):
+            assert deadlines[op] == ACK_TIMEOUT_S == 15.0
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_real_reset_still_reports_a_lost_connection(config: Path) -> None:
+    """The disconnect path is untouched: a dead socket still says why.
+
+    The complement of the timeout test — proving the new arm narrowed what the
+    ``OSError`` arm catches without taking anything from it.
+    """
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        client = AttachClient(lambda p: None, lambda reason: None)
+        await client.connect(record, "sess-a")
+
+        assert client._writer is not None
+
+        async def dead_drain() -> None:
+            raise ConnectionResetError("peer reset")
+
+        client._writer.drain = dead_drain  # type: ignore[method-assign]
+
+        with pytest.raises(ConnectionError) as caught:
+            await client._request_frame("set_effort", effort="hi")
+        assert not isinstance(caught.value, OwnerAckTimeout)
+        assert "owner connection lost:" in str(caught.value)
+        assert str(caught.value).split("owner connection lost:", 1)[1].strip()
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_late_reply_for_an_abandoned_request_is_logged(
+    config: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A completed provider answer being discarded must not be invisible.
+
+    The waiter gave up and its future was popped, so the owner's ack arrives
+    for a ``req`` nobody is holding. Dropping it is correct; dropping it
+    silently loses the only trace that the work was paid for (design §4).
+    """
+    handle = SlowEffortHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        client = AttachClient(lambda p: None, lambda reason: None)
+        await client.connect(record, "sess-a")
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.mobile.attach_client"):
+            with pytest.raises(OwnerAckTimeout):
+                await client._request_frame("set_effort", deadline_s=0.05, effort="hi")
+            abandoned_req = client._req_seq
+            assert not client._pending
+            # The owner is still working; its ack lands once the handle
+            # returns. Wait for the pump to see it rather than sleeping a
+            # fixed span.
+            deadline = asyncio.get_running_loop().time() + 5
+            while asyncio.get_running_loop().time() < deadline:
+                if "unknown request" in caplog.text:
+                    break
+                await asyncio.sleep(0.05)
+
+        assert "unknown request" in caplog.text
+        assert str(abandoned_req) in caplog.text
+        await client.detach()
     finally:
         r.close()
