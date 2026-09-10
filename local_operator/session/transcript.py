@@ -351,7 +351,7 @@ class ReplaySuffix:
 
 
 #: Backward read granularity. One MiB is large enough that a compaction's kept
-#: window (355–456 messages on the reference owners) is usually inside the
+#: window (355–456 messages on the reference runtimes) is usually inside the
 #: first or second chunk, and small enough that a whole-file fallback on a
 #: journal with no compaction costs no more than the forward parse it replaces.
 _SUFFIX_CHUNK_BYTES = 1 << 20
@@ -417,7 +417,7 @@ def read_replay_suffix(
         handle.seek(0, os.SEEK_END)
         position = handle.tell()
         # EOF as the handle saw it. Re-stat'ing after the close would measure a
-        # file an appending owner may have grown in between, reporting bytes
+        # file an appending runtime may have grown in between, reporting bytes
         # this call never read (round 5, NIT).
         end_of_file = position
         # Invariant: ``pending`` is the bytes after ``position`` that have NOT
@@ -532,7 +532,7 @@ class Transcript:
         self._lock = asyncio.Lock()
         self._entries: list[TranscriptEntry] = []
         # Paging tokens survive appends, but not a replay-changing mutation or
-        # a new owner. The signing key never leaves this resident transcript.
+        # a new runtime. The signing key never leaves this resident transcript.
         self._history_generation = 0
         self._history_page_key = os.urandom(32)
         self._display_window_cache: _DisplayWindowCache | None = None
@@ -762,7 +762,7 @@ class Transcript:
     ) -> tuple[str, bool]:
         """Copy a committed transcript without racing append or file compaction.
 
-        The owner, not a viewer's cache, defines this boundary. Cancellation of
+        The runtime, not a viewer's cache, defines this boundary. Cancellation of
         a waiter cannot stop a filesystem copy, so retain the same ordering lock
         as `_commit` until the worker settles, even after repeated cancellation.
         The returned fork excludes live messages not yet durably committed.
@@ -829,7 +829,7 @@ class Transcript:
         """
         rebuild = not self.path.exists()
         if self._created_at is None and not rebuild:
-            # Another owner may have materialized a speculative transcript
+            # Another runtime may have materialized a speculative transcript
             # before our first append. Adopt its birth for later self-healing.
             self._created_at = session_created_at(self.directory)
         if not rebuild:
@@ -1504,10 +1504,10 @@ def audit_slice(
     Windowed rather than a full audit replay because the cost difference is the
     whole design: measured on the operator's 231 MB / 17,345-row journal, a
     naive full audit replay is 0.29 s and 47 MB of peak allocation per call,
-    while this walks back ``limit`` message rows over the owner's already
+    while this walks back ``limit`` message rows over the runtime's already
     resident ``_entries`` in under a millisecond. Reading the page off disk
     instead (``read_transcript_page``) measured ~1.03 s on the same journal.
-    Serve audit pages from RAM the owner already holds.
+    Serve audit pages from RAM the runtime already holds.
 
     ``prunes`` is passed in deliberately; see :func:`collect_prunes`.
     """

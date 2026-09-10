@@ -428,13 +428,13 @@ class AttentionStore:
         *,
         baseline_seen: bool | None = None,
     ) -> dict[str, Any]:
-        """Import a durable outcome idempotently, including after owner restart.
+        """Import a durable outcome idempotently, including after runtime restart.
 
         A TOKEN MAY LEGITIMATELY ADVANCE OUT OF ITS PROVISIONAL RECORD, and
         refusing that used to brick a session permanently. One turn writes
         ``attention_started`` with token T and, on completion, writes the SAME T
         with the real anchor and kind. Anything that bootstraps while that turn
-        is in flight — a mobile daemon sweep, a resume attempt, a killed owner —
+        is in flight — a mobile daemon sweep, a resume attempt, a killed runtime —
         publishes the provisional ``(completion-T, interrupted)`` marker first.
         When the turn then finishes and the conversation is next opened, the
         journal's authoritative ``(<entry id>, complete)`` arrives for the same
@@ -545,7 +545,7 @@ class AttentionStore:
             if self._uninitialized(conn):
                 return (0, 0, 0)
             # This connection is READ-ONLY, so it cannot run the additive
-            # migration itself: a database written before this fix, whose owner
+            # migration itself: a database written before this fix, whose runtime
             # has not reconnected yet, legitimately has no `mutations` table and
             # must read as 0 rather than raising. A poller that raised here
             # would lose cross-process read sync for the life of the loop.
@@ -609,14 +609,14 @@ class AttentionStore:
         THE ACCEPTED RISK, stated plainly so the next reader does not have to
         rediscover it: a claimant killed between the claim and the spawn leaves
         that completion delivered-but-unannounced FOREVER. There is no lease,
-        no owner pid and no expiry \u2014 a re-claim returns False for good, and
+        no holder pid and no expiry \u2014 a re-claim returns False for good, and
         nothing sweeps it. That is bounded in CONSEQUENCE (one transient toast,
         for one completion, on a process that crashed) and unbounded in TIME,
         and it is accepted here because the alternative trade is worse: a lease
         needs a clock, and a clock in this predicate is what lets two observers
         with disagreeing time both deliver. The durable signal survives
         regardless, which is what makes the transient one safe to lose. A lease
-        carrying an owner pid is the natural fix if this ever stops being
+        carrying a holder pid is the natural fix if this ever stops being
         acceptable; the schema has no room for one today (review round 1 m1,
         QA round 1 Q3 \u2014 both judged the trade correct).
 
