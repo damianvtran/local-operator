@@ -434,6 +434,12 @@ class _ClientConn:
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
+    #: This viewer negotiated ``display-history-audit-v1`` and can therefore be
+    #: sent the audit fields on a display page. A property of the CONNECTION,
+    #: so it is read where the connection is known and never inferred from the
+    #: frame; see ``DISPLAY_HISTORY_AUDIT_CAPABILITY`` for what emitting them
+    #: to a viewer that did not negotiate would do.
+    audit_history: bool = False
     frontend_ready: bool = False
     # Updates can be scheduled back to this loop while the owner-loop
     # subscription call is returning. Hold them until the sync frame is queued;
@@ -664,6 +670,14 @@ class RuntimeServer:
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
+                # A SECOND string for the same op, because the one above is a
+                # bare presence flag with no version handshake and cannot say
+                # "this owner also pages pre-compaction history". The page
+                # model forbids extra fields, so emitting the audit fields to a
+                # viewer built before them fails that viewer's validation and
+                # breaks the attach outright. See
+                # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
+                + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
             ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
@@ -1276,9 +1290,19 @@ class RuntimeServer:
                 oversized_frame_report,
                 sync_wire_payload,
             )
+            from local_operator.session.history_window import (
+                strip_audit_fields,
+                wire_payload,
+            )
 
             window_requested = bool(frame.get("display_window")) and (
                 "display-history-window-v1" in self._record.capabilities
+            )
+            # Negotiated exactly like ``display_window``: the viewer opts in by
+            # declaring the flag, and an older viewer that cannot name it never
+            # receives the fields it would reject.
+            conn.audit_history = bool(frame.get("display_history_audit")) and (
+                "display-history-audit-v1" in self._record.capabilities
             )
             outcome = (
                 subscribe_frontend(on_update, display_window=True)
@@ -1293,6 +1317,15 @@ class RuntimeServer:
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
+            # The sync frame carries the FIRST display page, so it is one of
+            # the two places the audit fields reach the wire (the other is the
+            # ``history_page`` RPC below). Both strip through the same helper;
+            # stripping in only one would produce a viewer that attaches
+            # cleanly and then fails on its first scroll.
+            if isinstance(sync_payload.get("display_history"), dict):
+                strip_audit_fields(
+                    sync_payload["display_history"], audit_capable=conn.audit_history
+                )
             conn.frontend_unsubscribe = subscription.unsubscribe
             # Registration and snapshot capture happened synchronously on the
             # authoritative loop. Mark ready only after queuing that snapshot;
@@ -1319,7 +1352,9 @@ class RuntimeServer:
                         "snapshot_token": None,
                     }
                 )
-                sync_payload["display_history"] = fallback.model_dump(mode="json")
+                sync_payload["display_history"] = wire_payload(
+                    fallback, audit_capable=conn.audit_history
+                )
                 oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
                 logger.error("session runtime: frontend_sync will not fit — %s", oversize)
@@ -1790,7 +1825,13 @@ class RuntimeServer:
                 # ``data`` the invoker renders locally (a slash command's typed
                 # outcome, a cancel's authoritative count) rather than a
                 # one-line receipt that would paint in the owner's transcript.
-                data = await self._dispatch_payload(op, frame, conn.locality, conn.slash_consumers)
+                data = await self._dispatch_payload(
+                    op,
+                    frame,
+                    conn.locality,
+                    conn.slash_consumers,
+                    audit_capable=conn.audit_history,
+                )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
                 await self._push()
@@ -2220,6 +2261,7 @@ class RuntimeServer:
         frame: dict[str, Any],
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
+        audit_capable: bool = False,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -2227,6 +2269,9 @@ class RuntimeServer:
         ``slash_consumers`` set (``None`` when the auth frame omitted it),
         carried here for the same reason ``locality`` is: it is a property of
         the CONNECTION, not of the frame, and only the handle can act on it.
+        ``audit_capable`` is a third of the same kind — whether this viewer
+        negotiated ``display-history-audit-v1`` — and it decides whether a
+        display page may carry the audit fields at all.
         """
         h = self._handle
         if op == "fork_snapshot":
@@ -2398,7 +2443,15 @@ class RuntimeServer:
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
             result = fetch(before, anchor)
-            return await result if inspect.isawaitable(result) else result
+            payload = await result if inspect.isawaitable(result) else result
+            # Same contract as the sync frame: a viewer that did not negotiate
+            # the audit capability must not be handed fields its page model
+            # forbids.
+            if isinstance(payload, dict):
+                from local_operator.session.history_window import strip_audit_fields
+
+                strip_audit_fields(payload, audit_capable=audit_capable)
+            return payload
         if op == "job_trajectory":
             # The other half of the frame-size fix: the attach snapshot omits
             # trajectories, so a viewer opening a child page pulls that one

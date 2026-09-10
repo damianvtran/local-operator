@@ -35,6 +35,15 @@ from local_operator.tui.widgets.transcript import (
 #: to measure a real presentation against it before changing it.
 RETAIN_TEXT_BYTES = 1024 * 1024
 
+#: The in-transcript seam between what the agent still sees and what it does
+#: not. Both halves of that sentence have to be on screen: the rows below the
+#: marker are REAL history (so the reader is not being told anything was lost)
+#: and they are outside the model's context (so the reader is not misled into
+#: thinking the agent can still refer to them).
+COMPACTION_MARKER_NOTICE = (
+    "context compacted here — older messages below are history the agent no longer sees"
+)
+
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):
     BINDINGS = [Binding("enter", "more", "More recent messages", show=False)]
@@ -497,7 +506,10 @@ def project_settled_rows(
     """
     from contextlib import nullcontext
 
-    from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+    from local_operator.compaction.marker import (
+        COMPACTION_MARKER_TYPE,
+        COMPACTION_REFUSED_TYPE,
+    )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -667,6 +679,26 @@ def project_settled_rows(
                 details = getattr(message, "details", None) or {}
                 text, kind = compaction_refused_notice(details)
                 self._append_block(NoticeBlock(text, kind=kind))
+                appended = True
+                continue
+            # The compaction boundary itself. The replay layer has always
+            # emitted this row, and it rendered as NOTHING: it is a custom
+            # message, so it fell past every branch above and then past the
+            # role-based handling below, which drops what it does not
+            # recognise. That was survivable while the row only ever sat at the
+            # very top of the model's replay; it is not survivable now that
+            # audit paging puts one at each compaction MID-transcript, because
+            # the reader would scroll from live conversation into
+            # pre-compaction history with no sign of the seam.
+            #
+            # `note`, not `info`, for the reason `RESUME_UNREACHABLE_NOTICE`
+            # is: this answers "where did my history go", and `info` maps to
+            # `dim`, which measures below the AA contrast floor on the light
+            # theme. Nothing went wrong here, so it is neither a warning nor an
+            # error — the rows below are real history, they are simply outside
+            # what the agent can still see.
+            if getattr(message, "custom_type", None) == COMPACTION_MARKER_TYPE:
+                self._append_block(NoticeBlock(COMPACTION_MARKER_NOTICE, kind="note"))
                 appended = True
                 continue
             role = getattr(message, "role", None)

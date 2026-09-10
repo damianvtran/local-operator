@@ -342,3 +342,222 @@ async def test_prompt_and_wait_does_not_complete_on_admission(tmp_path, monkeypa
             await remote.dispose()
         server.close()
         await handle.dispose()
+
+
+# --- Audit paging ------------------------------------------------------------
+#
+# The chain must reach the journal's FIRST message row. Before this, it stopped
+# at the compaction cut and told the reader that was the start of the
+# conversation — measured at 97% of rows unreachable on a real 17,345-row
+# session.
+
+
+async def _compacted_journal(directory: Path, *, compactions: int, rows_each: int):
+    transcript = Transcript(directory)
+    written = []
+    for cut in range(compactions):
+        batch = [Message.user(f"cut {cut} row {index}") for index in range(rows_each)]
+        await transcript.append_messages(batch)
+        written.extend(batch)
+        await transcript.append_compaction(
+            f"summary {cut}",
+            batch[-1].id,
+            500,
+            preserved_user_turns=[{"id": batch[0].id, "text": batch[0].text}],
+        )
+    tail = [Message.assistant(f"tail {index}") for index in range(rows_each)]
+    await transcript.append_messages(tail)
+    written.extend(tail)
+    return transcript, written
+
+
+def _walk(transcript: Transcript, **kwargs):
+    """Follow the whole backward chain, returning (rows, pages, audit_pages)."""
+    page = window(transcript, **kwargs)
+    rows = list(page.messages)
+    pages = [page]
+    while page.before_token:
+        page = window(transcript, before=page.before_token, **kwargs)
+        assert page.status == "ok", page.status
+        rows[0:0] = list(page.messages)
+        pages.append(page)
+    return rows, pages
+
+
+@pytest.mark.asyncio
+async def test_chain_terminates_at_the_first_message_row_not_the_compaction_cut(tmp_path):
+    """The defect, stated as a test.
+
+    ``before_token`` may become ``None`` only when the journal's first message
+    row has been delivered. Terminating at the compaction cut is what made the
+    TUI print "start of conversation" above thousands of real rows.
+    """
+    transcript, written = await _compacted_journal(tmp_path / "s", compactions=3, rows_each=40)
+    rows, pages = _walk(transcript, max_messages=30)
+    message_rows = [r for r in rows if getattr(r, "custom_type", None) != "compaction_summary"]
+    assert message_rows[0].id == written[0].id
+    assert pages[-1].before_token is None
+    assert any(p.audit for p in pages), "the chain never entered the audit phase"
+
+
+@pytest.mark.asyncio
+async def test_every_row_appears_exactly_once_across_the_chain(tmp_path):
+    """Audit completeness: the chain tiles the journal with no gap and no repeat.
+
+    This is the assertion that proves the two phases meet exactly at the
+    compaction cut — a page-seam off-by-one shows up here as a missing row or a
+    duplicated one rather than as a subtly short transcript nobody notices.
+    """
+    transcript, written = await _compacted_journal(tmp_path / "s", compactions=3, rows_each=25)
+    rows, pages = _walk(transcript, max_messages=20)
+    delivered = [r.id for r in rows if getattr(r, "custom_type", None) != "compaction_summary"]
+    # Completeness and exactly-once are the contract.
+    assert set(delivered) == {m.id for m in written}
+    assert len(delivered) == len(set(delivered)) == len(written)
+
+    # Global order is NOT asserted, and the reason is a pre-existing property
+    # of the context phase rather than a concession: the latest compaction's
+    # ``preserved_user_turns`` are re-emitted at the HEAD of the model's replay
+    # under their original ids, so that one row is displayed where compaction
+    # put it rather than at its journal position. The audit phase suppresses
+    # its own in-place copy so the row is delivered once instead of twice (the
+    # duplicate-id hazard). Within the audit phase itself, order is journal
+    # order, and that IS asserted.
+    # ``_walk`` collects pages newest-first, so reverse to read the audit phase
+    # in the order a reader scrolling upward actually assembles it.
+    audit_rows = [
+        r.id
+        for page in reversed(pages)
+        if page.audit
+        for r in page.messages
+        if getattr(r, "custom_type", None) != "compaction_summary"
+    ]
+    order = {m.id: index for index, m in enumerate(written)}
+    positions = [order[row_id] for row_id in audit_rows]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_audit_paging_does_not_move_the_context_derived_counts(tmp_path):
+    """``total_message_count``/``theme_turn_count`` stay CONTEXT-scoped.
+
+    The TUI reads the first as a monotonic context-growth signal for its
+    presentation cache and the second as the retitle growth gate. Inflating
+    either by the audit depth would invalidate every cached presentation and
+    re-fire retitling across every session on the machine.
+    """
+    transcript, _ = await _compacted_journal(tmp_path / "s", compactions=2, rows_each=20)
+    first = window(transcript, max_messages=15)
+    _rows, pages = _walk(transcript, max_messages=15)
+    audit_pages = [p for p in pages if p.audit]
+    assert audit_pages
+    for page in audit_pages:
+        assert page.total_message_count == 0
+        assert page.theme_turn_count == 0
+        assert page.opener_text == ""
+    # And the context page's own counts are untouched by the audit phase.
+    assert first.total_message_count == len(transcript.build_llm_history())
+
+
+@pytest.mark.asyncio
+async def test_an_audit_token_resets_after_a_compaction_bumps_the_generation(tmp_path):
+    """An outstanding audit cursor must not survive the journal changing.
+
+    The cursor names an entry id rather than an offset precisely because
+    ``compact_file`` rewrites the file; a generation bump invalidates it into
+    ``reset`` so the viewer re-syncs instead of paging a stale coordinate space.
+    """
+    transcript, written = await _compacted_journal(tmp_path / "s", compactions=2, rows_each=20)
+    page = window(transcript, max_messages=15)
+    while page.before_token and not page.audit:
+        page = window(transcript, before=page.before_token, max_messages=15)
+    assert page.audit and page.before_token
+    await transcript.append_compaction("later cut", written[-1].id, 500)
+    assert window(transcript, before=page.before_token, max_messages=15).status == "reset"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_and_its_result_never_split_across_an_audit_page(tmp_path):
+    """A result is drawn on its call's card; a page may not open on one."""
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    rows = []
+    for index in range(12):
+        call = Message.assistant(
+            f"calling {index}",
+            tool_calls=[ToolCall(id=f"call-{index}", name="probe", arguments={})],
+        )
+        result = Message.tool_result(
+            ToolResult(
+                tool_call_id=f"call-{index}",
+                tool_name="probe",
+                content=[TextContent(text=f"done {index}")],
+            )
+        )
+        rows.extend([Message.user(f"ask {index}"), call, result])
+    await transcript.append_messages(rows)
+    await transcript.append_compaction("cut", rows[-1].id, 500)
+    await transcript.append_messages([Message.user("after")])
+
+    _all_rows, pages = _walk(transcript, max_messages=4)
+    for page in pages:
+        if not page.messages:
+            continue
+        first = page.messages[0]
+        assert getattr(first, "role", None) != "tool", f"page opens on a tool result: {first.id}"
+
+
+@pytest.mark.asyncio
+async def test_a_journal_without_compaction_still_terminates_where_it_always_did(tmp_path):
+    """No compaction means no audit phase: unchanged behaviour, unchanged copy."""
+    transcript = Transcript(tmp_path / "s")
+    messages = [Message.user(f"row {index}") for index in range(50)]
+    await transcript.append_messages(messages)
+    rows, pages = _walk(transcript, max_messages=20)
+    assert [r.id for r in rows] == [m.id for m in messages]
+    assert not any(p.audit for p in pages)
+    assert not any(p.audit_available for p in pages)
+
+
+@pytest.mark.asyncio
+async def test_the_audit_chain_advances_even_when_a_page_delivers_no_rows(tmp_path):
+    """Forward progress is a property of the WINDOW, not of the rows kept.
+
+    An audit page can legitimately deliver nothing: every row in its window was
+    a preserved user turn the context phase already re-emitted at its head, so
+    the audit copy is suppressed to avoid a duplicate id. If the next cursor
+    were minted from the surviving rows, such a page would re-mint the cursor
+    it was fetched with and the chain would spin on one window forever.
+
+    Found on a real 231 MB journal, where it presented as a hang rather than as
+    a wrong answer — which is why the assertion is a bounded loop.
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    # A run of user turns, ALL of which the compaction preserves. Their audit
+    # copies are therefore all suppressed, so some audit window is empty.
+    preserved = [Message.user(f"preserved {index}") for index in range(12)]
+    await transcript.append_messages(preserved)
+    later = [Message.assistant(f"later {index}") for index in range(30)]
+    await transcript.append_messages(later)
+    await transcript.append_compaction(
+        "summary",
+        later[-1].id,
+        500,
+        preserved_user_turns=[{"id": m.id, "text": m.text} for m in preserved],
+    )
+    await transcript.append_messages([Message.user("after the cut")])
+
+    page = window(transcript, max_messages=4)
+    seen_cursors = set()
+    for _ in range(200):  # bounded: a stalled chain must fail, not hang
+        token = page.before_token
+        if not token:
+            break
+        assert token not in seen_cursors, "the audit chain re-issued a cursor"
+        seen_cursors.add(token)
+        page = window(transcript, before=token, max_messages=4)
+        assert page.status == "ok"
+    else:
+        raise AssertionError("the audit chain did not terminate")
+    assert page.before_token is None
