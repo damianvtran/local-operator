@@ -244,6 +244,12 @@ class AttachClient:
             auth["frontend_state"] = True
         if self._display_window and "display-history-window-v1" in record.capabilities:
             auth["display_window"] = True
+            # Declared separately from the window itself: this build can READ
+            # the audit fields, and an owner that does not advertise the
+            # capability simply never sends them. Announcing it is what makes
+            # the owner's strip decision a negotiation rather than a guess.
+            if "display-history-audit-v1" in record.capabilities:
+                auth["display_history_audit"] = True
         if self._slash_consumers is not None:
             # Additive and advisory, exactly the shape ``events`` and
             # ``frontend_state`` are: an older owner ignores the unknown auth

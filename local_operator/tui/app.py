@@ -1027,6 +1027,26 @@ RESUME_START_NOTICE = "start of conversation"
 #: keyboard chord the product documents nowhere else.
 RESUME_UNREACHABLE_NOTICE = "older messages above — select to load"
 
+#: The audit-phase twins of the two notices above, shown once the reader has
+#: drained everything the model can still see and the rows above are
+#: PRE-COMPACTION history.
+#:
+#: "earlier history", deliberately not "older messages": the two phases differ
+#: in kind, not merely in age, and a reader who has just crossed the compaction
+#: marker should see the vocabulary change with it rather than be told the same
+#: sentence about materially different rows.
+#:
+#: These are what make ``RESUME_START_NOTICE`` honest. Before audit paging
+#: existed the head notice went straight to "start of conversation" at the
+#: compaction cut — a faithful report of a history layer that had discarded the
+#: rows, and still a false statement about the conversation. It now appears
+#: only when the journal's first message row has actually been reached.
+RESUME_AUDIT_NOTICE = "earlier history above — scroll up to load"
+
+#: The unreachable twin: more pre-compaction history exists but this frame
+#: cannot be scrolled to it, so the row offers itself as the control instead.
+RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — select to load"
+
 
 @dataclass(frozen=True)
 class _PagingLease:
@@ -8493,8 +8513,24 @@ class OperatorApp(App[None]):
         more = bool(self._resume_pending_head) or bool(
             session is not None and getattr(session, "history_before_token", None)
         )
+        # Which VOCABULARY the two "more exists" states use. Once the context
+        # replay is drained, what remains above is pre-compaction history — a
+        # different kind of row, not merely an older one — so the copy says
+        # "earlier history" rather than "older messages". Absent on an owner
+        # too old to page audit rows, which is exactly when the pre-audit copy
+        # is still the correct thing to say.
+        audit = bool(session is not None and getattr(session, "history_is_audit", False))
         if not more:
-            self._restate_head_notice(notice, RESUME_START_NOTICE, "info")
+            # `note` for the same reason the two states below use it, and this
+            # is the state the audit phase made load-bearing: before audit
+            # paging, "start of conversation" appeared at the compaction cut
+            # and was simply false, so its quietness cost nothing. It now
+            # appears only when the journal's first message row has genuinely
+            # been reached, which makes it the definitive answer to "where did
+            # my history go" — and it was the one state of the six still
+            # rendered at `info`/`dim`, 3.77:1 on the light theme against the
+            # 4.5:1 AA floor (design review round 1, D4).
+            self._restate_head_notice(notice, RESUME_START_NOTICE, "note")
         elif not scrollable and self._resume_fill_active:
             # A fill attempt is still in flight, and the frame it is about to
             # produce is the one worth describing. Stating "unreachable" from
@@ -8513,12 +8549,18 @@ class OperatorApp(App[None]):
             # on. `info` maps to `dim`, which measures 3.77:1 on the light
             # theme — below the 4.5:1 AA floor — so the row got quieter
             # exactly as it got more important.
-            self._restate_head_notice(notice, RESUME_UNREACHABLE_NOTICE, "note")
+            self._restate_head_notice(
+                notice,
+                RESUME_AUDIT_UNREACHABLE_NOTICE if audit else RESUME_UNREACHABLE_NOTICE,
+                "note",
+            )
         else:
             # The way BACK. More history exists and the frame can now reach it,
             # so the instruction is followable again and the notice returns to
             # stating the promise it can keep.
-            self._restate_head_notice(notice, RESUME_OLDER_NOTICE, "note")
+            self._restate_head_notice(
+                notice, RESUME_AUDIT_NOTICE if audit else RESUME_OLDER_NOTICE, "note"
+            )
 
     @staticmethod
     def _restate_head_notice(notice: NoticeBlock, text: str, kind: NoticeKind) -> None:

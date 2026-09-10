@@ -35,6 +35,75 @@ from local_operator.tui.widgets.transcript import (
 #: to measure a real presentation against it before changing it.
 RETAIN_TEXT_BYTES = 1024 * 1024
 
+#: The in-transcript seam between what the agent still sees and what it does
+#: not. Both halves of that sentence have to be on screen: the rows it points
+#: at are REAL history (so the reader is not being told anything was lost) and
+#: they are outside the model's context (so the reader is not misled into
+#: thinking the agent can still refer to them).
+#:
+#: The direction is ABOVE, and it is not interchangeable with "below". A
+#: transcript paints oldest-at-top, so the pre-compaction rows sit above this
+#: marker and the rows below it are the newer ones the model still sees.
+#: Design review round 1 (D1) measured both halves of the original "older
+#: messages below" wording against real mounted block positions and against
+#: ``mode="context"`` membership: rows BELOW a marker were 100% still in
+#: context — exactly what the sentence claimed the agent could not see — while
+#: the rows above were 0-1%. Audit reading is the one task where someone is
+#: reasoning about which rows the agent could have used, so a marker pointing
+#: the wrong way is worse for a trusting reader than the silent nothing it
+#: replaced.
+#:
+#: The wrap budget at 80 columns is 70 text columns, and the MECHANICAL check
+#: is ``NoticeBlock.body_budget(76) == 70`` rather than hand arithmetic (design
+#: review round 2, D6). The chain, measured on a block mounted in an 80x30
+#: pilot rather than reasoned on paper: an 80-column terminal gives a 78-column
+#: screen; ``scrollbar-gutter: stable`` on ``TranscriptView`` permanently
+#: reserves one more column whether or not the bar is visible (77); the view's
+#: own left padding takes one (76, which is the width the block is actually
+#: painted); ``_build`` folds at ``max(width - 2, 12)`` (74); and the hanging
+#: glyph field is ``GLYPH_COLS`` = ``SPINE_INDENT + 2`` = 4, not 2 (70).
+#: Corroborated by rendered block height at that geometry: a 70-character
+#: string is one row, a 71-character string is two.
+#:
+#: This string is 66, so it sits 4 columns inside the budget, and the unit
+#: guard pins 66 rather than 70 — a copy change that wants the headroom has to
+#: move that guard deliberately. Do NOT re-derive the budget from the older
+#: "68 usable, so 66" arithmetic: it landed on a safe number through two
+#: COMPENSATING errors — it subtracted neither the reserved scrollbar column
+#: nor the fold clamp, and charged the glyph 2 where it costs 4 — so it cannot
+#: be carried to any other width. Round 1's "under ~76", also derived on
+#: paper, produced a 71-character string that still wrapped in the frame. That
+#: is why a longer string is checked in a RENDERED frame rather than counted:
+#: it orphans its last word on a second line at every compaction, 48 times in
+#: the reference journal (D2). Capture one with
+#: ``scripts/audit_history_shot.py <dir> marker 80x30``.
+COMPACTION_MARKER_NOTICE = "context compacted — earlier history above the agent no longer sees"
+
+
+class CompactionMarkerBlock(NoticeBlock):
+    """The compaction seam, spaced apart from whatever it lands beside.
+
+    A plain ``NoticeBlock`` would be right in every respect but one. In the
+    audit state the head notice sits directly above this row, and the two share
+    a ``SPACING_KIND`` of ``notice``, so the adaptive rule stacks them flush
+    (see :func:`needs_gap_above`: same kind, previous is one row, no gap). They
+    also share the ``·`` glyph and the ``note`` ink, and after the round-1 copy
+    fix they open with nearly the same words — "earlier history above — scroll
+    up to load" over "context compacted — earlier history above …". Design
+    review round 1 (D3) flagged the pair as indistinguishable, and the D1 fix
+    alone did not resolve it: verified in a rendered 80x30 frame, the two rows
+    still read as one wrapped block, with nothing to say that the first is a
+    CONTROL (focusable, clickable, `enter`-bound) and this one is inert.
+
+    ``SPACING_AIRY`` is the mechanism the tool ledger already uses for exactly
+    this — "each row is a separate thing, not a paragraph of one" — so the seam
+    takes a blank row above itself rather than earning a second glyph or a
+    second ink. The designer's own preference, and it keeps ``NOTICE_GLYPHS``'
+    deliberate sharing of ``·`` between ``info`` and ``note`` intact.
+    """
+
+    SPACING_AIRY = True
+
 
 class HistoryPageNotice(NoticeBlock, can_focus=True):
     BINDINGS = [Binding("enter", "more", "More recent messages", show=False)]
@@ -497,7 +566,10 @@ def project_settled_rows(
     """
     from contextlib import nullcontext
 
-    from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+    from local_operator.compaction.marker import (
+        COMPACTION_MARKER_TYPE,
+        COMPACTION_REFUSED_TYPE,
+    )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -667,6 +739,26 @@ def project_settled_rows(
                 details = getattr(message, "details", None) or {}
                 text, kind = compaction_refused_notice(details)
                 self._append_block(NoticeBlock(text, kind=kind))
+                appended = True
+                continue
+            # The compaction boundary itself. The replay layer has always
+            # emitted this row, and it rendered as NOTHING: it is a custom
+            # message, so it fell past every branch above and then past the
+            # role-based handling below, which drops what it does not
+            # recognise. That was survivable while the row only ever sat at the
+            # very top of the model's replay; it is not survivable now that
+            # audit paging puts one at each compaction MID-transcript, because
+            # the reader would scroll from live conversation into
+            # pre-compaction history with no sign of the seam.
+            #
+            # `note`, not `info`, for the reason `RESUME_UNREACHABLE_NOTICE`
+            # is: this answers "where did my history go", and `info` maps to
+            # `dim`, which measures below the AA contrast floor on the light
+            # theme. Nothing went wrong here, so it is neither a warning nor an
+            # error — the rows below are real history, they are simply outside
+            # what the agent can still see.
+            if getattr(message, "custom_type", None) == COMPACTION_MARKER_TYPE:
+                self._append_block(CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note"))
                 appended = True
                 continue
             role = getattr(message, "role", None)

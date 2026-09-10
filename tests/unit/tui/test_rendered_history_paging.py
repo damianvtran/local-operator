@@ -842,3 +842,248 @@ async def test_explicit_anchor_offset_outranks_a_tail_following_view() -> None:
         assert abs(view.scroll_y - held.virtual_region.y) < 1.0
         assert view.max_scroll_y > inserted_at, "the page did not mount above"
         assert view.blocks()[:40] == page, "the page is not above the retained rows"
+
+
+# --- Audit history, rendered -------------------------------------------------
+
+
+async def compacted_history(directory: Path, *, compactions: int, rows_each: int):
+    """Seed a journal with real compaction cuts, as a resumed session has."""
+    from local_operator.session.transcript import Transcript
+
+    directory.mkdir(parents=True, exist_ok=True)
+    transcript = Transcript(directory)
+    written: list[Message] = []
+    for cut in range(compactions):
+        batch = [
+            Message(
+                id=f"cut{cut}-row-{index:04}",
+                role="user" if index % 2 else "assistant",
+                content=[TextContent(text=f"cut {cut} row {index:04}")],
+                stop_reason="stop",
+            )
+            for index in range(rows_each)
+        ]
+        for message in batch:
+            await transcript.append_message(message)
+        written.extend(batch)
+        await transcript.append_compaction(f"summary {cut}", batch[-1].id, 500)
+    tail = [
+        Message(
+            id=f"tail-row-{index:04}",
+            role="assistant",
+            content=[TextContent(text=f"tail row {index:04}")],
+            stop_reason="stop",
+        )
+        for index in range(rows_each)
+    ]
+    for message in tail:
+        await transcript.append_message(message)
+    written.extend(tail)
+    transcript.flush()
+    return written
+
+
+@asynccontextmanager
+async def compacted_session(tmp_path: Path, *, compactions: int = 3, rows_each: int = 40):
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    directory = config / "sessions" / "synthetic-compacted"
+    await compacted_history(directory, compactions=compactions, rows_each=rows_each)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    remote = await RemoteSession.connect(
+        server._record,
+        directory.name,
+        config_dir=config,
+        takeover_factory=_never_take_over,
+        display_window=True,
+    )
+    try:
+        yield remote
+    finally:
+        await remote.dispose()
+        server.close()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_compacted_session_does_not_claim_the_conversation_starts_at_the_cut(
+    tmp_path,
+) -> None:
+    """The operator's report, as a rendered assertion.
+
+    He resumed a long conversation, scrolled up, and the top row said "start of
+    conversation" above real messages. It was the honest rendering of a history
+    layer that had already discarded them — so the fix is that the layer now
+    reaches them, and this asserts the rendered consequence.
+    """
+    from local_operator.tui.app import (
+        RESUME_AUDIT_NOTICE,
+        RESUME_AUDIT_UNREACHABLE_NOTICE,
+    )
+
+    # Large enough that the reader does NOT reach the head in one fill, which
+    # is the situation the operator was in: a long conversation whose top he
+    # had to scroll toward.
+    async with compacted_session(tmp_path, compactions=6, rows_each=400) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            # Drain everything the model can still see, and STOP at the
+            # boundary: this asserts the state the operator was in — context
+            # exhausted, pre-compaction rows still above — not the state after
+            # the whole journal has been read back.
+            for _ in range(40):
+                if not remote.history_before_token or remote.history_is_audit:
+                    break
+                await remote.load_older_display_page()
+                await pilot.pause()
+            assert remote.history_is_audit, "the chain never offered the audit phase"
+            app._reconcile_head_notice()
+            await pilot.pause()
+            notice = app._resume_head_notice
+            assert notice is not None, "the audit phase left no head notice to read"
+            # The defect, precisely: this row used to say "start of
+            # conversation" while pre-compaction rows sat unread on disk.
+            assert notice.text() != "start of conversation"
+            assert notice.text() in (RESUME_AUDIT_NOTICE, RESUME_AUDIT_UNREACHABLE_NOTICE)
+            assert notice.can_focus, "the audit head notice stays actionable"
+
+
+@pytest.mark.asyncio
+async def test_start_of_conversation_appears_only_once_the_audit_chain_drains(tmp_path) -> None:
+    """``RESUME_START_NOTICE`` is now a TRUE statement, and only then."""
+    from local_operator.tui.app import RESUME_START_NOTICE
+
+    async with compacted_session(tmp_path) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            for _ in range(200):
+                if not remote.history_before_token:
+                    break
+                await remote.load_older_display_page()
+                await pilot.pause()
+            assert not remote.history_before_token
+            app._reconcile_head_notice()
+            await pilot.pause()
+            notice = app._resume_head_notice
+            # Head fully drained: the notice may be removed entirely or state
+            # the (now true) start of the conversation.
+            if notice is not None and not app._resume_pending_head:
+                assert notice.text() == RESUME_START_NOTICE
+                assert not notice.can_focus, "true exhaustion drops interactivity"
+
+
+@pytest.mark.asyncio
+async def test_the_compaction_marker_renders_as_a_notice_mid_transcript(tmp_path) -> None:
+    """The marker had NO renderer and painted as nothing.
+
+    Harmless while it only ever sat at the very top of the model's replay;
+    not harmless now that audit paging puts one at each compaction inside the
+    transcript, where it is the only thing telling the reader they have crossed
+    out of what the agent can still see.
+    """
+    from local_operator.tui.session_presentation import COMPACTION_MARKER_NOTICE
+
+    async with compacted_session(tmp_path) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            for _ in range(200):
+                if not remote.history_before_token:
+                    break
+                await remote.load_older_display_page()
+                await pilot.pause()
+            for _ in range(60):
+                if not app._resume_pending_head:
+                    break
+                app._mount_older_resume_page()
+                await pilot.pause()
+            texts = [
+                block.text()
+                for block in app._transcript_view().blocks()
+                if isinstance(block, NoticeBlock) and hasattr(block, "text")
+            ]
+            assert COMPACTION_MARKER_NOTICE in texts
+
+
+def test_the_compaction_marker_fits_an_80_column_terminal() -> None:
+    """D2: the marker must not wrap and orphan its last word.
+
+    80x24 is the oldest default terminal size there is, and this row repeats at
+    every compaction — 48 times in the reference journal — so a wrap is paid
+    once per seam on exactly the sessions audit paging exists for.
+
+    The budget is NOT the terminal width, which is why round 1's arithmetic
+    ("under ~76") produced a 71-character string that still wrapped. At 80
+    columns the budget is 70 text columns, and the mechanical check is
+    ``NoticeBlock.body_budget(76) == 70`` rather than hand arithmetic (D6): an
+    80-column terminal gives a 78-column screen, ``scrollbar-gutter: stable``
+    reserves one more (77), the view's left padding one (76, the painted block
+    width), ``_build`` folds at ``max(width - 2, 12)`` (74), and ``GLYPH_COLS``
+    is 4 rather than 2 (70). Do not re-derive it from the superseded "68
+    usable, so 66" arithmetic, which reached a safe number through compensating
+    errors and does not transfer to any other width.
+
+    This guard pins 66, not the 70 budget, so a copy change that wants the
+    4 columns of headroom has to move the number here deliberately. Kept as a
+    cheap unit guard beside the frame capture
+    (`scripts/audit_history_shot.py <dir> marker 80x30`), which is the
+    instrument that established the number.
+    """
+    from local_operator.tui.session_presentation import COMPACTION_MARKER_NOTICE
+
+    assert len(COMPACTION_MARKER_NOTICE) <= 66, (
+        f"the marker is {len(COMPACTION_MARKER_NOTICE)} chars; it wraps at 80 "
+        f"columns and orphans its last word at every compaction"
+    )
+
+
+def test_the_compaction_marker_is_spaced_apart_from_the_head_notice() -> None:
+    """D3: the seam and the head notice must not read as one block.
+
+    In the audit state they land on adjacent rows sharing the `·` glyph, the
+    `note` ink, and — after the D1 copy fix — nearly the same opening words.
+    One is a CONTROL (focusable, clickable) and the other is inert, with
+    nothing else to tell them apart, so the separation has to come from
+    spacing. `SPACING_AIRY` is the mechanism the tool ledger already uses for
+    "each row is a separate thing"; asserting it here keeps a future edit from
+    dropping the class and silently restacking the two rows flush.
+    """
+    from local_operator.tui.app import RESUME_AUDIT_NOTICE
+    from local_operator.tui.session_presentation import (
+        COMPACTION_MARKER_NOTICE,
+        CompactionMarkerBlock,
+        OlderHistoryNotice,
+    )
+    from local_operator.tui.widgets.transcript import needs_gap_above
+
+    marker = CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note")
+    # The real audit-state pairing: this exact copy sits directly above it.
+    head = OlderHistoryNotice(RESUME_AUDIT_NOTICE)
+    # Same SPACING_KIND is precisely why the default rule stacked them flush.
+    assert marker.SPACING_KIND == head.SPACING_KIND == "notice"
+    assert needs_gap_above(head, marker), (
+        "the compaction marker stacks flush against the head notice; the two "
+        "share a glyph, an ink and their opening words, and one is clickable "
+        "while the other is not"
+    )

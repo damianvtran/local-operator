@@ -620,6 +620,11 @@ class RemoteSession:
         self._hydrated_once = False
         self._display_history: DisplayHistoryWindow | None = None
         self._history_hydrated = True
+        #: Whether the PRE-COMPACTION rows behind the context replay are
+        #: loaded (or absent). Separate from ``_history_hydrated`` on purpose;
+        #: see :attr:`history_before_token`. Starts ``True`` so a session with
+        #: no owner window behaves exactly as it did before this existed.
+        self._audit_exhausted = True
         self._durable_seed_ids: set[str] = set()
         self._durable_seed_tool_ids: set[str] = set()
         self._history_ids: set[str] = set()
@@ -2490,6 +2495,7 @@ class RemoteSession:
             # Legacy owners and oversized prose keep the honest full replay.
             self._display_history = None
             self._history_hydrated = True
+            self._audit_exhausted = True
             self._durable_seed_ids.clear()
             self._durable_seed_tool_ids.clear()
             await self._load_history(frontend.live_cursor, strict_cut=window is not None)
@@ -2527,6 +2533,9 @@ class RemoteSession:
         self._history = rows
         self._live_history.clear()
         self._history_hydrated = page.start == 0 and len(rows) == window.total_message_count
+        # An owner too old to know about audit paging reports neither field, so
+        # this stays True and the chain terminates exactly where it used to.
+        self._audit_exhausted = not (page.audit_available or page.audit)
         self._history_ids = {m.id for m in rows}
         self._durable_seed_ids = set(window.durable_seed_ids)
         self._durable_seed_tool_ids = set(window.durable_seed_tool_ids)
@@ -2551,7 +2560,16 @@ class RemoteSession:
             or window.through_id != cursor
         ):
             raise ConnectionError("display history does not match canonical sync")
-        if window.start < 0 or window.start + len(window.messages) > window.total_message_count:
+        if window.start < 0:
+            raise ConnectionError("invalid display history range")
+        # The range check is a CONTEXT-coordinate check: it bounds a page
+        # against ``total_message_count``, which is deliberately the size of
+        # the model's replay. An audit page's ``start`` is a JOURNAL index and
+        # its rows sit BELOW that replay entirely, so it exceeds the bound by
+        # construction and this would reject every one of them. Audit pages are
+        # bounded by their own phase instead: the owner mints their cursor from
+        # its resident entry list and refuses one it cannot resolve.
+        if not window.audit and window.start + len(window.messages) > window.total_message_count:
             raise ConnectionError("invalid display history range")
 
     async def _fetch_history_page(
@@ -2721,7 +2739,31 @@ class RemoteSession:
     @property
     def history_before_token(self) -> str | None:
         window = self._display_history
-        return window.before_token if window is not None and not self._history_hydrated else None
+        if window is None:
+            return None
+        # Two independent exhaustion facts, and they must NOT be folded into
+        # one flag. ``_history_hydrated`` means "the model's replay is fully
+        # loaded" and is what ``history()`` and ``materialize_history()`` gate
+        # on; ``_audit_exhausted`` means "the pre-compaction rows behind that
+        # replay are loaded too". Reusing the first for both would either let
+        # the retitle sampler drain 17,000 audit rows or stop the reader at the
+        # compaction cut, which is the defect this feature exists to fix.
+        if self._history_hydrated and self._audit_exhausted:
+            return None
+        return window.before_token
+
+    @property
+    def history_is_audit(self) -> bool:
+        """Whether the rows still above the reader are PRE-COMPACTION history.
+
+        Read by the head notice to choose its vocabulary. False on an owner
+        that cannot page audit rows, so an older owner keeps the copy it always
+        had rather than promising history it cannot serve.
+        """
+        window = self._display_history
+        if window is None:
+            return False
+        return bool(window.audit or window.audit_available)
 
     async def load_older_display_page(self) -> list[Any]:
         window = self._display_history
@@ -2735,21 +2777,58 @@ class RemoteSession:
             return []
         if page.status == "full_required":
             old_ids = set(self._history_ids)
-            return [m for m in await self.materialize_history() if m.id not in old_ids]
-        if page.start + len(page.messages) != window.start:
+            rows = [m for m in await self.materialize_history() if m.id not in old_ids]
+            # ``materialize_history`` deliberately stops at the end of the
+            # context phase, so the audit cursor the owner returned alongside
+            # the escalation is the only way back into the older rows. Keep it.
+            if page.before_token:
+                self._adopt_audit_cursor(page.before_token)
+            return rows
+        if not page.audit and page.start + len(page.messages) != window.start:
+            # Context-phase contiguity only. An audit page's ``start`` is a
+            # JOURNAL index while the loaded window's is a position in the
+            # context replay, so comparing them is a category error that fires
+            # on the very first audit page and surfaces to the reader as a
+            # failed fetch instead of history.
             raise ConnectionError("history page is not contiguous with the loaded window")
         self._history[:0] = page.messages
         self._history_ids.update(m.id for m in page.messages)
         self._display_history = window.model_copy(
             update={
-                "start": page.start,
+                # An audit page must not move the window's context coordinate:
+                # ``start`` is read against ``total_message_count``, which stays
+                # context-scoped. It is already 0 by the time audit begins.
+                "start": window.start if page.audit else page.start,
                 "before_token": page.before_token,
                 "has_more": page.has_more,
                 "messages": list(self._history),
+                "audit": page.audit,
+                "audit_available": page.audit_available,
             }
         )
-        self._history_hydrated = page.start == 0
+        if page.audit:
+            self._audit_exhausted = not page.before_token
+        else:
+            self._history_hydrated = page.start == 0
+            # Context drained with audit rows behind it: the chain continues.
+            self._audit_exhausted = not (page.start == 0 and page.before_token)
         return list(page.messages)
+
+    def _adopt_audit_cursor(self, token: str) -> None:
+        """Keep paging alive at the audit cursor after a full-replay escalation.
+
+        ``full_required`` hands the reader the model's whole history and would
+        otherwise end the chain there, stranding every pre-compaction row on a
+        session whose oversized group triggered the escalation — the sessions
+        most likely to have one.
+        """
+        window = self._display_history
+        if window is None:
+            return
+        self._display_history = window.model_copy(
+            update={"before_token": token, "has_more": True, "audit_available": True}
+        )
+        self._audit_exhausted = False
 
     async def ensure_display_anchor(self, anchor: str) -> bool:
         window = self._display_history
@@ -2775,7 +2854,15 @@ class RemoteSession:
         return True
 
     async def materialize_history(self) -> list[Any]:
-        """Explicit full replay, off the click path, at the captured sync cut."""
+        """Explicit full replay, off the click path, at the captured sync cut.
+
+        Produces the MODEL's history and stops at the end of the context phase.
+        It must never walk into the audit phase: its consumers are
+        ``history()`` and the conversation-retitle sampler, and draining audit
+        here would hand the retitle model every row of a 17,000-row journal on
+        an ordinary message submit. Audit rows are reached only by the reader's
+        own backward scroll, one bounded page at a time.
+        """
         if self._history_hydrated:
             return self.history()
         window = self._display_history
@@ -2800,7 +2887,9 @@ class RemoteSession:
                 rows = await asyncio.to_thread(replay)
                 break
             rows[:0] = page.messages
-            token = page.before_token
+            # The context phase ends here; the audit cursor is left for the
+            # reader (see this method's docstring).
+            token = None if page.audit_available or page.audit else page.before_token
         if self._display_history is not window:
             raise RuntimeError("history changed while materializing; retry")
         self._history = rows

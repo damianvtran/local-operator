@@ -12,7 +12,9 @@ from local_operator.harness.types import (
     CustomMessage,
     Message,
     TextContent,
+    ToolCall,
     ToolContext,
+    ToolResult,
     Usage,
 )
 from local_operator.mcp.tool_bridge import format_mcp_result
@@ -722,3 +724,161 @@ def test_replay_suffix_absent_journal_is_empty_history(tmp_path):
     assert (
         replay_entries(suffix.entries, None) == Transcript(tmp_path / "absent").build_llm_history()
     )
+
+
+# --- Audit replay mode -------------------------------------------------------
+#
+# The seam these tests guard: ``replay_entries`` answers two different
+# questions, and the first one must not move. ``mode="context"`` is what the
+# MODEL sees and is bounded by compaction; ``mode="audit"`` is what the
+# CONVERSATION contained and is bounded by nothing. Fusing them is how the
+# display window came to page only post-compaction rows.
+
+
+async def _compacted(directory: Path, *, compactions: int = 1, rows_each: int = 4):
+    """Journal with ``compactions`` cuts, each preserving the turn before it."""
+    transcript = Transcript(directory)
+    written: list[Message] = []
+    for cut in range(compactions):
+        batch = [Message.user(f"cut {cut} row {i}") for i in range(rows_each)]
+        await transcript.append_messages(batch)
+        written.extend(batch)
+        await transcript.append_compaction(
+            f"summary {cut}",
+            batch[-1].id,
+            500,
+            preserved_user_turns=[{"id": batch[0].id, "text": batch[0].text}],
+        )
+    tail = [Message.assistant("after the last cut")]
+    await transcript.append_messages(tail)
+    written.extend(tail)
+    return transcript, written
+
+
+@pytest.mark.asyncio
+async def test_context_mode_is_byte_identical_to_build_llm_history(tmp_path):
+    """The regression guard for the entire audit change.
+
+    ``mode="context"`` is the default and must remain what this function has
+    always produced, compaction cut and preserved turns included. If this ever
+    fails, the model's context has changed — which the audit feature is
+    explicitly not allowed to do.
+    """
+    transcript, _ = await _compacted(tmp_path / "sess", compactions=3)
+    expected = transcript.build_llm_history()
+    replayed = replay_entries(transcript.entries(), transcript._attachments, mode="context")
+    assert [m.model_dump(mode="json") for m in replayed] == [
+        m.model_dump(mode="json") for m in expected
+    ]
+    # And the default is context, so no existing caller changed behaviour.
+    default = replay_entries(transcript.entries(), transcript._attachments)
+    assert [m.model_dump(mode="json") for m in default] == [
+        m.model_dump(mode="json") for m in expected
+    ]
+
+
+@pytest.mark.asyncio
+async def test_audit_mode_returns_every_message_row_on_disk(tmp_path):
+    """Audit mode's contract: nothing the journal holds is unreachable."""
+    transcript, written = await _compacted(tmp_path / "sess", compactions=3)
+    audited = replay_entries(transcript.entries(), transcript._attachments, mode="audit")
+    rows = [m for m in audited if getattr(m, "custom_type", None) != "compaction_summary"]
+    assert [m.id for m in rows] == [m.id for m in written]
+    # Context mode, on the same journal, reaches almost none of them — which is
+    # the defect that made this mode necessary.
+    assert len(transcript.build_llm_history()) < len(rows)
+
+
+@pytest.mark.asyncio
+async def test_audit_mode_does_not_reinject_preserved_user_turns(tmp_path):
+    """Preserved turns are COPIES of rows audit mode already replays.
+
+    Re-injecting them would duplicate every preserved turn under its ORIGINAL
+    id, and the TUI's mount-time id dedupe would then swallow the second — so
+    the visible symptom is a MISSING row, not a doubled one.
+    """
+    transcript, written = await _compacted(tmp_path / "sess", compactions=3)
+    audited = replay_entries(transcript.entries(), transcript._attachments, mode="audit")
+    ids = [m.id for m in audited]
+    assert len(ids) == len(set(ids))
+    for message in written:
+        assert ids.count(message.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_audit_mode_emits_one_marker_per_compaction_in_place(tmp_path):
+    """Every cut is shown where it happened, not hoisted to the front.
+
+    Context mode keeps only the latest cut and puts its marker at the head. A
+    reader auditing a session with 48 compactions needs to see where each one
+    fell; one marker at the boundary would misrepresent the other 47 as
+    ordinary history.
+    """
+    transcript, _ = await _compacted(tmp_path / "sess", compactions=3, rows_each=2)
+    audited = replay_entries(transcript.entries(), transcript._attachments, mode="audit")
+    positions = [
+        index
+        for index, m in enumerate(audited)
+        if getattr(m, "custom_type", None) == "compaction_summary"
+    ]
+    assert len(positions) == 3
+    assert positions != sorted(positions)[:1] * 3  # not all hoisted to one spot
+    assert positions[0] > 0, "the first marker sits after the rows it followed"
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_audit_slice_applies_a_prune_journalled_after_its_window(tmp_path):
+    """The one cross-row dependency a bounded window can miss.
+
+    A prune is always appended AFTER the row it targets, so a prune for a row
+    inside the slice can sit past ``end_index``. Deriving the prune map from
+    the slice would replay tool output compaction already blanked.
+    """
+    from local_operator.session.transcript import audit_slice
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    target = Message.assistant("secret tool output")
+    await transcript.append_message(target)
+    filler = [Message.user(f"later {i}") for i in range(30)]
+    await transcript.append_messages(filler)
+    # The prune lands at the very END of the journal, far past the window.
+    await transcript.append_prune(target.id, "[pruned]")
+
+    entries = transcript.entries()
+    end = next(i for i, e in enumerate(entries) if e.id == filler[0].id)
+    rows, _indices, _start = audit_slice(entries, transcript._attachments, end_index=end, limit=50)
+    replayed = next(m for m in rows if m.id == target.id)
+    assert isinstance(replayed, Message)
+    assert replayed.text == "[pruned]"
+    assert (replayed.provider_payload or {}).get("pruned") is True
+
+
+@pytest.mark.asyncio
+async def test_audit_slice_never_begins_inside_a_tool_group(tmp_path):
+    """A window opening on a tool RESULT renders a settled call as interrupted.
+
+    The result row is drawn on the card of the call above it, so a page whose
+    first row is a result would show a card with no call until some unrelated
+    scroll happened to fetch it.
+    """
+    from local_operator.session.transcript import audit_slice
+
+    transcript = Transcript(tmp_path / "sess")
+    call = Message.assistant(
+        "calling", tool_calls=[ToolCall(id="call-1", name="probe", arguments={})]
+    )
+    result = Message.tool_result(
+        ToolResult(tool_call_id="call-1", tool_name="probe", content=[TextContent(text="done")])
+    )
+    rows = [Message.user("before"), call, result, Message.user("after")]
+    await transcript.append_messages(rows)
+    entries = transcript.entries()
+    end = next(i for i, e in enumerate(entries) if e.id == rows[-1].id)
+    # limit=1 would otherwise land the window exactly on the result row.
+    messages, _indices, _start = audit_slice(
+        entries, transcript._attachments, end_index=end, limit=1
+    )
+    assert messages[0].id == call.id
+    assert [m.id for m in messages] == [call.id, result.id]
