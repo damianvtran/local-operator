@@ -723,9 +723,9 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # An exact pin, unlike the ratio above: this is the population the aggregate
     # floor of 40 is set against, so a drop here is the decay that floor exists
     # to catch rather than ordinary churn.
-    assert len(viewer_only) == 49, (
+    assert len(viewer_only) == 50, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 49, and the aggregate floor is set at 40 against that number. A "
+        "says 50, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
