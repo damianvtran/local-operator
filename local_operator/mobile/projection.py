@@ -1065,7 +1065,7 @@ class ProjectionFold:
             # equivalent keeps ``getattr`` because its dispatch routes on
             # ``event.type`` without re-validating, so a legacy relayed frame
             # reaches it as a bare ``AgentEvent`` (see the comment there).
-            # An older owner that omits the field arrives as ``None`` and takes
+            # An older runtime that omits the field arrives as ``None`` and takes
             # the falsy no-op path below.
             superseded = event.supersedes_tool_call_id
             if superseded:
@@ -1593,7 +1593,7 @@ class ProjectionFold:
         ]
 
     def set_todos(self, phases: list[dict[str, Any]]) -> None:
-        """Refresh the todo list from the tool store. Called by the owner
+        """Refresh the todo list from the tool store. Called by the runtime
         after every event batch: the store is the only writer, so re-reading
         it is the fold — there is no todo event to listen for.
 

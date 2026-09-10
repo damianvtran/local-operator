@@ -10,7 +10,7 @@ lifecycle and are never answered or removed by a completion receipt.
 Canonical identities distinguish `session/<durable-id>` from legacy persistent
 `agent/<agent-id>` conversations. Selecting an agent profile does not alias an
 ordinary session to that profile's persistent conversation. Followers acknowledge
-through their authenticated owner connection, not through their own PID.
+through their authenticated runtime connection, not through their own PID.
 
 The logical run journals its token before execution. A settled eligible outcome
 is journaled after durable message persistence and imported idempotently into
@@ -21,7 +21,7 @@ Copied fork journals cannot reuse another conversation's token.
 
 A receipt advances through the supplied token's sequence using a monotonic
 watermark. Delayed or duplicate acknowledgement of A cannot acknowledge newer B.
-Owner epoch, transcript mtime, heartbeat time and stream sequence are not
+Runtime epoch, transcript mtime, heartbeat time and stream sequence are not
 completion clocks. The SQLite engine serializes writers across processes. All
 schema objects initialize in one transaction; readers of a positively identified
 empty, not-yet-initialized database see no published completion. Corrupt bytes or
@@ -63,7 +63,7 @@ key visible window's selected workspace and terminal surface.
 Mobile transcript rows carry `text_complete`. `final` means streaming settled;
 it does not prove transport retained the final row's ending. Both runtime and
 relay serialization preserve `text_complete=false` when clipping a row. Missing
-metadata from an older owner is unknown, not permission to acknowledge. Only a
+metadata from an older runtime is unknown, not permission to acknowledge. Only a
 rendered anchor with both flags true qualifies. Unrelated degraded rows do not
 prevent acknowledgement of a complete result. If a capped result cannot be
 hydrated in full on the phone, it remains unread until a full surface views it;
