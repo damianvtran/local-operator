@@ -276,7 +276,10 @@ async def test_no_matching_target_is_a_clean_error() -> None:
         _context(),
     )
     assert result.is_error is True
-    assert "no live session matches" in result.text
+    # The send now searches BOTH the live registry and the stored session store
+    # before refusing, and the error says so rather than implying only the live
+    # fleet was checked.
+    assert "searched live and stored sessions" in result.text
 
 
 @pytest.mark.asyncio

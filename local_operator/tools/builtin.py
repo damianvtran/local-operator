@@ -5854,7 +5854,34 @@ async def execute_send(
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
         cold_session_id = cold_session_id or ""
+    if not cold_session_id and not candidates and params.target and record is None:
+        # The substring found no LIVE record. Fall back to the STORED store
+        # before refusing, so a note addressed by the name a session had before
+        # its terminal was closed still delivers. The resolver decides WHO;
+        # delivery below is the unchanged cold path (spool / engage), so live
+        # still wins over stored for the same substring.
+        from local_operator.mobile.peer_send import (
+            resolve_stored_target,
+            stored_candidate_lines,
+        )
+
+        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
+            resolve_stored_target, params.target
+        )
+        if stored_candidates:
+            lines = [
+                f"{len(stored_candidates)} stored sessions match; drop `target` and "
+                "retry with session=<id> instead (passing both is refused):"
+            ]
+            lines.extend(stored_candidate_lines(stored_candidates, indent="  ", prefix="session="))
+            return _error(tool_call_id, "send", "\n".join(lines))
+        if stored_id:
+            cold_session_id = stored_id
+        elif stored_error:
+            return _error(tool_call_id, "send", stored_error)
     if not cold_session_id and (error or record is None):
+        if error and "no live session matches" in error:
+            error = f"no session matches {params.target!r} (searched live and stored sessions)"
         return _error(tool_call_id, "send", error or "no target resolved")
 
     # Self-send guard: the tool runs INSIDE the sender's session process, so

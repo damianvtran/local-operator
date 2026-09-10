@@ -554,6 +554,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
     sessions_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    sessions_parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "also list stored sessions that are not running (RSS/UPTIME/etc. are "
+            "shown as — for these; sorted newest-first by last activity)"
+        ),
+    )
+    sessions_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="with --all, cap the number of stored rows listed (default: 50)",
+    )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
     # bare `lop sessions` keeps listing.
@@ -2256,7 +2271,39 @@ def send_command(args: argparse.Namespace) -> int:
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = resolve_cold_session(args.session or "") or ""
+    if not cold_session_id and not candidates and target and record is None:
+        # The substring found no LIVE record and named no exact id. Fall back
+        # to the STORED store before refusing: a note addressed by the name a
+        # session had before its terminal was closed must still deliver. The
+        # resolver decides WHO; delivery still goes through the unchanged
+        # cold path below, so live keeps winning over stored for the same
+        # substring and the delivery mechanics are untouched.
+        from local_operator.mobile.peer_send import (
+            resolve_stored_target,
+            stored_candidate_lines,
+        )
+
+        stored_id, stored_candidates, stored_error = resolve_stored_target(target)
+        if stored_candidates:
+            print(
+                f"{len(stored_candidates)} stored sessions match; replace the "
+                "target with one of these:",
+                file=sys.stderr,
+            )
+            for line in stored_candidate_lines(stored_candidates, indent="  ", prefix="--session"):
+                print(line, file=sys.stderr)
+            return 1
+        if stored_id:
+            cold_session_id = stored_id
+        elif stored_error:
+            _peer_red(stored_error)
+            return 1
     if not cold_session_id and (error or record is None):
+        if error and "no live session matches" in error:
+            # The stored fallback just failed too, so the message names BOTH
+            # searches rather than leaving the user to discover the store on
+            # their own.
+            error = f"no session matches {target!r} (searched live and stored sessions)"
         _peer_red(error or "no target resolved")
         return 1
 
@@ -2543,7 +2590,10 @@ def sessions_command(args: argparse.Namespace) -> int:
     # ``is_self``, a field this command never had.
     from local_operator.info.collect import session_rows
 
-    rows = session_rows(config_dir())
+    # ``--limit`` bounds the STORED rows only — the live fleet is always listed
+    # in full, and a stored cap means nothing without ``--all`` asking for them.
+    # ``None`` lets ``collect`` apply its own stored cap.
+    rows = session_rows(config_dir(), include_stored=args.all, stored_limit=args.limit)
 
     if args.json:
         print(_json.dumps(rows, indent=2))
@@ -2557,22 +2607,40 @@ def sessions_command(args: argparse.Namespace) -> int:
     # question holds a runtime resident for up to a day, so "which of these is
     # waiting on me" has to be answerable from the same place the memory is
     # visible. Blank for every session that is simply working.
+    #
+    # LAST_ACTIVE appears only under ``--all``: a stored session has no process,
+    # so PID/RSS/FOOTPRINT/UPTIME/HB_AGE read "—" for it, and the one fact a
+    # stored row CAN offer is when its transcript last moved. Adding the column
+    # unconditionally would re-flow the live-only listing every existing
+    # consumer parses, so it is appended only when the flag brought stored rows.
+    show_stored = any(row["state"] == "stored" for row in rows)
     header = (
         f"{'STATE':<7} {'PID':>7} {'KIND':<7} {'NEEDS':<8} {'CONVERSATION':<24} "
         f"{'MODEL':<24} {'RSS':>8} {'FOOTPRINT':>9} {'UPTIME':>8} {'HB_AGE':>7}"
     )
+    if show_stored:
+        header += f" {'LAST_ACTIVE':>11}"
     print(header)
+    now = time.time()
     for row in rows:
         name = (row["conversation_name"] or row["session_id"] or "")[:24]
         model = (row["model_label"] or "")[:24]
         needs = (row.get("pending") or "")[:8]
-        print(
-            f"{row['state']:<7} {row['pid']:>7} {row['kind']:<7} {needs:<8} {name:<24} "
+        stored = row["state"] == "stored"
+        line = (
+            f"{row['state']:<7} "
+            f"{('—' if stored else str(row['pid'])):>7} "
+            f"{(row['kind'] or '—'):<7} {needs:<8} {name:<24} "
             f"{model:<24} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
-            f"{_format_duration(row['uptime_s']):>8} "
-            f"{_format_duration(row['heartbeat_age_s']):>7}"
+            f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
+            f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
         )
+        if show_stored:
+            stamp = row["last_activity_s"]
+            age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
+            line += f" {age:>11}"
+        print(line)
     return 0
 
 

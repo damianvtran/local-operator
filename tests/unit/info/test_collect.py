@@ -264,6 +264,99 @@ def test_no_live_sessions_is_not_an_unmeasurable_host() -> None:
     assert info.usage_available is True
 
 
+# -- stored sessions (lop sessions --all) --------------------------------------
+#
+# ``include_stored`` folds in sessions that have a directory but no live
+# record. These pin that the default path is unchanged (live-only), the stored
+# rows carry only the durable identity fields, and the fleet roll-up counters
+# never count a session that has no runtime.
+
+
+class _StoredRow:
+    """The ``SessionRow`` fields ``_stored_lines`` reads."""
+
+    def __init__(self, session_id: str, name: str, mtime: float) -> None:
+        self.id = session_id
+        self.name = name
+        self.mtime = mtime
+
+
+def _stored(monkeypatch: Any, rows: list[_StoredRow]) -> None:
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: rows
+    )
+
+
+def test_default_listing_never_includes_stored(monkeypatch: Any, tmp_path: Path) -> None:
+    _stored(monkeypatch, [_StoredRow("dead00000001", "old work", 5.0)])
+    info = collect_sessions(
+        tmp_path, scan=_scan([(_Record(pid=1), "live")]), usage=_usage({}), now=100.0
+    )
+    assert [line.state for line in info.lines] == ["live"]
+
+
+def test_include_stored_appends_stored_rows(monkeypatch: Any, tmp_path: Path) -> None:
+    _stored(monkeypatch, [_StoredRow("dead00000001", "old work", 5.0)])
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([(_Record(pid=1), "live")]),
+        usage=_usage({}),
+        now=100.0,
+        include_stored=True,
+    )
+    states = [line.state for line in info.lines]
+    assert "stored" in states
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.session_id == "dead00000001"
+    assert stored.conversation_name == "old work"
+    assert stored.last_activity_s == 5.0
+    # Process-level fields are meaningless for a dead session and stay empty.
+    assert stored.pid == 0 and stored.rss_bytes is None and stored.uptime_s == 0.0
+
+
+def test_stored_rows_never_inflate_the_fleet_counters(monkeypatch: Any, tmp_path: Path) -> None:
+    """A stored session has no runtime; ``total``/``live`` must not count it."""
+    _stored(monkeypatch, [_StoredRow("dead00000001", "old work", 5.0)])
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([(_Record(pid=1), "live")]),
+        usage=_usage({}),
+        now=100.0,
+        include_stored=True,
+    )
+    assert info.total == 1 and info.live == 1 and info.stale == 0
+
+
+def test_live_wins_over_a_stored_row_with_the_same_id(monkeypatch: Any, tmp_path: Path) -> None:
+    """A session the registry just published for is not listed twice."""
+    _stored(monkeypatch, [_StoredRow("live-session", "shared", 5.0)])
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([(_Record(pid=1, session_id="live-session"), "live")]),
+        usage=_usage({}),
+        now=100.0,
+        include_stored=True,
+    )
+    assert [line.state for line in info.lines] == ["live"]
+
+
+def test_an_unreadable_store_yields_no_stored_rows_not_a_failure(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    def _boom(directory: Any, limit: Any = None) -> Any:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", _boom)
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([(_Record(pid=1), "live")]),
+        usage=_usage({}),
+        now=0.0,
+        include_stored=True,
+    )
+    assert [line.state for line in info.lines] == ["live"]
+
+
 # -- the subagent tree --------------------------------------------------------
 
 
