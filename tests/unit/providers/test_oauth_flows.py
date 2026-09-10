@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import inspect
 import json
+import socket
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
@@ -1960,3 +1962,636 @@ class TestABadPasteDoesNotEndTheLogin:
         )
         got, _ = result[0]
         assert got == ("browser-code", "browser-state")
+
+
+# ---------------------------------------------------------------------------
+# Bounded port allowlist (OpenAI 1455 -> /cancel -> retry -> 1457)
+# ---------------------------------------------------------------------------
+
+
+async def _occupy(port: int = 0) -> asyncio.base_events.Server:
+    """Bind 127.0.0.1:port with a server that never answers /cancel.
+
+    Stands in for the real squatters (Cursor, Codex Desktop): something that
+    holds the port and is NOT a login server of ours, so the cancel poke is
+    correctly ignored and the ladder has to move on.
+
+    Port 0 asks the OS for a free one. These tests deliberately do NOT bind the
+    real 1455/1457/54545: this repo is worked through many concurrent
+    worktrees, and a developer running Cursor, Codex Desktop or Claude Code has
+    those ports legitimately occupied — a test that needs them is a test that
+    fails for reasons that have nothing to do with the code. The ladder logic
+    is port-agnostic, so it is exercised on ephemeral ports; that the LITERAL
+    ports are the right ones is a separate, binding-free assertion (see
+    ``test_openai_uses_the_allowlisted_port_pair``).
+    """
+
+    async def _sink(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read(1024)
+        finally:
+            writer.close()
+
+    return await asyncio.start_server(_sink, "127.0.0.1", port)
+
+
+def _port_of(server: asyncio.base_events.Server) -> int:
+    assert server.sockets
+    return int(server.sockets[0].getsockname()[1])
+
+
+def _free_port() -> int:
+    """An ephemeral port that is free right now (racy by nature, adequate here)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+async def test_fallback_ports_reject_pinned_redirect_uri() -> None:
+    """A ladder plus a literal URI would advertise a port we did not bind."""
+    with pytest.raises(ValueError, match="pinned redirect_uri"):
+        CallbackFlowOptions(
+            preferred_port=1455,
+            fallback_ports=(1457,),
+            allow_port_fallback=False,
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+
+
+async def test_fallback_ports_reject_os_assigned_fallback() -> None:
+    """The ladder IS the allowlist; an OS-assigned port would defeat it."""
+    with pytest.raises(ValueError, match="allow_port_fallback=False"):
+        CallbackFlowOptions(preferred_port=1455, fallback_ports=(1457,))
+
+
+async def test_candidate_ports_dedupe_preserving_order() -> None:
+    opts = CallbackFlowOptions(
+        preferred_port=1455, fallback_ports=(1457, 1455), allow_port_fallback=False
+    )
+    assert opts.candidate_ports == (1455, 1457)
+
+
+async def test_openai_uses_the_allowlisted_port_pair() -> None:
+    """The literal ports are the contract: 1455 then 1457, both server-side
+    allowlisted for this client id (upstream commit 8d5da3f). Asserted without
+    binding anything, so a developer running Cursor cannot fail it."""
+    from local_operator.providers.oauth.openai import OpenAIOAuthFlow
+
+    flow = OpenAIOAuthFlow(LoginCallbacks(), open_browser=lambda url: None)
+    assert flow.options.candidate_ports == (1455, 1457)
+    assert flow.options.allow_port_fallback is False
+    # No literal redirect_uri: it must name whichever of the two we bound.
+    assert flow.options.redirect_uri is None
+
+
+async def test_port_ladder_falls_back_to_second_allowlisted_port() -> None:
+    """Preferred busy => bind the fallback rung and ADVERTISE it. The
+    redirect_uri must name the port actually bound, or the IdP sends the
+    browser to a closed socket."""
+    squatter = await _occupy()
+    busy = _port_of(squatter)
+    spare = _free_port()
+    try:
+        flow = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=busy,
+                fallback_ports=(spare,),
+                allow_port_fallback=False,
+                callback_path="/auth/callback",
+                provider_label="OpenAI",
+            ),
+            LoginCallbacks(),
+        )
+        await flow._start_server()
+        try:
+            assert flow.bound_port == spare
+            assert flow.redirect_uri() == f"http://localhost:{spare}/auth/callback"
+        finally:
+            await flow._stop_server()
+    finally:
+        squatter.close()
+        await squatter.wait_closed()
+
+
+async def test_port_ladder_fails_when_every_allowlisted_port_is_busy() -> None:
+    """Both busy => fail BEFORE the browser opens, naming both ports. An
+    OS-assigned port is never substituted for a validated redirect URI."""
+    held = [await _occupy(), await _occupy()]
+    first, second = (_port_of(server) for server in held)
+    try:
+        flow = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=first,
+                fallback_ports=(second,),
+                allow_port_fallback=False,
+                callback_path="/auth/callback",
+                provider_label="OpenAI",
+            ),
+            LoginCallbacks(),
+        )
+        with pytest.raises(ConfigurationError) as excinfo:
+            await flow._start_server()
+        message = str(excinfo.value)
+        assert str(first) in message and str(second) in message
+        assert "OpenAI" in message
+        # The message must give the user a way to find the squatter.
+        assert "lsof" in message
+        assert flow.bound_port is None
+    finally:
+        for server in held:
+            server.close()
+            await server.wait_closed()
+
+
+async def test_a_real_sibling_login_stands_down_when_poked() -> None:
+    """The claim the retry ladder is built on, tested against a REAL sibling.
+
+    This must not use a hand-written responder that closes its own listener:
+    such a stand-in asserts only that we SEND `/cancel`, which was true even
+    when our server answered it with a 404 and kept the port. The regression
+    that hid behind exactly that shape is what this test exists to catch, so
+    the incumbent here is a genuine OAuthCallbackFlow with `run()` pending.
+    """
+    port = _free_port()
+    sibling = _EchoFlow(
+        CallbackFlowOptions(
+            preferred_port=port,
+            allow_port_fallback=False,
+            callback_path="/auth/callback",
+            timeout_seconds=30.0,
+        ),
+        LoginCallbacks(),
+    )
+    sibling_run = asyncio.create_task(sibling.run())
+    for _ in range(400):  # let the sibling actually bind before we compete
+        if sibling.bound_port is not None and sibling.generated:
+            break
+        await asyncio.sleep(0.01)
+
+    # PRECONDITION: the sibling really holds the port and its login is really
+    # pending. Without this, "the newcomer got the port" could just mean the
+    # sibling never started, which is a passing test for a broken feature.
+    assert sibling.bound_port == port
+    assert not sibling_run.done(), "sibling login should still be pending"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError):
+            probe.bind(("127.0.0.1", port))
+    finally:
+        probe.close()
+
+    try:
+        newcomer = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=port,
+                allow_port_fallback=False,
+                callback_path="/auth/callback",
+            ),
+            LoginCallbacks(),
+        )
+        await newcomer._start_server()
+        try:
+            # The newcomer won the PREFERRED port, which is only possible if
+            # the sibling honoured `/cancel` and released it.
+            assert newcomer.bound_port == port
+        finally:
+            await newcomer._stop_server()
+
+        # And the sibling ended as a CANCELLATION, not as a generic failure:
+        # it was superseded, which is not something the user did wrong.
+        with pytest.raises(LoginCancelledError):
+            await asyncio.wait_for(sibling_run, timeout=10)
+    finally:
+        sibling_run.cancel()
+        with contextlib.suppress(asyncio.CancelledError, LoginError):
+            await sibling_run
+
+
+async def _await_outcome(flow: OAuthCallbackFlow, resolve: list[tuple[str, Any]]) -> str:
+    """Drive `_await_code` with several futures resolving in ONE event-loop pass.
+
+    The race this guards is co-resolution: `asyncio.wait` reports every future
+    that settled before the waiter was rescheduled, and `done` is a SET, so
+    iterating it lets hash order pick the outcome. Resolving without awaiting
+    in between is what actually holds that window open — a test that yields
+    between the two resolutions can never lose the race and therefore proves
+    nothing about it.
+    """
+    loop = asyncio.get_running_loop()
+    flow._captured = loop.create_future()
+    flow._capture_error = loop.create_future()
+    flow._cancelled = loop.create_future()
+    task = asyncio.create_task(flow._await_code())
+    await asyncio.sleep(0)  # let `_await_code` reach `asyncio.wait`
+    for which, value in resolve:  # deliberately no await between these
+        getattr(flow, which).set_result(value)
+    try:
+        got = await asyncio.wait_for(task, timeout=5)
+        return "SUCCESS" if got == ("real-code", "st") else f"UNEXPECTED:{got}"
+    except LoginCancelledError:
+        return "CANCELLED"
+    except LoginError:
+        return "ERROR"
+
+
+@pytest.mark.parametrize(
+    "resolve",
+    [
+        [("_captured", ("real-code", "st")), ("_cancelled", "superseded")],
+        [("_cancelled", "superseded"), ("_captured", ("real-code", "st"))],
+    ],
+    ids=["code-first", "cancel-first"],
+)
+async def test_a_captured_code_survives_a_concurrent_cancel(
+    resolve: list[tuple[str, Any]],
+) -> None:
+    """A `/cancel` racing a successful callback must NOT discard the code.
+
+    The user already approved in the browser and the provider already issued a
+    code; a sibling login wanting the port does not un-approve that. Losing it
+    here would be worse than the bug the `/cancel` route fixes, so this is
+    asserted over repeated trials in BOTH resolution orders — a single trial
+    can pass on set order alone.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, resolve) for _ in range(40)}
+    assert outcomes == {"SUCCESS"}, f"a captured code was lost to a cancel: {outcomes}"
+
+
+@pytest.mark.parametrize(
+    "resolve",
+    [
+        [("_capture_error", "state mismatch"), ("_cancelled", "superseded")],
+        [("_cancelled", "superseded"), ("_capture_error", "state mismatch")],
+    ],
+    ids=["error-first", "cancel-first"],
+)
+async def test_a_real_error_is_not_downgraded_to_a_cancellation(
+    resolve: list[tuple[str, Any]],
+) -> None:
+    """A genuine failure racing a cancel must still surface AS a failure.
+
+    Distinct from the code-loss case above and tested separately: hosts render
+    `LoginCancelledError` as a quiet outcome offering no remedy, so a
+    forged-redirect/state-mismatch silently downgraded to "login cancelled"
+    tells the user nothing about a security-relevant event.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, resolve) for _ in range(40)}
+    assert outcomes == {"ERROR"}, f"a real error was silenced as a cancel: {outcomes}"
+
+
+async def test_a_cancel_alone_is_still_a_cancellation() -> None:
+    """The control: ranking outcomes must not have broken the plain cancel."""
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=5.0), LoginCallbacks())
+    outcomes = {await _await_outcome(flow, [("_cancelled", "superseded")]) for _ in range(20)}
+    assert outcomes == {"CANCELLED"}
+
+
+async def test_cancel_route_answers_200_not_404() -> None:
+    """The route itself: our server must ANSWER `/cancel`, not 404 it.
+
+    Pinned directly because the 404 is what made the poke a no-op, and a 404
+    here is indistinguishable from "route missing" at the ladder's call site.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=30.0), LoginCallbacks())
+    run = asyncio.create_task(flow.run())
+    for _ in range(400):
+        if flow.bound_port is not None and flow.generated:
+            break
+        await asyncio.sleep(0.01)
+    assert flow.bound_port is not None
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{flow.bound_port}/cancel")
+        assert response.status_code == 200
+        with pytest.raises(LoginCancelledError):
+            await asyncio.wait_for(run, timeout=10)
+    finally:
+        run.cancel()
+        with contextlib.suppress(asyncio.CancelledError, LoginError):
+            await run
+
+
+async def test_the_fallback_rung_is_never_poked() -> None:
+    """Upstream gates the poke on `!using_fallback_port`; so do we.
+
+    An incumbent on a rung we merely MAY use has as much claim to it as we do,
+    so standing it down to save ourselves a fallback would be taking someone
+    else's login for our own convenience.
+    """
+    poked: list[str] = []
+
+    async def _watch(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw = await reader.read(256)
+        poked.append(raw.decode("latin-1").split("\r\n", 1)[0])
+        writer.close()
+
+    preferred = await asyncio.start_server(_watch, "127.0.0.1", 0)
+    fallback = await asyncio.start_server(_watch, "127.0.0.1", 0)
+    try:
+        flow = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=_port_of(preferred),
+                fallback_ports=(_port_of(fallback),),
+                allow_port_fallback=False,
+                callback_path="/auth/callback",
+            ),
+            LoginCallbacks(),
+        )
+        with pytest.raises(ConfigurationError):
+            await flow._start_server()
+        assert (
+            poked.count("GET /cancel HTTP/1.1") == 1
+        ), f"expected exactly one poke (the preferred rung), saw {poked}"
+    finally:
+        for server in (preferred, fallback):
+            server.close()
+            await server.wait_closed()
+
+
+async def test_single_pinned_port_message_names_the_port() -> None:
+    """Anthropic's case: one port, no ladder, and a message worth reading."""
+    squatter = await _occupy()
+    port = _port_of(squatter)
+    try:
+        flow = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=port,
+                allow_port_fallback=False,
+                provider_label="Anthropic",
+            ),
+            LoginCallbacks(),
+        )
+        with pytest.raises(ConfigurationError) as excinfo:
+            await flow._start_server()
+        message = str(excinfo.value)
+        assert str(port) in message
+        assert "Anthropic" in message
+        assert "lsof" in message
+    finally:
+        squatter.close()
+        await squatter.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# OpenAI device flow + refresh encoding (first tests for the device path)
+# ---------------------------------------------------------------------------
+
+
+class _BodyRecorder:
+    """Captures the RAW request bytes and Content-Type of every call.
+
+    Encoding claims are the point of these tests, so nothing here inspects a
+    parsed convenience view: JSON vs form-encoded is a property of the wire
+    bytes, and asserting on `request.content` is what makes the claim checkable
+    rather than assumed.
+    """
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls.append(
+            {
+                "url": str(request.url),
+                "content_type": request.headers.get("content-type", ""),
+                "body": request.content.decode(),
+            }
+        )
+        return self._responses[min(len(self.calls) - 1, len(self._responses) - 1)]
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+
+def _id_token(account_id: str = "acct_1") -> str:
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = {
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": "plus",
+        },
+        "https://api.openai.com/profile": {"email": "user@example.com"},
+    }
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return f"{header}.{body}.sig"
+
+
+async def test_openai_refresh_sends_json_not_form() -> None:
+    """Upstream refreshes with JSON (auth/manager.rs request_chatgpt_token_refresh)
+    while the code exchange stays form-encoded. The asymmetry is the server's,
+    not ours -- assert the wire bytes so nobody 'tidies' it into consistency."""
+    from local_operator.providers.oauth.openai import refresh_openai_token
+
+    recorder = _BodyRecorder(
+        [httpx.Response(200, json={"access_token": "at_new", "expires_in": 3600})]
+    )
+    async with recorder.client() as client:
+        merged = await refresh_openai_token(
+            {"refresh": "rt_old", "access": "at_old", "org_id": "org_keep"},
+            http_client=client,
+        )
+
+    call = recorder.calls[0]
+    assert call["content_type"].startswith("application/json")
+    assert json.loads(call["body"]) == {
+        "grant_type": "refresh_token",
+        "refresh_token": "rt_old",
+        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+    }
+    assert "grant_type=refresh_token" not in call["body"]  # not form-encoded
+    assert merged["access"] == "at_new"
+    assert merged["org_id"] == "org_keep"  # org fields are never rewritten
+
+
+async def test_openai_device_flow_sends_json_with_user_code() -> None:
+    """The three device-flow defects at once: JSON encoding on both requests,
+    `user_code` present in the poll body (upstream TokenPollReq), and a bare
+    403 treated as 'keep polling' rather than as a hard failure."""
+    from local_operator.providers.oauth.openai import login_openai_device
+
+    recorder = _BodyRecorder([])
+    responses = iter(
+        [
+            # 1. usercode
+            httpx.Response(
+                200, json={"device_auth_id": "dev_1", "user_code": "ABCD-1234", "interval": 0}
+            ),
+            # 2/3. pending -- the statuses that used to abort the login on the
+            # very first poll, before the user could have typed anything.
+            httpx.Response(403),
+            httpx.Response(404),
+            # 4. authorized
+            httpx.Response(200, json={"authorization_code": "ac_1", "code_verifier": "cv_1"}),
+            # 5. token exchange
+            httpx.Response(
+                200,
+                json={
+                    "access_token": "at_1",
+                    "refresh_token": "rt_1",
+                    "id_token": _id_token(),
+                    "expires_in": 3600,
+                },
+            ),
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        recorder.calls.append(
+            {
+                "url": str(request.url),
+                "content_type": request.headers.get("content-type", ""),
+                "body": request.content.decode(),
+            }
+        )
+        return next(responses)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        creds = await asyncio.wait_for(
+            login_openai_device(LoginCallbacks(), http_client=client), timeout=30
+        )
+
+    usercode, first_poll, second_poll, third_poll, exchange = recorder.calls
+
+    # (a) JSON, not form-encoded, on the OpenAI-private endpoints.
+    assert usercode["content_type"].startswith("application/json")
+    assert json.loads(usercode["body"]) == {"client_id": "app_EMoamEEZ73f0CkXaXp7hrann"}
+
+    # (b) the poll carries user_code -- upstream TokenPollReq{device_auth_id,
+    # user_code}. client_id is NOT part of that struct.
+    for poll in (first_poll, second_poll, third_poll):
+        assert poll["content_type"].startswith("application/json")
+        assert json.loads(poll["body"]) == {
+            "device_auth_id": "dev_1",
+            "user_code": "ABCD-1234",
+        }
+
+    # (c) 403 and 404 kept the flow polling instead of ending it.
+    assert len([c for c in recorder.calls if c["url"].endswith("deviceauth/token")]) == 3
+
+    # The code exchange stays FORM-encoded (upstream exchange_code_for_tokens).
+    assert exchange["content_type"].startswith("application/x-www-form-urlencoded")
+    exchanged = dict(urllib.parse.parse_qsl(exchange["body"]))
+    assert exchanged["grant_type"] == "authorization_code"
+    assert exchanged["code"] == "ac_1"
+    assert exchanged["redirect_uri"] == "https://auth.openai.com/deviceauth/callback"
+    assert exchanged["code_verifier"] == "cv_1"
+
+    assert creds["access"] == "at_1"
+    assert creds["account_id"] == "acct_1"
+
+
+async def test_openai_device_flow_still_fails_on_a_real_error() -> None:
+    """403/404 meaning 'pending' must not swallow genuine failures."""
+    from local_operator.providers.oauth.openai import login_openai_device
+
+    responses = iter(
+        [
+            httpx.Response(
+                200, json={"device_auth_id": "dev_1", "user_code": "ABCD-1234", "interval": 0}
+            ),
+            httpx.Response(400, json={"error": "expired_token", "error_description": "gone"}),
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(LoginError, match="gone"):
+            await asyncio.wait_for(
+                login_openai_device(LoginCallbacks(), http_client=client), timeout=30
+            )
+
+
+# ---------------------------------------------------------------------------
+# Paste fallback: reachable, announced, and honest about failure
+# ---------------------------------------------------------------------------
+
+
+# NOTE: the shapes `_parse_pasted_callback` accepts (bare code, `code#state`,
+# full redirect URL, state-in-fragment) are already pinned by
+# TestPastedCallbackParsing above; re-verified against this change, unchanged.
+
+
+async def test_pending_login_announces_the_paste_fallback() -> None:
+    """A user watching a browser that will never redirect must be able to SEE
+    that pasting is available, without hunting. The prompt was always attached;
+    nothing on screen said so."""
+    seen: dict[str, Any] = {}
+
+    def on_auth_url(url: str, instructions: str | None = None) -> None:
+        seen["url"] = url
+        seen["instructions"] = instructions
+
+    callbacks = LoginCallbacks(
+        on_auth_url=on_auth_url,
+        on_manual_code_input=lambda: None,  # attached, declines -> parks
+    )
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=0, timeout_seconds=0.2, provider_label="Anthropic"),
+        callbacks,
+    )
+    with pytest.raises(LoginError):
+        await asyncio.wait_for(flow.run(), timeout=10)
+
+    instructions = seen["instructions"]
+    assert instructions is not None
+    assert "paste" in instructions.lower()
+    assert "redirect URL" in instructions
+
+
+async def test_no_paste_prompt_means_no_paste_promise() -> None:
+    """Loopback-only providers get no prompt, so promising one would lie."""
+    seen: dict[str, Any] = {}
+
+    def on_auth_url(url: str, instructions: str | None = None) -> None:
+        seen["instructions"] = instructions
+
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=0, timeout_seconds=0.2),
+        LoginCallbacks(on_auth_url=on_auth_url),
+    )
+    with pytest.raises(LoginError):
+        await asyncio.wait_for(flow.run(), timeout=10)
+
+    assert "paste" not in (seen["instructions"] or "").lower()
+
+
+async def test_timeout_with_a_paste_path_names_the_recovery() -> None:
+    """The reported symptom -- browser stays on the provider's site -- times out
+    here. The generic 'check your system clock' message serves the wrong cause."""
+    from local_operator.providers.oauth.callback_server import LoginTimeoutError
+
+    flow = _EchoFlow(
+        CallbackFlowOptions(preferred_port=0, timeout_seconds=0.2, provider_label="Anthropic"),
+        LoginCallbacks(on_manual_code_input=lambda: None),
+    )
+    with pytest.raises(LoginTimeoutError) as excinfo:
+        await asyncio.wait_for(flow.run(), timeout=10)
+
+    message = str(excinfo.value)
+    assert "Anthropic" in message
+    assert "paste" in message.lower()
+    assert "clock" in message  # the WSL/VM note is kept, not replaced
+
+
+async def test_anthropic_pins_its_callback_port() -> None:
+    """54545 is allowlisted by Anthropic; inheriting the default port fallback
+    meant a busy 54545 minted a random-port redirect_uri that the allowlist
+    rejects at the IdP, after the browser had opened, with an error the user
+    cannot act on. The pin is what makes the module docstring's claim true.
+
+    Asserted on configuration rather than by binding 54545: the operator may
+    well have a real Claude login open, and the busy-port BEHAVIOUR is covered
+    on an ephemeral port by test_single_pinned_port_message_names_the_port.
+    """
+    from local_operator.providers.oauth.anthropic import AnthropicOAuthFlow
+
+    flow = AnthropicOAuthFlow(LoginCallbacks(), open_browser=lambda url: None)
+    assert flow.options.allow_port_fallback is False
+    assert flow.options.candidate_ports == (54545,)
+    assert flow.options.redirect_uri is None  # built from the bound port
