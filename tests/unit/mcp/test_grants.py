@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.mcp import auth as auth_mod
 from local_operator.mcp.grants import (
     GRANT_SUBCOMMANDS,
     REMOTE_GRANT_NOTICE,
@@ -20,6 +21,12 @@ from local_operator.mcp.grants import (
     run_grant,
     start_grant,
 )
+
+#: The genuine credential delete, captured at IMPORT time. The autouse fixture
+#: below replaces the module attribute for every test, so a test that needs the
+#: real deletion (against an injected store) cannot recover it by reading the
+#: module afterwards — it would get the fake back and pass vacuously.
+_REAL_MCP_LOGOUT = auth_mod.mcp_logout_server
 
 
 class _Conn:
@@ -525,3 +532,64 @@ async def test_the_last_notice_never_claims_a_deleted_credential_is_intact(
     assert "the stored credential is unchanged" not in last, last
     # Whatever it says, it must leave the user with the step that fixes it.
     assert "/mcp login notion" in last, last
+
+
+@pytest.mark.asyncio
+async def test_reauth_on_a_url_only_server_reconnects_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's bug: `/mcp reauth` 401'd where `/mcp login` then worked.
+
+    Runs the REAL credential delete (the autouse fake is opted out of via an
+    injected store) because the delete is where the defect lived. A
+    Codex-imported config is url-only, so the stored grant is its only evidence
+    under ``server_is_oauth_capable``; reauth deleted it and then re-asked the
+    same question, got False, attached no OAuth provider, and connected
+    unauthenticated. Intermittent only because the challenge ledger is
+    per-process — a session that had already seen this server 401 was warm.
+    """
+    from local_operator.mcp.config import MCPHttpServerConfig
+
+    url = "https://codex.example/mcp"
+    cfg = MCPHttpServerConfig(url=url)
+    auth_mod.OAUTH_CHALLENGES.clear()
+
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    store = FakeAuthStore()
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda cwd: ({"codex": cfg}, {}),
+    )
+    # Undo the autouse logout stub and run the REAL delete against an
+    # in-memory store: the delete is the code under test here, so a fake that
+    # skips it would leave the stored-grant evidence intact and pass either
+    # way. The store is injected, so the developer's real auth.db is untouched.
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd: _REAL_MCP_LOGOUT(name, cwd, store),
+    )
+
+    class _AuthAwareManager(_Manager):
+        """Records the answer ``_build_oauth_auth`` gets at reconnect time."""
+
+        capable_at_connect: bool | None = None
+
+        async def connect_configured_server(
+            self, name: str, *, timeout_ms: float | None = None
+        ) -> _Conn:
+            self.capable_at_connect = auth_mod.server_is_oauth_capable(cfg, store)
+            if not self.capable_at_connect:
+                raise RuntimeError(f"MCP server at {url} refused the connection (401)")
+            return await super().connect_configured_server(name, timeout_ms=timeout_ms)
+
+    manager = _AuthAwareManager(cfg=cfg)
+    text, kind = await run_grant(manager, "reauth", "codex")
+
+    # The row really was deleted — reauth stays destructive-then-constructive.
+    assert auth_mod.server_has_stored_grant(url, store) is False
+    # ...but the fact it proved survived the delete, so OAuth is still wired.
+    assert manager.capable_at_connect is True
+    assert kind == "success", text
+    assert "refused the connection (401)" not in text

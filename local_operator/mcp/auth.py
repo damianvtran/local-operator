@@ -1000,9 +1000,46 @@ def mcp_logout_server(
     # Only remote configs carry ``url``; a stdio config reaching here would
     # have already failed the OAuth check above, so the getattr is a type
     # narrowing rather than a guess.
-    storage = McpTokenStorage(getattr(cfg, "url", ""), store)
+    url = getattr(cfg, "url", "")
+    # Read the durable evidence BEFORE destroying it — see the transfer below.
+    had_stored_grant = server_has_stored_grant(url, store)
+    storage = McpTokenStorage(url, store)
     if not storage.clear():
         return f"no stored credential for MCP server {name!r} — nothing to log out of"
+    if had_stored_grant:
+        # EVIDENCE TRANSFER, not a guess. ``server_is_oauth_capable`` accepts
+        # three kinds of evidence that a server authenticates over OAuth: an
+        # explicit ``auth.type: oauth`` block, a stored grant for its URL, and
+        # an observed 401 challenge in ``OAUTH_CHALLENGES``. A config imported
+        # from a foreign tool (Codex, issue #367) carries only a ``url``, so
+        # the stored grant is its ONLY evidence — and the delete above is what
+        # erases it.
+        #
+        # That erasure is what broke ``/mcp reauth`` on those servers. Reauth
+        # is a delete followed by a reconnect, and the reconnect re-asks
+        # ``server_is_oauth_capable`` (via ``_build_oauth_auth``): with the row
+        # gone and the ledger cold, it answered False, attached no OAuth
+        # provider, and the connect went out unauthenticated and took a 401.
+        # The gate that authorised the reauth had already short-circuited on
+        # the very row being deleted, so nothing re-established the fact. It
+        # was intermittent only because the ledger is per-process: a session
+        # that had already watched this server 401 was warm and worked.
+        #
+        # Holding a token for ``url`` is STRONGER proof than the discovery
+        # probe that normally populates this ledger — an authorization server
+        # did not merely advertise itself, it issued us a grant — so recording
+        # it as an observed challenge asserts only what we just read. The
+        # record is deliberately made HERE, at the single point that destroys
+        # the row, so no caller can delete a credential without preserving
+        # what it proved (``/mcp reauth``, the CLI's ``mcp reauth``, and the
+        # desktop grant runner all funnel through this function).
+        #
+        # Scoped to ``had_stored_grant`` on purpose: a server that qualified
+        # only through a declared ``auth.type: oauth`` block keeps qualifying
+        # without the ledger, and claiming a discovery result we never ran
+        # would put an unverified fact in a ledger whose entries are supposed
+        # to be observations.
+        record_oauth_challenge(url, oauth_available=True)
     return None
 
 

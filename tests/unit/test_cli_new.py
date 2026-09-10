@@ -695,7 +695,14 @@ def test_main_exec_dispatch(
 async def test_mcp_login_connects_and_disconnects_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    config = types.SimpleNamespace(auth=types.SimpleNamespace(type="oauth"))
+    # ``url`` is part of the shape, not decoration: an OAuth server with no URL
+    # is a contradiction (a stdio transport cannot carry a bearer token), and
+    # the real ``MCPHttpServerConfig`` always has one. The gate now asks
+    # ``server_rejects_oauth``, which reads the transport as well as the auth
+    # block, so a double omitting it describes a server that cannot exist.
+    config = types.SimpleNamespace(
+        auth=types.SimpleNamespace(type="oauth"), url="https://linear.example/mcp"
+    )
     monkeypatch.setattr(
         "local_operator.mcp.config.load_all_mcp_configs",
         lambda _cwd: ({"linear": config}, {"linear": tmp_path / "mcp.json"}),
@@ -780,6 +787,129 @@ async def test_mcp_reauth_stops_when_removal_fails(
     monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
     assert await cli._mcp_reauth_server("linar", tmp_path) == 1
     assert "not configured" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_accepts_a_url_only_oauth_capable_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A Codex-imported server has no auth block, and the CLI must not refuse it.
+
+    The static ``cfg.auth.type == 'oauth'`` gate this replaced rejected exactly
+    the servers ``/mcp login`` in the TUI handles fine — one question with two
+    gates that disagreed. Capability is decided by the same live probe the rest
+    of the code uses.
+    """
+    config = types.SimpleNamespace(auth=None, url="https://codex.example/mcp")
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": config}, {"codex": tmp_path / "config.toml"}),
+    )
+
+    async def _capable(cfg, store=None):
+        return True
+
+    monkeypatch.setattr("local_operator.mcp.auth.probe_oauth_capability", _capable)
+
+    class FakeManager:
+        def __init__(self, cwd: Path) -> None:
+            self.disconnected = False
+
+        async def connect_configured_server(self, name, *, timeout_ms=None):
+            return types.SimpleNamespace(tools=[object()])
+
+        async def disconnect_all(self) -> None:
+            self.disconnected = True
+
+    monkeypatch.setattr("local_operator.mcp.manager.McpManager", FakeManager)
+
+    assert await cli._mcp_login_server("codex", tmp_path) == 0
+    assert "discovered 1 tools" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_still_refuses_a_server_that_cannot_take_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """F3: an apikey or stdio server stays a HARD refusal, with no probe.
+
+    An ``auth.type: apikey`` entry is the user stating how the server
+    authenticates; starting an OAuth flow there answers a question they already
+    answered. The refusal must also stay free — no network round trip to learn
+    something the config already settles.
+    """
+
+    async def _must_not_probe(cfg, store=None):
+        raise AssertionError("a statically-ineligible server must not be probed")
+
+    monkeypatch.setattr("local_operator.mcp.auth.probe_oauth_capability", _must_not_probe)
+
+    apikey = types.SimpleNamespace(
+        auth=types.SimpleNamespace(type="apikey"), url="https://api.example/mcp"
+    )
+    stdio = types.SimpleNamespace(auth=None, url=None)
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"apikey": apikey, "stdio": stdio}, {}),
+    )
+
+    for name in ("apikey", "stdio"):
+        assert await cli._mcp_login_server(name, tmp_path) == 1
+        assert "not OAuth-enabled" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_on_a_url_only_server_reconnects_authenticated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI reauth path shares the TUI's evidence-loss bug and its fix.
+
+    ``_mcp_reauth_server`` is its own function — it does not go through
+    ``run_grant`` — so it deletes the row via the same helper and then logs in.
+    With the stored grant as a url-only config's ONLY capability evidence, the
+    delete used to make the subsequent connect unauthenticated.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    url = "https://codex.example/mcp"
+    cfg = MCPHttpServerConfig(url=url)
+    auth_mod.OAUTH_CHALLENGES.clear()
+    store = FakeAuthStore()  # never the developer's real auth.db
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": cfg}, {}),
+    )
+    real_logout = auth_mod.mcp_logout_server
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.mcp_logout_server",
+        lambda name, cwd: real_logout(name, cwd, store),
+    )
+
+    seen: dict[str, bool] = {}
+
+    class FakeManager:
+        def __init__(self, cwd: Path) -> None:
+            pass
+
+        async def connect_configured_server(self, name, *, timeout_ms=None):
+            # The question ``_build_oauth_auth`` asks before wiring the provider.
+            seen["capable"] = auth_mod.server_is_oauth_capable(cfg, store)
+            if not seen["capable"]:
+                raise RuntimeError(f"MCP server at {url} refused the connection (401)")
+            return types.SimpleNamespace(tools=[object()])
+
+        async def disconnect_all(self) -> None:
+            pass
+
+    monkeypatch.setattr("local_operator.mcp.manager.McpManager", FakeManager)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 0
+    assert auth_mod.server_has_stored_grant(url, store) is False  # really deleted
+    assert seen["capable"] is True  # ...but still known to take OAuth
 
 
 @pytest.mark.parametrize(

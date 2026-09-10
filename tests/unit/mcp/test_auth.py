@@ -413,6 +413,57 @@ class TestLogoutHelpers:
         not_oauth = mcp_logout_server("stdio", Path("/anywhere")) or ""
         assert "does not use OAuth" in not_oauth
 
+    def test_deleting_a_url_only_grant_preserves_what_it_proved(self, monkeypatch) -> None:
+        """The ``/mcp reauth`` regression: the delete must not erase capability.
+
+        A Codex-imported config is url-only, so its stored grant is its ONLY
+        evidence under ``server_is_oauth_capable``. Reauth deletes that row and
+        immediately reconnects, and the reconnect re-asks the same question:
+        without this transfer it answered False, attached no OAuth provider,
+        and the connect went out unauthenticated and took a 401.
+        """
+        url = "https://codex.example/mcp"
+        auth_mod.OAUTH_CHALLENGES.clear()
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: ({"codex": MCPHttpServerConfig(url=url)}, {}),
+        )
+        store = FakeAuthStore()
+        McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+        assert mcp_logout_server("codex", Path("/anywhere"), store) is None
+        assert auth_mod.server_has_stored_grant(url, store) is False
+        # The row is gone, but the server is still known to take OAuth.
+        assert auth_mod.server_is_oauth_capable(MCPHttpServerConfig(url=url), store) is True
+
+    def test_deleting_a_registration_only_row_records_no_challenge(self, monkeypatch) -> None:
+        """Only a grant we actually HELD is evidence of a live challenge.
+
+        The row deleted here carries just a dynamic client registration — the
+        artifact the SDK writes when it merely DISCOVERS a server, before anyone
+        authorizes (see ``server_has_stored_grant``). Deleting it proves nothing
+        was ever issued, so recording an observed 401 for that URL would put a
+        fact we never established into an observation-only ledger. The config's
+        explicit ``auth.type: oauth`` is what keeps this server capable, and it
+        needs no ledger entry to stay that way.
+        """
+        url = "https://declared.example/mcp"
+        auth_mod.OAUTH_CHALLENGES.clear()
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: ({"declared": cfg}, {}),
+        )
+        store = FakeAuthStore()
+        McpTokenStorage(url, store).seed_client_info("client-1")
+        assert auth_mod.server_has_stored_grant(url, store) is False
+
+        # The delete succeeds: a registration row exists and is removed.
+        assert mcp_logout_server("declared", Path("/anywhere"), store) is None
+        assert url not in auth_mod.OAUTH_CHALLENGES
+        # Still capable — on the declared block alone, as it should be.
+        assert auth_mod.server_is_oauth_capable(cfg, store) is True
+
     def test_logged_out_servers_keys_by_url(self) -> None:
         """The picker list is keyed by server NAME but the store by URL; the
         helper returns the store's keys so the caller can do the mapping."""

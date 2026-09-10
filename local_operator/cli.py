@@ -3606,6 +3606,7 @@ async def _mcp_login_server(name: str, cwd: Path) -> int:
     therefore survives this short-lived manager and future Local Operator
     sessions reuse it without another browser round-trip.
     """
+    from local_operator.mcp.auth import probe_oauth_capability, server_rejects_oauth
     from local_operator.mcp.config import load_all_mcp_configs
     from local_operator.mcp.manager import McpManager
 
@@ -3614,10 +3615,34 @@ async def _mcp_login_server(name: str, cwd: Path) -> int:
     if cfg is None:
         print(f"error: MCP server {name!r} is not configured", file=sys.stderr)
         return 1
-    auth = getattr(cfg, "auth", None)
-    if auth is None or auth.type != "oauth":
+    # NOT ``cfg.auth.type == 'oauth'`` any more — the same widening the TUI and
+    # runtime grant paths already made (issue #367). A config imported from a
+    # foreign tool (Codex) carries only a ``url``, because that tool keeps its
+    # OAuth grants elsewhere and its format has no auth block to copy. The
+    # static check refused those outright, so ``local-operator mcp login
+    # <codex-server>`` failed on exactly the servers ``/mcp login`` handles
+    # fine — two gates for one question, disagreeing.
+    #
+    # The split below preserves the F3 protection that motivated the strict
+    # check. ``server_rejects_oauth`` is the STATIC impossibility (a stdio
+    # server, or one whose config declares ``auth.type: apikey`` — the user
+    # stating how it authenticates), and it stays a free, hard refusal with the
+    # wording that tells them how to add an OAuth server. Only the genuinely
+    # undecidable url-only case pays for the live probe, which asks the network
+    # once instead of assuming every remote URL is authenticable.
+    if server_rejects_oauth(cfg):
         print(
             f"error: MCP server {name!r} is not OAuth-enabled; " "add a remote server with --oauth",
+            file=sys.stderr,
+        )
+        return 1
+    if not await probe_oauth_capability(cfg):
+        # Reachable only for a remote server that answered the probe without
+        # advertising an authorization server: it may be genuinely public, or
+        # discovery may be unreachable. Distinct wording, because "add a remote
+        # server with --oauth" is useless advice for a server that IS one.
+        print(
+            f"error: MCP server {name!r} does not use OAuth login",
             file=sys.stderr,
         )
         return 1
