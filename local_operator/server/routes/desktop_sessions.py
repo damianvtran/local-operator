@@ -10,8 +10,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -51,6 +51,13 @@ router = APIRouter(tags=["Desktop sessions"], dependencies=[Depends(require_desk
 RequestID = Annotated[
     str, Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
 ]
+#: The attachment store names files ``<digest>.bin``, so the digest reaches a
+#: filesystem path directly. Constraining the shape HERE rather than in the
+#: handler is what makes traversal unreachable by construction: FastAPI rejects
+#: a non-matching path before the handler runs, and a later edit inside the
+#: handler cannot route around a declaration. 32 hex characters is
+#: ``attachments._DIGEST_CHARS``.
+AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
 
 
 class Input(BaseModel):
@@ -250,6 +257,52 @@ async def history(
 ):
     async with errors(), host(request).session(session_id) as bridge:
         return reply(await bridge.history(before_id=before_id, limit=limit))
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/attachments/{digest}",
+    # The image's own mime type is the response type, so the published contract
+    # must not claim the CRUD JSON envelope its neighbours return. Declaring the
+    # class is what keeps the schema honest; without it FastAPI documents
+    # `application/json` for a route that never sends any.
+    response_class=Response,
+)
+async def attachment(session_id: str, digest: AttachmentDigest, request: Request):
+    """Raw bytes of one content-addressed attachment referenced by a history row.
+
+    ``/history`` serves durable rows verbatim, and a durable image block is
+    ``{"attachment": <digest>, "mime_type": ...}`` with the payload stripped
+    (``transcript._externalize_attachments``). Without this route a frontend can
+    see that an image was in the conversation and can never render it after a
+    reload — the live event stream carries the base64, the durable transcript
+    does not.
+
+    Three deliberate choices:
+
+    - **Keyed by digest, not by (entry, index).** The history row hands the
+      caller the digest directly, so nothing has to re-fold history per image,
+      and identical screenshots across a whole conversation collapse to one
+      request and one cache entry.
+    - **The digest pattern is the traversal gate.** ``_DIGEST_CHARS`` is 32 hex
+      characters and the store turns a digest straight into a filename, so the
+      shape is validated in the path declaration rather than inside the handler
+      where a later edit could route around it. FastAPI answers a non-matching
+      path with 422 before any disk access.
+    - **Immutable caching.** The digest IS the sha256 of the content, so the
+      bytes behind a URL can never change. A renderer that holds a blob for a
+      scrolled-away row re-requests it for free.
+
+    A missing attachment is 404, never 500: the store's contract is that an
+    unresolvable reference is ordinary (interrupted write, hand-pruned store)
+    and the reader degrades to a placeholder.
+    """
+    async with errors():
+        data, mime_type = await host(request).attachment(session_id, digest)
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.post(

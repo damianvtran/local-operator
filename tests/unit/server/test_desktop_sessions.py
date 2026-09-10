@@ -1,6 +1,7 @@
 """Desktop stream algebra, resource bounds and durable retry invariants."""
 
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -463,3 +464,71 @@ async def test_served_list_order_is_the_catalogs_rank(tmp_path):
     assert served == [entry.id for entry in rank_entries(catalog[::-1])]
     # And concretely: the armed row leads despite being the oldest.
     assert served == ["armed", "newest", "middle"]
+
+
+@pytest.mark.asyncio
+async def test_durable_attachment_is_readable_without_starting_an_owner(tmp_path):
+    """A digest from a history row resolves to bytes on a cold conversation.
+
+    This is the read that makes durable images renderable at all: `/history`
+    serves rows verbatim, and an image block over the externalisation floor is a
+    digest with the payload stripped, so a reader that cannot resolve a digest
+    can only ever know an image WAS there.
+
+    It deliberately does NOT go through `DesktopSessions.session`. A finished
+    conversation's screenshot must be readable without starting an owner
+    process, which is the same argument `acknowledge_attention` already makes
+    for a read receipt -- and the assertion that no bridge was created is what
+    keeps a later refactor from quietly acquiring one per image.
+    """
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    raw = b"\x89PNG\r\n\x1a\nnot-a-real-png-but-real-bytes"
+    store = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME)
+    ref = store.put(base64.b64encode(raw).decode("ascii"), "image/png")
+    assert ref is not None
+
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+
+    pool = DesktopSessions(tmp_path)
+    data, mime_type = await pool.attachment("0123456789ab", ref.digest)
+    assert data == raw and mime_type == "image/png"
+    assert pool.bridges == {}
+
+    # A miss is ordinary, not a fault: the store's own contract is that an
+    # interrupted write or a hand-pruned store degrades to a placeholder, and
+    # `errors()` maps KeyError to 404 rather than letting it reach a 500.
+    with pytest.raises(KeyError):
+        await pool.attachment("0123456789ab", "f" * 32)
+    # Nor may a valid digest be read through a session id that is not a user
+    # conversation on this machine.
+    with pytest.raises(KeyError):
+        await pool.attachment("ffffffffffff", ref.digest)
+
+
+def test_attachment_digest_shape_is_enforced_by_the_route_declaration():
+    """Traversal is unreachable by construction, not by a handler check.
+
+    The store turns a digest straight into `<root>/<digest>.bin`, so the only
+    safe place for the constraint is the path declaration: FastAPI rejects a
+    non-matching path before the handler runs, and no later edit inside the
+    handler can route around it. Asserting on the published schema rather than
+    on a string literal is what keeps this true if the annotation moves.
+    """
+    from local_operator.server.app import app
+
+    schema = app.openapi()
+    path = "/v1/desktop/sessions/{session_id}/attachments/{digest}"
+    digest = next(
+        parameter
+        for parameter in schema["paths"][path]["get"]["parameters"]
+        if parameter["name"] == "digest"
+    )
+    assert digest["schema"]["pattern"] == r"^[a-f0-9]{32}$"
+    # And the response is raw bytes rather than the CRUD envelope: a JSON
+    # envelope has nowhere to put an image.
+    assert "application/json" not in schema["paths"][path]["get"]["responses"]["200"].get(
+        "content", {}
+    )

@@ -9,6 +9,7 @@ The last reader detaches; neither socket disposal nor HTTP shutdown stops work.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -30,6 +31,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
+from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import load_catalog
 from local_operator.session.frontend_state import (
@@ -481,6 +483,44 @@ class DesktopSessions:
             )
 
         return await asyncio.to_thread(acknowledge)
+
+    async def attachment(self, session_id: str, digest: str) -> tuple[bytes, str]:
+        """Decoded bytes and mime type for one content-addressed attachment.
+
+        Durable transcript rows reference images by digest, not by payload:
+        ``transcript._externalize_attachments`` strips ``data`` from any block
+        over 1 KiB of base64 and leaves ``{"attachment": <digest>,
+        "mime_type": ...}`` behind. ``/history`` serves those rows verbatim,
+        so a reading surface can see that an image WAS there and has no way to
+        fetch it. This is that way.
+
+        Deliberately outside :meth:`session`, exactly like
+        :meth:`acknowledge_attention` and for the same reason: reading a
+        screenshot out of a finished conversation must not start an owner
+        process. The session id is still validated against the same durable
+        user-session namespace, so the route cannot be used to probe arbitrary
+        directories, and the store is shared rather than per-session because
+        the digest IS the content key.
+
+        ``KeyError`` for an unknown session or an unresolvable digest — the
+        store's own contract is that a miss is ordinary (an interrupted write,
+        a hand-pruned store) and callers degrade to a placeholder rather than
+        treating it as a fault.
+        """
+
+        def read() -> tuple[bytes, str]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
+            if resolved is None:
+                raise KeyError("Unknown attachment")
+            data_b64, mime_type = resolved
+            return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
 
     async def create(self, cwd: str, *, target: dict[str, str] | None = None) -> str:
         directory = Path(cwd).expanduser().resolve()
