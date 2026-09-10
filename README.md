@@ -87,3 +87,54 @@ Printed by the capture script at the moment each frame was taken.
 
 `audit=` and `more=` in the script's output are `RemoteSession.history_is_audit`
 and `bool(history_before_token)`, which are what the notice branches on.
+
+---
+
+# Round 2 — remediation frames (head `9c2b7531e`)
+
+Re-captured after the round-1 remediation. `round2-before/` is the **reviewed
+head `ec31bd26f`**, not `main`, so each pair isolates what remediation changed.
+
+**Captured into a separate directory per geometry**, because the round-1 script
+named frames by state alone: running two geometries into one directory silently
+left only the second, and a settle check "passed" over four such overwritten
+files. `scripts/audit_history_shot.py` now puts the geometry in the filename
+(`<state>.<COLS>x<ROWS>.svg`), so the collision is structurally impossible.
+
+```sh
+for g in 80x30 100x34 140x50; do
+  env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+      scripts/audit_history_shot.py "/tmp/frames/$g" all "$g"
+done
+```
+
+## Why 80x30 was added
+
+D2 could not be seen at either round-1 geometry: 98 and 138 usable columns both
+clear the marker, so the wrap only appears at 80. It is now the geometry that
+decides this row.
+
+| geometry | screen | usable text columns on the marker row |
+|---|---|---|
+| `80x30` | `78 x 28` | **68** — the binding constraint |
+| `100x34` | `98 x 32` | 88 |
+| `140x50` | `138 x 48` | 128 |
+
+## What the pairs show
+
+| frame | shows |
+|---|---|
+| `round2-before/marker.80x30.svg` | **D2, reproduced.** `· context compacted here — older messages below are history the agent no` with `longer sees` orphaned on the next row. |
+| `round2-after/marker.80x30.svg` | One row: `· context compacted — earlier history above the agent no longer sees`. Direction corrected (D1), 66 chars, no wrap. |
+| `round2-before/marker.{100x34,140x50}.svg` | The same inverted copy, on one line — which is exactly why these two geometries could not show D2. |
+| `round2-after/audit.*.svg` | **D3.** A blank row now separates the clickable head notice from the inert seam; before, the two stacked flush sharing glyph, ink and opening words. |
+| `round2-after/exhausted.*.svg` | **D4.** `start of conversation` at the `note` ink (`#b5afa2` dark / `#565147` light), 7.18:1 on light against the 3.77:1 it had at `info`/`dim`. |
+
+## Settle pairs
+
+All 12 after-frames captured twice with a further settle between; every pair
+byte-identical, so no reflow. The `cmp` instrument was canaried both ways first
+(a file against itself → IDENTICAL; against itself plus 8 bytes → DIFFERS), so
+a null result is a real absence rather than a dead probe. Only the first frame
+of each pair is committed; regenerate with the script for the `.settled.svg`
+twin.
