@@ -1,0 +1,58 @@
+  [armed-state buffer] '/credential •••••'
+--- TYPED: /credential<space>12345<enter> ---
+  composer text   : '[Credential #1, 5 chars] '
+  chip minted     : True
+  credential count: 1
+  armed           : False
+  submitted texts : []
+  SECRET in composer : False
+  SECRET in submitted: False
+  => clean
+
+  [picker open] True
+  [after accept] text='/credential ' armed=True
+  [armed-state buffer] '/credential •••••'
+--- ACCEPT-ENTER: /credential+enter 12345 <enter> ---
+  composer text   : '[Credential #1, 5 chars] '
+  chip minted     : True
+  credential count: 1
+  armed           : False
+  submitted texts : []
+  SECRET in composer : False
+  SECRET in submitted: False
+  => clean
+
+  [picker open] True
+  [after accept] text='/credential ' armed=True
+  [armed-state buffer] '/credential •••••'
+--- ACCEPT-TAB: /credential+tab 12345 <enter> ---
+  composer text   : '[Credential #1, 5 chars] '
+  chip minted     : True
+  credential count: 1
+  armed           : False
+  submitted texts : []
+  SECRET in composer : False
+  SECRET in submitted: False
+  => clean
+
+  [armed-state buffer] '/credential •••••'
+--- ESC after typing the secret (must RESTORE the text, not submit it) ---
+  composer text   : '/credential 12345'
+  chip minted     : False
+  credential count: 0
+  armed           : False
+  submitted texts : []
+  SECRET in composer : True
+  SECRET in submitted: False
+  => clean
+
+--- PASTE while armed (must not regress) ---
+  composer text   : '[Credential #1, 5 chars] '
+  chip minted     : True
+  credential count: 1
+  armed           : False
+  submitted texts : []
+  SECRET in composer : False
+  SECRET in submitted: False
+  => clean
+

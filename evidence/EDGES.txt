@@ -1,0 +1,75 @@
+--- K excludes the delimiting space ---
+  chip           : '[Credential #1, 5 chars] '
+  stored value   : <5 chars>
+  value == secret: True
+  leading space? : False
+  => K counts the secret only: True
+
+--- a space INSIDE the span is part of the secret ---
+  armed buffer   : '/credential •••••••••••••••••••••'
+  chip           : '[Credential #1, 21 chars] '
+  value == phrase: True
+  => spaces kept inside the secret: True
+
+--- bare /credential <KEY> still dispatches ---
+  armed?         : False
+  typing?        : False
+  submitted      : ['/credential MY_API_KEY']
+  => legacy dispatch intact: True
+
+--- Enter ends the secret, not the message ---
+  after enter    : '[Credential #1, 5 chars] '
+  submitted yet? : []
+  after prose    : '[Credential #1, 5 chars] this is the staging key'
+  => description typed around the chip, nothing sent: True
+
+--- empty secret + Enter mints nothing ---
+  armed buffer   : '/credential '
+  chip minted    : False
+  submitted      : ['/credential ']
+  => empty secret mints nothing: True
+
+--- backspace past the token backs out ---
+  after erasing  : '/credential ' typing=True
+  past the space : '/credential' typing=False
+  armed?         : True
+  => backing out is clean: True
+
+--- caret leaving the span ends the capture ---
+  buffer         : '/credential •••••'
+  typing?        : False
+  SECRET present : False
+  => capture ended without disclosing: True
+
+--- history recall while typing ---
+  buffer         : '/credential •••••'
+  typing?        : False
+  SECRET present : False
+  => recall cannot reveal it: True
+
+--- a second /credential while one is chipped ---
+  buffer         : '[Credential #1, 5 chars] and [Credential #2, 5 chars] '
+  credentials    : 2 keys=['LOP_SECRET_SWXFWXAN', 'LOP_SECRET_Z65WAN8F']
+  => two distinct captures: True
+
+--- shift+enter (multi-line) while typing ---
+  buffer         : '/credential •••••\n'
+  typing?        : False
+  SECRET present : False
+  => newline does not disclose: True
+
+--- clear_content while typing ---
+  buffer         : ''
+  typing?        : False
+  => clear drops the held value: True
+
+--- --forget-all stays typable ---
+  buffer         : '/credential --forget-all'
+  typing?        : False
+  => flag verb typable verbatim: True
+
+--- prose masks, Esc restores it ---
+  masked prose   : 'fix the /credential •••••••'
+  after esc      : 'fix the /credential command'
+  => prose recoverable in one keystroke: True
+

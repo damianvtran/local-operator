@@ -1,0 +1,58 @@
+  [armed-state buffer] '/credential 12345'
+--- TYPED: /credential<space>12345<enter> ---
+  composer text   : ''
+  chip minted     : False
+  credential count: 0
+  armed           : False
+  submitted texts : ['/credential 12345']
+  SECRET in composer : False
+  SECRET in submitted: True
+  => LEAK
+
+  [picker open] True
+  [after accept] text='' armed=False
+  [armed-state buffer] '12345'
+--- ACCEPT-ENTER: /credential+enter 12345 <enter> ---
+  composer text   : ''
+  chip minted     : False
+  credential count: 0
+  armed           : False
+  submitted texts : ['/credential ', '12345']
+  SECRET in composer : False
+  SECRET in submitted: True
+  => LEAK
+
+  [picker open] True
+  [after accept] text='/credential ' armed=False
+  [armed-state buffer] '/credential 12345'
+--- ACCEPT-TAB: /credential+tab 12345 <enter> ---
+  composer text   : ''
+  chip minted     : False
+  credential count: 0
+  armed           : False
+  submitted texts : ['/credential 12345']
+  SECRET in composer : False
+  SECRET in submitted: True
+  => LEAK
+
+  [armed-state buffer] '/credential 12345'
+--- ESC after typing the secret ---
+  composer text   : '/credential 12345'
+  chip minted     : False
+  credential count: 0
+  armed           : True
+  submitted texts : []
+  SECRET in composer : True
+  SECRET in submitted: False
+  => LEAK
+
+--- PASTE while armed (must not regress) ---
+  composer text   : '[Credential #1, 5 chars] '
+  chip minted     : True
+  credential count: 1
+  armed           : False
+  submitted texts : []
+  SECRET in composer : False
+  SECRET in submitted: False
+  => clean
+
