@@ -1047,6 +1047,29 @@ RESUME_AUDIT_NOTICE = "earlier history above — scroll up to load"
 #: cannot be scrolled to it, so the row offers itself as the control instead.
 RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — select to load"
 
+#: How many times one fetch transaction re-issues against a moved display
+#: window before declaring the head genuinely unstable. The window moves on a
+#: compaction or canonical refresh — rare, and each move is a real event, so
+#: two retries cover a refresh landing mid-page with generous headroom; a
+#: fourth move means something is churning history faster than a reader can
+#: scroll, and spinning further is indistinguishable from a live-lock.
+_OLDER_PAGE_MAX_RETRIES = 3
+
+#: The transport-gone message, in the user's vocabulary. Chosen over the
+#: transport's own strings (`not attached`, `owner connection lost`) which the
+#: operator reported as a stack of red errors they could not act on. Stated as
+#: a fact the reader can wait out — the rows are still on disk and a
+#: reconnected session serves them — never as an instruction the code was
+#: meant to carry out. Not red: the condition resolves itself, so it is not an
+#: error the user must answer.
+_OLDER_PAGE_TRANSPORT_NOTICE = "session is reconnecting; earlier messages will load once it is back"
+
+#: The genuine-fault message. Still an error — a contiguity violation or an
+#: unexpected failure must surface — but phrased for a human: what happened,
+#: and that scrolling up is the way to ask again. Never carries the internal
+#: `not attached` / `history changed while paging` wording.
+_OLDER_PAGE_FAULT_NOTICE = "Could not load earlier messages right now — scroll up to try again"
+
 
 @dataclass(frozen=True)
 class _PagingLease:
@@ -3200,6 +3223,15 @@ class OperatorApp(App[None]):
         #: presentation: `_resume_paging` reads the current source's entry, and
         #: only the transaction holding an entry may remove it (F1).
         self._paging_leases: dict[str, _PagingLease] = {}
+        #: Consecutive display-window invalidations one fetch transaction has
+        #: re-issued against, keyed by source token. A compaction or canonical
+        #: refresh can replace the window UNDER an in-flight page request, and
+        #: the right answer is to re-issue against the fresh window, silently —
+        #: it is not a failure at all. Bounded (see `_OLDER_PAGE_MAX_RETRIES`):
+        #: a window that keeps moving is not this layer's to spin on. Transport
+        #: failures (the connection is gone) never count and never retry here —
+        #: reattach is the owner's floor, not the presentation's.
+        self._older_page_retries: dict[str, int] = {}
         #: Whether the INITIAL fill still has an attempt to make. Distinct from
         #: `_resume_paging`, which is a mutex over the mount seam: this asks
         #: "is the geometry on screen still provisional?", and it stays set
@@ -8822,6 +8854,7 @@ class OperatorApp(App[None]):
         generation = self._sidebar_navigation.generation
         transferred = False
         completed = False
+        retrying = False
 
         def current() -> bool:
             return (
@@ -8856,13 +8889,69 @@ class OperatorApp(App[None]):
                 transferred = True
         except Exception as exc:
             if current() and owns():
-                self._resume_fill_active = False
-                self._notice(f"Could not load earlier messages: {exc}", "error")
+                failure = self._classify_older_page_failure(session, exc)
+                if failure == "invalidation":
+                    # The display window moved under this request — a
+                    # compaction or a canonical refresh replaced it. Nothing
+                    # is broken, and the reader should never see it: re-issue
+                    # the page against the fresh window, silently. The retry
+                    # count is per-source so a switch away cannot leak one
+                    # conversation's budget into another's. A retry RE-ISSUES
+                    # through the whole fetch path (below), which re-acquires
+                    # the lease — a stale completion matching source+view must
+                    # never retire the newer transaction, which is the F1
+                    # identity check, and the fresh acquire is its guard.
+                    attempts = self._older_page_retries.get(lease.source_token, 0) + 1
+                    self._older_page_retries[lease.source_token] = attempts
+                    if attempts <= _OLDER_PAGE_MAX_RETRIES:
+                        # Mark the retry BEFORE the finally: it must release
+                        # this dead lease without firing `on_settled` (the
+                        # fill-chain continuation) — the re-issued fetch owns
+                        # answering the same demand now, and firing it early
+                        # would advance the chain before the page has landed.
+                        self._resume_fill_active = False
+                        retrying = True
+                        return
+                    # The window keeps moving — churning faster than a reader
+                    # can scroll. Fall through to the honest fault rather than
+                    # live-lock; the next scroll-up asks again.
+                    self._resume_fill_active = False
+                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
+                elif failure == "transport":
+                    # The connection is down; reattach is the transport
+                    # layer's floor and is driven underneath this one. Do NOT
+                    # spin: two independent retries on one failure is its own
+                    # bug. End quietly, in the user's vocabulary — the rows
+                    # are still there and a reconnected session serves them —
+                    # and never red, for a condition that resolves itself.
+                    self._older_page_retries.pop(lease.source_token, None)
+                    self._resume_fill_active = False
+                    self._notice(_OLDER_PAGE_TRANSPORT_NOTICE, "note")
+                else:
+                    # A genuine fault: a contiguity violation or the
+                    # unexpected. Surface it, honestly, phrased for a human —
+                    # and never carrying the internal `not attached` /
+                    # `history changed while paging` wording the operator saw
+                    # as five identical red rows.
+                    self._older_page_retries.pop(lease.source_token, None)
+                    self._resume_fill_active = False
+                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
         finally:
             # `transferred` means the mount now carries the lease to its settle.
             # Otherwise this transaction ends here, and only it may end itself.
             if not transferred and self._release_paging_lease(lease):
-                if current() and completed and on_settled is not None:
+                # A successful page that retired cleanly resets the retry
+                # budget: the window this transaction re-issued against has
+                # stopped moving, so the next demand starts fresh rather than
+                # inheriting a count earned against a window already gone.
+                if completed:
+                    self._older_page_retries.pop(lease.source_token, None)
+                if retrying:
+                    # The lease is now free; re-issue the page against the
+                    # fresh window through a NEW acquire, so a stale
+                    # completion can never retire the newer transaction (F1).
+                    self._reissue_older_display_page(source, on_settled)
+                elif current() and completed and on_settled is not None:
                     on_settled()
                 else:
                     self._resume_fill_active = False
@@ -8912,6 +9001,76 @@ class OperatorApp(App[None]):
     def _resume_paging(self) -> bool:
         """Whether the CURRENT source owes a page it has not finished painting."""
         return self._interaction.token in self._paging_leases
+
+    def _classify_older_page_failure(self, session: Any, exc: Exception) -> str:
+        """Sort an older-page fetch failure into its retry-ownership class.
+
+        Three classes, each owned by a different layer, and the split is the
+        contract this method exists to enforce — the wrong owner for a retry
+        is its own bug (two independent retries stacked on one failure):
+
+        ``invalidation`` — the display window moved under the page request
+        (a compaction or a canonical refresh replaced ``_display_history``).
+        Nothing is broken; the page simply needs re-issuing against the fresh
+        window. The session raised ``history changed while paging; retry`` to
+        say so, but that instruction is to the CODE, so this layer — not the
+        reader — carries it out. This is the ONLY class retried here, because
+        it is not a transport failure at all: the transport layer neither sees
+        it nor can fix it.
+
+        ``transport`` — the connection is gone (``ConnectionError``, or the
+        session reporting ``is_cold``). NEVER retried here: reattach is the
+        transport layer's floor, and this layer spinning on a dead socket
+        would race it. Ended quietly with a calm, non-error message.
+
+        ``fault`` — anything else (a contiguity violation, the unexpected).
+        Still surfaces, honestly, as an error a human can act on.
+
+        The classification keys on the failure TYPE first and only then on the
+        session's connectivity, never on text — with ONE deliberate exception.
+        ``history changed while paging`` is the session's OWN retry signal (a
+        ``RuntimeError`` it raises from ``load_older_display_page`` when its
+        identity check fires), produced by first-party code rather than an
+        untrusted peer, so it is the one string this layer may recognise. What
+        it must never do is the reverse: surface ANY of these internal strings
+        to the reader, which is the defect this change fixes.
+        """
+        if isinstance(exc, RuntimeError) and "history changed while paging" in str(exc):
+            return "invalidation"
+        if isinstance(exc, ConnectionError):
+            return "transport"
+        # A window that moved can surface as an ordinary RuntimeError rather
+        # than the explicit invalidation string on an older owner; a revision
+        # bump says the window moved between the request and the raise. Only
+        # trusted here for the INVALIDATION class, and only when the session
+        # still reports a live connection — a dead transport is transport's.
+        if bool(getattr(session, "is_cold", False)):
+            return "transport"
+        return "fault"
+
+    def _reissue_older_display_page(
+        self, source: SessionInteraction, on_settled: Callable[[], None] | None
+    ) -> None:
+        """Re-issue one older-page fetch after a moved display window.
+
+        Runs ONLY after the failed transaction's own `finally` has released
+        its lease, so this acquires a FRESH one through `_acquire_paging_lease`
+        rather than reusing the dead token — a stale completion matching
+        source+view must never retire this newer transaction, which is the F1
+        identity check that check exists for. A refused acquire (a switch or a
+        newer page already holds the gate) ends the demand quietly rather than
+        queuing behind it: the reader's next upward gesture re-arms it, and a
+        queued retry would fire against a view the reader has already left.
+        """
+        if not self._is_current(source) or source.session is None:
+            return
+        lease = self._acquire_paging_lease(source)
+        if lease is None:
+            return
+        self.run_worker(
+            self._fetch_older_display_page(source, lease, on_settled=on_settled),
+            group=source.worker_group("history-page"),
+        )
 
     def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
         """Take the backward-paging gate for ``source``, or refuse.

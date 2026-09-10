@@ -259,6 +259,189 @@ async def test_remote_fetch_lease_extends_through_painted_settlement(tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_moved_window_retries_silently_and_loads(tmp_path) -> None:
+    """A display window replaced under the page request re-issues silently.
+
+    This is the `history changed while paging` line from the operator's
+    report: a compaction or canonical refresh replaces ``_display_history``
+    while a page fetch is in flight, and the session raises the retry
+    instruction. Pre-fix that internal string was painted at the reader as a
+    red error; the fix re-issues the page against the fresh window and says
+    nothing. The mover is driven through REAL machinery —
+    ``_invalidate_display_history`` + ``ensure_display_current`` — exactly as
+    a compaction event does, so the raise is load_older's own identity check,
+    not a stub.
+    """
+    async with remote_session(tmp_path, history()) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            # Drain the mounted reserve so the next upward demand must FETCH.
+            while app._resume_pending_head:
+                app._mount_older_resume_page()
+                await settled(app, pilot)
+            assert remote.history_before_token
+
+            calls = 0
+            real_load = remote.load_older_display_page
+
+            async def counted_load():
+                nonlocal calls
+                calls += 1
+                return await real_load()
+
+            remote.load_older_display_page = counted_load
+
+            # Move the window under the FIRST page request only — a single
+            # transient, the reachable-in-production shape.
+            real_history_page = remote.history_page
+            moved_once = False
+
+            async def moving_history_page(before, *, anchor=""):
+                nonlocal moved_once
+                if not moved_once:
+                    moved_once = True
+                    remote._invalidate_display_history()
+                    await remote.ensure_display_current()
+                return await real_history_page(before, anchor=anchor)
+
+            remote.history_page = moving_history_page
+
+            view = app._transcript_view()
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            # The reader's own gesture: a wheel notch at the top.
+            view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+            await settled(app, pilot)
+            for _ in range(10):
+                await pilot.pause()
+
+            # One invalidation forced a re-issue: the same logical demand was
+            # fetched twice, and the retry SUCCEEDED — older rows landed.
+            assert calls >= 2
+            assert app._resume_pending_head
+            # And said nothing to the reader: no error, no internal wording.
+            notices = [
+                block.text()
+                for block in app._transcript_view().blocks()
+                if isinstance(block, NoticeBlock)
+            ]
+            assert not any("history changed while paging" in t for t in notices)
+            assert not any("retry" in t.lower() and "earlier messages" in t for t in notices)
+
+
+@pytest.mark.asyncio
+async def test_transport_gone_is_calm_and_never_retried(tmp_path) -> None:
+    """A dropped owner connection ends quietly, never retried by this layer.
+
+    The `not attached` / `owner connection lost` lines from the report. The
+    connection is down and reattach is the transport layer's floor — this
+    layer must NOT spin on it. It ends the transaction with a calm, non-error
+    message in the user's vocabulary, and makes exactly ONE fetch attempt.
+    """
+    async with remote_session(tmp_path, history()) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            while app._resume_pending_head:
+                app._mount_older_resume_page()
+                await settled(app, pilot)
+            assert remote.history_before_token
+
+            calls = 0
+            real_load = remote.load_older_display_page
+
+            async def counted_load():
+                nonlocal calls
+                calls += 1
+                return await real_load()
+
+            remote.load_older_display_page = counted_load
+            # A real disconnection, not a stubbed raise: a closed attach
+            # client is exactly the state a dropped owner leaves behind. The
+            # client is known live here (the drain above needed it); the
+            # None-guard is only for the type checker.
+            assert remote._client is not None
+            remote._client.close()
+            await pilot.pause()
+
+            view = app._transcript_view()
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+            await settled(app, pilot)
+            for _ in range(10):
+                await pilot.pause()
+
+            # NEVER retried: one attempt, then the transaction ended.
+            assert calls == 1
+            assert not app._resume_paging and not app._resume_fill_active
+            notices = [
+                block for block in app._transcript_view().blocks() if isinstance(block, NoticeBlock)
+            ]
+            texts = [block.text() for block in notices]
+            # The internal wording is gone, and the row is calm — `note`'s
+            # `·` glyph, not the red `✗` the operator reported.
+            assert not any("not attached" in t for t in texts)
+            failure = next((n for n in notices if "earlier messages" in n.text()), None)
+            assert failure is not None
+            assert failure._glyph != "✗"
+
+
+@pytest.mark.asyncio
+async def test_genuine_fault_still_surfaces_as_error(tmp_path) -> None:
+    """An unexpected failure keeps an honest, human-phrased error notice.
+
+    Not every failure is a moved window or a dead socket. A contiguity
+    violation or any unexpected exception must still surface — but phrased
+    for a human, never carrying the internal `not attached` /
+    `history changed while paging` wording the operator saw as red rows.
+    """
+    async with remote_session(tmp_path, history()) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            while app._resume_pending_head:
+                app._mount_older_resume_page()
+                await settled(app, pilot)
+            assert remote.history_before_token
+
+            async def failing_load():
+                raise ValueError("history page is not contiguous with the loaded window")
+
+            remote.load_older_display_page = failing_load
+            view = app._transcript_view()
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+            await settled(app, pilot)
+            for _ in range(10):
+                await pilot.pause()
+
+            notices = [
+                block for block in app._transcript_view().blocks() if isinstance(block, NoticeBlock)
+            ]
+            texts = [block.text() for block in notices]
+            # Still an error (the `✗` glyph), but never the internal wording.
+            assert any("earlier messages" in t for t in texts)
+            assert not any("contiguous with the loaded window" in t for t in texts)
+            failure = next(n for n in notices if "earlier messages" in n.text())
+            assert failure._glyph == "✗"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("hidden", [0, 500])
 async def test_real_sidebar_projection_runs_rendered_fill(tmp_path, hidden) -> None:
     async with (
