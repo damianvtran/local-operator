@@ -350,7 +350,7 @@ LIVE_EVENT_END_ROWS_MAX = 100
 #: has hundreds of kilobytes spare and is never touched. Only the pathological
 #: combination clips, which is the case the socket cannot carry anyway.
 #:
-#: Clipping keeps the FIRST rows in the owner's existing sort order (best/most
+#: Clipping keeps the FIRST rows in the runtime's existing sort order (best/most
 #: relevant first, the order the picker already renders) rather than dropping
 #: from the middle, and sets ``model_catalogue_truncated`` so the reader can
 #: say the list is partial instead of presenting it as the whole set.
@@ -664,7 +664,7 @@ def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
 
 
 # Commands whose effect belongs to the process drawing the widgets. Every other
-# advertised slash is routed to the authoritative session owner; keeping this a
+# advertised slash is routed to the authoritative runtime; keeping this a
 # complement means adding a command without classification fails the test rather
 # than silently acquiring follower-local behavior.
 _FRONTEND_LOCAL_SLASHES = {
@@ -672,13 +672,13 @@ _FRONTEND_LOCAL_SLASHES = {
     "exit",
     "clear",
     # The terminal schedules source-bound iterations and owns sidebar focus;
-    # each iteration still submits through that conversation's real owner.
+    # each iteration still submits through that conversation's runtime.
     "loop",
     "sidebar",
     # The clipboard is the machine the USER IS SITTING AT, and every part of
     # this command is already here: the transcript it reads is painted by this
     # frontend, the picker it opens is painted by this frontend, and the OSC 52
-    # write goes out this terminal. Routed to the owner it would draw a chooser
+    # write goes out this terminal. Routed to the runtime it would draw a chooser
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
@@ -689,19 +689,19 @@ _FRONTEND_LOCAL_SLASHES = {
     # The picker draws on THIS terminal, its suggestions are read from THIS
     # machine's session records and wake index, and the directory a user means
     # is one on the machine they are sitting at — the same argument `/settings`
-    # and `/theme` make about config.yml. Routed to the owner it would offer a
+    # and `/theme` make about config.yml. Routed to the runtime it would offer a
     # remote host's directories to someone who cannot see them, and move a
     # session into a path that may not exist here at all.
     "move",
     # A fork opens a window on THIS machine and reads THIS machine's config.yml
     # for where to put it — the same argument `/settings` and `/theme` make. On a
-    # follower attached to a remote owner, forking must open a window here, not
-    # on the owner's host where nobody is sitting.
+    # follower attached to a remote runtime, forking must open a window here, not
+    # on the runtime's host where nobody is sitting.
     "fork",
     "theme",
     # The settings page reads and writes THIS machine's config.yml, exactly
-    # like `/theme` and `/search` above it. Routed to the owner it would open
-    # against the owner's config and persist a default governing a machine the
+    # like `/theme` and `/search` above it. Routed to the runtime it would open
+    # against the runtime's config and persist a default governing a machine the
     # user is not sitting at — the same rule `/model default` states explicitly
     # when it refuses to run on a follower.
     "settings",
@@ -710,17 +710,17 @@ _FRONTEND_LOCAL_SLASHES = {
     "accounts",
     # Reads config.yml and the local credential COUNTS, and compares the
     # frontend's own effective model — all of it available on a follower, so
-    # routing it to the owner would only add a hop.
+    # routing it to the runtime would only add a hop.
     "failovers",
     "usage",
     "analytics",
     # Like analytics, reads the shared local ledger for the mirrored current
-    # session ID. No owner RPC or new transport payload is needed.
+    # session ID. No runtime RPC or new transport payload is needed.
     "session",
     # Everything /info reports is a fact about the process DRAWING the screen:
     # its install prefix and resolved import path, its pid and control port, the
     # session registry on this host, this frontend's terminal and theme. Routed
-    # to the owner it would describe the owner's machine while the header names
+    # to the runtime it would describe the runtime's machine while the header names
     # this one — the wrong-machine answer on the one screen whose entire job is
     # "which code am I actually running". Same argument as `/theme`, `/settings`
     # and the `desktop_destination` this command deliberately omits.
@@ -729,37 +729,37 @@ _FRONTEND_LOCAL_SLASHES = {
     "login",
     "logout",
     # Remote access is enrolled using this frontend computer's OAuth store and
-    # service manager; routing to the session owner would expose another host.
+    # service manager; routing to the runtime would expose another host.
     "mobile",
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
-    # paste prompt on the owner's screen, which nobody is looking at. This is
+    # paste prompt on the runtime host's screen, which nobody is looking at. This is
     # the same split bare ``/model`` makes: the interaction is hosted here, the
-    # effect lands on the owner.
+    # effect lands on the runtime.
     #
     # The STORE is emphatically NOT local. ``VariableStore._credentials`` is an
     # in-memory per-process dict, and the reader is ``credential_env()`` inside
-    # the `bash` tool, which runs in the OWNER's process. A viewer that stored
+    # the `bash` tool, which runs in the runtime's process. A viewer that stored
     # locally would hold a secret no tool could ever read while telling the
     # model the key exists — a silent failure whose workaround is pasting the
     # secret into the chat, which is the exact leak this feature prevents. So
     # ``_cmd_credential`` keeps the prompt here and routes every store/forget
-    # over the dedicated ``credential`` op to the owner's store.
+    # over the dedicated ``credential`` op to the runtime's store.
     "credential",
     # The overlay is local UI; its provider request crosses the authoritative
     # complete_aside operation on RemoteSession.
     "btw",
     # The kill switch is the one session command that must act from THIS
     # process even on a follower: bare /stop ends the session the viewer is
-    # looking at (the owner's runtime via the direct stop op, not a routed
+    # looking at (the attached runtime via the direct stop op, not a routed
     # slash), `/stop <target>` and `/stop all` enumerate THIS machine's
-    # registry — a different machine's registry than the owner's is exactly
-    # the point of stopping from here. Routing it to the owner would stop the
-    # OWNER's neighbours, not the viewer's.
+    # registry — a different machine's registry than the runtime's is exactly
+    # the point of stopping from here. Routing it to the runtime would stop the
+    # RUNTIME's neighbours, not the viewer's.
     "stop",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
-# subcommands mutate OAuth state that lives on the authoritative owner — the
+# subcommands mutate OAuth state that lives on the authoritative runtime — the
 # follower's MCP facade is a read-only snapshot with no config accessor, so
 # routing the mutation (not faking it locally) is the only non-crashing,
 # non-divergent answer. The dispatch splits the two shapes by argument.
@@ -804,9 +804,9 @@ class SlashCapability(BaseModel):
 
 
 class SlashResult(BaseModel):
-    """The typed outcome of one slash command run on the authoritative owner.
+    """The typed outcome of one slash command run on the authoritative runtime.
 
-    The v5 replacement for the synthetic ``ran /…`` receipt: the owner runs a
+    The v5 replacement for the synthetic ``ran /…`` receipt: the runtime runs a
     shared slash command and returns WHAT happened as data, so the terminal
     that asked renders it locally instead of the answer painting in another
     process's transcript. Every product-facing string is produced by the
@@ -1083,7 +1083,7 @@ def _bound_launch_prompts_across_jobs(jobs: list[Any]) -> None:
         if not isinstance(prompts, dict) or not prompts:
             continue
         # Re-bounded HERE as well as in ``_with_lineage``. A ``JobState`` can be
-        # built directly — a restored reader row, a test, an owner that never
+        # built directly — a restored reader row, a test, a runtime that never
         # went through the comms path — so the wire boundary cannot assume the
         # construction-time bound ran. Cheap: the common row has no entries.
         prompts = _wire_launch_prompts(prompts)
@@ -1240,7 +1240,7 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
     Omission is exactly equivalent to sending the empty values: ``JobState``
     defaults both, a delta rebuilds each row by revalidating the raw dict rather
     than merging it onto the prior row (``apply_update``), and a follower
-    reading neither key takes the same degrade path as one attached to an owner
+    reading neither key takes the same degrade path as one attached to a runtime
     that predates the fields. So this is a pure byte saving, not a semantic one.
 
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
@@ -1280,7 +1280,7 @@ class JobState(BaseModel):
     """Read-only job shape used by the existing job widgets.
 
     ``extra='allow'`` is intentional: retained trajectory fields can grow without
-    forcing an older follower to reject a newer owner. Unknowns stay attached to
+    forcing an older follower to reject a newer runtime. Unknowns stay attached to
     the DTO and survive a round trip rather than being discarded.
     """
 
@@ -1299,7 +1299,7 @@ class JobState(BaseModel):
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
-    # None knowledge marks old owners, which still need the legacy pricing path.
+    # None knowledge marks old runtimes, which still need the legacy pricing path.
     # Explicit UNKNOWN forbids viewers from discovering/pricing independently.
     direct_cost: float | None = None
     direct_cost_knowledge: CostKnowledge | None = None
@@ -1307,18 +1307,18 @@ class JobState(BaseModel):
     started_at: float | None = None
     settled_at: float | None = None
     trajectory: list[dict[str, Any]] = Field(default_factory=list)
-    #: How many events the OWNER retains for this job, independent of how many
+    #: How many events the RUNTIME retains for this job, independent of how many
     #: ride this particular frame. The attach snapshot omits trajectories
     #: entirely (see :func:`_job_roster_row`) because a busy session's retained
     #: events exceed the socket's ``_MAX_LINE_BYTES`` and made the session
     #: unopenable; a viewer therefore needs the COUNT before it has the rows,
-    #: to say "loading 500 events" rather than "no activity". Owner-side this
-    #: is always ``len(trajectory)``; follower-side it stays the owner's number
+    #: to say "loading 500 events" rather than "no activity". Runtime-side this
+    #: is always ``len(trajectory)``; follower-side it stays the runtime's number
     #: even while the local list is empty or a partial page.
     trajectory_length: int = 0
     # Nested spend (#297): a finished grandchild's usage folds into its root's
     # row here. Without carrying it, follower-side child-cost pricing counted
-    # only the direct child while the owner priced the whole subtree.
+    # only the direct child while the runtime priced the whole subtree.
     descendant_usage: list[FrontendUsage] = Field(default_factory=list)
     prompt: str | None = None
     agent_role: str | None = None
@@ -1326,7 +1326,7 @@ class JobState(BaseModel):
     output_tail: str = ""
     output_seq: int = 0
     restored: bool = False
-    # Canonical lineage (U5): the owner's subagent-comms tree is not itself
+    # Canonical lineage (U5): the runtime's subagent-comms tree is not itself
     # serializable, but its one fact — who launched whom — is. Stamping the
     # parent's job id (and the child's session/role for the page header) lets
     # a follower rebuild the full parent/peer/child graph from ``state.jobs``
@@ -1336,12 +1336,12 @@ class JobState(BaseModel):
     session_id: str | None = None
     #: The child's durable session directory, as a string (``Path`` is not
     #: JSON-native). Projected here for the same reason ``session_id`` is:
-    #: the owner's ``SubagentComms`` registry never crosses the socket, and
+    #: the runtime's ``SubagentComms`` registry never crosses the socket, and
     #: the full-page view lazy-loads the child's ``transcript.jsonl`` through
     #: ``comms.session_dir_of(job_id)``. A follower with no directory treated
     #: every child as "no saved transcript" and could show only the 500-event
     #: in-memory trajectory window of a child that had hours of history on
-    #: disk. ``None`` from an owner that predates this field is tolerated —
+    #: disk. ``None`` from a runtime that predates this field is tolerated —
     #: ``SnapshotSubagentComms`` derives the path from ``session_id`` then.
     session_dir: str | None = None
     #: The deterministic ``subagent-launch:<job_id>`` id of the CURRENT launch
@@ -1363,9 +1363,9 @@ class JobState(BaseModel):
     #: wire boundary. It stays a MAPPING rather than collapsing to the current
     #: id: a resumed child's transcript holds one launch turn per collapsed
     #: attempt, and reconciling only the newest leaks every earlier attempt's
-    #: preamble (the exact defect owner-side review round 4 R4-1 fixed).
+    #: preamble (the exact defect runtime-side review round 4 R4-1 fixed).
     #:
-    #: Both are absent from an owner that predates them (``extra='allow'``), and
+    #: Both are absent from a runtime that predates them (``extra='allow'``), and
     #: a follower missing them degrades to rendering the synthetic head plus the
     #: unreconciled durable row — today's behaviour, not a crash.
     launch_message_id: str = ""
@@ -1382,9 +1382,9 @@ class JobState(BaseModel):
 
         Only when the caller supplied none. An explicit value is always kept,
         because on a FOLLOWER the two legitimately disagree: the wire snapshot
-        carries the owner's count with an empty list (the rows do not fit the
+        carries the runtime's count with an empty list (the rows do not fit the
         frame), and a watched job accumulates only the appends seen since its
-        page opened. Deriving unconditionally would replace the owner's real
+        page opened. Deriving unconditionally would replace the runtime's real
         number with the length of whatever partial window happens to be local.
         """
         if isinstance(data, dict) and "trajectory_length" not in data:
@@ -1476,7 +1476,7 @@ class JobState(BaseModel):
 
 
 class FrontendModelSpec(ModelSpec):
-    """Wire model spec that preserves fields introduced by newer owners."""
+    """Wire model spec that preserves fields introduced by newer runtimes."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -1599,18 +1599,18 @@ class FrontendSessionState(BaseModel):
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
-    # The owner's provider-catalogue rows, so an attached terminal's bare
+    # The runtime's provider-catalogue rows, so an attached terminal's bare
     # ``/model`` picker lists the models the SESSION can actually switch to
-    # (owner credentials/aggregators), never the follower's own possibly-
+    # (runtime credentials/aggregators), never the follower's own possibly-
     # credential-less registry (D3, review round 2). Bounded to the direct
     # (non-aggregator) rows; a follower's current model and its own live
     # refresh stay authoritative for their own rows.
     model_catalogue: list[dict[str, Any]] = Field(default_factory=list)
     #: True when the frame could not carry every catalogue row and
-    #: ``model_catalogue`` is a prefix of the owner's list rather than all of
+    #: ``model_catalogue`` is a prefix of the runtime's list rather than all of
     #: it (see :data:`MODEL_CATALOGUE_FLOOR_ROWS`).
     #:
-    #: Set at the WIRE boundary, not at accumulation: the owner's state holds
+    #: Set at the WIRE boundary, not at accumulation: the runtime's state holds
     #: the whole catalogue and only a frame that cannot fit clips, so this
     #: describes the copy the reader was actually sent. A reader that shows a
     #: clipped list as if it were complete is the failure this exists to
@@ -1620,7 +1620,7 @@ class FrontendSessionState(BaseModel):
     history_cursor: str | None = None
     history_generation: int = 0
     attachment_root: str | None = None
-    # Durable receipts are independent of owner epoch and pending action gates.
+    # Durable receipts are independent of the runtime epoch and pending action gates.
     attention: dict[str, Any] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
@@ -1681,13 +1681,13 @@ class FrontendSessionState(BaseModel):
 def _freeze_state_jobs(
     state: FrontendSessionState, *, jobs_are_canonical: bool = False
 ) -> FrontendSessionState:
-    """Detach incoming owners, or preserve already-owned jobs on scalar updates."""
+    """Detach the incoming owning models, or preserve already-owned jobs on scalar updates."""
     jobs = state.jobs if jobs_are_canonical else (_freeze_job(job) for job in state.jobs)
     return state.model_copy(update={"jobs": _FrozenSequence(jobs)})
 
 
 def _public_job(job: JobState) -> JobState:
-    """Detach every Pydantic owner while sharing immutable retained payloads."""
+    """Detach every owning model while sharing immutable retained payloads."""
     values = {
         name: copy.deepcopy(value) if isinstance(value, BaseModel) else value
         for name, value in job.__dict__.items()
@@ -1752,7 +1752,7 @@ class FrontendUpdate(BaseModel):
     Refusing a malformed frame is NOT the same as tearing down the socket over
     a degraded one. The degrade path now labels its own frame, so the frame this
     validator rejects is one claiming to be a complete delta while carrying no
-    body — which no correct owner emits. The receiver refuses it and re-syncs
+    body — which no correct runtime emits. The receiver refuses it and re-syncs
     (``RemoteSession._on_frontend_update``), which is the recovery the transport
     already has for a gap. Staying loud is what keeps that recovery reachable.
     """
@@ -1762,13 +1762,13 @@ class FrontendUpdate(BaseModel):
     epoch: str
     sequence: int
     changes: dict[str, Any] = Field(default_factory=dict)
-    #: The owner shed this delta's body to keep the line under the socket limit.
+    #: The runtime shed this delta's body to keep the line under the socket limit.
     #: Sequencing is still authoritative; the FIELDS are not, so a receiver must
     #: re-snapshot rather than treat the empty body as "nothing changed".
     degraded: bool = False
     degraded_reason: str = ""
     job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
-    # Jobs whose appended events are a REPLACEMENT, not a suffix. The owner's
+    # Jobs whose appended events are a REPLACEMENT, not a suffix. The runtime's
     # ``AsyncJob.trajectory`` evicts oldest past ``subagent.TRAJECTORY_CAP``, so
     # once a child crosses the cap the prefix check can never hold again;
     # without this marker a follower would extend forever (500 → 1000 → 1500…)
@@ -1786,7 +1786,7 @@ class FrontendUpdate(BaseModel):
         consumes a sequence and drifts the follower — the same shape as the
         defect this class is being fixed for. A normal delta always carries
         ``changes`` (``mutate`` returns ``None`` rather than emitting an empty
-        one), so requiring it here rejects only frames no correct owner sends.
+        one), so requiring it here rejects only frames no correct runtime sends.
         """
         if isinstance(data, dict) and "changes" not in data and not data.get("degraded"):
             raise ValueError(
@@ -1797,7 +1797,7 @@ class FrontendUpdate(BaseModel):
 
 
 # One watched plan must not take down the 1 MiB control stream. Larger plans
-# remain authoritative on the owner and are explicitly unavailable on a follower,
+# remain authoritative on the runtime and are explicitly unavailable on a follower,
 # never silently truncated into what looks like a complete task list.
 JOB_TODOS_WIRE_BYTES = 128 * 1024
 
@@ -1822,7 +1822,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     attached to — 12 of 17 sessions on the reference machine.
 
     Stripping happens HERE, at the wire boundary, rather than in
-    :class:`FrontendStateStore`: an in-process owner subscribes to the same
+    :class:`FrontendStateStore`: a front end in the runtime's process subscribes to the same
     store and still wants its rows, and the follower re-acquires them per job
     through the ``job_trajectory`` op once a reader actually opens that child's
     page. ``trajectory_length`` survives so the viewer can say how many events
@@ -1833,7 +1833,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
     itself and the next unbounded field grew past the same cap on its own:
 
     * ``snapshot.usage_components`` — capped at accumulation
-      (:data:`USAGE_COMPONENT_CAP`), and capped AGAIN here because an owner
+      (:data:`USAGE_COMPONENT_CAP`), and capped AGAIN here because a runtime
       that restored a pre-cap checkpoint holds the uncapped list in memory for
       the life of that process.
     * each job's ``usage.cost_components`` and ``descendant_usage`` — the
@@ -1926,7 +1926,7 @@ def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str,
     # thing being sent is the only quantity the socket cares about.
     if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
         return
-    # Binary search for the longest prefix that fits. The owner's order is the
+    # Binary search for the longest prefix that fits. The runtime's order is the
     # picker's order, so a prefix keeps the most relevant rows rather than an
     # arbitrary slice, and the flag below stops the short list from reading as
     # a complete one (MODEL_CATALOGUE_FLOOR_ROWS).
@@ -2209,7 +2209,7 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     makes the reader's ``readline`` raise ``LimitOverrunError``, which killed
     the client's pump task, which left the viewer waiting out its full 15 s
     sync timeout and then degrading to a runtime-less cold session. A hard bug
-    therefore wore the costume of a slow/absent owner, and diagnosing it took a
+    therefore wore the costume of a slow/absent runtime, and diagnosing it took a
     profiling session rather than a log line.
 
     So the report names the size, the cap, and the biggest contributors by
@@ -2329,7 +2329,7 @@ class SnapshotWakeScheduler:
 class SnapshotSubagentComms:
     """A follower's read-only job-graph facade, rebuilt from canonical jobs.
 
-    The owner's ``SubagentComms`` is a live registry of running children and
+    The runtime's ``SubagentComms`` is a live registry of running children and
     cannot cross the socket, but every navigation the full-page view needs —
     parent/peer/child, ancestors, the node's session/role — is pure graph over
     ``(job_id, parent_job_id, label, session_id, prompt, agent_role, effort)``,
@@ -2378,26 +2378,26 @@ class SnapshotSubagentComms:
             # queued child's ``JobState.status`` is still ``"running"`` and the
             # distinction lives in the separate ``queued`` flag, so projecting
             # the raw status counts a child that has not started as one that is
-            # spending tokens. The owner reconstructs the same split in
+            # spending tokens. The runtime reconstructs the same split in
             # ``SubagentComms._describe``; this is that derivation, on the
-            # follower's side of the wire, so a follower and an owner looking
+            # follower's side of the wire, so a follower and the runtime looking
             # at the same child agree on its word.
             status=_snapshot_status(job),
             # Derived from the RESULTING status, not from the raw one, so a
             # queued child is never stamped live. Note this ``live`` means
-            # "counts as a running trajectory", which on the owner is
+            # "counts as a running trajectory", which on the runtime is
             # ``record.child is not None`` (child attached) — the two coincide
             # for every state either side can report, but they are not the same
             # question, and a future divergence belongs in one of these two
             # comments rather than being discovered from a wrong total.
             live=_snapshot_status(job) in RUNNING_SUBAGENT_STATUSES,
             # Launch-row reconciliation, read off the node by
-            # ``_refresh_subagent_view`` exactly as it is on an owner. Defaulted
-            # rather than conditional: an older owner sends neither field, and
+            # ``_refresh_subagent_view`` exactly as it is on the runtime. Defaulted
+            # rather than conditional: an older runtime sends neither field, and
             # the empty values are what the view already tolerates (it keeps the
             # synthetic head and leaves the durable row unreconciled).
             #
-            # RE-DERIVED only when the owner SAID it elided a derivable value
+            # RE-DERIVED only when the runtime SAID it elided a derivable value
             # (``launch_id_derived``). At 46.7 B on every task row the literal
             # string cost 43 rows of attach headroom, and an identity cannot be
             # truncated, so it is omitted where it is reconstructible instead.
@@ -2406,7 +2406,7 @@ class SnapshotSubagentComms:
             # ``task`` row can have a launch turn at all (``run_subagent`` is
             # the sole minting site; bash and eval jobs register as ``"bash"``),
             # so a bash row keeps the empty string it always had and no marker
-            # has to ride the wire to say so. A v0.49.2 owner's task rows are
+            # has to ride the wire to say so. A v0.49.2 runtime's task rows are
             # derived here too — the id is right whenever the child was launched
             # by this runtime, and a wrong-shaped guess simply matches no
             # durable row, which is the pre-#681 behaviour.
@@ -2438,7 +2438,7 @@ class SnapshotSubagentComms:
         and a follower window reported "no subagents" for a session that had
         several, with nothing named as degraded.
 
-        One flat list including nested descendants, like the owner's: the
+        One flat list including nested descendants, like the runtime's: the
         canonical jobs stream carries every depth tagged with its true
         ``parent_job_id``, so consumers count with ``len()`` over a filter and
         never a recursive walk.
@@ -2450,7 +2450,7 @@ class SnapshotSubagentComms:
 
     def job(self, job_id: str) -> Any | None:
         # The page reads live job fields from the jobs facade, not here; the
-        # comms lookup exists on the owner for a manager cross-reference the
+        # comms lookup exists on the runtime for a manager cross-reference the
         # follower resolves through its own SnapshotJobs instead.
         return None
 
@@ -2484,7 +2484,7 @@ class SnapshotSubagentComms:
     def session_dir_of(self, job_id: str) -> Path | None:
         """Where the child's durable transcript lives, for lazy history paging.
 
-        The owner answers this from its live registry; a follower answers it
+        The runtime answers this from its live registry; a follower answers it
         from the projected job (see :func:`_snapshot_session_dir`). Existence
         is deliberately NOT checked here: the view already re-probes a
         directory whose ``transcript.jsonl`` is missing on every refresh
@@ -2563,7 +2563,7 @@ def _derived_dir_belongs_to(directory: Path, label: str, agent_role: str) -> boo
     existing "no saved transcript" note — exactly what a follower saw before
     this derivation existed — whereas trusting them renders somebody else's
     conversation under this child's name. Nothing is lost that the wire path
-    does not already cover: an owner that stamps ``session_dir`` never reaches
+    does not already cover: a runtime that stamps ``session_dir`` never reaches
     this check at all.
 
     Neither is a missing, unreadable, or malformed marker ownership, and the
@@ -2633,7 +2633,7 @@ def _snapshot_status(job: JobState) -> str:
     both carry ``"running"``, with the difference held in the separate
     ``queued`` flag. Every "what is running" surface wants them apart — a queued
     child is delegated, not working — so the split is reconstructed here exactly
-    as the owner reconstructs it in ``SubagentComms._describe``.
+    as the runtime reconstructs it in ``SubagentComms._describe``.
 
     Kept as a named function rather than an inline expression because it is the
     follower's half of a derivation whose two halves must agree; a reader
@@ -2649,17 +2649,17 @@ def _snapshot_session_dir(job: JobState) -> Path | None:
 
     Two sources, in order of authority:
 
-    1. The wire ``session_dir`` the owner stamped (``_with_lineage``). This is
-       the owner's own ``Path`` and is right by construction, so it is trusted
-       as-is — the owner knows where it put the child.
-    2. ``config_dir() / "sessions" / session_id`` when the owner sent only a
+    1. The wire ``session_dir`` the runtime stamped (``_with_lineage``). This is
+       the runtime's own ``Path`` and is right by construction, so it is trusted
+       as-is — the runtime knows where it put the child.
+    2. ``config_dir() / "sessions" / session_id`` when the runtime sent only a
        ``session_id``. Children are always created there
        (``harness/subagent.py``: ``session_id`` IS ``session_dir.name``), and a
        TUI attached to a daemon on the same machine reads the same config
        root. The derivation exists so an already-running daemon from before
        ``session_dir`` rode the wire — the exact situation an operator is in
-       when they upgrade the viewer under a long-lived owner — gets history
-       without a restart, rather than only after the owner is relaunched. It
+       when they upgrade the viewer under a long-lived runtime — gets history
+       without a restart, rather than only after the runtime is relaunched. It
        is also what rescues a child rebuilt from the comms graph after a
        restart, which carries a ``session_id`` and never had a wire directory.
 
@@ -2854,17 +2854,17 @@ class FrontendStateStore:
             subscriber(update.model_copy(deep=True))
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
-        """Apply one already-validated ordered delta from an owner.
+        """Apply one already-validated ordered delta from the runtime.
 
         A DEGRADED delta advances the sequence and touches nothing else. The
-        owner shed the body to keep the line under the socket limit, so the
+        runtime shed the body to keep the line under the socket limit, so the
         fields it carried are unknown here — not unchanged. Rebuilding the
         payload from an empty ``changes`` would be indistinguishable from a
         no-op delta and would leave the store quietly wrong, so the only honest
         local action is to keep what we have and let the sequence advance in
-        step with the owner's.
+        step with the runtime's.
 
-        The sequence MUST still advance: the owner consumed that number, and
+        The sequence MUST still advance: the runtime consumed that number, and
         refusing it here would desynchronise this store from the transport's
         gap check and refuse every later delta. Recovering the shed fields is
         the SUBSCRIBER's job — ``RemoteSession`` forces a fresh ``frontend_sync``
@@ -2892,8 +2892,8 @@ class FrontendStateStore:
                 else:
                     trajectory = list(prior.trajectory if prior is not None else [])
                 trajectory.extend(update.job_trajectory_appends.get(job_id, []))
-                # Defensive mirror of the owner-side eviction: even a
-                # misbehaving owner cannot grow a follower without bound.
+                # Defensive mirror of the runtime-side eviction: even a
+                # misbehaving runtime cannot grow a follower without bound.
                 if len(trajectory) > _TRAJECTORY_CAP:
                     del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
                 raw["trajectory"] = trajectory
@@ -2932,7 +2932,7 @@ class FrontendStateStore:
         fetched window two accumulators of the same list, and the page would
         show whichever won. Seeding is deliberately NOT a sequence-bearing
         mutation — no delta is published and the sequence does not move, since
-        this changes what this follower has locally, not what the owner said.
+        this changes what this follower has locally, not what the runtime said.
 
         Returns False when the job is no longer on the roster (it settled and
         was swept while the fetch was in flight), so the caller can leave the
@@ -3022,7 +3022,7 @@ class FrontendStateStore:
                 if trajectory[: len(old)] == old:
                     appended = trajectory[len(old) :]
                 else:
-                    # The owner list rotated past its cap (or was rebuilt):
+                    # The runtime's list rotated past its cap (or was rebuilt):
                     # a suffix no longer exists, so ship a replacement once
                     # rather than the whole list disguised as appends forever.
                     appended = trajectory
@@ -3126,12 +3126,12 @@ class FrontendStateStore:
         epoch = uuid.uuid4().hex
         session_id = str(session.session_id)
         state = restored or FrontendSessionState(session_id=session_id, epoch=epoch)
-        # A new owner epoch invalidates stale wire updates while preserving the
+        # A new runtime epoch invalidates stale wire updates while preserving the
         # durable checkpoint identity used to reconcile takeover without addition.
         #
         # The receipt cap is applied to the RESTORED value, not just to fresh
         # accumulation: every transcript written before the cap carries the full
-        # uncapped list (958 KB in the largest observed row), so an owner that
+        # uncapped list (958 KB in the largest observed row), so a runtime that
         # resumed one would emit an oversized attach frame and re-persist the fat
         # list forever despite the cap above. Capping on the way in is what makes
         # an existing session heal on its first resume rather than staying broken.
@@ -3140,7 +3140,7 @@ class FrontendStateStore:
                 "epoch": epoch,
                 "sequence": 0,
                 "usage_components": _capped_components(state.usage_components),
-                # The checkpoint describes a previous owner, not a scheduler
+                # The checkpoint describes a previous runtime, not a scheduler
                 # to restart. Keep its progress visible without claiming an
                 # iteration still runs (or replaying a possibly costly turn).
                 "loop": (
@@ -3373,11 +3373,11 @@ class FrontendStateStore:
         return self.mutate(jobs=jobs, child_costs=child_costs, **_ledger_cost(session))
 
     def refresh_model_catalogue(self, entries: Iterable[Any]) -> FrontendUpdate | None:
-        """Publish the owner's offerable model rows as canonical state.
+        """Publish the runtime's offerable model rows as canonical state.
 
         The catalogue answers one question — which models may this SESSION
-        switch to — and only the owner's provider controller knows it (the
-        owner's credentials, its aggregators, its registry). Kept out of
+        switch to — and only the runtime's provider controller knows it (the
+        runtime's credentials, its aggregators, its registry). Kept out of
         ``refresh_from_session`` because that runs on the session loop for
         every streaming edge; the catalogue changes on credential/registry
         timescales, so the TUI publishes it on adoption and after login-style
@@ -3787,7 +3787,7 @@ def _wire_launch_prompts(value: Any) -> dict[str, str]:
         # finding 3): a whitespace-only prompt otherwise rode the wire verbatim
         # and was then discarded by the view's own strip, spending bytes for an
         # entry that could never reconcile. The drop decision belongs here,
-        # owner-side, where it is made once.
+        # runtime-side, where it is made once.
         text = str(prompt or "").strip()
         if not identity or not text:
             continue
@@ -3816,7 +3816,7 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
     child_id = getattr(node, "session_id", None)
     has_plan = bool(child_id) and (bool(getattr(node, "live", False)) or child_id in TODO_STORE)
     # Stringified: the wire is JSON and ``Path`` is not. A follower's
-    # ``SnapshotSubagentComms`` turns it back into a ``Path``; the owner-side
+    # ``SnapshotSubagentComms`` turns it back into a ``Path``; the runtime-side
     # view never reads this field, it asks the live registry directly.
     session_dir = getattr(node, "session_dir", None)
     return job.model_copy(
@@ -3828,7 +3828,7 @@ def _with_lineage(job: JobState, comms: Any) -> JobState:
             # row: a live job knows only its own attempt, while the node
             # carries every attempt #314 collapsed into this record. The job's
             # own ``launch_message_id`` is the fallback for a node that has
-            # none, mirroring how the owner-side view reads the two.
+            # none, mirroring how the runtime-side view reads the two.
             "launch_message_id": str(
                 getattr(node, "launch_message_id", "")
                 or getattr(job, "launch_message_id", "")

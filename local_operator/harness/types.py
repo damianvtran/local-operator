@@ -331,7 +331,7 @@ class Message(BaseModel):
         could recover it.
 
         That is not hypothetical. ``harness/loop.py::_append_results`` stamped
-        the payload onto the message AFTER calling this, so the owner's rows
+        the payload onto the message AFTER calling this, so the runtime's rows
         carried it and everyone else's did not — and
         ``RemoteSession._remember_live`` builds the live row for a relayed
         ``tool_execution_end`` through exactly this constructor. The interval
@@ -953,7 +953,7 @@ class ToolContext(BaseModel):
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.
     todos: dict[str, list[dict[str, str]]] | None = None
-    # Optional owner hook for canonical full-TUI state. Tools call it only after
+    # Optional host hook for canonical full-TUI state. Tools call it only after
     # a successful mutation, never on read-only view or validation failures.
     on_todos_changed: Callable[[], None] | None = None
     # Injected by the HOST (see BrowserSurface), not created by the tool: this
@@ -1294,7 +1294,7 @@ class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
     """Settled transcript rows that became durable while no frontend painted them.
 
     Emitted by a reconnecting follower for the durable gap between what it
-    painted before losing the owner and the fresh sync's cursor. It is a
+    painted before losing the runtime and the fresh sync's cursor. It is a
     HISTORY contract, not a live one: every row is already settled, so the
     consumer must project each row through the same role-aware settled-history
     renderer a cold resume uses — user rows as user rows, assistant prose and
@@ -1467,7 +1467,7 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     """A message from ANOTHER local lop session (`lop send`) was delivered here.
 
     Fires the instant the message lands in this session's transcript/context,
-    even while the session is idle, so the owner TUI can paint the
+    even while the session is idle, so the attached TUI can paint the
     cross-session indicator immediately rather than waiting for the next turn
     render. Carries ``body`` (the raw text the human reads) and ``sender`` (the
     advisory pid/conversation/model identity for the indicator label).
@@ -1686,7 +1686,7 @@ class LoopConfig(BaseModel):
     # host (``Session._model``) and this config is a per-run value object: the
     # host would otherwise have to hold a reference to the config of whatever
     # run happens to be live and write through it. The loop asks instead, so
-    # the session stays the single owner of which model is current.
+    # the session stays the single authority on which model is current.
     #
     # The boundary is deliberately BETWEEN calls, never inside one. An
     # in-flight request keeps the spec it was issued with, so a switch cannot
@@ -2005,7 +2005,7 @@ class ChatRequest(BaseModel):
     #: the actual request until a counted boundary is available. ``0`` denotes
     #: an unrelated fresh one-shot prompt, whose own estimate should decide.
     context_tokens_hint: int | None = None
-    # Admission trusts a hint only after the conversation owner reconciles it
+    # Admission trusts a hint only after the loop that owns the conversation reconciles it
     # against this request and names the provider/model it measured. A fallback
     # to another model must use its own tokenizer estimate instead.
     context_tokens_hint_model: str | None = None

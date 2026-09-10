@@ -1429,7 +1429,7 @@ class SubagentComms:
         # the envelope leaked beside the fact. ``steer_message`` is the
         # identity-preserving seam: it queues the caller-built Message
         # verbatim. On a follower-owned child the id rides the wire as the
-        # ContinuationCommand id, which the owner's handle hands back to
+        # ContinuationCommand id, which the runtime's handle hands back to
         # ``Session.steer`` as ``message_id``, so the correlation survives
         # that path too.
         record.child.steer_message(Message.user(str(message.details["text"]), id=message.id))

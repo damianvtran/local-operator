@@ -1257,7 +1257,7 @@ class AgentLoop:
 
         The model is resolved HERE, per call, not once per run — see
         :meth:`_current_model`. ``context_tokens_hint`` is stamped onto the
-        request by THIS loop, the owner of the conversation the call belongs
+        request by THIS loop, which owns the conversation the call belongs
         to — never remembered on the shared stream fn, where a subagent's
         registration would overwrite the parent's (review F8).
         """
@@ -1968,7 +1968,7 @@ class AgentLoop:
                 return self._synthetic_result(
                     call,
                     # FIRST LINE is the card's failure label (the TUI takes
-                    # `_first_line(result_text)`), which is the row the owner
+                    # `_first_line(result_text)`), which is the row read as
                     # read as `User denied approv…`. It therefore carries the
                     # whole diagnosis on its own and the detail follows below,
                     # where the expansion and the model both get it.

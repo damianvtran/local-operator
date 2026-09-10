@@ -1761,8 +1761,8 @@ class Session:
         # above: the stream fn is SHARED with subagents, so a registered reader
         # is last-writer-wins — constructing a child overwrote the parent's
         # reader for good and downgraded every later parent request to 5m
-        # (review F8). The hint rides each request instead, stamped by its
-        # owner: the loop reads ``get_context_tokens_hint`` for turn calls and
+        # (review F8). The hint rides each request instead, stamped by whoever
+        # owns the call: the loop reads ``get_context_tokens_hint`` for turn calls and
         # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
         self._transcript = transcript
@@ -2053,7 +2053,7 @@ class Session:
         # Hosts reserve producer identities before a steer reaches its durable
         # boundary. A failed append must hand that identity back explicitly;
         # otherwise one disk error consumes both the retry ID and a bounded
-        # steering slot for the lifetime of the owner.
+        # steering slot for the lifetime of the runtime.
         self._steering_rejection_handlers: list[Callable[[str, str], None]] = []
         # Count of courtesy wake_prompt messages sitting in the steering
         # queue. The immediate-interrupt poll may cancel a RUNNING tool only
@@ -2116,8 +2116,8 @@ class Session:
         # not carry the conversation (their prompt is a different, write-once
         # prefix — see ``_one_shot_complete``). Moves in lockstep with
         # ``_last_usage`` (see ``_note_usage``) so a hint is never staler than
-        # the compaction trigger's figure, and is stamped per request by the
-        # call's owner: the loop seeds its run from it and then prefers its
+        # the compaction trigger's figure, and is stamped per request by whoever
+        # owns the call: the loop seeds its run from it and then prefers its
         # own in-run counts; asides and the advisor stamp it directly. Seeded
         # from the transcript's last usage so a RESUMED large session starts on
         # its real size instead of re-deriving it through the client's byte
@@ -2285,7 +2285,7 @@ class Session:
         #: Bang-mode receipts that completed while a turn or manual compaction
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
-        #: resume. The owner flushes this FIFO before releasing `_turn_lock`.
+        #: resume. The runtime flushes this FIFO before releasing `_turn_lock`.
         self._pending_shell_records: list[tuple[str, ToolResult]] = []
         self._turn_lock = asyncio.Lock()  # serializes prompt() and wake deliveries
         # True only while an ON-DEMAND compaction holds ``_turn_lock``. The
@@ -2447,7 +2447,7 @@ class Session:
         from local_operator.browser_bridge.resources import BrowserResource
 
         self._browser = BrowserSurface(BrowserResource(transcript.directory, self._session_id))
-        # Connections and overlapping read requests have a conversation owner.
+        # Connections and overlapping read requests are owned by the conversation.
         # This avoids rebuilding pools for every tool call without allowing one
         # child's disposal to close a sibling's active transport.
         from local_operator.web_search.io import WebReadIO
@@ -4855,11 +4855,11 @@ class Session:
         await self._turn_lock.acquire()
         try:
             # Close the narrow completion-after-final-flush race: a shell
-            # receipt may have queued while the previous owner still held the
+            # receipt may have queued while the previous holder still held the
             # lock. It must be visible before this prompt builds its request.
             await self._flush_shell_records()
             # Same race, same window: a journal notice parked by the previous
-            # owner must reach the model before this prompt's request is built,
+            # holder must reach the model before this prompt's request is built,
             # or the switch it announces goes unmentioned for another turn.
             self._flush_context_journal()
             # A fresh user prompt supersedes any earlier interrupt request.
@@ -4925,7 +4925,7 @@ class Session:
         if self._seeded or self._context.messages or self._is_streaming:
             return
         self._seeded = True
-        # A history import may carry tool batches. One commit prevents owner
+        # A history import may carry tool batches. One commit prevents runtime
         # snapshots from observing half a seeded pair between per-row awaits.
         await self._transcript.append_messages(messages)
         self._context.messages.extend(messages)
@@ -4994,7 +4994,7 @@ class Session:
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """Fork the committed prefix without interrupting the live agent loop.
 
-        Both in-process callers and socket owners use this same admission path.
+        Both in-process callers and socket-attached front ends use this same admission path.
         The transcript lock, not a viewer or a turn interruption, defines the
         copy boundary; active history rewrites are refused explicitly.
         """
@@ -5323,7 +5323,7 @@ class Session:
         return "delivered to the mailbox (will be read on the next turn)"
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
-        """Fire the live receipt so the owner TUI paints the indicator now.
+        """Fire the live receipt so the attached TUI paints the indicator now.
 
         Mirrors ``WakeDeliveredEvent`` firing before/around the turn spawn:
         even for the record-only idle case the front end must be told the
@@ -5870,7 +5870,7 @@ class Session:
         # Failure may precede the first assistant message. Its durable outcome
         # marker, not an unrelated previous answer, is the viewable anchor.
         anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
-        # The journal precedes publication: owner death between these writes is
+        # The journal precedes publication: runtime death between these writes is
         # repaired idempotently on resume, without fabricating a new token.
         await self._transcript.append_custom(
             ATTENTION_CUSTOM_TYPE,
@@ -5905,7 +5905,7 @@ class Session:
 
     @property
     def epoch(self):  # type: ignore[no-untyped-def]
-        """The owner epoch without the full-state clone.
+        """The runtime's epoch without the full-state clone.
 
         Paired with :attr:`pending_gate`: gate identity is epoch plus gate, so
         reading the epoch through ``frontend_state`` would restore the clone on
@@ -6704,7 +6704,7 @@ class Session:
             # resume. Placed on the normal path (a turn that raised past here
             # still has last turn's snapshot; the next clean turn re-writes it).
             await self._maybe_persist_todos()
-            # Spend must survive owner death at the same durability boundary as
+            # Spend must survive runtime death at the same durability boundary as
             # the messages it describes. The checkpoint is replacement state,
             # never an additive delta, so takeover cannot double it. A headless
             # store that observed nothing (no UI, no attach subscriber) skips
@@ -7505,7 +7505,7 @@ class Session:
         for handler in list(self._steering_rejection_handlers):
             try:
                 handler(command_id, reason)
-            except Exception:  # noqa: BLE001 - one owner cannot hide rejection from others
+            except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
         await self._emit(
             NoticeEvent(
@@ -9345,7 +9345,7 @@ class Session:
             # may not have been delivered yet. Writing pending then would park
             # a summary the ceiling pass is about to make stale. Same shape as
             # the steer-receipt guard (PR #452): drop the delivery when the
-            # owner is no longer the current one.
+            # writer is no longer the current one.
             if self._disposed or self._compaction_pass_task is not asyncio.current_task():
                 return
             self._pending_compaction = _PendingCompaction(
@@ -10366,7 +10366,7 @@ class Session:
         A receipt that lands while a turn or manual compaction owns the message
         list is QUEUED, never discarded: splicing it into a live provider batch
         would produce an unsendable list, while dropping it would make a command
-        the user can see disappear on resume. The lock owner flushes the FIFO at
+        the user can see disappear on resume. The lock holder flushes the FIFO at
         its safe boundary before another prompt can start.
         """
         if self._transcript.has_entry(f"shell:{result.tool_call_id}:result") or any(
@@ -10826,7 +10826,8 @@ class Session:
     def _load_subagent_roster(self) -> None:
         """Rehydrate the subagent panel and the resume basis from disk.
 
-        Reads the newest snapshot and feeds each half to its owner: the comms
+        Reads the newest snapshot and feeds each half to the component that
+        owns it: the comms
         records to ``SubagentComms.restore`` (the resume basis) and the job rows
         to ``AsyncJobManager.restore`` (the panel). Restoring the records
         MINTS the comms instance if this session had not yet — a resumed session
@@ -11377,7 +11378,7 @@ class Session:
           per-call ``RetrySettings.from_settings`` reads. A subagent shares
           only the parent's transport pool; its routing state belongs to its
           own stream fn. Each child's watcher therefore applies the same live
-          settings to that independent owner. Legacy stream functions without
+          settings to that independent stream fn. Legacy stream functions without
           ``apply_settings`` retain their existing behavior.
         * ``subagents.max_running`` — pushed into the live job manager with
           the same validation the constructor applied; an unset or invalid
@@ -11771,7 +11772,7 @@ class Session:
             unsubscribe_state()
             self._unsubscribe_subagent_state = None
         # No later boundary can drain producer steers once disposal starts.
-        # Reject them while owner callbacks and viewers are still attached so
+        # Reject them while rejection subscribers and viewers are still attached so
         # capacity is released and the producer can safely reuse the same ID.
         while not self._steering_queue.empty():
             message = self._steering_queue.get_nowait()

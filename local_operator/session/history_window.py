@@ -1,4 +1,4 @@
-"""Opt-in display pages of the owner's canonical durable replay.
+"""Opt-in display pages of the runtime's canonical durable replay.
 
 The journal may contain hundreds of MB of ignored host checkpoints while its
 conversation is only a few KB. Reuse the resident canonical replay, not a second
@@ -33,20 +33,20 @@ if TYPE_CHECKING:
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 
 #: Separate from the capability above, and it MUST stay separate. That one is a
-#: presence flag with no version handshake, so it cannot express "this owner
+#: presence flag with no version handshake, so it cannot express "this runtime
 #: also pages pre-compaction history". :class:`DisplayHistoryWindow` forbids
-#: extra fields, so an owner that emitted ``audit``/``audit_available`` to a
+#: extra fields, so a runtime that emitted ``audit``/``audit_available`` to a
 #: viewer built before those fields existed would fail that viewer's validation
 #: and turn into a FAILED ATTACH — not a degraded one. Mixed builds against one
 #: sessions directory are routine here (the global uv-tool runtime is updated
 #: independently of a repo checkout's venv), so this is a live rollout hazard
-#: rather than a theoretical one. The owner emits the new fields only to a
+#: rather than a theoretical one. The runtime emits the new fields only to a
 #: viewer that negotiated this string.
 DISPLAY_HISTORY_AUDIT_CAPABILITY = "display-history-audit-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
 
-# Per OWNER, not per viewer: a fleet of sessions must not retain a full replay
+# Per RUNTIME, not per viewer: a fleet of sessions must not retain a full replay
 # per speculative attach. Admission examines only the already bounded page,
 # never walks the whole canonical history merely to decide whether to cache it.
 DISPLAY_PAGE_CACHE_ENTRIES = 4
@@ -106,7 +106,7 @@ def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[
 
     Stripping in only some of them yields a viewer that attaches cleanly and
     then fails later — on its first scroll up, or on the first refresh after
-    the owner appends a row — which is a worse failure than any single route
+    the runtime appends a row — which is a worse failure than any single route
     breaking on its own. Round 1 review found the third route unstripped after
     this docstring had asserted there were two: if a fourth is ever added,
     update this list in the same commit.
@@ -189,7 +189,7 @@ def _retained_size(value: object, limit: int) -> int | None:
     Deliberately an OVER-estimate: ``sys.getsizeof`` charges per-object CPython
     overhead (measured ~7.5x a pickled page — 91,960 accounted against 12,172
     serialized), so the effective retention ceiling is well under the nominal
-    2 MiB. That direction is the safe one for a per-owner budget multiplied
+    2 MiB. That direction is the safe one for a per-runtime budget multiplied
     across a fleet, but anyone re-tuning the constant should size it against
     ACCOUNTED bytes rather than expecting a wire-sized figure.
     The fixed allowance covers the four LRU nodes and bookkeeping. Framework
@@ -259,7 +259,7 @@ def display_window(
         # the signed ``before`` token, which is already keyed here, and the two
         # phases mint structurally different token payloads. So a context page
         # and an audit page can never collide on one key, and — because the
-        # phase is only ever read from a signature this owner minted — a viewer
+        # phase is only ever read from a signature this runtime minted — a viewer
         # cannot ask for audit rows without having been handed a cursor to them.
         before,
         anchor,
