@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import secrets
 from concurrent.futures import Future
@@ -51,6 +50,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import (
     SessionHandle,
+    has_durable_history,
     image_blocks,
     image_blocks_in_thread,
 )
@@ -95,39 +95,6 @@ def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
         index: Attachment(image=image, marker=f"[Image #{index}]")
         for index, image in enumerate(_image_blocks(images), start=1)
     }
-
-
-def _has_durable_history(session: Any) -> bool:
-    """Whether this session's transcript already holds a conversation.
-
-    The re-seed signal for ``TuiSessionHandle.rebind``: a ``/resume`` lands
-    here with history (the conversation ran turns under an earlier process)
-    while a ``/new`` lands with an empty or not-yet-materialised transcript.
-    A MESSAGE row is the discriminator, not just any row: bookkeeping rows
-    (a persisted ``system_prefix`` epoch, a title) can precede the first
-    turn, and counting those would mark a fresh composer as started — the
-    exact window the flag exists to gate. Read from the FILE rather than
-    the in-memory index — the index is built by replay and is not
-    guaranteed populated at rebind time — and defensively: a session shape
-    with no readable transcript (a reduced host) answers False, the
-    conservative "unstarted" direction a first real turn immediately
-    corrects.
-    """
-    path = getattr(getattr(session, "transcript", None), "path", None)
-    if path is None:
-        return False
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for row in handle:
-                try:
-                    entry = json.loads(row)
-                except ValueError:
-                    continue  # a torn line says nothing about history
-                if isinstance(entry, dict) and entry.get("type") == "message":
-                    return True
-    except OSError:
-        return False
-    return False
 
 
 class TuiSessionHandle(SessionHandle):
@@ -292,7 +259,7 @@ class TuiSessionHandle(SessionHandle):
         reseed = getattr(registrant, "reset_record_started", None)
         if callable(reseed):
             try:
-                reseed(_has_durable_history(session))
+                reseed(has_durable_history(session))
             except Exception:  # noqa: BLE001 — a stale bit must never break /new
                 logger.debug("could not re-seed the started bit on rebind", exc_info=True)
 

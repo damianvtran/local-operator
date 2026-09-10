@@ -1180,6 +1180,61 @@ class TestLiveStateReachesTheRecord:
         server = RuntimeServer(FakeHandle(), kind="daemon")
         assert server._record.started is False
 
+    def _handle_over_transcript(self, tmp_path, name: str, rows: list[str]) -> FakeHandle:
+        """A FakeHandle whose owned session reads a transcript file on disk.
+
+        The boot-seed path probes ``handle._session`` (the owned-handle shape
+        — the daemon child and exec) and derives ``started`` from the
+        transcript FILE, so the fake only needs the path to be real.
+        """
+        from types import SimpleNamespace
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        handle = FakeHandle()
+        handle._session = SimpleNamespace(  # type: ignore[attr-defined]
+            transcript=SimpleNamespace(path=path)
+        )
+        return handle
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_boot_seeds_started_from_durable_history(self, tmp_path) -> None:
+        """QA Q3: the daemon child behind ``lop --resume <sid>`` builds its
+        record at boot, and a conversation that already ran turns under an
+        earlier process must read ``started=True`` from the FIRST publish —
+        before the owner types anything in THIS process. Bookkeeping rows
+        (a persisted title) do not count; only a MESSAGE row does, exactly
+        as in ``TuiSessionHandle.rebind``'s re-seed."""
+        handle = self._handle_over_transcript(
+            tmp_path,
+            "resumed",
+            [
+                '{"id":"m1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                '{"id":"m2","ts":2,"type":"message","payload":{"role":"user"}}',
+            ],
+        )
+        server = RuntimeServer(handle, kind="daemon")
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_an_empty_session_directory_boots_unstarted(self, tmp_path) -> None:
+        """The composer gate survives the seed: a true ``/new`` — no message
+        rows, whether the transcript is empty or holds only bookkeeping —
+        must still publish ``started=False`` so peer broadcasts do not drive
+        a turn into a session whose owner has not typed yet."""
+        empty = self._handle_over_transcript(tmp_path, "empty", [])
+        bookkeeping_only = self._handle_over_transcript(
+            tmp_path,
+            "titled",
+            ['{"id":"t1","ts":3,"type":"custom","payload":{"custom_type":"title"}}'],
+        )
+        for handle in (empty, bookkeeping_only):
+            server = RuntimeServer(handle, kind="daemon")
+            assert server._started is False
+            assert server._record.started is False
+
     @pytest.mark.asyncio
     async def test_started_is_one_way_and_deduplicated(self) -> None:
         """The flag flips once and a repeat ``True`` (every turn after the

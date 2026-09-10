@@ -564,6 +564,40 @@ class ProjectionSink(Protocol):
     def set_pending(self, pending: Any) -> None: ...
 
 
+def has_durable_history(session: Any) -> bool:
+    """Whether this session's transcript already holds a conversation.
+
+    The seed signal for the record's ``started`` bit at two call sites that
+    face the same question — ``RuntimeServer.__init__`` (a resumed boot must
+    publish ``started=True`` before any turn runs in the NEW process) and
+    ``TuiSessionHandle.rebind`` (a ``/resume`` mid-flight re-seeds the bit for
+    the swapped identity). A MESSAGE row is the discriminator, not just any
+    row: bookkeeping rows (a persisted ``system_prefix`` epoch, a title) can
+    precede the first turn, and counting those would mark a fresh composer as
+    started — the exact window the flag exists to gate. Read from the FILE
+    rather than the in-memory index — the index is built by replay and is not
+    guaranteed populated at the moment either call site asks — and
+    defensively: a session shape with no readable transcript (a reduced
+    host) answers False, the conservative "unstarted" direction a first
+    real turn immediately corrects.
+    """
+    path = getattr(getattr(session, "transcript", None), "path", None)
+    if path is None:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for row in handle:
+                try:
+                    entry = json.loads(row)
+                except ValueError:
+                    continue  # a torn line says nothing about history
+                if isinstance(entry, dict) and entry.get("type") == "message":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -581,7 +615,10 @@ class RuntimeServer:
         #: True once this session has run at least one real turn. Starts
         #: False for every fresh boot (a ``/new`` session sitting in the
         #: composer) and flips True the first time a turn actually runs — the
-        #: hook lives in ``Session._run_turn_pipeline``.
+        #: hook lives in ``Session._run_turn_pipeline``. One exception at
+        #: birth, below: a boot that RESUMED a conversation with history
+        #: seeds True from the transcript, because those turns already ran
+        #: under an earlier process.
         self._started = False
         self._busy = False
         #: Subagent trajectory counts, ``None`` until the handle answers the
@@ -694,6 +731,26 @@ class RuntimeServer:
             version=build.version,
             source_ref=build.source_ref,
         )
+        # A resumed conversation has ALREADY run its turns under an earlier
+        # process, and the record must say so from its FIRST publish. Until
+        # the owner's first turn here, the bit would otherwise read False and
+        # peers would treat a working session as a composer window (QA Q3:
+        # after a terminal restart, `lop --resume <sid>` engaged a child whose
+        # record said ``started=false``, making the idle session invisible to
+        # broadcasts and degrading peer wakes to quiet notes until the owner
+        # typed once). Seeded from the session's own durable transcript — the
+        # same signal ``TuiSessionHandle.rebind`` uses — so a true ``/new``
+        # (no message rows) still boots as the composer window. Probed off
+        # ``handle._session`` because only the owned-handle shape carries its
+        # Session there; a handle without one (the TUI's, a reduced test
+        # host) keeps the conservative False a first real turn immediately
+        # corrects. Direct field writes, not ``set_record_started``: nothing
+        # is published yet, and this is a derivation at birth, not the
+        # per-turn signal.
+        owned_session = getattr(handle, "_session", None)
+        if owned_session is not None and has_durable_history(owned_session):
+            self._started = True
+            self._record.started = True
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unsubscribe_events: Callable[[], None] | None = None

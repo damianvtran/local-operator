@@ -219,10 +219,14 @@ class SessionRecord:
     #: published but the owner is still composing their first prompt, so a
     #: peer broadcast or an exact-address wake/steer must not drive a turn
     #: into it. One-way per session identity: once a real turn has run it
-    #: stays True (a TUI ``/new`` rebind re-seeds it for the NEW identity —
-    #: see ``RuntimeServer.reset_record_started``), and every
-    #: heartbeat/republish carries it forward so it is never reset by a later
-    #: write. Deserialization overrides the default for pre-field records —
+    #: stays True. Two paths other than a turn set it — a TUI ``/new``
+    #: rebind re-seeds it for the NEW identity (see
+    #: ``RuntimeServer.reset_record_started``), and a boot that RESUMED a
+    #: history-bearing conversation seeds True at record construction (see
+    #: ``RuntimeServer.__init__``) so the idle session is peer-visible
+    #: before any turn runs in the new process. Every heartbeat/republish
+    #: carries it forward so it is never reset by a later write.
+    #: Deserialization overrides the default for pre-field records —
     #: see ``from_json``.
     started: bool = False
     #: No front end is attached. A working session with nobody watching is
