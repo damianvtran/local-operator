@@ -1099,36 +1099,50 @@ class ProviderModelClient:
                 compaction=compaction,
             )
         try:
-            # A ``toolUse`` stop that carried NO tool call and NO text is a model
-            # that chose the tool channel and then put nothing on it. Left alone it
-            # reaches ``parse_decision`` as an empty string, which reports "decision
-            # is not valid JSON" -- so the runner re-prompts the model to fix JSON
-            # it never wrote, and the correction cannot land because it names the
-            # wrong defect.
+            # A reply that produced NO tool call and NO text said nothing at
+            # all, whatever terminal marker it carried. Left alone it reaches
+            # ``parse_decision`` as an empty string, which reports "decision is
+            # not valid JSON" -- so the runner re-prompts the model to fix JSON
+            # it never wrote, and the correction cannot land because it names a
+            # defect that does not exist. The retry bound is then spent on the
+            # same non-answer and the episode seals as a model failure.
             #
-            # Measured on minimax/minimax-m3: ~8% of replies on a routine screen and
-            # ~60% on a screen that looks already-complete come back this way, after
-            # spending output tokens entirely on reasoning. That killed a first paid
-            # episode at 3 calls. The failures are CORRELATED within an observation
-            # (three in a row is a 1-in-1700 event if independent), so a bigger
-            # retry bound does not fix it -- the re-prompt has to say something
+            # Every NORMAL stop reason can produce this shape, so the guard is
+            # keyed on the SILENCE, not on the marker:
+            #   - ``toolUse``  -- the model selected the tool channel and put
+            #     nothing on it. Measured on minimax/minimax-m3: ~8% of replies
+            #     on a routine screen, and 6 of 10 on a screen that looks
+            #     already-complete, come back this way after spending their
+            #     output tokens entirely on reasoning.
+            #   - ``stop``     -- observed in the same probe (1 of 12) and in a
+            #     real episode's third call, which recorded ``('stop', 0)`` with
+            #     no content.
+            #   - ``length``   -- a reply cut off before it emitted anything.
+            # An abnormal marker with empty text is already handled above; this
+            # closes the normal ones, which is the whole remainder of the set.
+            #
+            # Within one observation these failures are CORRELATED -- three in a
+            # row is a 1-in-1700 event under independence -- so a larger retry
+            # bound does not fix it. The re-prompt has to SAY something
             # different, which is exactly what the rejection path does.
             #
-            # Raised as a DecisionParseError, NOT a ProviderStreamAbortedError: an
-            # abort seals the episode as a provider failure with no retry at all,
-            # which is strictly worse than the status quo. This is the model's
-            # error and it is recoverable, so it takes the corrective-re-prompt
-            # path, where an explicit "you must reply with a tool call" turn is
-            # appended to the history. A 10-sample probe of that exact correction
-            # against a latched screen recovered 10/10, where escalating
-            # ``tool_choice`` to ``required`` recovered only 7/10 and a named tool
-            # choice 2/10.
-            if stop_reason == "toolUse" and tool_call_count == 0 and not text.strip():
+            # Raised as a DecisionParseError, NOT a ProviderStreamAbortedError:
+            # an abort seals the episode as an infrastructure failure with no
+            # retry at all (``episode.py`` re-raises it), which is strictly
+            # worse than the status quo. This is the model's error and it is
+            # recoverable, so it takes the corrective-re-prompt path, where an
+            # explicit instruction is appended to the history. A 10-sample probe
+            # of that exact correction against a latched screen recovered 10/10,
+            # where escalating ``tool_choice`` to ``required`` recovered 7/10
+            # and a named tool choice only 2/10 -- so the corrective turn is the
+            # remedy, not a stronger ``tool_choice``.
+            if tool_call_count == 0 and not text.strip():
                 raise DecisionParseError(
-                    "reply carried no tool call and no text: the tool channel was "
-                    "selected but nothing was emitted on it. Reply with the action "
-                    "batch itself, as a single JSON object with a non-empty "
-                    '"actions" array, and nothing else.'
+                    "reply carried no tool call and no text: the model ended its "
+                    f"turn as '{stop_reason}' without emitting a decision on "
+                    "either channel. Reply with the action batch itself, as a "
+                    'single JSON object with a non-empty "actions" array, and '
+                    "nothing else."
                 )
             return parse_decision(
                 text.strip(),

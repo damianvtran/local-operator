@@ -235,7 +235,18 @@ def test_an_unused_channel_is_distinguishable_from_an_empty_one() -> None:
         "not json at all",
         '{"reply_version": "9.9", "action_batch": {"actions": []}, "public_observations": ""}',
         '{"actions": []}',
-        "",
+        # NOTE: the empty body is deliberately absent. It does not encode the
+        # same model behaviour on both paths, so it cannot test parity between
+        # them: in prose it means the model emitted NOTHING (no tool call, no
+        # text) and is now reported as the silence it is, while on the channel
+        # it means the model DID select the channel and sent empty arguments --
+        # a malformed call, not an absent reply. Requiring one diagnostic to
+        # cover both would force the silent case back to "not valid JSON",
+        # which is the misdiagnosis that spends an episode's retry bound
+        # re-prompting a model to fix JSON it never wrote. The silent case is
+        # covered directly by ``test_a_silent_reply_is_a_correctable_rejection``
+        # and the channel case by
+        # ``test_an_empty_channel_call_is_rejected_like_an_empty_prose_body``.
     ],
 )
 async def test_a_malformed_reply_is_rejected_on_the_channel_exactly_as_in_prose(
@@ -606,3 +617,54 @@ async def test_a_rejected_reply_still_records_the_tools_the_request_offered() ->
         await client.decide(current, _turns(current))
 
     assert raised.value.offered_tool_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_channel_answer_without_prose_is_not_read_as_silence() -> None:
+    """Pins the ``tool_call_count == 0`` half of the silent-reply guard.
+
+    ``provider_client`` rejects a reply that emitted no tool call AND no text,
+    because that model said nothing on either channel. The tool-call half of
+    that condition is load-bearing and easy to drop by accident: a model that
+    answers ON the channel and writes no prose arrives here with empty
+    ``text``, so keying the guard on silence alone would reject the very
+    replies the channel exists to carry.
+
+    Without this test, deleting ``tool_call_count == 0`` leaves the guard's own
+    test file entirely green.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+    client = _client(ChannelStream(body), model_spec=_spec(supports_tools=True))
+
+    decision = await client.decide(current, _turns(current))
+
+    assert isinstance(decision.action_batch, ActionBatch)
+    assert decision.tool_call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_empty_channel_call_is_rejected_like_an_empty_prose_body() -> None:
+    """A channel call carrying EMPTY arguments is malformed, not silent.
+
+    This is the half of the old empty-body parity case that still belongs to
+    the malformed family. The model selected the channel and sent nothing in
+    it, so a tool call really was emitted -- the silent-reply guard must not
+    claim the model said nothing, and the reply must still be rejected on the
+    correctable path.
+
+    Kept as its own test because the two halves of the old parametrised case
+    encode DIFFERENT model behaviours that the fixture spelled with the same
+    empty string.
+    """
+
+    current = observation()
+    client = _client(ChannelStream(""), model_spec=_spec(supports_tools=True))
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+
+    message = str(info.value)
+    assert "no tool call and no text" not in message
+    assert "not valid JSON" in message
