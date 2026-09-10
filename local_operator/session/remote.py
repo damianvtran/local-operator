@@ -520,6 +520,49 @@ def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
     return rows
 
 
+def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
+    """Rebuild the viewer's ``AskQuestion`` from the projected ask card.
+
+    The wire is TOLERANT and the harness model is STRICT, so the version-skew
+    reconciliation lives here rather than at either end. ``AskQuestion._shape``
+    rejects ``recommended`` on a secret question (nothing to recommend), a bare
+    ``persist`` (nothing to persist), and an out-of-range index — and a
+    ``ValidationError`` is a ``ValueError``, which is NOT in ``_run_ask``'s
+    ``except`` clause. An unguarded rebuild would therefore escape as an
+    unretrieved-task traceback and the user's question would never mount, which
+    is strictly worse than a missing badge. Dropping the offending marker keeps
+    the card on screen.
+
+    ``options`` arrive ALREADY HOISTED and ``recommended`` indexes them as
+    received, so nothing here re-sorts or re-rotates them: doing so would move
+    the badge to the wrong row.
+    """
+    options = [
+        AskOption(
+            label=(option.get("label", "") if isinstance(option, Mapping) else option.label),
+            description=(
+                option.get("description", "") if isinstance(option, Mapping) else option.description
+            ),
+        )
+        for option in pending.options
+    ]
+    recommended = pending.recommended
+    if pending.secret or not options:
+        recommended = None
+    elif recommended is not None and not 0 <= recommended < len(options):
+        # A payload from a newer or odd owner cannot be trusted to index THIS
+        # list; drop the marker rather than fail the whole card.
+        recommended = None
+    return AskQuestion(
+        id=pending.request_id,
+        question=pending.title,
+        options=options,
+        secret=pending.secret,
+        recommended=recommended,
+        persist=pending.persist and pending.secret,
+    )
+
+
 class RemoteSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -3784,25 +3827,7 @@ class RemoteSession:
             client = self._client
             if handler is None or client is None:
                 return
-            options = [
-                AskOption(
-                    label=(
-                        option.get("label", "") if isinstance(option, Mapping) else option.label
-                    ),
-                    description=(
-                        option.get("description", "")
-                        if isinstance(option, Mapping)
-                        else option.description
-                    ),
-                )
-                for option in pending.options
-            ]
-            question = AskQuestion(
-                id=pending.request_id,
-                question=pending.title,
-                options=options,
-                secret=pending.secret,
-            )
+            question = _ask_question_from_pending(pending)
             answer = await handler([question])
             if not self._gate_reply_is_current(pending, client):
                 return
@@ -5679,6 +5704,16 @@ def _pending_request(state: Any) -> PendingRequest | None:
         secret=state.secret,
         question_index=state.question_index,
         question_total=state.question_total,
+        # `PendingGateState` is `extra="allow"`, so these ride the frontend-state
+        # contract as extras rather than declared fields — but this rebuild
+        # enumerates, so anything not named here is dropped. This is the path
+        # `_maybe_start_gate` feeds `_run_ask` from on the DEFAULT detached
+        # topology (the projection fold is the phone's path), so a field missing
+        # here never reaches the terminal picker however well the projection
+        # carries it. `getattr` with the dataclass default keeps an older owner's
+        # gate state (which has neither key) safe.
+        recommended=(raw if isinstance(raw := getattr(state, "recommended", None), int) else None),
+        persist=bool(getattr(state, "persist", False)),
     )
 
 
