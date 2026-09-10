@@ -2572,15 +2572,16 @@ class RemoteSession:
             raise RuntimeError("this session uses full-history replay")
         return await self._fetch_history_page(before, window.owner_epoch, window.through_id, anchor)
 
-    def pending_display_tool_ids(self) -> set[str]:
-        """Unanswered calls in the pending gate's current serialized user turn.
+    def _unanswered_tail_call_ids(self) -> set[str]:
+        """Calls in the CURRENT turn's latest group that have no result yet.
 
-        A gate can precede tool_execution_start, so no invented start event is
-        needed. The latest call group after the latest user boundary is the
-        only eligible group; old interrupted turns must remain interrupted.
+        Shared by the two "this row is not finished" questions below, which
+        differ only in what makes the call unfinished — a gate parked in front
+        of it, or the tool still executing. The scan itself is one rule and
+        belongs in one place: the latest call group after the latest user
+        boundary is the only eligible group, so old interrupted turns keep
+        their ``⊘`` and are never revived by a later turn's liveness.
         """
-        if self.pending_gate is None:
-            return set()
         answered: set[str] = set()
         for message in reversed(self.display_history_window()):
             role = getattr(message, "role", "")
@@ -2592,6 +2593,50 @@ class RemoteSession:
             if role == "assistant" and calls:
                 return {call.id for call in calls} - answered
         return set()
+
+    def pending_display_tool_ids(self) -> set[str]:
+        """Unanswered calls in the pending gate's current serialized user turn.
+
+        A gate can precede tool_execution_start, so no invented start event is
+        needed.
+        """
+        if self.pending_gate is None:
+            return set()
+        return self._unanswered_tail_call_ids()
+
+    def executing_display_tool_ids(self) -> set[str]:
+        """Unanswered calls of a turn that is STILL RUNNING right now.
+
+        The gate's counterpart, and the reason it cannot answer for both. A
+        long tool — ``wait(wait_ms=1800000)``, a background ``bash``, a
+        ``task`` — parks the turn inside execution with NO gate open, so
+        ``pending_display_tool_ids`` returns nothing for it while the call is
+        very much alive.
+
+        That matters because of where the row comes from. The viewer files
+        each completed live row into ``_live_history`` (see
+        :meth:`_remember_live`), and ``display_history_window`` hands those
+        rows to the next prepared replay. So a viewer that was watching when
+        the model issued the call — the ordinary case for a conversation
+        sitting in the sidebar — replays an assistant message whose
+        ``tool_calls`` have no answer, and ``replay_tool_call`` has exactly
+        two outcomes for that: settled, or ``⊘ interrupted``. The call had not
+        stopped; nobody had asked whether it was still going.
+
+        Gated on :attr:`is_streaming` and on the LATEST group only, so the answer
+        is "this turn, right now" and never "some turn once left a call
+        dangling". A turn that has ended reports nothing here and its
+        unanswered rows stay interrupted, which for a turn that really died
+        mid-flight is the truth.
+        """
+        # Through the PROPERTY the docstring names, not the private attribute.
+        # Same value today, and the rest of this file reads `_streaming`
+        # directly — but this predicate's contract is the documented gate, so a
+        # future `is_streaming` that stops being a bare passthrough must move
+        # this answer with it rather than silently leaving it behind.
+        if not self.is_streaming:
+            return set()
+        return self._unanswered_tail_call_ids()
 
     @property
     def display_history_revision(self) -> int:

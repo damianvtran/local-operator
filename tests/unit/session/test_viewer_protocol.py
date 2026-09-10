@@ -199,11 +199,11 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: scan cost and no coverage; add one when it starts probing something new.
 #:
 #: The third element is that host's MINIMUM member count, and it is per host for
-#: a structural reason: ``app.py`` derives 104 of the 112 DISTINCT PUBLIC
-#: MEMBERS (and 362 of 413 ``file:line`` SITES, deduped per member and line), so
+#: a structural reason: ``app.py`` derives 105 of the 113 DISTINCT PUBLIC
+#: MEMBERS (and 363 of 414 ``file:line`` SITES, deduped per member and line), so
 #: any single global floor loose enough to survive ordinary churn there cannot
 #: notice a smaller host going dark at all. Measured, not guessed: dropping the
-#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 48 and dropping
+#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 49 and dropping
 #: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
 #: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
 #: stated beside each path fires on the host that actually decayed and names it.
@@ -595,11 +595,11 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     # ``assert viewer_only`` would still pass (review m3).
     #
     # PER HOST, and that is the whole point rather than a refinement. A GLOBAL
-    # floor cannot do this job at any value: ``app.py`` contributes 104 of the
-    # 112 distinct public MEMBERS, so a number that survives ordinary churn
+    # floor cannot do this job at any value: ``app.py`` contributes 105 of the
+    # 113 distinct public MEMBERS, so a number that survives ordinary churn
     # there is necessarily far above every other host's entire contribution.
     # Measured on this head — dropping the desktop utils host costs 3
-    # viewer-only members of 48, dropping ``info/collect.py`` costs 0 — so both
+    # viewer-only members of 49, dropping ``info/collect.py`` costs 0 — so both
     # single-point decays slid under a global ``>= 40`` exactly as they slid
     # under the ``>= 20`` that review round 2 (MINOR-1) rejected. Raising one
     # number would only move the blind spot. Each host is now asserted against
@@ -723,9 +723,9 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # An exact pin, unlike the ratio above: this is the population the aggregate
     # floor of 40 is set against, so a drop here is the decay that floor exists
     # to catch rather than ordinary churn.
-    assert len(viewer_only) == 48, (
+    assert len(viewer_only) == 49, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 48, and the aggregate floor is set at 40 against that number. A "
+        "says 49, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -938,7 +938,7 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
 
     The count is pinned as well as the contribution, because the two decays are
     different and only one of them is a rename. DELETING ``source.session``
-    outright costs 2 of 48 viewer-only members — under any floor, per-host or
+    outright costs 2 of 49 viewer-only members — under any floor, per-host or
     aggregate, and invisible to the zero-sites check because a removed entry is
     not an entry that derives nothing. It was the last planted violation this
     guard did not catch. A registered binding is a coverage claim, so removing
