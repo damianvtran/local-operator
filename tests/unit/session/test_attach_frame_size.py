@@ -1335,6 +1335,29 @@ def test_a_catalogue_too_large_for_the_frame_is_clipped_and_says_so() -> None:
     assert len(kept) >= MODEL_CATALOGUE_FLOOR_ROWS
 
 
+def test_a_clipped_catalogue_still_fits_the_rpc_reply_envelope() -> None:
+    """The clipper's budget must cover the envelope the RPC reply adds.
+
+    The binary search measures the payload through one mirror of the wire, but
+    a ``frontend_sync`` RPC replies in ``{"op": "result", "req": <seq>,
+    "data": ...}`` — a few bytes larger than the push frame the mirror
+    described. When the search parked the line within that delta of the cap,
+    the real reply measured over it and the handler degraded a perfectly good
+    display page to ``full_required`` to pay for bytes the envelope — not the
+    page — had added; the follower then strict-replayed and a cursor its local
+    journal lacked turned the degrade into an error. Pinned by measuring the
+    clipped payload in the reply envelope itself, with a ``req`` no attach
+    will outgrow.
+    """
+    _frame, snapshot = _catalogue_frame(5_000, jobs=200)
+    assert snapshot["model_catalogue_truncated"] is True
+    # The REAL reply shape: the RPC returns the whole clipped payload, so the
+    # envelope is measured around exactly what the handler serializes back.
+    payload = _frame["data"]
+    reply = {"op": "result", "req": 9_999_999_999, "data": payload}
+    assert len(json.dumps(reply).encode()) + 1 < _MAX_LINE_BYTES
+
+
 def test_an_untruncated_catalogue_leaves_the_flag_alone() -> None:
     """The flag describes the list that SHIPPED, so it stays false when whole."""
     _frame, snapshot = _catalogue_frame(10)
