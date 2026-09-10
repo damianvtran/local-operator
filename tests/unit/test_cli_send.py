@@ -548,6 +548,85 @@ def test_the_guide_quotes_the_ambiguity_error_verbatim() -> None:
     assert documented == actual
 
 
+def test_send_to_a_stored_session_by_name_spools(monkeypatch, tmp_path, capsys) -> None:
+    """THE FEATURE: a name that matches no live record but one stored session.
+
+    ``resolve_peer_target`` sees no live record, so the CLI falls back to the
+    stored store, resolves the name to the stored id, and delivers through the
+    unchanged cold path — a quiet mailbox spool, not a refusal.
+    """
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    sid = "cafe0123beef"
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+
+    class _Row:
+        id = sid
+        name = "Improve /credential skill"
+        mtime = 0.0
+
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: [_Row()]
+    )
+    with (
+        patch(
+            "local_operator.cli._resolve_peer_target",
+            return_value=(None, [], "no live session matches"),
+        ),
+        # The guard walks the CLI's parent chain for a self-send; there is no
+        # record for this test pid, so the walk must not find one.
+        patch("local_operator.mobile.peer_send._record_for_pid", lambda pid: None),
+        patch("local_operator.mobile.peer_send._parent_pid", lambda pid: None),
+    ):
+        rc = send_command(_parse_send(["credential", "rebased and green"]))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "spooled" in out
+    assert (tmp_path / "sessions" / sid / "inbox.jsonl").is_file()
+
+
+def test_no_match_now_names_both_live_and_stored(capsys, tmp_path, monkeypatch) -> None:
+    """When the stored fallback also finds nothing the error says so."""
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", lambda d, limit=None: [])
+    with patch(
+        "local_operator.cli._resolve_peer_target",
+        return_value=(None, [], "no live session matches 'ghost'"),
+    ):
+        rc = send_command(_parse_send(["ghost", "hello"]))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "searched live and stored sessions" in err
+
+
+def test_ambiguous_stored_matches_list_sessions_not_pids(capsys, tmp_path, monkeypatch) -> None:
+    """A stored ambiguity names session ids (a pid is an address that can never
+    resolve for a session that is not running)."""
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+
+    class _Row:
+        def __init__(self, sid, name):
+            self.id, self.name, self.mtime = sid, name, 0.0
+
+    rows = [_Row("aaaa1111bbbb", "review multi A"), _Row("cccc2222dddd", "review multi B")]
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", lambda d, limit=None: rows)
+    with patch(
+        "local_operator.cli._resolve_peer_target",
+        return_value=(None, [], "no live session matches"),
+    ):
+        rc = send_command(_parse_send(["review multi", "ping"]))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "aaaa1111bbbb" in err and "cccc2222dddd" in err
+    assert "(not running)" in err
+
+
 def test_self_send_is_refused_before_any_network_call(capsys) -> None:
     """A target whose pid is os.getppid() (the launching session) is rejected
     with a clear message and never reaches ``send_peer_message``."""
@@ -643,3 +722,45 @@ def test_a_grandparent_session_does_not_block_a_send_to_a_third_party(capsys) ->
     assert "that target is this session" not in err
     # It got past the guard and failed on the dial instead (no live peer here).
     assert code == 1
+
+
+def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, monkeypatch) -> None:
+    """BLOCKER-1/MAJOR-1 at the CLI: a refusal about a live session stands.
+
+    The binder rejects `target` + `--pid` before resolution, so this drives the
+    guard the way the in-session tool actually reaches it: resolution returns
+    one of the no-record refusals (a conflicting pair, or a wedged unique
+    match) while a stored session sharing the substring exists on disk. Either
+    falling through to the store would deliver the message to a session the
+    command never named, so both forms must be refused with their own error
+    and nothing spooled.
+    """
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+    sid = "dead00000abc"
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+
+    class _Row:
+        id = sid
+        name = "Improve /credential skill"
+        mtime = 0.0
+
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: [_Row()]
+    )
+    refusals = {
+        "conflict": (
+            "pass either a target substring or an exact pid/session, not both — "
+            "they name different sessions"
+        ),
+        "wedged": "the only match for 'credential' is not responding (pid 4242); try again shortly",
+    }
+    for label, live_error in refusals.items():
+        with patch("local_operator.cli._resolve_peer_target", return_value=(None, [], live_error)):
+            rc = send_command(_parse_send(["credential", "hello"]))
+        assert rc == 1, label
+        err = capsys.readouterr().err
+        assert ("not both" in err) or ("not responding" in err), label
+        # The stored lookalike received nothing: the refusal was the answer.
+        assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists(), label

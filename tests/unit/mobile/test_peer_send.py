@@ -206,6 +206,137 @@ def test_no_target_is_a_clean_error(fake_scan) -> None:
     assert "no target given" in error
 
 
+# --- Stored-session discovery (resolve_stored_target) ----------------------
+#
+# A note addressed by the name a session had before its terminal was closed
+# must still deliver. These pin the fallback's contract: live wins, ambiguity
+# refuses with candidates, and a single stored match resolves to the id that
+# feeds the unchanged cold-delivery path. The store is faked by patching
+# ``resume.recent_session_rows`` — the same scan the picker uses — so the test
+# pins the matching rule, not the filesystem walk.
+
+
+class _StoredRow:
+    """The ``SessionRow`` fields ``resolve_stored_target`` reads."""
+
+    def __init__(self, session_id: str, name: str, mtime: float = 0.0) -> None:
+        self.id = session_id
+        self.name = name
+        self.mtime = mtime
+
+
+def _stored(monkeypatch, rows):
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows",
+        lambda directory, limit=None: rows,
+    )
+
+
+def test_stored_match_by_name_resolves_when_no_live_record(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Improve /credential skill")])
+    session_id, candidates, error = peer_send.resolve_stored_target("credential")
+    assert error == ""
+    assert candidates == []
+    assert session_id == "abc123def456"
+
+
+def test_stored_match_is_case_insensitive(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Release Cutter")])
+    session_id, _c, _e = peer_send.resolve_stored_target("release cutter")
+    assert session_id == "abc123def456"
+
+
+def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_scan) -> None:
+    """The exclusion is by ID, not by name, and exists for the id collision.
+
+    The fallback is entered only after the live scan matched nothing (see
+    ``live_scan_found_nothing``), so a live session sharing the stored row's
+    NAME cannot be what this guards: both read their name from the same
+    transcript. What the exclusion exists for is a stored row whose ID belongs
+    to a session that currently has a runtime — delivering cold to it would
+    queue behind a process that could have been dialled. Review round 1,
+    MINOR-3: an earlier draft of this test passed a live NAME and asserted the
+    stored row still returned, which pinned nothing the production callers
+    exercise.
+    """
+    live = _Record(10, session_id="shared-id", conversation_name="live name")
+    fake_scan([(live, "live")])
+    _stored(monkeypatch, [_StoredRow("shared-id", "old name"), _StoredRow("other-id", "old name")])
+    session_id, candidates, error = peer_send.resolve_stored_target(
+        "old name", live_ids={"shared-id"}
+    )
+    assert error == ""
+    assert candidates == []
+    # The live-owned row is skipped; the distinct stored row still resolves.
+    assert session_id == "other-id"
+
+
+def test_ambiguous_stored_matches_are_refused_with_candidates(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(
+        monkeypatch,
+        [_StoredRow("id1", "multi one"), _StoredRow("id2", "multi two")],
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("multi")
+    assert session_id is None
+    assert error == ""
+    assert [c.session_id for c in candidates] == ["id1", "id2"]
+    lines = peer_send.stored_candidate_lines(candidates, indent="  ", prefix="session")
+    assert lines == [
+        "  session id1  multi one  (not running)",
+        "  session id2  multi two  (not running)",
+    ]
+
+
+def test_no_stored_match_is_a_clean_no_match(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("id1", "something else")])
+    session_id, candidates, error = peer_send.resolve_stored_target("nothing-here")
+    assert (session_id, candidates, error) == (None, [], "")
+
+
+def test_an_unreadable_store_never_refuses_a_send(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+
+    def _boom(directory, limit=None):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", _boom)
+    session_id, candidates, error = peer_send.resolve_stored_target("anything")
+    assert (session_id, candidates, error) == (None, [], "")
+
+
+def test_stored_resolution_flows_into_spool_delivery(monkeypatch, tmp_path) -> None:
+    """A stored substring match delivers through the EXISTING cold path.
+
+    ``resolve_stored_target`` decides WHO; ``deliver_peer_message`` still owns
+    HOW. This pins that a resolved stored id spools to the inbox on a quiet
+    mailbox (wake=False) exactly as an exact-id cold send does — the fallback
+    does not rebuild delivery.
+    """
+    import asyncio
+
+    sid = "deadbeef0123"
+    directory = tmp_path / "sessions" / sid
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
+
+    receipt = asyncio.run(
+        peer_send.deliver_peer_message(
+            None,
+            session_id=sid,
+            text="hello from the past",
+            mode="mailbox",
+            wake=False,
+            sender={},
+        )
+    )
+    assert receipt == "spooled (will be read when the session next opens)"
+    assert (directory / "inbox.jsonl").is_file()
+
+
 def test_validate_body_rejects_empty_and_oversized() -> None:
     assert peer_send.validate_peer_body("   ") == "message is empty"
     big = "x" * (peer_send.PEER_MESSAGE_MAX_BYTES + 1)

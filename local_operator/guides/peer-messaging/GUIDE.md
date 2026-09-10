@@ -115,7 +115,9 @@ Refusals are answers too, and each names its own fix:
 
 - An ambiguous `target` returns the candidate list — `2 sessions match; retry
   with pid=<n>:` followed by one `pid=<n>` line per session.
-- No match returns `no live session matches '<target>'`.
+- No match returns `no session matches '<target>' (searched live and stored
+  sessions)` — a name only a closed session had still resolves, so a miss
+  means neither the running fleet nor the store answered to it.
 - A session cannot send to itself; the tool refuses before it dials.
 - A body over the 256 KB cap is rejected with the measured size, not truncated.
 - If the ack is lost after the peer committed the message, the tool says the
