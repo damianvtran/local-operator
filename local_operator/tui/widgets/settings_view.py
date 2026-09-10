@@ -58,6 +58,7 @@ from local_operator import settings_io
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import score_command_text_match
+from local_operator.tui.error_text import error_text
 from local_operator.tui.widgets.command_picker import ghost_for
 from local_operator.tui.widgets.model_picker import ModelRow, rank_rows
 from local_operator.tui.widgets.subagent_view import HintButton
@@ -1963,7 +1964,7 @@ class SettingsView(Vertical):
             self._repaint()
             return False
         except ValueError as error:
-            self._error = str(error)
+            self._error = error_text(error)
             self._repaint()
             return False
         except TypeError as error:
@@ -2527,7 +2528,7 @@ class SettingsView(Vertical):
         try:
             value = settings_io.coerce(setting, text)
         except ValueError as error:
-            self._error = str(error)
+            self._error = error_text(error)
             self._repaint()
             return
         problem = settings_io.validate(setting, value, self._config_values())

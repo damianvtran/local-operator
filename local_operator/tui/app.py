@@ -138,6 +138,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
+from local_operator.tui.error_text import error_text
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -28848,12 +28849,12 @@ class OperatorApp(App[None]):
                 if not accepts():
                     return
                 if self._is_current(source) and panel.accepts(generation):
-                    panel.fail_answer(generation, str(error))
+                    panel.fail_answer(generation, error_text(error))
                     if not self._editor().text.strip():
                         self._editor().load_text(question)
                     self._sync_aside_fork_hint()
                 else:
-                    target.fail(str(error))
+                    target.fail(error_text(error))
                     if not source.draft.text.strip():
                         source.draft.text = question
                 return
