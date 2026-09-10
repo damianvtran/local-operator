@@ -3680,38 +3680,21 @@ async def _mcp_reauth_server(name: str, cwd: Path) -> int:
     and then runs exactly the login connect path — one implementation of what
     "authenticated" means.
 
-    A failed removal is NOT automatically a failed reauth. Reauth's contract
-    is "end up authenticated", not "delete a row", so having nothing to delete
-    is a satisfied precondition rather than an error — see the gate below.
+    A failed removal is NOT automatically a failed reauth, and a successful
+    login is not automatically a successful reauth. Reauth's contract is "end
+    up authenticated having genuinely re-granted", not "delete a row", so
+    having nothing to delete is a satisfied precondition, while a delete that
+    was ATTEMPTED and failed leaves a credential the coming grant would
+    silently reuse. :func:`clear_for_reauth` is the single place that tells
+    those apart — shared with the TUI's ``/mcp reauth`` so the two cannot
+    answer one question differently, which is the defect this path exists to
+    remove. A remote server that advertises no authorization server is still
+    refused downstream by the live probe inside :func:`_mcp_login_server`.
     """
-    from local_operator.mcp.auth import mcp_logout_server, server_rejects_oauth
-    from local_operator.mcp.config import load_all_mcp_configs
+    from local_operator.mcp.auth import clear_for_reauth
 
-    error = mcp_logout_server(name, cwd)
+    error = clear_for_reauth(name, cwd)
     if error is not None:
-        # ``mcp_logout_server`` gates on ``server_is_oauth_capable`` — the
-        # STRICT test, deliberately unwidened because other callers (the
-        # ``/mcp logout`` picker) need it to mean "we actually hold something
-        # here". On a url-only Codex import with a cold ledger and no stored
-        # row that is False, so reauth used to exit 1 with "does not use OAuth
-        # login" on precisely the server ``mcp login`` accepts one line later:
-        # a false statement AND a dead end, for the exact user this path exists
-        # for.
-        #
-        # Fixed HERE rather than by loosening the shared helper. Nothing stored
-        # means the delete was a no-op, and a no-op delete leaves reauth's own
-        # precondition (no credential to reuse) already satisfied — so fall
-        # through to the login, which IS the rest of reauth. The refusals that
-        # matter survive because they are re-made downstream, not skipped: an
-        # unknown name still errors here (``cfg is None``), a statically
-        # ineligible server — stdio, or a declared ``auth.type: apikey`` — is
-        # refused by ``server_rejects_oauth`` here, and a remote server that
-        # advertises no authorization server is refused by the live probe
-        # inside ``_mcp_login_server``. A typo still cannot open a browser tab.
-        configs, _sources = load_all_mcp_configs(cwd)
-        cfg = configs.get(name)
-        if cfg is not None and not server_rejects_oauth(cfg):
-            return await _mcp_login_server(name, cwd)
         print(f"error: MCP reauth failed for {name!r}: {error}", file=sys.stderr)
         return 1
     return await _mcp_login_server(name, cwd)

@@ -30643,11 +30643,21 @@ class OperatorApp(App[None]):
     ) -> bool:
         """Remove the stored OAuth credential for ``name`` and disconnect it.
 
-        Returns whether the removal happened, so ``reauth`` can chain into the
-        login only when the old grant is actually gone. Deletion goes through
-        the module helper, which writes to the shared ``auth.db`` — the row
-        every future session will read — rather than any store this one
-        session was injected with.
+        Returns whether the login may proceed, so ``reauth`` can chain into it
+        only when no credential is left for a fresh grant to reuse. Deletion
+        goes through the module helper, which writes to the shared ``auth.db``
+        — the row every future session will read — rather than any store this
+        one session was injected with.
+
+        The two verbs ask DIFFERENT questions of that removal, so they call
+        different gates. Logout must actually delete something and reports a
+        no-op as a failure. Reauth only needs to know that nothing survives for
+        the coming grant to reuse: a server holding nothing already satisfies
+        that (and used to be refused here), while a delete that was attempted
+        and FAILED does not (and used to look like the former). That is
+        :func:`~local_operator.mcp.auth.clear_for_reauth`, shared with the
+        CLI's ``mcp reauth`` and with ``run_grant`` so all three surfaces
+        answer one question the same way.
 
         The live connection is torn down too, deliberately AFTER the row is
         deleted: the manager's auto-reconnect would otherwise read the stored
@@ -30661,10 +30671,13 @@ class OperatorApp(App[None]):
         logout can honestly leave behind — the tools drop out on the next
         tools-changed repaint.
         """
-        from local_operator.mcp.auth import mcp_logout_server
+        from local_operator.mcp.auth import clear_for_reauth, mcp_logout_server
 
         try:
-            error = mcp_logout_server(name, os.getcwd())
+            if verb == "reauth":
+                error = clear_for_reauth(name, os.getcwd())
+            else:
+                error = mcp_logout_server(name, os.getcwd())
         except Exception as exc:  # noqa: BLE001 — a failed logout is a notice, not a crash
             self._system_notice(f"MCP {verb} failed for {name!r}: {exc}", "error")
             return False

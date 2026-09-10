@@ -758,9 +758,12 @@ async def test_mcp_reauth_removes_then_logs_in(
     row would reuse the stored registration and never show the consent
     screen, which is the entire reason reauth exists."""
     calls: list[str] = []
+    # ``store`` is part of the real signature and the reauth gate passes it, so
+    # the stub accepts it too — a narrower stub raises TypeError, which the
+    # gate would report as a failed removal and refuse for the wrong reason.
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
-        lambda name, cwd: calls.append("logout") or None,
+        lambda name, cwd, store=None: calls.append("logout") or None,
     )
 
     async def fake_login(name: str, cwd: Path) -> int:
@@ -778,7 +781,7 @@ async def test_mcp_reauth_stops_when_removal_fails(
 ) -> None:
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
-        lambda name, cwd: "MCP server 'linar' is not configured",
+        lambda name, cwd, store=None: "MCP server 'linar' is not configured",
     )
 
     async def fake_login(name: str, cwd: Path) -> int:
@@ -886,8 +889,11 @@ async def test_mcp_reauth_cli_on_a_url_only_server_reconnects_authenticated(
     real_logout = auth_mod.mcp_logout_server
     monkeypatch.setattr(
         "local_operator.mcp.auth.mcp_logout_server",
-        lambda name, cwd: real_logout(name, cwd, store),
+        lambda name, cwd, _store=None: real_logout(name, cwd, store),
     )
+    # The reauth gate re-reads the store to confirm nothing survived the
+    # delete, and would resolve the real shared ``auth.db`` to do it.
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
 
     seen: dict[str, bool] = {}
 
@@ -947,6 +953,62 @@ async def test_mcp_reauth_with_nothing_stored_proceeds_into_the_login(
     assert await cli._mcp_reauth_server("codex", tmp_path) == 0
     assert logged_in == ["codex"]  # fell through instead of erroring
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+async def test_mcp_reauth_refuses_when_the_credential_delete_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A FAILED delete must never look like "nothing was stored".
+
+    The hazard the fall-through above opens if the two are conflated: both
+    outcomes made ``mcp_logout_server`` return an error string, so falling
+    through on "an error" also fell through when the delete had been ATTEMPTED
+    and had RAISED — leaving the row on disk. The SDK then reuses the surviving
+    token and ``client_info``, no consent screen comes back up, and reauth
+    exits 0 for the account switch that silently did not happen.
+
+    Reachable rather than theoretical: a sibling session holding an EXCLUSIVE
+    sqlite transaction makes ``delete_credential`` raise ``database is locked``,
+    which is what ``RefusingStore`` reproduces here.
+
+    This test is the one that can SEE the distinction. Asserting only "reauth
+    errors when nothing is stored" cannot: it is satisfied by a gate that
+    refuses everything. So it drives the real ``_mcp_reauth_server`` against a
+    real ``McpTokenStorage`` over a store whose delete raises, and asserts all
+    three of rc=1, the login NOT reached, and the row still present.
+    """
+    from local_operator.mcp import auth as auth_mod
+    from local_operator.mcp.config import MCPHttpServerConfig
+    from tests.unit.mcp.test_auth import FakeAuthStore
+
+    class RefusingStore(FakeAuthStore):
+        """A store whose row cannot be deleted — `OperationalError` in the field."""
+
+        def delete_credential(self, credential_id: int) -> None:
+            raise RuntimeError("database is locked")
+
+    url = "https://codex.example/mcp"
+    store = RefusingStore()
+    auth_mod.OAUTH_CHALLENGES.clear()
+    auth_mod.McpTokenStorage(url, store)._write({"tokens": {"access_token": "OLD-TOKEN"}})
+    monkeypatch.setattr(
+        "local_operator.mcp.config.load_all_mcp_configs",
+        lambda _cwd: ({"codex": MCPHttpServerConfig(url=url)}, {}),
+    )
+    # The CLI resolves the real shared ``auth.db``; pin it to the in-memory
+    # store so the developer's own credentials are never touched.
+    monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+
+    async def fake_login(name: str, cwd: Path) -> int:
+        raise AssertionError("a surviving credential must not be reused by a fresh grant")
+
+    monkeypatch.setattr(cli, "_mcp_login_server", fake_login)
+
+    assert await cli._mcp_reauth_server("codex", tmp_path) == 1
+    assert "still in place" in capsys.readouterr().err
+    # The row really did survive — which is precisely why the login was refused.
+    assert auth_mod.server_has_stored_grant(url, store) is True
 
 
 @pytest.mark.asyncio
