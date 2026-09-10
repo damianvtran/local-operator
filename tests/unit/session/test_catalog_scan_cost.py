@@ -409,33 +409,56 @@ class TestTheHiddenSkipCannotHideRealWork:
     def test_a_recreated_id_is_visible_rather_than_serving_a_dead_verdict(
         self, tmp_path: Path
     ) -> None:
-        """ID REUSE — the case that fails a name-keyed cache.
+        """ID REUSE — the case that motivates the inode qualification.
 
         Delete a subagent directory, then create a REAL session under the same
         12-hex id. Keyed on the name alone the dead directory's hidden verdict
-        is served for the live session and it never appears. The inode closes
-        it: a recreated directory gets a different inode, so it misses the
-        cache and takes the slow path.
+        is served for the live session, and the ONLY thing that ever repairs it
+        is the epoch.
 
-        This is why the inode qualification is load-bearing rather than a
-        nicety, and it is the one assertion that distinguishes the shipped
-        design from the cheaper one.
+        The inode is what usually repairs it sooner, and how much sooner is a
+        property of the FILESYSTEM, which is why this test asserts two
+        different bars:
+
+        * where the inode is REALLOCATED on recreate (measured on APFS:
+          912841799 -> 912841800), the recreated id misses the cache and is
+          visible on the VERY NEXT poll;
+        * where it is RECYCLED immediately (measured on ext4 in
+          ``python:3.12-slim``: 67634 -> 67634), the skip still fires and the
+          session is hidden until the epoch — the documented degradation, since
+          the inode is a hint and never a source of truth.
+
+        Both are asserted rather than one being assumed, because the CI matrix
+        runs both filesystems and an assertion written for APFS alone is how a
+        Linux-only failure ships. What is NOT allowed on either is the session
+        staying invisible forever, so the revalidation bar is checked
+        unconditionally at the end.
         """
         import shutil
 
         reused = "a" * 12
-        _session(tmp_path, reused, origin="subagent", stamp=1000.0)
+        directory = _session(tmp_path, reused, origin="subagent", stamp=1000.0)
+        before_ino = directory.stat().st_ino
         _session(tmp_path, "b" * 12, stamp=2000.0)
         _recent_sessions_with_origin(tmp_path)
         # Arm the fast path: this is the poll that would serve the stale answer.
         assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["b" * 12]
 
         shutil.rmtree(tmp_path / "sessions" / reused)
-        _session(tmp_path, reused, stamp=3000.0)
+        recreated = _session(tmp_path, reused, stamp=3000.0)
+        reallocated = recreated.stat().st_ino != before_ino
 
         listed = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
-        assert reused in listed, "a session recreated under a reused id must be visible"
-        assert listed == [reused, "b" * 12]
+        if reallocated:
+            assert listed == [reused, "b" * 12], "a moved inode must miss the cache at once"
+        else:
+            assert listed == ["b" * 12], "a recycled inode degrades to the epoch, by design"
+
+        # The bar that holds on EVERY filesystem: never invisible for good.
+        from local_operator import resume as resume_mod
+
+        resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == [reused, "b" * 12]
 
     def test_a_missing_inode_degrades_to_the_slow_path_not_to_a_guess(
         self, tmp_path: Path, monkeypatch: Any
@@ -678,12 +701,21 @@ class TestTheHiddenSkipCannotHideRealWork:
         assert len(page) == CATALOG_SCAN_LIMIT
         assert [entry.id for entry in load_catalog(tmp_path)] == [entry.id for entry in page]
 
-    def test_resume_and_the_sidebar_list_the_same_set_in_the_same_order(
-        self, tmp_path: Path
-    ) -> None:
-        """The invariant the whole change is measured against. Both surfaces
-        share one scan, so they cannot diverge — pinned here so a future
-        'optimisation' that gives the sidebar its own path fails loudly."""
+    def test_resume_and_the_sidebar_select_the_same_sessions(self, tmp_path: Path) -> None:
+        """The invariant the whole change is measured against: both surfaces
+        must SELECT the same sessions, because they share one scan.
+
+        Set equality, not order equality — the two deliberately order
+        differently and always have. ``_recent_sessions_with_origin`` ranks by
+        the activity clock, while the sidebar re-ranks by ``CatalogEntry.rank``
+        (``tier, wake_rank, -birth, id``), which is birth order inside a tier.
+        Asserting a prefix relationship here would pin a coincidence rather
+        than the contract, and would fail on any store where creation order and
+        activity order differ.
+
+        What must never happen is the two ranging over different SETS: the
+        hidden-skip changes visibility, and a session the picker offers but the
+        sidebar cannot show (or the reverse) is the divergence this pins."""
         for index in range(20):
             _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
         for index in range(40):
@@ -691,6 +723,7 @@ class TestTheHiddenSkipCannotHideRealWork:
         _recent_sessions_with_origin(tmp_path)
         _recent_sessions_with_origin(tmp_path)
 
-        picker = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
-        sidebar = [entry.id for entry in load_catalog(tmp_path)]
-        assert sidebar == picker[: len(sidebar)]
+        picker = {row[0] for row in _recent_sessions_with_origin(tmp_path)}
+        sidebar = {entry.id for entry in load_catalog(tmp_path)}
+        assert sidebar == picker
+        assert len(picker) == 20, "every subagent session must stay hidden from both"

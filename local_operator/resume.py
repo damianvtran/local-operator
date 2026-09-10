@@ -125,9 +125,11 @@ USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
 #:
 #: Each entry also carries the directory's ``ino``, which is what lets a
 #: known-HIDDEN directory be skipped whole — before its marker is stat'd at all
-#: — for zero syscalls. See :data:`REVALIDATE_EVERY` and the scan loop in
-#: :func:`_recent_sessions_with_origin` for why the inode is load-bearing and
-#: why the skip is not permitted to be permanent.
+#: — for zero syscalls, and which bounds how long a reused session id can serve
+#: a dead directory's verdict. How MUCH it bounds it is filesystem-dependent
+#: (APFS reallocates on recreate, ext4 recycles), so :data:`REVALIDATE_EVERY`
+#: rather than the inode is the correctness guarantee; see the scan loop in
+#: :func:`_scan_sessions` for both measurements.
 ORIGIN_CACHE_NAME = "origin-verdicts.json"
 
 #: Bumped when the cache's shape or key changes, so an older file is discarded
@@ -1338,20 +1340,28 @@ def _scan_sessions(
             # per-directory cost from O(the whole store) into O(the user's own
             # sessions).
             #
-            # WHY THE INODE IS LOAD-BEARING, not a nicety: keyed on the name
-            # alone this is wrong under ID REUSE. Delete a subagent directory,
-            # later create a real session under the same 12-hex id, and the
-            # dead directory's "hidden" verdict is served for the live one —
-            # a real session permanently invisible in the picker, the severe
-            # failure this design exists to avoid. An inode is reallocated on
-            # recreation (measured on APFS: 912841799 -> 912841800), so the
-            # recreated id misses the cache and takes the slow path.
+            # WHY THE INODE IS HERE: keyed on the name alone this is wrong
+            # under ID REUSE. Delete a subagent directory, later create a real
+            # session under the same 12-hex id, and the dead directory's
+            # "hidden" verdict is served for the live one — a real session
+            # invisible in the picker, the severe failure this design must
+            # bound. Where the filesystem reallocates on recreate the inode
+            # closes that hole outright: measured on APFS (912841799 ->
+            # 912841800), the recreated id misses the cache and is visible on
+            # the very next poll.
             #
-            # The inode is a HINT, never truth. Where it is unavailable
-            # (``ino is None``) or a filesystem recycles numbers aggressively,
-            # the worst case is the name-keyed behaviour this qualification
-            # replaced, bounded by :data:`REVALIDATE_EVERY` — never a wrong
-            # answer that outlives the epoch.
+            # The inode is a HINT, never truth, and HOW MUCH it buys is a
+            # property of the filesystem rather than of this code. ext4
+            # recycles the number immediately (measured in python:3.12-slim:
+            # 67634 -> 67634), so there the skip still fires and the case
+            # degrades to exactly the name-keyed behaviour — repaired by
+            # :data:`REVALIDATE_EVERY` rather than at once. Same where the
+            # inode is unavailable (``ino is None``). So the epoch is the
+            # correctness guarantee and the inode is the latency improvement on
+            # top of it; do not delete the epoch on the strength of the inode,
+            # and do not assume the APFS timing holds on the Linux CI leg.
+            # ``test_a_recreated_id_is_visible_rather_than_serving_a_dead_verdict``
+            # asserts both behaviours explicitly for this reason.
             try:
                 ino: int | None = entry.inode()
             except OSError:
