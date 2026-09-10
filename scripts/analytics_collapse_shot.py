@@ -199,6 +199,27 @@ async def _capture(app, pilot, out: Path, state: str) -> dict[str, object]:
     }
 
 
+async def _walk_cursor_to(pilot, screen, *, expandable: bool, limit: int = 40) -> str:
+    """Walk the row cursor down until it stands on a row of the asked-for kind.
+
+    Frames are named after the STATE they show, so the state has to be asserted
+    rather than assumed. Round 1 shipped ``cursor-expandable.svg`` holding the
+    cursor on a childless root and ``cursor-childless.svg`` holding it on the
+    expandable one — the two were captured by press count, and the press count
+    that reaches an expandable row depends on the seeded ledger's ordering.
+
+    Returns the session id it stopped on so the caller can print it as evidence.
+    Raises rather than capturing a mislabelled frame.
+    """
+    for _ in range(limit):
+        row = screen._cursor_row()
+        if row is not None and row.expandable is expandable:
+            return row.session_id
+        await pilot.press("down")
+        await pilot.pause()
+    raise AssertionError(f"no row with expandable={expandable} within {limit} presses")
+
+
 async def main() -> None:
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -233,17 +254,22 @@ async def main() -> None:
         # pre-change code these keys do not exist, so the frames repeat the
         # previous state — which is the point of running one script on both sides.
         #
-        # TWO presses, deliberately: the first Enter PLACES the cursor (there is
-        # no "that row" to expand until one exists) and the second acts on it.
-        # A single press captured the cursor arriving on a still-collapsed row,
-        # which is a real state but not the one this frame is for.
+        # ONE press now. It used to take two, because the first Enter only
+        # PLACED the cursor; the cursor is placed at mount since review D2, so
+        # the advertised key acts on its first press and this script no longer
+        # has to paper over the difference.
+        #
+        # The cursor is walked onto an EXPANDABLE row explicitly rather than
+        # trusted to land on one by press count: which row a fixed number of
+        # presses reaches depends on the seeded ledger's ordering, and that is
+        # how the round-1 artifacts ended up with the frame named "expandable"
+        # holding the cursor on a childless root.
         await pilot.press("home")
         await pilot.pause()
         for _ in range(4):
             await pilot.press("pagedown")
             await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
+        await _walk_cursor_to(pilot, screen, expandable=True)
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()

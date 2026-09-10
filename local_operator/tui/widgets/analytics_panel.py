@@ -899,7 +899,16 @@ def build_report(
             cursor_index = next(
                 (i for i, row in enumerate(structure) if row.session_id == cursor), None
             )
-        lines.append(_session_section(session_rows, width, name_col, meta, cursor=cursor_index))
+        lines.append(
+            _session_section(
+                session_rows,
+                width,
+                name_col,
+                meta,
+                cursor=cursor_index,
+                suffixes=[suffixes[row.session_id] for row in structure],
+            )
+        )
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
@@ -1290,6 +1299,7 @@ def _session_section(
     meta: str = "",
     *,
     cursor: int | None = None,
+    suffixes: Sequence[str] | None = None,
 ) -> Text:
     """The per-session table, pre-ordered and pre-indented by the forest walk.
 
@@ -1317,6 +1327,14 @@ def _session_section(
     (the default, and what every non-interactive caller passes) paints no
     cursor at all, which keeps the plain-text renderers and the scripts on the
     same output they had before the row cursor existed.
+
+    ``suffixes`` is the ``+N subagents`` tail already composed into each label,
+    handed over separately ONLY so it can be painted ``dim`` (review D3). It is
+    metadata about the row, not part of the session's name, and at full
+    foreground it scanned as the end of the title — while ``calls``, ``% cache``
+    and the section meta beside it are all dim. Passing the string rather than a
+    length keeps the split honest under truncation: a suffix the budget cut is
+    simply not found at the tail and the row paints in one style, as before.
     """
     fg = semantic_style("fg")
     dim = semantic_style("dim")
@@ -1347,10 +1365,18 @@ def _session_section(
         # whatever the label overran, and the cost column is the one thing this
         # screen exists to let you scan straight down. Labels arrive budgeted
         # (prefix included), so this is a backstop rather than the mechanism.
-        block.append(
-            f"{truncate_cells(label, name_col):<{name_col}}",
-            style=accent if on_cursor else style,
-        )
+        clipped = truncate_cells(label, name_col)
+        pad = " " * max(0, name_col - cell_len(clipped))
+        suffix = suffixes[index] if suffixes is not None and index < len(suffixes) else ""
+        # The cursor row keeps ONE style across the whole label: the caret's
+        # highlight is what says "you are here", and breaking it in the middle
+        # would read as two spans rather than one selected row.
+        if suffix and not on_cursor and clipped.endswith(suffix):
+            block.append(clipped[: len(clipped) - len(suffix)], style=style)
+            block.append(suffix, style=dim)
+            block.append(pad)
+        else:
+            block.append(clipped + pad, style=accent if on_cursor else style)
         block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=style)
         block.append("   ")
         append_cost(block, agg, cost_col, style, dim)
@@ -1554,6 +1580,33 @@ class AnalyticsScreen(ModalScreen[None]):
         # After layout settles: ``max_scroll_y`` is only meaningful once the
         # body has been measured against the viewport.
         self.call_after_refresh(self._sync_hint)
+        self.call_after_refresh(self._place_initial_cursor)
+
+    def _place_initial_cursor(self) -> None:
+        """Draw the caret from frame 1, without moving the viewport.
+
+        The hint says ``enter expand`` on the opening frame, but with no cursor
+        set the first ``enter`` only PLACED one — so the advertised key took two
+        presses to do the advertised thing (review D2; the PR's own capture
+        script pressed ``enter`` twice for exactly this reason). Placing it at
+        mount makes every ``enter`` act.
+
+        Placed WITHOUT scrolling: the opening frame is the top of the report and
+        scrolling to row 0 of a table 57 lines down would throw the reader out of
+        the totals block they opened the screen to read. This is the same rule
+        U2 asks for — a cursor never teleports the viewport — so the two are one
+        behaviour, not two. When the table is off screen the cursor is simply
+        parked on row 0 unpainted; the first arrow press then line-scrolls
+        (``_table_on_screen``) rather than jumping to it.
+        """
+        if self._cursor is not None:
+            return
+        rows = self._layout.session_rows
+        if not rows:
+            return
+        index = self._visible_row_index()
+        self._cursor = rows[index if index is not None else 0].session_id
+        self._repaint()
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
         # NOT an unconditional rebuild. Dragging a terminal edge emits a burst of
@@ -1620,30 +1673,87 @@ class AnalyticsScreen(ModalScreen[None]):
         title.append("─" * max(1, self._card_width()), style=faint)
         return title
 
+    def _hint_width(self) -> int:
+        """Cells the hint ``Static`` can actually paint into on this frame.
+
+        The hint is ``height: 2`` with ``padding-top: 1`` (see
+        ``#analytics-hint`` in the stylesheet), i.e. exactly ONE content line.
+        Anything wider wraps to a second line that is never painted — which is
+        why the width has to be measured rather than assumed. Falls back to the
+        card width before the widget is mounted, which is within a cell of the
+        real box at every terminal size measured (50→39/40, 120→102/101).
+        """
+        hint = getattr(self, "_hint", None)
+        if hint is not None and hint.is_mounted:
+            width = hint.content_size.width
+            if width > 0:
+                return width
+        return self._card_width()
+
     def _hint_text(self, *, scrollable: bool) -> Text:
         # The scroll affordance is advertised only when there is something to
         # scroll (D5): the empty state and any report that fits told the user to
         # scroll a screen that could not, which reads as a dead control.
         faint = Style(color=theme_mod.semantic_color("faint"))
-        hint = Text()
-        hint.append("esc back", style=faint)
-        # The metric toggle is advertised only when there is a chart to toggle;
-        # an empty or rollup-less report has no bars, so the key is a no-op and
-        # promising it would be a dead control (the same rule the scroll hint
-        # follows). ``bool(series)`` is false for both ``None`` and ``[]``.
-        if self._has_charts():
-            hint.append(" · t cost/tokens", style=faint)
-        # The expand keys are advertised only when a row can actually be
-        # expanded — the same D5 rule as the two hints above. A ledger that never
-        # ran a subagent has no expandable row, so ``enter`` and ``e`` would be
-        # dead controls, and the table it renders is the flat one this screen has
-        # always shown.
-        if self._expandable_rows():
-            hint.append(" · ↑↓ row · enter expand · e all", style=faint)
+        # ``↑↓`` is described as "row" whenever session rows exist, NOT only when
+        # something is expandable (review R2). The cursor moves on every ledger
+        # with rows — ``_move_cursor`` never consults expandability — so the old
+        # ``↑↓ scroll`` on a subagent-free ledger described a control the screen
+        # did not have. It now also genuinely scrolls above the table, but "row"
+        # is the half a reader needs named: line-scrolling is the behaviour they
+        # already expect from an arrow on a report.
+        rows = bool(self._layout.session_rows)
+        expandable = self._expandable_rows()
+        # Ordered widest-first; the first one that FITS the real box is painted.
+        # Degrading by dropping whole clauses (rather than letting the tail wrap
+        # away unpainted) is the fix for U3: at 50 and 60 columns the cut used to
+        # eat ``enter expand · e all`` and leave a dangling ``·``, so exactly
+        # where the table is most cramped the expand keys stopped being
+        # documented while the ``▸`` glyphs stayed on screen inviting the press.
+        #
+        # ``esc back`` is shed BEFORE the expand keys because ``esc`` is the one
+        # key a reader tries unprompted on a modal; ``enter``/``e`` are the ones
+        # they cannot guess. Both keep their names in every tier that mentions
+        # them — an abbreviation that drops the key name documents nothing.
+        if expandable:
+            candidates = [
+                "esc back · t cost/tokens · ↑↓ row · enter expand · e all",
+                "esc back · ↑↓ row · enter expand · e all",
+                "esc back · ↑↓ row · enter · e all",
+                "↑↓ row · enter · e all",
+                "enter · e all",
+            ]
+            if not self._has_charts():
+                candidates = candidates[1:]
+        elif rows:
+            candidates = [
+                "esc back · t cost/tokens · ↑↓ row",
+                "esc back · ↑↓ row",
+                "↑↓ row",
+            ]
+            if not self._has_charts():
+                candidates = candidates[1:]
         elif scrollable:
-            # ``↑↓`` still moves the cursor when rows exist, so it is described
-            # as "scroll" only where there is no cursor to move.
-            hint.append(" · ↑↓ scroll", style=faint)
+            # No rows at all (an empty or provider-only report): there is no
+            # cursor to move, so the arrows only ever scroll and the hint says so.
+            candidates = [
+                "esc back · t cost/tokens · ↑↓ scroll",
+                "esc back · ↑↓ scroll",
+                "↑↓ scroll",
+            ]
+            if not self._has_charts():
+                candidates = candidates[1:]
+        else:
+            candidates = ["esc back · t cost/tokens", "esc back"]
+            if not self._has_charts():
+                candidates = ["esc back"]
+
+        width = self._hint_width()
+        # The narrowest tier is the floor: below it there is nothing left to shed
+        # and a clipped hint beats no hint.
+        text = next((c for c in candidates if cell_len(c) <= width), candidates[-1])
+        hint = Text(no_wrap=True, overflow="crop")
+        hint.append(text, style=faint)
         return hint
 
     def _sync_hint(self) -> None:
@@ -1797,16 +1907,102 @@ class AnalyticsScreen(ModalScreen[None]):
             None,
         )
 
+    def _table_on_screen(self) -> bool:
+        """Whether any session row is inside the viewport right now.
+
+        This is the hand-off test between the two jobs ``↑↓`` has to do on this
+        screen. The report is mostly NOT a list: on the operator's ledger the
+        session table starts ~57 body lines down, behind the totals block, both
+        bar charts and the input attribution. A cursor addresses ONLY table
+        rows, so while the reader is still up in that non-row content there is
+        nothing for the cursor to move and the arrows must keep doing what they
+        did before this feature existed — line-scroll the container.
+
+        Measured before the fix (real ledger, 120x40): ``end`` then 400 ``up``
+        presses left the viewport pinned at y=56, i.e. the top of the report was
+        unreachable by arrow key while the hint said ``↑↓ row`` (reviews
+        R1/R2/D1/U1/U2 — four streams, one root cause).
+        """
+        rows = self._layout.session_rows
+        scroll = getattr(self, "_scroll", None)
+        if not rows or scroll is None or not scroll.is_mounted:
+            return False
+        height = scroll.size.height
+        if height <= 0:
+            return False
+        top = scroll.scroll_offset.y
+        first = self._layout.session_first_line
+        last = first + len(rows) - 1
+        # Any overlap between [first, last] and the viewport [top, top+height).
+        return first <= top + height - 1 and last >= top
+
+    def _visible_row_index(self) -> int | None:
+        """Index of the first session row already ON SCREEN, or ``None``.
+
+        Used to place a cursor that has none instead of teleporting to row 0.
+        Homing to row 0 is what made ``up`` the largest jump on the keyboard
+        (review U2: after ``end`` at y=629, one ``up`` landed at y=56 — 570
+        lines BACKWARD), because ``_scroll_cursor_into_view`` then drags the
+        viewport to wherever row 0 happens to be. Landing on a row the reader
+        can already see keeps them where they were, which is the property that
+        makes a cursor feel like a cursor rather than a jump.
+        """
+        rows = self._layout.session_rows
+        scroll = getattr(self, "_scroll", None)
+        if not rows or scroll is None or not scroll.is_mounted:
+            return None
+        height = scroll.size.height
+        if height <= 0:
+            return None
+        top = scroll.scroll_offset.y
+        first = self._layout.session_first_line
+        # The first row at or below the viewport's top edge, if it is still
+        # inside the viewport.
+        index = max(0, top - first)
+        if index >= len(rows) or first + index > top + height - 1:
+            return None
+        return index
+
+    def _cursor_on_screen(self) -> bool:
+        """Whether the cursor's row is inside the viewport right now.
+
+        The cursor is ALLOWED to drift off screen — the wheel and the scrollbar
+        move the viewport without touching it, which is the split AGENTS.md
+        requires. But a KEY that acts on the cursor must not then drag the
+        viewport back to wherever it drifted to: that is the 570-line backward
+        jump review U2 measured after ``end``. So an arrow press re-homes an
+        off-screen cursor to a row the reader can see, rather than moving it
+        from a position they can no longer verify.
+        """
+        index = self._cursor_index()
+        scroll = getattr(self, "_scroll", None)
+        if index is None or scroll is None or not scroll.is_mounted:
+            return False
+        height = scroll.size.height
+        if height <= 0:
+            return False
+        top = scroll.scroll_offset.y
+        line = self._layout.session_first_line + index
+        return top <= line <= top + height - 1
+
     def _move_cursor(self, delta: int) -> None:
         rows = self._layout.session_rows
         if not rows:
             return
-        index = self._cursor_index()
+        index = self._cursor_index() if self._cursor_on_screen() else None
         if index is None:
-            # First press, or the cursor's row was collapsed away. Land on the
-            # first row rather than jumping to wherever the delta points: the
-            # press should do something visible and predictable on its first try.
-            target = 0
+            # No cursor to move. Two cases, and conflating them is the defect
+            # the round-2 remediation fixes:
+            #
+            # 1. The table is not on screen — the reader is up in the totals or
+            #    the charts. There is no row to point at, so the arrow keeps its
+            #    pre-feature meaning and line-scrolls the container. Handled by
+            #    the callers (``action_move_up``/``action_move_down``), which
+            #    check ``_table_on_screen`` before ever reaching here.
+            # 2. The table IS on screen but no cursor is set (first press, or
+            #    the cursor's row was collapsed away). Place it on a row the
+            #    reader can already SEE rather than scrolling to row 0.
+            target = self._visible_row_index() or 0
         else:
             target = max(0, min(len(rows) - 1, index + delta))
         self._cursor = rows[target].session_id
@@ -1845,18 +2041,108 @@ class AnalyticsScreen(ModalScreen[None]):
         elif line > top + height - 1 - slack:
             scroll.scroll_to(y=max(0, line - height + 1 + slack), animate=False)
 
+    def _scroll_by_line(self, delta: int) -> None:
+        """Move the viewport one line, the way the container did before the cursor.
+
+        ``animate=False`` deliberately: an animated single-line step makes an
+        autorepeating arrow queue animations behind each other and the viewport
+        lags the key by hundreds of milliseconds. Every other viewport move on
+        this screen (``_scroll_cursor_into_view``) is unanimated for the same
+        reason, so this keeps one feel across the surface.
+        """
+        scroll = getattr(self, "_scroll", None)
+        if scroll is None or not scroll.is_mounted:
+            return
+        scroll.scroll_relative(y=delta, animate=False)
+
     def action_move_up(self) -> None:
+        # The arrows serve the TABLE only once the table is on screen. Above it
+        # the report is charts and totals with no rows to address, so the key
+        # line-scrolls exactly as ``origin/main``'s ``Binding("up",
+        # "scroll_up")`` did. Without this the cursor's re-home clamped the
+        # viewport at the table's first line and the top of the report could not
+        # be reached by arrow at all (R1/D1/U1), and ``up`` at the bottom jumped
+        # 570 lines backward (U2).
+        if not self._table_on_screen():
+            self._scroll_by_line(-1)
+            return
+        # At the TOP of the table the arrow keeps travelling instead of
+        # clamping. Clamping here is what produced the hard floor: ``end`` then
+        # 400 ``up`` presses left the viewport stuck at y=56 forever, because
+        # every press re-pinned the cursor to row 0 and dragged the viewport
+        # back to it. Falling through to a line-scroll hands the reader back the
+        # 57 lines of totals and charts above the table.
+        if self._cursor_on_screen() and self._cursor_index() == 0:
+            self._scroll_by_line(-1)
+            return
         self._move_cursor(-1)
 
     def action_move_down(self) -> None:
+        if not self._table_on_screen():
+            self._scroll_by_line(1)
+            return
+        rows = self._layout.session_rows
+        # Symmetric to ``action_move_up``: at the last row the arrow scrolls on
+        # rather than dying, so the reader can reach the true bottom of the body
+        # with the same key that got them there.
+        if rows and self._cursor_on_screen() and self._cursor_index() == len(rows) - 1:
+            self._scroll_by_line(1)
+            return
         self._move_cursor(1)
 
+    def _ancestor_chain(self) -> list[str]:
+        """Session ids of the cursor row's ancestors, nearest parent first.
+
+        Read off the CURRENT paint, before the collapse that is about to hide
+        the cursor. The walk is depth-first, so the nearest row above the cursor
+        at each shallower depth is exactly its ancestor at that depth — the same
+        exact (not heuristic) scan ``action_collapse_row`` already uses to step
+        out to a parent.
+        """
+        index = self._cursor_index()
+        if index is None:
+            return []
+        rows = self._layout.session_rows
+        chain: list[str] = []
+        depth = rows[index].depth
+        for candidate in range(index - 1, -1, -1):
+            if rows[candidate].depth < depth:
+                depth = rows[candidate].depth
+                chain.append(rows[candidate].session_id)
+                if depth == 0:
+                    break
+        return chain
+
+    def _rehome_to_ancestor(self, chain: list[str]) -> None:
+        """After a collapse hid the cursor, put it on the nearest VISIBLE ancestor.
+
+        The root that swallowed the row is where the reader's attention already
+        is — it is the row still on screen at the position they were reading.
+        Leaving the cursor naming a hidden session instead (the pre-fix
+        behaviour) made the NEXT arrow press re-home to table row 0 and teleport
+        the viewport: observed at ~200 lines after collapse-all (review U2c).
+        """
+        if self._cursor_index() is not None:
+            return
+        visible = {row.session_id for row in self._layout.session_rows}
+        for ancestor in chain:
+            if ancestor in visible:
+                self._cursor = ancestor
+                return
+
     def _set_expanded(self, session_id: str, open_: bool) -> None:
+        # Captured BEFORE the repaint: collapsing a subtree removes the cursor's
+        # row from the layout, and the ancestry that says where to land is only
+        # readable while that row is still painted.
+        chain = [] if open_ else self._ancestor_chain()
         if open_:
             self._expanded.add(session_id)
         else:
             self._expanded.discard(session_id)
         self._repaint()
+        if chain:
+            self._rehome_to_ancestor(chain)
+            self._repaint()
         self._scroll_cursor_into_view()
         # Expanding changes the body's height, so whether it overflows its
         # viewport — and therefore whether the scroll hint is honest — can change
@@ -1935,11 +2221,18 @@ class AnalyticsScreen(ModalScreen[None]):
         expensive state is reachable deliberately and never sticky.
         """
         expandable = {node.session_id for node in _iter_nodes(self._forest()) if node.has_children}
-        if expandable and expandable <= self._expanded:
+        collapsing = bool(expandable) and expandable <= self._expanded
+        # Same reason as ``_set_expanded``: collapse-all hides every child row,
+        # so the cursor's ancestry has to be read while it is still painted.
+        chain = self._ancestor_chain() if collapsing else []
+        if collapsing:
             self._expanded.clear()
         else:
             self._expanded = expandable
         self._repaint()
+        if chain:
+            self._rehome_to_ancestor(chain)
+            self._repaint()
         self._scroll_cursor_into_view()
         self.call_after_refresh(self._sync_hint)
 

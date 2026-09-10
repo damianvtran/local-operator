@@ -24,6 +24,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import (
     _MAX_NAME_COL,
     _MIN_NAME_COL,
+    _ROW_CURSOR,
     _WIDE_TABLE_MIN,
     METRIC_COST,
     METRIC_TOKENS,
@@ -1560,7 +1561,11 @@ def _nested_screen_agg() -> UsageAggregate:
 
 
 def test_enter_expands_the_row_the_cursor_is_on():
-    """The user's words: "hits enter to expand that row"."""
+    """The user's words: "hits enter to expand that row".
+
+    No priming press: the cursor is placed at MOUNT (review D2), so the FIRST
+    ``enter`` does the thing the hint advertises instead of arming the next one.
+    """
     import asyncio
 
     async def run():
@@ -1568,8 +1573,6 @@ def test_enter_expands_the_row_the_cursor_is_on():
         async with app.run_test(size=(110, 40)) as pilot:
             screen = await _push(pilot, app, _nested_screen_agg())
             assert "kid1session" not in "\n".join(screen.render_lines_for_test())
-            await pilot.press("down")  # place the cursor on the first row
-            await pilot.pause()
             await pilot.press("enter")
             await pilot.pause()
             body = "\n".join(screen.render_lines_for_test())
@@ -1582,18 +1585,23 @@ def test_enter_expands_the_row_the_cursor_is_on():
     asyncio.run(run())
 
 
-def test_the_first_down_press_places_the_cursor_rather_than_moving_it():
-    """A press must do what it says on its FIRST try, not arm the next one."""
+def test_the_cursor_is_on_screen_from_the_first_frame():
+    """A press must do what it says on its FIRST try, not arm the next one.
+
+    The hint says ``enter expand`` on the opening frame, so a cursor has to
+    exist there (review D2) — otherwise the advertised key takes two presses.
+    Placed without scrolling, so the caret costs the reader none of the totals
+    block they opened the screen to read.
+    """
     import asyncio
 
     async def run():
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(110, 40)) as pilot:
             screen = await _push(pilot, app, _nested_screen_agg())
-            assert screen._cursor is None
-            await pilot.press("down")
-            await pilot.pause()
             assert screen._cursor == screen._layout.session_rows[0].session_id
+            assert screen._scroll.scroll_offset.y == 0, "placing the cursor scrolled the report"
+            assert _ROW_CURSOR in "\n".join(screen.render_lines_for_test())
 
     asyncio.run(run())
 
@@ -1813,6 +1821,11 @@ def test_the_cursor_is_scrolled_into_view_when_it_moves():
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(110, 12)) as pilot:
             screen = await _push(pilot, app, _nested_screen_agg())
+            # Bring the table into view first. Above it the arrows line-scroll
+            # (there is no row to address up there — R1/D1/U1), so the cursor
+            # contract this test is about only applies once rows are on screen.
+            await pilot.press("end")
+            await pilot.pause()
             await pilot.press("down")
             await pilot.pause()
             index = screen._cursor_index()
@@ -1848,5 +1861,190 @@ def test_the_row_keys_work_on_a_report_too_tall_to_fit():
                 assert (
                     screen._cursor is not None
                 ), f"the arrow never reached the screen at h={height}"
+
+    asyncio.run(run())
+
+
+def _tall_report_agg(roots: int = 40) -> UsageAggregate:
+    """A report shaped like the operator's real ledger: a table far BELOW the fold.
+
+    The defect these tests pin is only visible when the session table starts
+    below the viewport — on the real ledger it begins ~57 body lines down, behind
+    the totals block, both bar charts and the input attribution. The small
+    ``_nested_screen_agg`` fixture puts the table 17 lines down, which fits a
+    40-row terminal whole and hid the bug from every existing test.
+    """
+
+    def scope(micro, calls=1):
+        return UsageAggregate(
+            calls=calls,
+            ok_calls=calls,
+            context_tokens=micro,
+            cost_micro=micro,
+            cost_known_calls=calls,
+        )
+
+    agg = scope(1_000_000 * (roots + 2), calls=roots + 2)
+    by_session = {f"root{i:08d}": scope(1_000_000 * (roots - i)) for i in range(roots)}
+    # One expandable root so the disclosure gutter and the expand hints are live,
+    # exactly as on the real ledger where 103 of 595 roots have children.
+    by_session["kid00000001"] = scope(500_000)
+    agg.by_session = by_session
+    setattr(agg, "session_parents", {"kid00000001": "root00000000"})
+    setattr(agg, "session_names", {f"root{i:08d}": f"Session number {i}" for i in range(roots)})
+    agg.components = {k: 0 for k in COMPONENT_KEYS}
+    agg.components["conversation"] = 1_000
+    agg.by_provider = {"anthropic": copy.deepcopy(agg)}
+    return agg
+
+
+def test_the_top_of_the_report_is_reachable_with_the_arrow_keys():
+    """R1/R2/D1/U1/U2 — four review streams, one root cause.
+
+    ``↑``/``↓`` became ``priority=True`` row-moves, and the cursor only ever
+    addresses SESSION-TABLE rows. On the real ledger that table starts ~57 body
+    lines down, so every press re-pinned the cursor to table row 0 and dragged
+    the viewport back to it: measured at 120x40 on the operator's ledger,
+    ``end`` then 400 ``up`` presses left the viewport stuck at y=56 forever
+    while the hint on that same frame read ``↑↓ row``.
+
+    The invariant: from the BOTTOM, arrows alone must walk the viewport all the
+    way to y=0, one line per press where there is no row to move. Asserted as
+    reachability rather than as a per-press delta because the cursor legitimately
+    consumes presses while it crosses the table.
+    """
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 24)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg())
+            scroll = screen._scroll
+            assert scroll.max_scroll_y > 0, "fixture is not taller than the viewport"
+            assert (
+                screen._layout.session_first_line > scroll.size.height
+            ), "fixture's table is not below the fold, so it cannot pin this defect"
+
+            await pilot.press("end")
+            await pilot.pause()
+            bottom = scroll.scroll_offset.y
+            assert bottom > 0
+
+            # One ``up`` must never be a large backward jump (U2b: 570 lines).
+            await pilot.press("up")
+            await pilot.pause()
+            assert bottom - scroll.scroll_offset.y <= 1, (
+                f"one 'up' moved {bottom - scroll.scroll_offset.y} lines — the cursor re-home "
+                "is teleporting the viewport"
+            )
+
+            # Generous budget: the cursor eats one press per table row on the way
+            # through, and the assertion is reachability, not press count.
+            for _ in range(bottom + len(screen._layout.session_rows) + 10):
+                if scroll.scroll_offset.y <= 0:
+                    break
+                await pilot.press("up")
+            await pilot.pause()
+            floor = scroll.scroll_offset.y
+            assert floor == 0, f"the top of the report is unreachable by arrow (floor at y={floor})"
+
+    asyncio.run(run())
+
+
+def test_the_hint_fits_one_line_at_every_width():
+    """U3 — the hint grew 36→56 cells but its ``Static`` is ONE content line.
+
+    ``#analytics-hint`` is ``height: 2`` with ``padding-top: 1``, so anything
+    wider than the box wraps to a second line that is never painted. At 60x20
+    the user lost ``· e all``; at 50x16 they lost ``enter expand · e all`` and the
+    visible copy ended on a dangling ``·`` — exactly where the table is most
+    cramped, the expand keys stopped being documented while the ``▸`` glyphs
+    stayed on screen inviting the press.
+
+    Pinned at the two widths the review measured plus the ones that must not
+    regress, and the assertion is against the widget's REAL content box rather
+    than an assumed width.
+    """
+    import asyncio
+
+    async def run():
+        for width, height in ((50, 16), (60, 20), (70, 24), (110, 24), (160, 40)):
+            app = OperatorApp(lambda: _factory(FakeSession()))
+            async with app.run_test(size=(width, height)) as pilot:
+                screen = await _push(pilot, app, _tall_report_agg())
+                box = screen._hint.content_size.width
+                text = screen._hint_text(scrollable=True).plain
+                assert cell_len(text) <= box, (
+                    f"hint is {cell_len(text)} cells in a {box}-cell box at {width}x{height}: "
+                    f"{text!r} would wrap to an unpainted second line"
+                )
+                # Degrade by dropping whole clauses, never by losing the tail.
+                assert not text.rstrip().endswith(
+                    "·"
+                ), f"hint ends on a dangling separator: {text!r}"
+                # The keys a reader cannot guess must survive every tier.
+                assert "enter" in text and "e all" in text, (
+                    f"the expand keys are undocumented at {width}x{height} while the ▸ glyphs "
+                    f"remain on screen: {text!r}"
+                )
+
+    asyncio.run(run())
+
+
+def test_the_hint_says_row_even_on_a_subagent_free_ledger():
+    """R2 — the hint read ``↑↓ scroll`` where the keys did row-jumps.
+
+    ``_move_cursor`` never consults expandability, so the cursor moves on every
+    ledger that has session rows. Gating the wording on *expandability* made the
+    hint describe a control the screen did not have.
+    """
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 24)) as pilot:
+            flat = _tall_report_agg()
+            setattr(flat, "session_parents", {})
+            screen = await _push(pilot, app, flat)
+            text = screen._hint_text(scrollable=True).plain
+            assert "↑↓ row" in text, text
+            assert "↑↓ scroll" not in text, text
+            # and no dead controls advertised: nothing can expand here.
+            assert "expand" not in text and "e all" not in text, text
+
+    asyncio.run(run())
+
+
+def test_collapsing_keeps_the_cursor_on_the_visible_ancestor():
+    """U2c — collapse left ``_cursor`` naming a HIDDEN row.
+
+    ``_cursor_index()`` then returned ``None`` and the next arrow re-homed to
+    table row 0, teleporting the viewport ~200 lines on the real ledger. The
+    ancestry needed to land on the root that swallowed the row is already in the
+    layout, so the cursor follows it there instead.
+    """
+    import asyncio
+
+    async def run():
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _nested_screen_agg())
+            await pilot.press("enter")  # open the root the cursor mounted on
+            await pilot.pause()
+            await pilot.press("down")  # step onto its child
+            await pilot.pause()
+            child = screen._cursor_row()
+            assert child is not None and child.depth == 1
+
+            # ``e`` with only SOME rows open expands all (the documented
+            # contract); the second press is the collapse-all that hides the
+            # child the cursor is standing on.
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.press("e")
+            await pilot.pause()
+            assert screen._cursor_index() is not None, "the cursor was orphaned on a hidden row"
+            assert screen._cursor_row().depth == 0  # type: ignore[union-attr]
+            assert screen._cursor == "rootsession", screen._cursor
 
     asyncio.run(run())
