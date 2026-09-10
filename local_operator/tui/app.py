@@ -2872,10 +2872,13 @@ class OperatorApp(App[None]):
         #: in-tree sessions take the keyword, so no shipping path relies on it.
         self._pending_user_echoes = []
         #: Discovered skills by name, for the ``$skill`` composer prefix.
-        #: ``None`` until the first submit or picker sync asks; see
-        #: :meth:`_discovered_skills` for why one discovery per session is the
-        #: right lifetime rather than a per-keystroke filesystem walk.
+        #: ``None`` until the first submit or picker sync asks. Refreshed only
+        #: when a cheap fingerprint says the skill tree changed -- see
+        #: :meth:`_discovered_skills` for why that gate replaces a
+        #: session-lifetime cache without costing a per-keystroke walk.
         self._skills_by_name: dict[str, Skill] | None = None
+        #: Fingerprint of the skill roots when ``_skills_by_name`` was built.
+        self._skills_fingerprint: tuple[object, ...] | None = None
         #: Wake receipts painted LIVE this session, as ``(wake_id, occurrence)``
         #: keys. ``on_wake_delivered`` records each; the history replay skips a
         #: persisted ``wake_prompt`` whose key is already here — otherwise a
@@ -29871,14 +29874,20 @@ class OperatorApp(App[None]):
         return RichBlock(Group(*lines))
 
     def _discovered_skills(self) -> dict[str, Skill]:
-        """Discovered skills by name, computed once per session.
+        """Discovered skills by name, rescanned only when the tree changed.
 
-        Cached because it is read on EVERY submit to decide whether a leading
-        ``$`` is an invocation, and discovery walks the filesystem. The cache
-        matches the lifetime the rest of the skills subsystem already assumes:
-        discovery and the semantic index are built at session creation, so a
-        skill added mid-session is not visible to routing either and telling
-        the user to restart is one consistent rule rather than two.
+        Read on EVERY submit to decide whether a leading ``$`` is an
+        invocation, so a bare rescan here would put a 17-25 ms filesystem walk
+        on the keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
+        it instead: the walk runs only when a ``SKILL.md`` was added or edited.
+
+        It used to cache for the whole session, justified by the rule that a
+        skill added mid-session needed a restart to be visible anywhere. The
+        skill resolver now rescans on a miss, so that rule is gone and the
+        cache would have made ``$name`` the one surface still requiring a
+        restart -- the opposite of one consistent rule. Semantic SELECTION is
+        still frozen for prompt-cache stability; naming a skill by hand, here
+        or by URL, is not.
 
         Hidden skills are KEPT (unlike :meth:`_skills_block`, which lists what
         routing can select). ``hide`` suppresses automatic selection; naming a
@@ -29886,18 +29895,26 @@ class OperatorApp(App[None]):
 
         Never raises: a broken skills tree degrades to "no invocations", which
         sends the user's ``$foo`` through as the prose it is indistinguishable
-        from at that point.
+        from at that point. A fingerprint failure keeps the last good map for
+        the same reason.
         """
-        if self._skills_by_name is None:
-            try:
-                from pathlib import Path
+        try:
+            from pathlib import Path
 
-                from local_operator.skills.api import default_skill_roots
-                from local_operator.skills.discovery import discover_skills
+            from local_operator.skills.api import default_skill_roots
+            from local_operator.skills.discovery import (
+                discover_skills,
+                roots_fingerprint,
+            )
 
-                skills, _warnings = discover_skills(default_skill_roots(Path(os.getcwd())))
+            roots = default_skill_roots(Path(os.getcwd()))
+            fingerprint = roots_fingerprint(roots)
+            if self._skills_by_name is None or fingerprint != self._skills_fingerprint:
+                skills, _warnings = discover_skills(roots)
                 self._skills_by_name = {skill.name: skill for skill in skills}
-            except Exception:
+                self._skills_fingerprint = fingerprint
+        except Exception:
+            if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
 

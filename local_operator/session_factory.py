@@ -1135,6 +1135,12 @@ class _KnowledgeHooks:
     agent_hint_index: SkillIndex | None = None
     skills_by_name: dict[str, Skill] = field(default_factory=dict)
     guides_by_name: dict[str, Skill] = field(default_factory=dict)
+    #: The roots ``skills_by_name`` was discovered from, kept so the skill
+    #: resolver can rescan THE SAME set on a miss. Recomputing them at resolve
+    #: time would be subtly different: ``default_skill_roots`` filters
+    #: ecosystem roots by existence, so a root created mid-session would change
+    #: the list and quietly widen what the session scans.
+    skill_roots: list[Path] = field(default_factory=list)
     frozen_block: str | None = None
     #: Compaction entry id observed when ``frozen_block`` was computed. A
     #: change here (a new compaction marker) re-opens selection once — the
@@ -1212,6 +1218,7 @@ async def _setup_knowledge(
     config_dir: Path,
     agent_registry: AgentRegistry,
     warnings_out: list[str],
+    cwd: str | Path | None = None,
 ) -> _KnowledgeHooks:
     """Discover and index user skills, packaged guides, and private agent hints.
 
@@ -1231,7 +1238,13 @@ async def _setup_knowledge(
         )
         from local_operator.skills.embeddings import LocalEmbedder
 
-        skills, discovery_warnings = discover_skills(default_skill_roots(Path.cwd()))
+        # The SESSION's cwd, not the process's. A session created with an
+        # explicit cwd (bootstrap, the scheduler, owned runtimes) otherwise
+        # discovered project-local skills for whatever directory the process
+        # happened to start in -- every other consumer here already takes the
+        # session's cwd, and this one silently did not.
+        hooks.skill_roots = default_skill_roots(Path(cwd) if cwd is not None else None)
+        skills, discovery_warnings = discover_skills(hooks.skill_roots)
         warnings_out.extend(discovery_warnings)
         guides = discover_guides()
         hooks.skills_by_name = {skill.name: skill for skill in skills}
@@ -1364,7 +1377,12 @@ def _make_knowledge_resolver(hooks: _KnowledgeHooks) -> Callable[[str], str | No
     from local_operator.skills.api import make_skill_resolver
 
     guide_resolver = make_guide_resolver(hooks.guides_by_name)
-    skill_resolver = make_skill_resolver(hooks.skills_by_name)
+    # Passing the roots turns on the miss-path rescan, which is what makes a
+    # skill authored mid-session readable -- here and in subagents already
+    # running, because they inherit this closure and it mutates
+    # ``hooks.skills_by_name`` IN PLACE. Guides are packaged release resources
+    # and cannot change at runtime, so the guide resolver takes no roots.
+    skill_resolver = make_skill_resolver(hooks.skills_by_name, hooks.skill_roots)
 
     def resolver(url: str) -> str | None:
         guide_result = guide_resolver(url)
@@ -1950,7 +1968,7 @@ async def _prepare(
     effective_cwd = cwd if cwd is not None else os.getcwd()
     knowledge_warnings: list[str] = []
     hooks = await _setup_knowledge(
-        credential_manager, config_dir, agent_registry, knowledge_warnings
+        credential_manager, config_dir, agent_registry, knowledge_warnings, effective_cwd
     )
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving

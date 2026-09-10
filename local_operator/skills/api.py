@@ -20,10 +20,18 @@ makes native roots authoritative over imported ones.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
-from local_operator.skills.discovery import Skill, discover_skills
+from local_operator.skills.discovery import (
+    Skill,
+    diagnose_missing_skill,
+    discover_skills,
+    is_plain_skill_name,
+    roots_fingerprint,
+)
 from local_operator.skills.embeddings import (
     ApiEmbedder,
     EmbeddingBackend,
@@ -43,8 +51,11 @@ __all__ = [
     "SkillIndex",
     "default_backend_from_env",
     "default_skill_roots",
+    "diagnose_missing_skill",
     "discover_skills",
+    "is_plain_skill_name",
     "make_skill_resolver",
+    "roots_fingerprint",
     "render_block",
     "resolve_skill_url",
 ]
@@ -127,7 +138,117 @@ def default_skill_roots(cwd: Path | None = None) -> list[Path]:
     return roots
 
 
-def make_skill_resolver(skills: Mapping[str, Skill]) -> Callable[[str], str | None]:
+#: The prefix ``resolve_skill_url`` uses for an unresolvable NAME. It also
+#: raises for traversal, dotfiles and unsafe child paths, and those must NOT
+#: trigger a rescan -- otherwise a malformed URL drives filesystem work.
+_UNKNOWN_PREFIX = "Unknown skill: "
+
+
+class _RefreshState:
+    """Mutable bookkeeping for the miss-path refresh, one instance per resolver.
+
+    Guarded by ``lock``. Subagents run as asyncio tasks on a single loop and
+    the resolver is synchronous, so the refresh is already atomic with respect
+    to that loop -- but sessions are also built on other execution paths
+    (``exec_worker.py``, ``exec_mode.py``), and this read-modify-write is not
+    inherently thread-safe. The lock is uncontended in practice and removes the
+    question permanently rather than leaving a reader to re-derive the GIL
+    argument.
+    """
+
+    __slots__ = ("fingerprint", "lock")
+
+    def __init__(self) -> None:
+        # None means "never probed": distinct from an empty tuple, which is a
+        # real fingerprint for roots that exist and hold no skills.
+        self.fingerprint: tuple[object, ...] | None = None
+        self.lock = threading.Lock()
+
+
+def _refresh_if_changed(
+    skills: MutableMapping[str, Skill],
+    roots: Sequence[Path],
+    state: _RefreshState,
+) -> None:
+    """Rescan the roots into ``skills`` when the tree changed.
+
+    Returns nothing DELIBERATELY. An earlier revision returned an outcome enum
+    (refreshed / unchanged / cooldown) and the caller retried the lookup only
+    on "refreshed" -- which conflates two different questions. "Did MY call do
+    the scan?" is not "is the name resolvable now?": under concurrency the
+    thread that loses the race blocks on the lock, is released AFTER the winner
+    has populated the shared mapping, computes a fingerprint that now matches,
+    and reports "unchanged" for a tree it never scanned -- so it answered
+    ``Unknown skill`` for a skill demonstrably present in the mapping it was
+    holding. Only the caller's own re-lookup answers the resolvability
+    question, so the caller now always re-looks-up and this returns nothing an
+    outcome test could be written against again.
+
+    Three properties here are load-bearing:
+
+    1. **``skills.update(...)``, never ``skills = {...}``.** The whole
+       propagation story is that ``session_factory``, this closure and every
+       subagent hold the SAME dict object (``harness/subagent.py`` passes the
+       parent's resolver to the child verbatim). Rebinding the local name
+       leaves every one of those holders looking at the old mapping, and it
+       breaks children SILENTLY -- no exception, no test failure unless one is
+       written for it. ``tests/unit/skills/test_api.py`` asserts liveness
+       through a CHILD resolver for exactly this reason.
+    2. **The refresh only ADDS; it never removes.** A skill deleted from disk
+       stays in the mapping. Dropping it would let one agent's cleanup break a
+       sibling child mid-read, and the stale entry already degrades gracefully:
+       the read returns a clean ``[Errno 2] No such file or directory`` through
+       the adapter's ``OSError`` catch. Growth-only is the safe direction.
+    3. **The fingerprint is committed only AFTER a successful scan.** Assigning
+       it before ``discover_skills`` meant one transient failure (EMFILE, an
+       NFS blip, a permissions hiccup) left the state claiming it had already
+       ingested that tree: every later miss compared equal, never rescanned,
+       and the skill stayed unreadable for the WHOLE SESSION even once the
+       filesystem recovered -- a permanent regression from a one-off error, and
+       worse than the pre-refresh behaviour it replaced. Committing after the
+       scan means a failed scan simply retries on the next miss. The accepted
+       cost is that a SUSTAINED failure re-attempts a scan on every miss rather
+       than backing off (measured: 50 misses -> 50 attempts, 0.17 ms/read).
+       That is the deliberate direction -- a bounded per-miss cost on an error
+       path beats a session-long unreadable skill -- and the stat-gated
+       fingerprint still keeps the healthy path at one scan per real change.
+
+    There is deliberately NO time-based cooldown. One existed and was removed:
+    it stamped on any miss and was shared by every subagent, so a miss at t=0
+    made a skill written at t=0.05 unreadable until t=1.0 -- write-then-read is
+    the NORMAL authoring sequence, so the 1 s window broke the exact case this
+    code exists for, and it suppressed the diagnostic too. Measured, it bought
+    0.224 ms -> 0.002 ms per read on a looping typo: 0.2 ms on an error path,
+    paid for with the feature being wrong for a second. The fingerprint gate is
+    the real bound and it is stat-based rather than clock-based -- a typo in a
+    tight loop pays one sub-millisecond probe per read and NEVER a scan,
+    because an unchanged tree compares equal.
+    """
+    with state.lock:
+        try:
+            fingerprint = roots_fingerprint(roots)
+        except OSError:
+            # The fingerprint swallows OSError per-entry already; this is the
+            # belt-and-braces case, and a resolver may never raise.
+            return
+        if fingerprint == state.fingerprint:
+            return
+        try:
+            discovered, _warnings = discover_skills(roots)
+        except OSError:
+            # Do NOT commit the fingerprint here. See point 3 above.
+            return
+        # In place. See point 1 above before changing this line.
+        skills.update({skill.name: skill for skill in discovered})
+        # Committed last: reaching this line is the only proof the tree was
+        # actually ingested.
+        state.fingerprint = fingerprint
+
+
+def make_skill_resolver(
+    skills: Mapping[str, Skill],
+    roots: Sequence[Path] | None = None,
+) -> Callable[[str], str | None]:
     """Build the ``SkillResolver`` adapter for the ``read`` tool.
 
     Contract (docs/REWRITE.md §C, ``harness/types.py``
@@ -137,16 +258,112 @@ def make_skill_resolver(skills: Mapping[str, Skill]) -> Callable[[str], str | No
     unknown names and unsafe paths; this adapter catches it and returns the
     message AS CONTENT, so the available-names list reaches the model as a
     clean tool result and it can self-correct with a retry.
+
+    When ``roots`` is given, an unknown NAME additionally triggers a
+    fingerprint-gated rescan, so a skill authored mid-session becomes readable
+    without a restart -- in this session and in subagents already running,
+    which inherit this exact closure. That was the defect: an agent wrote a
+    valid skill and a subagent whose standing instructions named it got
+    ``Unknown skill`` for the rest of the session.
+
+    **Cost on the frequent path is one dict lookup.** Nothing above the
+    ``resolve_skill_url`` call runs on a hit; the fingerprint (~0.29 ms) and
+    the full scan (17-25 ms) are miss-path only, and the scan runs only when
+    the fingerprint says the tree actually changed.
+
+    ``roots=None`` is the default so every existing caller -- and the parallel
+    guide resolver, whose resources are packaged and cannot change at runtime
+    -- keeps today's behaviour exactly.
     """
+    state = _RefreshState()
+    # Narrowed ONCE here rather than re-tested inside the closure, so the hot
+    # path carries no type checks. Only a MutableMapping can be refreshed in
+    # place: callers pass a plain dict, the read-only ``Mapping`` annotation
+    # stays for the resolver's contract, and a caller that genuinely passes an
+    # immutable mapping degrades to today's behaviour instead of raising a
+    # TypeError on an error path.
+    refresh_roots: Sequence[Path] | None = None
+    refresh_target: MutableMapping[str, Skill] | None = None
+    if roots is not None and isinstance(skills, MutableMapping):
+        refresh_roots = roots
+        refresh_target = skills
 
     def resolver(url: str) -> str | None:
         if not url.startswith("skill://"):
             return None
         try:
             return resolve_skill_url(url, skills)
-        except (ValueError, OSError) as exc:
+        except ValueError as exc:
+            message = str(exc)
+            if (
+                refresh_roots is None
+                or refresh_target is None
+                or not message.startswith(_UNKNOWN_PREFIX)
+                or not is_plain_skill_name(_url_name(url))
+            ):
+                # Traversal, dotfile and unsafe-child-path errors land here and
+                # must not cause a rescan.
+                #
+                # The name check is the same rule, applied where the guards
+                # above cannot reach: those only inspect a URL's PATH, but a
+                # skill name is its NETLOC, so ``skill://..`` and
+                # ``skill://%2fetc`` arrive as a perfectly ordinary
+                # "Unknown skill" and used to drive a full fingerprint probe.
+                # A name no one-level root scan could produce is never made
+                # resolvable by rescanning, so the work is pure waste on
+                # attacker-chosen input.
+                return message
+            _refresh_if_changed(refresh_target, refresh_roots, state)
+            # ALWAYS re-resolve, whatever the refresh did or did not do. The
+            # only question that matters here is "is the name resolvable NOW",
+            # and the mapping is shared: a concurrent reader may have populated
+            # it while this thread waited on the lock, and a refresh that found
+            # nothing new still leaves the answer to a lookup rather than to an
+            # inference about which call performed the scan. Gating this retry
+            # on the refresh's own outcome is what made the losing thread of a
+            # race report ``Unknown skill`` for a skill already in the dict.
+            try:
+                return resolve_skill_url(url, skills)
+            except ValueError as retry_exc:
+                message = str(retry_exc)
+            except OSError as retry_exc:
+                return str(retry_exc)
+            # Still missing: say WHY, because the bare message covers four
+            # distinct causes an agent cannot otherwise tell apart.
+            reason = _diagnose(url, refresh_roots)
+            return f"{message}\n{reason}" if reason else message
+        except OSError as exc:
             # OSError: a SKILL.md deleted or chmod-000'd between discovery and
             # the read. The adapter's contract is "never raises".
             return str(exc)
 
     return resolver
+
+
+def _url_name(url: str) -> str:
+    """The decoded NAME a ``skill://`` URL addresses, or ``""``.
+
+    The name is the URL's netloc, which is precisely the part
+    ``resolve_skill_url``'s traversal and dotfile guards never inspect -- they
+    police the child PATH. Decoding it here, from the URL rather than from the
+    error text, keeps the miss path's safety check independent of message
+    wording: a reworded ``Unknown skill`` must not silently reopen the hole.
+    """
+    try:
+        return unquote(urlsplit(url).netloc)
+    except Exception:  # noqa: BLE001 -- a malformed URL is simply not a name
+        return ""
+
+
+def _diagnose(url: str, roots: Sequence[Path]) -> str | None:
+    """Best-effort explanation for a surviving miss; never raises.
+
+    Diagnosis is a convenience on an error path, so any failure inside it must
+    degrade to the plain ``Unknown skill`` message rather than replacing one
+    unhelpful result with a traceback.
+    """
+    try:
+        name = _url_name(url)
+        return diagnose_missing_skill(name, roots)
+    except Exception:  # noqa: BLE001 -- a diagnostic may never break the read
+        return None
