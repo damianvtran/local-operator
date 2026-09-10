@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
+import local_operator.skills.discovery as discovery_module
 from local_operator.skills.discovery import (
     Skill,
     diagnose_missing_skill,
     discover_skills,
+    is_plain_skill_name,
     parse_frontmatter,
     roots_fingerprint,
     scan_skills_dir,
@@ -499,12 +501,9 @@ class TestDiagnoseMissingSkillContainment:
         that unsafe input must not drive filesystem work, even when its output
         is safe.
 
-        ``D:x`` and ``a:b`` are the DRIVE-RELATIVE shapes: not absolute by
-        ``is_absolute()``, yet ``PureWindowsPath(root) / "D:x"`` is ``"D:x"``
-        outright, so on Windows they reset the join exactly as an absolute path
-        does. They are listed here rather than in a Windows-only test because
-        the predicate is platform-independent by design -- see
-        :func:`is_plain_skill_name`.
+        The DRIVE-RELATIVE shapes (``D:x``, ``a:b``) are deliberately absent
+        from this list: they are rejected only on Windows, and are covered in
+        both directions by :class:`TestPlainSkillNameDriveRuleIsPlatformGated`.
         """
         import local_operator.skills.discovery as discovery_module
 
@@ -515,7 +514,7 @@ class TestDiagnoseMissingSkillContainment:
             raise AssertionError("an unsafe name must not reach the filesystem")
 
         monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
-        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", "", "D:x", "a:b"):
+        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", ""):
             assert diagnose_missing_skill(name, [root]) is None
 
     def test_a_plain_name_still_diagnoses(self, tmp_path: Path) -> None:
@@ -524,3 +523,106 @@ class TestDiagnoseMissingSkillContainment:
         (root / "alpha").mkdir(parents=True)
         message = diagnose_missing_skill("alpha", [root])
         assert message is not None and "has no SKILL.md" in message
+
+
+class TestPlainSkillNameDriveRuleIsPlatformGated:
+    """R9: the drive door shuts on Windows only, because ``:`` is legal on POSIX.
+
+    Gating the drive rejection on every platform rejected a name the POSIX
+    scanner genuinely registers, so a legitimately-named skill silently lost
+    the mid-session authoring refresh this PR exists to deliver -- and its
+    miss-path diagnostic with it. Both directions are asserted here rather
+    than left to whichever CI leg happens to run, by driving
+    ``_DRIVE_RESETS_JOIN`` (the seam) in each position.
+    """
+
+    # Every shape pathlib parses as a drive: it accepts ANY single printable
+    # character as a drive letter, so the rule is not limited to ``[A-Za-z]``.
+    _DRIVE_SHAPES = ("D:x", "a:b", "C:", "1:x", "#:x")
+
+    def test_the_gate_is_derived_from_the_running_platform(self) -> None:
+        """The seam every other test in this class DRIVES must itself be right.
+
+        Patching ``_DRIVE_RESETS_JOIN`` proves what each branch does but says
+        nothing about which branch a real host takes -- an inverted derivation
+        would satisfy every other assertion here while denying POSIX skills
+        and opening the drive door on Windows, which is precisely the bug.
+        """
+        assert discovery_module._DRIVE_RESETS_JOIN == (os.name == "nt")
+
+    def test_unpatched_predicate_matches_this_hosts_semantics(self) -> None:
+        """End-to-end on the REAL host, with no seam patched at all.
+
+        Belt and braces for the test above: on POSIX ``a:b`` must be admitted
+        for real, not merely when the constant is forced.
+        """
+        expected = os.name != "nt"
+        for name in self._DRIVE_SHAPES:
+            assert is_plain_skill_name(name) is expected, name
+
+    def test_posix_admits_drive_relative_shapes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On POSIX ``root / "a:b"`` is a contained child, so it must be admitted."""
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", False)
+        for name in self._DRIVE_SHAPES:
+            assert is_plain_skill_name(name) is True, name
+
+    def test_windows_rejects_drive_relative_shapes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On Windows the drive resets the join, so it stays an existence oracle."""
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", True)
+        for name in self._DRIVE_SHAPES:
+            assert is_plain_skill_name(name) is False, name
+
+    def test_root_and_separator_rejection_is_unconditional(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the DRIVE term is gated; every other rejection holds everywhere."""
+        for gate in (False, True):
+            monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", gate)
+            for name in ("", ".", "..", "/etc", "\\x", "a/b", "a\\b", "a\x00b", "D:/x"):
+                assert is_plain_skill_name(name) is False, (gate, name)
+            for name in ("plain-one", "notes:2024", "alpha"):
+                assert is_plain_skill_name(name) is True, (gate, name)
+
+    def test_scanner_and_predicate_agree_on_posix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression with teeth: the real scanner DOES produce ``a:b``.
+
+        A predicate that rejects a name ``scan_skills_dir`` registers makes the
+        refresh gate disagree with discovery, which is exactly how the skill
+        lost its liveness.
+        """
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", False)
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+        for dirname in ("a:b", "notes:2024", "plain-one"):
+            _write_skill(root, dirname, name=dirname)
+        registered = [s.name for s in scan_skills_dir(root, "test")]
+        assert "a:b" in registered
+        for name in registered:
+            assert is_plain_skill_name(name) is True, name
+
+    def test_posix_drive_shape_still_gets_a_diagnostic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Admitting the name must also restore the miss-path explanation."""
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", False)
+        root = tmp_path / "roots" / "skills"
+        (root / "a:b").mkdir(parents=True)
+        message = diagnose_missing_skill("a:b", [root])
+        assert message is not None and "has no SKILL.md" in message
+
+    def test_windows_drive_shapes_spend_no_filesystem_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under Windows semantics the denial is still BEFORE any stat."""
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", True)
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+
+        def explode(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("a drive-anchored name must not reach the filesystem")
+
+        monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
+        for name in self._DRIVE_SHAPES:
+            assert diagnose_missing_skill(name, [root]) is None, name

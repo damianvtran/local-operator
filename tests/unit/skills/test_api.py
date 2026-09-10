@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import local_operator.skills.api as api_module
+import local_operator.skills.discovery as discovery_module
 from local_operator.skills.api import default_skill_roots, make_skill_resolver
 from local_operator.skills.discovery import Skill
 from local_operator.skills.protocol import MAX_READ_BYTES
@@ -509,6 +510,54 @@ class TestResolverRefreshOnMiss:
             content = resolver(url)
             assert content is not None and "Unknown skill" in content
             # And nothing from outside the roots comes back with it.
+            assert "SKILL.md" not in content
+
+    def test_posix_colon_named_skill_authored_mid_session_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R9 at the resolver: the headline feature, for a legal POSIX name.
+
+        ``:`` is an ordinary directory character on POSIX and the scanner
+        registers ``a:b``, so gating the refresh on a name predicate that
+        rejected it cost that skill the very liveness this resolver adds --
+        silently, since the miss still read as a plain "Unknown skill".
+        """
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", False)
+        root = tmp_path / "roots"
+        root.mkdir()
+        skills: dict[str, Skill] = {}
+        resolver = make_skill_resolver(skills, [root])
+
+        before = resolver("skill://a:b")
+        assert before is not None and "Unknown skill: a:b" in before
+
+        self._write_skill_file(root, "a:b", body="# colon body")
+        after = resolver("skill://a:b")
+        assert after is not None and "# colon body" in after
+        # In place, not rebound -- the mapping the session already holds.
+        assert "a:b" in skills
+
+    def test_windows_drive_name_in_the_netloc_still_drives_no_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R9's other direction: the drive door stays shut under Windows semantics.
+
+        Percent-encoding is the delivery vehicle that matters -- ``%44%3ax``
+        decodes to ``D:x`` in the NETLOC, which no path-portion guard inspects.
+        """
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", True)
+
+        def explode(_roots: Sequence[Path]) -> tuple[object, ...]:
+            raise AssertionError("a drive-anchored NAME must not cause a probe")
+
+        monkeypatch.setattr(api_module, "roots_fingerprint", explode)
+        root = tmp_path / "roots"
+        root.mkdir()
+        resolver = make_skill_resolver({}, [root])
+
+        for url in ("skill://D:x", "skill://%44%3ax", "skill://a%3ab", "skill://C%3A"):
+            content = resolver(url)
+            assert content is not None and "Unknown skill" in content
             assert "SKILL.md" not in content
 
     def test_roots_none_preserves_todays_behaviour(self, tmp_path: Path) -> None:

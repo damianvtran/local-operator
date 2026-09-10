@@ -359,6 +359,13 @@ def _frontmatter_yaml_error(text: str) -> str | None:
     return None
 
 
+# WHY a module constant instead of an inline ``os.name`` test: this is the seam
+# both directions of the platform-divergent drive rule are tested through, so
+# the POSIX-admits case and the Windows-denies case each run on every CI leg
+# rather than only on the leg whose native semantics happen to match.
+_DRIVE_RESETS_JOIN = os.name == "nt"
+
+
 def is_plain_skill_name(name: str) -> bool:
     """Whether ``name`` is a single plain segment safe to join onto a root.
 
@@ -392,19 +399,45 @@ def is_plain_skill_name(name: str) -> bool:
     portion, and ``skill://%2fetc`` decodes to ``/etc`` where ``root / "/etc"``
     is ``/etc`` outright -- an existence oracle for any absolute path, and a
     reader of out-of-root frontmatter ``name`` values.
+
+    THE DRIVE RULE IS DELIBERATELY PLATFORM-DIVERGENT -- do not "simplify" it
+    back to one unconditional test. What is rejected where, and why:
+
+    * Separators, NUL, ``.`` and ``..``, and a ROOT anchor are rejected
+      EVERYWHERE. They reset or escape the join on every platform.
+    * A DRIVE anchor (``D:x``, ``a:b``, ``C:``, and -- since pathlib accepts
+      any single printable character as a drive letter -- ``1:x`` and ``#:x``)
+      is rejected ONLY when running on Windows.
+
+    The asymmetry is correct because the join that actually executes is the
+    RUNNING platform's, not a portable abstraction over both. On Windows
+    ``PureWindowsPath(root) / "D:x"`` is ``"D:x"`` outright -- drive-relative
+    names are not absolute by ``is_absolute()`` yet still reset the join, so
+    the drive is a genuine existence oracle and that door must stay shut. On
+    POSIX ``:`` is an ordinary, legal directory character and
+    ``PurePosixPath(root) / "a:b"`` is ``<root>/a:b`` -- a contained direct
+    child with nothing to escape through. Rejecting it there buys no safety
+    and costs a real feature: ``scan_skills_dir`` genuinely registers a
+    POSIX skill directory named ``a:b``, so an unconditional drive test makes
+    this predicate disagree with the scanner, silently denying that skill the
+    mid-session authoring refresh AND its miss-path diagnostic.
     """
     if not name or name in (".", ".."):
         return False
     if "/" in name or "\\" in name or "\x00" in name:
         return False
-    # ANCHOR, not is_absolute(). A Windows drive-RELATIVE name (``D:x``,
-    # ``a:b``, ``C:``) is not absolute, yet it still resets the join --
-    # ``PureWindowsPath(root) / "D:x"`` is ``"D:x"`` -- reopening the same
-    # existence oracle through the drive door instead of the separator door.
-    # ``anchor`` is drive-or-root, so it also rejects root-anchored shapes
-    # without depending on the separator check above having run first, and it
-    # is empty for every name a one-level scan can produce.
-    return not PureWindowsPath(name).anchor
+    # PureWindowsPath parses BOTH separators, so its ``root`` is the superset
+    # of the POSIX one and covers either platform in a single test. Checked
+    # unconditionally, and kept even though the separator test above already
+    # implies it: a root anchor needs a separator, so this is the defence that
+    # does not depend on that check having run first.
+    shape = PureWindowsPath(name)
+    if shape.root:
+        return False
+    # DRIVE, not anchor: the one term gated on the running platform, per the
+    # docstring. ``drive`` rather than ``is_absolute()`` because a
+    # drive-RELATIVE name resets the join without being absolute.
+    return not (_DRIVE_RESETS_JOIN and shape.drive)
 
 
 def _diagnose_one(name: str, root: Path, skill_md: Path) -> str | None:

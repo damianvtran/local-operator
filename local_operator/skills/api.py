@@ -362,10 +362,8 @@ def _diagnose(url: str, roots: Sequence[Path]) -> str | None:
     degrade to the plain ``Unknown skill`` message rather than replacing one
     unhelpful result with a traceback.
     """
-    from urllib.parse import unquote, urlsplit
-
     try:
-        name = unquote(urlsplit(url).netloc)
+        name = _url_name(url)
         return diagnose_missing_skill(name, roots)
     except Exception:  # noqa: BLE001 -- a diagnostic may never break the read
         return None
