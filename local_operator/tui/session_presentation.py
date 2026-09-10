@@ -53,16 +53,30 @@ RETAIN_TEXT_BYTES = 1024 * 1024
 #: the wrong way is worse for a trusting reader than the silent nothing it
 #: replaced.
 #:
-#: Keep it at 66 characters or fewer, and CHECK THAT IN A RENDERED 80-COLUMN
-#: FRAME rather than by counting. A longer string wraps and orphans its last
-#: word on a second line, at every compaction — 48 times in the reference
-#: journal (D2). The budget is not the terminal width: an 80-column terminal
-#: leaves a 78-column screen, the notice block's own padding takes more, and
-#: the ``· `` glyph costs 2, which measured out to 68 columns of text and so
-#: 66 for this string. Round 1 suggested "under ~76" from arithmetic alone and
-#: the 71-character string it produced still wrapped in the frame; the only
-#: instrument that settles it is ``scripts/audit_history_shot.py marker
-#: 80x30``.
+#: The wrap budget at 80 columns is 70 text columns, and the MECHANICAL check
+#: is ``NoticeBlock.body_budget(76) == 70`` rather than hand arithmetic (design
+#: review round 2, D6). The chain, measured on a block mounted in an 80x30
+#: pilot rather than reasoned on paper: an 80-column terminal gives a 78-column
+#: screen; ``scrollbar-gutter: stable`` on ``TranscriptView`` permanently
+#: reserves one more column whether or not the bar is visible (77); the view's
+#: own left padding takes one (76, which is the width the block is actually
+#: painted); ``_build`` folds at ``max(width - 2, 12)`` (74); and the hanging
+#: glyph field is ``GLYPH_COLS`` = ``SPINE_INDENT + 2`` = 4, not 2 (70).
+#: Corroborated by rendered block height at that geometry: a 70-character
+#: string is one row, a 71-character string is two.
+#:
+#: This string is 66, so it sits 4 columns inside the budget, and the unit
+#: guard pins 66 rather than 70 — a copy change that wants the headroom has to
+#: move that guard deliberately. Do NOT re-derive the budget from the older
+#: "68 usable, so 66" arithmetic: it landed on a safe number through two
+#: COMPENSATING errors — it subtracted neither the reserved scrollbar column
+#: nor the fold clamp, and charged the glyph 2 where it costs 4 — so it cannot
+#: be carried to any other width. Round 1's "under ~76", also derived on
+#: paper, produced a 71-character string that still wrapped in the frame. That
+#: is why a longer string is checked in a RENDERED frame rather than counted:
+#: it orphans its last word on a second line at every compaction, 48 times in
+#: the reference journal (D2). Capture one with
+#: ``scripts/audit_history_shot.py <dir> marker 80x30``.
 COMPACTION_MARKER_NOTICE = "context compacted — earlier history above the agent no longer sees"
 
 

@@ -1398,7 +1398,7 @@ def context_cut_index(entries: Sequence[TranscriptEntry], *, quiet: bool = False
     ``preserve_data`` blocks into the model's own context — measured at
     +3,380,677 bytes, roughly 845k tokens, on this one journal — while
     extending the audit window's first ``end_index`` past the cut re-delivers
-    16 message rows the context page already sent.
+    15 message rows the context page already sent.
     """
     compaction_index: int | None = None
     for i in range(len(entries) - 1, -1, -1):
@@ -1444,13 +1444,19 @@ def context_preserved_turn_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
             # gets emitted: ``replay_preserved_turns`` drops journalled
             # injections and enforces the cap, so on the reference journal
             # (``bda7b76d34e0``) the payload held 295 turns while the replay
-            # emitted 105. Suppressing the raw 295 would have hidden 190 rows
-            # that no phase then delivered — measured, and exactly the class of
-            # silent loss this whole change exists to end. The three figures
-            # track a live journal that keeps growing, so treat them as an
-            # order-of-magnitude illustration of the gap rather than a pin;
-            # what is invariant is that the payload count EXCEEDS the emitted
-            # count, which is the whole reason this filter cannot be skipped.
+            # emitted 149 rows — which dedupe to the 105 DISTINCT ids this
+            # function returns. Those last two are different quantities and
+            # are worth keeping apart: the emitted count is what the reader
+            # sees, the id set is what suppression is matched against, and one
+            # turn can be emitted under more than one row. Suppressing off the
+            # raw payload instead would have matched 295 ids against those
+            # 105, hiding 190 that no phase then delivered — measured, and
+            # exactly the class of silent loss this whole change exists to
+            # end. All of these figures track a live journal that keeps
+            # growing, so treat them as an order-of-magnitude illustration of
+            # the gap rather than a pin; what is invariant is that the payload
+            # count EXCEEDS both the emitted count and the id set, which is
+            # the whole reason this filter cannot be skipped.
             from local_operator.compaction.cutpoint import replay_preserved_turns
 
             return {
