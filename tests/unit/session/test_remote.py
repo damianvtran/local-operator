@@ -14,8 +14,13 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
 )
 from local_operator.mobile.types import AskOptionWire, PendingRequest
-from local_operator.session.frontend_state import FRONTEND_CAPABILITY
-from local_operator.session.remote import FRONTEND_SYNC_FOREGROUND_S, RemoteSession
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY, PendingGateState
+from local_operator.session.remote import (
+    FRONTEND_SYNC_FOREGROUND_S,
+    RemoteSession,
+    _ask_question_from_pending,
+    _pending_request,
+)
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -449,3 +454,68 @@ async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
         assert viewer._frontend_future is None, "the abandoned sync wait must not survive"
     finally:
         await viewer.dispose()
+
+
+def test_the_terminal_gate_rebuild_carries_the_recommendation_not_only_the_phone_one() -> None:
+    """`_pending_request` is the SECOND rebuild, and the one the picker sees.
+
+    There are two paths a parked ask takes out of the owner and they are not
+    the same one. The phone reads the projection fold, rebuilt by
+    `_projection_from_json`. A terminal viewer reads
+    `Session.frontend_state.pending_gate`, and `_maybe_start_gate` rebuilds
+    THAT through `_pending_request` before handing it to `_run_ask`.
+
+    This rebuild enumerates its fields, so a field carried perfectly by the
+    projection is still dropped here — which is exactly how the badge went
+    missing on the default detached topology while every projection-based test
+    stayed green. `PendingGateState` is `extra="allow"`, so the two keys ride
+    the frontend-state contract as extras and only this enumeration has to
+    name them.
+    """
+    state = PendingGateState(
+        **{
+            "request_id": "stale",
+            "kind": "ask",
+            "title": "What should happen to the stale rows?",
+            "detail": "",
+            "options": [
+                {"label": "Dual-write", "description": "safest"},
+                {"label": "Drop them", "description": "nothing reads the column"},
+            ],
+            "secret": False,
+            "question_index": 0,
+            "question_total": 1,
+            "recommended": 0,
+            "persist": False,
+        }
+    )
+
+    pending = _pending_request(state)
+
+    assert pending is not None
+    assert pending.recommended == 0
+    assert pending.persist is False
+    # And the rebuilt question the picker actually reads.
+    assert _ask_question_from_pending(pending).recommended == 0
+
+
+def test_an_older_owners_gate_state_without_the_new_keys_still_rebuilds() -> None:
+    """The old-owner direction: neither key present, no crash, defaults apply."""
+    state = PendingGateState(
+        **{
+            "request_id": "stale",
+            "kind": "ask",
+            "title": "Which migration?",
+            "detail": "",
+            "options": [{"label": "Beta", "description": "second"}],
+            "secret": False,
+            "question_index": 0,
+            "question_total": 1,
+        }
+    )
+
+    pending = _pending_request(state)
+
+    assert pending is not None
+    assert pending.recommended is None
+    assert pending.persist is False
