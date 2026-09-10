@@ -498,6 +498,13 @@ class TestDiagnoseMissingSkillContainment:
         A malformed URL that still spends a real probe defeats the design rule
         that unsafe input must not drive filesystem work, even when its output
         is safe.
+
+        ``D:x`` and ``a:b`` are the DRIVE-RELATIVE shapes: not absolute by
+        ``is_absolute()``, yet ``PureWindowsPath(root) / "D:x"`` is ``"D:x"``
+        outright, so on Windows they reset the join exactly as an absolute path
+        does. They are listed here rather than in a Windows-only test because
+        the predicate is platform-independent by design -- see
+        :func:`is_plain_skill_name`.
         """
         import local_operator.skills.discovery as discovery_module
 
@@ -508,7 +515,7 @@ class TestDiagnoseMissingSkillContainment:
             raise AssertionError("an unsafe name must not reach the filesystem")
 
         monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
-        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", ""):
+        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", "", "D:x", "a:b"):
             assert diagnose_missing_skill(name, [root]) is None
 
     def test_a_plain_name_still_diagnoses(self, tmp_path: Path) -> None:

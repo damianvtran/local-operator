@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 import yaml
@@ -360,13 +360,23 @@ def _frontmatter_yaml_error(text: str) -> str | None:
 
 
 def is_plain_skill_name(name: str) -> bool:
-    """Whether ``name`` can name a skill directory a root scan would produce.
+    """Whether ``name`` is a single plain segment safe to join onto a root.
 
-    A registered skill name comes from ``<root>/<child>`` where ``child`` is a
-    DIRECT entry of a root (:func:`scan_skills_dir` walks exactly one level),
-    so anything carrying a separator, a traversal token or an absolute-path
-    shape can never correspond to a scanned directory and must not be joined
-    onto a root at all.
+    The shape this admits is the DIRECT child of a root that
+    :func:`scan_skills_dir` produces (it walks exactly one level), so anything
+    carrying a separator, a traversal token or a path anchor can never name
+    such a directory and must not be joined onto a root at all.
+
+    NOT every registered skill name has this shape. :func:`_skill_from_file`
+    prefers the frontmatter ``name:`` over the directory name, so a skill
+    declaring ``name: group/sub`` registers under a separator-bearing name and
+    is rejected here. That is deliberate and its cost is bounded: such a skill
+    still resolves at startup and after any later rescan, and loses only the
+    mid-session authoring refresh on the read that created it. Widening the
+    predicate to admit it would hand every hostile netloc (``skill://..``,
+    ``skill://%2fetc``) the filesystem work and the join this guard exists to
+    deny, which is not a trade worth making for a name shape the harness
+    itself never generates.
 
     WHY this is a name check and not a resolved-path containment check
     (``protocol._contained``): ``scan_skills_dir`` deliberately FOLLOWS a
@@ -387,7 +397,14 @@ def is_plain_skill_name(name: str) -> bool:
         return False
     if "/" in name or "\\" in name or "\x00" in name:
         return False
-    return not PurePosixPath(name).is_absolute() and not PureWindowsPath(name).is_absolute()
+    # ANCHOR, not is_absolute(). A Windows drive-RELATIVE name (``D:x``,
+    # ``a:b``, ``C:``) is not absolute, yet it still resets the join --
+    # ``PureWindowsPath(root) / "D:x"`` is ``"D:x"`` -- reopening the same
+    # existence oracle through the drive door instead of the separator door.
+    # ``anchor`` is drive-or-root, so it also rejects root-anchored shapes
+    # without depending on the separator check above having run first, and it
+    # is empty for every name a one-level scan can produce.
+    return not PureWindowsPath(name).anchor
 
 
 def _diagnose_one(name: str, root: Path, skill_md: Path) -> str | None:

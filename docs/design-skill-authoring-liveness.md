@@ -200,7 +200,7 @@ def make_skill_resolver(
     skills: MutableMapping[str, Skill],
     roots: Sequence[Path] | None = None,
 ) -> Callable[[str], str | None]:
-    state = _RefreshState()  # last_check monotonic, last_fingerprint, threading.Lock
+    state = _RefreshState()  # last_fingerprint, threading.Lock
 
     def resolver(url: str) -> str | None:
         if not url.startswith("skill://"):

@@ -23,6 +23,7 @@ import os
 import threading
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from local_operator.skills.discovery import (
     Skill,
@@ -205,7 +206,12 @@ def _refresh_if_changed(
        and the skill stayed unreadable for the WHOLE SESSION even once the
        filesystem recovered -- a permanent regression from a one-off error, and
        worse than the pre-refresh behaviour it replaced. Committing after the
-       scan means a failed scan simply retries on the next miss.
+       scan means a failed scan simply retries on the next miss. The accepted
+       cost is that a SUSTAINED failure re-attempts a scan on every miss rather
+       than backing off (measured: 50 misses -> 50 attempts, 0.17 ms/read).
+       That is the deliberate direction -- a bounded per-miss cost on an error
+       path beats a session-long unreadable skill -- and the stat-gated
+       fingerprint still keeps the healthy path at one scan per real change.
 
     There is deliberately NO time-based cooldown. One existed and was removed:
     it stamped on any miss and was shared by every subagent, so a miss at t=0
@@ -343,8 +349,6 @@ def _url_name(url: str) -> str:
     error text, keeps the miss path's safety check independent of message
     wording: a reworded ``Unknown skill`` must not silently reopen the hole.
     """
-    from urllib.parse import unquote, urlsplit
-
     try:
         return unquote(urlsplit(url).netloc)
     except Exception:  # noqa: BLE001 -- a malformed URL is simply not a name
