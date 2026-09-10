@@ -2133,11 +2133,11 @@ async def execute_bash(
                 # delivery sink, and nothing in this codebase calls
                 # ``register_delivery_sink`` — so setting one guarantees the
                 # opposite of what it looks like: the completion is
-                # DEAD-LETTERED ("no live sink for owner ...") and the caller
-                # is never told its background job finished, which is the whole
-                # point of running it detached. Revisit together with a sink
-                # implementation, not before.
-                owner_id=None,
+                # DEAD-LETTERED ("no live sink for registrant ...") and the
+                # caller is never told its background job finished, which is
+                # the whole point of running it detached. Revisit together
+                # with a sink implementation, not before.
+                registrant_id=None,
                 on_cancel=_kill_unstarted,
             )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
@@ -9970,9 +9970,9 @@ async def execute_jobs(
         # Deliberately NOT owner-scoped, and the same choice ``op="list"``
         # already makes. Scoping these by ``context.job_id`` looked like
         # defence in depth and was a regression: ``run_subagent`` registers
-        # every ``task`` job with ``owner_id=None``, so inside a child session
-        # a scoped lookup misses its own grandchildren — the tool listed a job
-        # and then called that same id "unknown job". The isolation it was
+        # every ``task`` job with ``registrant_id=None``, so inside a child
+        # session a scoped lookup misses its own grandchildren — the tool
+        # listed a job and then called that same id "unknown job". The isolation it was
         # meant to add is structural rather than per-call anyway: each
         # ``Session`` builds its own ``AsyncJobManager`` and nothing reassigns
         # a child's, so a child's manager never holds its parent's rows and

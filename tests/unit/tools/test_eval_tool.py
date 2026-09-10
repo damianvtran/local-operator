@@ -1092,7 +1092,7 @@ async def test_background_timeout_may_exceed_the_foreground_cap(tmp_path) -> Non
 async def test_background_job_stays_deliverable_inside_a_subagent(tmp_path) -> None:
     """A background job must be registered UNOWNED, even in a child session.
 
-    Setting ``owner_id`` looks like scoping and is not: the manager routes an
+    Setting ``registrant_id`` looks like scoping and is not: the manager routes an
     owned completion exclusively through that owner's registered delivery sink,
     nothing in this codebase registers one, so the completion is dead-lettered
     and the caller is never told its job finished. That silently defeats the
@@ -1116,7 +1116,7 @@ async def test_background_job_stays_deliverable_inside_a_subagent(tmp_path) -> N
     )
     job_id = str((result.details or {})["job_id"])
     row = manager.get(job_id)
-    assert row is not None and row.owner_id is None
+    assert row is not None and row.registrant_id is None
 
     for _ in range(100):
         await asyncio.sleep(0.05)

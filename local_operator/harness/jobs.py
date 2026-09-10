@@ -14,8 +14,8 @@ Semantics worth preserving exactly:
   eviction) — it is never routed to the generic fallback, because that would
   leak one agent's result into another agent's session. Only genuinely
   unowned jobs use the fallback.
-- ``cancel(job_id, owner_id)`` treats a registrant mismatch as not-found, so a
-  subagent teardown cannot cancel its parent's jobs.
+- ``cancel(job_id, registrant_id)`` treats a registrant mismatch as
+  not-found, so a subagent teardown cannot cancel its parent's jobs.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.harness.types import AbortSignal, Usage
 
@@ -276,7 +276,7 @@ def _merge_accounting_component(
 
 class AsyncJob(BaseModel):
     """One registered background job. ``agent_id`` names the subagent the job
-    RUNS (when applicable); ``owner_id`` names who registered it."""
+    RUNS (when applicable); ``registrant_id`` names who registered it."""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -316,7 +316,27 @@ class AsyncJob(BaseModel):
     # cursor silently misreports as "nothing new".
     output_tail: str = ""
     output_seq: int = 0
-    owner_id: str | None = None
+    # Who registered this job — the parent subagent's id — scoping
+    # get/list/cancel and routing delivery to that registrant's sink.
+    # Formerly ``owner_id``: roster sidecars written before the rename carry
+    # the old key, so the validator below dual-reads it for one release.
+    registrant_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_owner_id(cls, data: Any) -> Any:
+        """Dual-read the pre-rename roster key for one release.
+
+        Persisted roster rows (the session sidecar and the legacy transcript
+        custom) were written with ``owner_id``, and ``model_config`` forbids
+        extras — without this mapping every row an older release wrote would
+        fail validation and be dropped at resume. Delete this together with
+        the legacy read once no pre-rename sidecar can still be resumed.
+        """
+        if isinstance(data, dict) and "owner_id" in data:
+            data.setdefault("registrant_id", data.pop("owner_id"))
+        return data
+
     # Set when a caller (the `wait` tool) has already returned this job's
     # result to the model: auto-delivery must then stay quiet, or the same
     # result would reach the conversation twice.
@@ -516,15 +536,15 @@ class AsyncJobManager:
 
     # -- queries ------------------------------------------------------------
 
-    def get(self, job_id: str, *, owner_id: str | None = None) -> AsyncJob | None:
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> AsyncJob | None:
         job = self._jobs.get(self._aliases.get(job_id, job_id))
         if job is None:
             return None
-        if owner_id is not None and job.owner_id != owner_id:
+        if registrant_id is not None and job.registrant_id != registrant_id:
             return None  # scoping: mismatch is not-found
         return job
 
-    def list(self, *, owner_id: str | None = None) -> list[AsyncJob]:
+    def list(self, *, registrant_id: str | None = None) -> list[AsyncJob]:
         """Every job row, oldest first, with retention applied AT READ TIME.
 
         The sweep runs here — not only on a settle — because retention's
@@ -569,8 +589,8 @@ class AsyncJobManager:
         """
         self._sweep_due()
         jobs = list(self._jobs.values())
-        if owner_id is not None:
-            jobs = [job for job in jobs if job.owner_id == owner_id]
+        if registrant_id is not None:
+            jobs = [job for job in jobs if job.registrant_id == registrant_id]
         return sorted(jobs, key=lambda job: job.start_time)
 
     def at_capacity(self) -> bool:
@@ -950,7 +970,7 @@ class AsyncJobManager:
         label: str,
         run: JobRunFn,
         *,
-        owner_id: str | None = None,
+        registrant_id: str | None = None,
         agent_id: str | None = None,
         queued: bool = False,
         on_cancel: Callable[[], None] | None = None,
@@ -983,7 +1003,7 @@ class AsyncJobManager:
             type=type,
             label=label,
             start_time=time.time(),
-            owner_id=owner_id,
+            registrant_id=registrant_id,
             agent_id=agent_id,
             queued=queued,
         )
@@ -1043,27 +1063,27 @@ class AsyncJobManager:
         if job is not None:
             job.consumed = True
 
-    def register_delivery_sink(self, owner_id: str, sink: DeliverySink) -> Callable[[], None]:
-        """Route completions owned by ``owner_id`` to ``sink``. Returns an
-        unregister callable."""
-        self._sinks[owner_id] = sink
+    def register_delivery_sink(self, registrant_id: str, sink: DeliverySink) -> Callable[[], None]:
+        """Route completions registered by ``registrant_id`` to ``sink``.
+        Returns an unregister callable."""
+        self._sinks[registrant_id] = sink
 
         def _unregister() -> None:
-            if self._sinks.get(owner_id) is sink:
-                del self._sinks[owner_id]
+            if self._sinks.get(registrant_id) is sink:
+                del self._sinks[registrant_id]
 
         return _unregister
 
     # -- cancellation -------------------------------------------------------
 
-    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
         """Cancel a job. A registrant mismatch is treated as not-found so a
         subagent teardown cannot cancel its parent's jobs."""
         job = self.get(job_id)
         if job is None:
             return False
         job_id = job.id
-        if owner_id is not None and job.owner_id != owner_id:
+        if registrant_id is not None and job.registrant_id != registrant_id:
             return False
         if job.status != "running":
             return False
@@ -1308,13 +1328,15 @@ class AsyncJobManager:
         # is belt-and-braces: it keeps the sink's ``str`` contract total even
         # if a row is ever built or replayed without one.
         text = (job.result_text or "") if job.status == "completed" else (job.error_text or "")
-        if job.owner_id is not None:
-            sink = self._sinks.get(job.owner_id)
+        if job.registrant_id is not None:
+            sink = self._sinks.get(job.registrant_id)
             if sink is None:
                 # Dead-letter: never route an owned job to the fallback sink,
                 # that would leak one agent's result into another's session.
                 logger.warning(
-                    "dead-lettering job %s: no live sink for owner %s", job.id, job.owner_id
+                    "dead-lettering job %s: no live sink for registrant %s",
+                    job.id,
+                    job.registrant_id,
                 )
                 return
             await self._maybe_await(sink(job.id, text, job))
