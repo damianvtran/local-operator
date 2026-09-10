@@ -663,12 +663,17 @@ def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object
     # expansion this replaces slipped under a 1,000-char ceiling.
     #
     # 600 is chosen against the CODE's reachable worst case, not against these
-    # fixtures. Five keys of 40 characters are all quotable, and that renders
-    # 513 characters (review round 4 measured it); a bound below that would
-    # assert a property the code does not have and would fail on a legitimate
-    # input. These fixtures top out far lower because every key in them is
-    # withheld, which is the point -- the margin between their ~344 and this
-    # ceiling is the room an escaped quote would need.
+    # fixtures. Five 40-character keys are all quotable; adding a carried
+    # reserved key and the " and N more" suffix pushes the rendered maximum to
+    # 539, established by brute-forcing every carried/omitted split against the
+    # real decoder (review round 5) after two narrower measurements -- 513 and
+    # 518 -- each missed a term. Growth is logarithmic in the key count, so the
+    # template stays under ~550 for any input at all.
+    #
+    # A bound below 539 would assert a property the code does not have and
+    # would fail on a legitimate input. These fixtures top out around 344
+    # because every key in them is withheld, which is the point: the margin
+    # between that and this ceiling is the room an escaped quote would need.
     assert len(message) < 600, f"diagnostic grew to {len(message)} characters"
     # No fragment of an unsafe key escapes: whole-or-nothing, so a redaction
     # canary still matches and nothing is rendered in a reshaped form.
