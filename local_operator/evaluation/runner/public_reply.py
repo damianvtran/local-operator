@@ -19,6 +19,39 @@ from local_operator.evaluation.receipts import RedactionSet
 REPLY_VERSION = "1.0"
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
 _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
+
+#: Bounds on how much of a rejected reply's OWN key names may appear in the
+#: diagnostic sent back to the model. The reserved keys are safe to name (they
+#: come from a fixed set), but any other key is model-supplied text: echoing it
+#: whole turns a malformed reply into an unbounded retry prompt and re-opens
+#: the replay channel the reserved-key suppression exists to close.
+#:
+#: A key is quoted WHOLE or not at all -- never truncated. Truncation was the
+#: first attempt and it failed closed in neither direction (review round 3):
+#: ``repr`` expands escapes after the cut, so the rendered length depended on
+#: the input's alphabet; and, far worse, cutting a secret that appeared as a
+#: key left a prefix that ``_assert_redacted``'s substring check no longer
+#: matched, converting a loud redaction failure into a silent leak. Quoting
+#: whole-or-nothing means nothing is ever reshaped on the way out.
+_MAX_EXTRA_KEY_CHARS = 40
+_MAX_EXTRA_KEYS_SHOWN = 5
+
+
+def _is_quotable_key(key: str) -> bool:
+    """Whether an unexpected key may be named back to the model verbatim.
+
+    Conservative by construction: the key must be short, and must render to
+    exactly itself under ``repr`` minus the quotes. That second test is what
+    makes the bound independent of the alphabet -- anything carrying escapes,
+    control characters, or quote marks expands when rendered, so it is counted
+    rather than named.
+    """
+    if len(key) > _MAX_EXTRA_KEY_CHARS:
+        return False
+    rendered = repr(key)
+    return rendered[1:-1] == key
+
+
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
 
 #: What the reply-channel function tells the model it is for. Kept beside the
@@ -103,6 +136,73 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
             "model reply must be one duplicate-free JSON object, with no trailing text"
         ) from error
     if not isinstance(value, dict) or set(value) != _ENVELOPE_KEYS:
+        # Name the DEFECT, not just the rule. Validation is unchanged -- a
+        # partial envelope is still rejected, because silently downgrading one
+        # to the legacy interpretation would drop whatever the model meant to
+        # put in ``public_observations``. What changes is what the model is
+        # told, and that decides whether the correction can land.
+        #
+        # Reserving every envelope key means touching ONE of them commits the
+        # reply to strict decoding, so the common failure is a near-miss: a
+        # model emits ``{"action_batch": {...}}`` and gets told the rule it
+        # already half-followed, without being told which half it missed.
+        # Measured on minimax/minimax-m3, which produces exactly that shape in
+        # ~1 of 10 replies: re-prompting with the bare rule recovered 4/10,
+        # while naming the keys present and missing recovered 9/10. The
+        # difference is the whole gap between an episode that continues and one
+        # that spends its retry bound and seals as a model failure -- which is
+        # how a paid canary episode died at three calls.
+        if isinstance(value, dict):
+            present = sorted(_ENVELOPE_KEYS & set(value))
+            missing = sorted(_ENVELOPE_KEYS - set(value))
+            extra = sorted(set(value) - _ENVELOPE_KEYS)
+            parts = []
+            if present:
+                parts.append("carried " + ", ".join(repr(key) for key in present))
+            if missing:
+                parts.append("omitted " + ", ".join(repr(key) for key in missing))
+            if extra:
+                # ``present``/``missing`` are intersections with a fixed set, so
+                # they can only ever name the three reserved keys. ``extra`` is
+                # arbitrary MODEL-SUPPLIED text and must never be echoed whole:
+                # a 50,000-character key produced a 50,000-character retry
+                # prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
+                # ``_diagnostic``'s cap intercepts, and which re-opens the
+                # replay channel the reserved-key suppression below closes.
+                #
+                # A key is quoted only if it is ENTIRELY safe, and is otherwise
+                # counted but not named. Truncating instead was the first
+                # attempt and it failed closed in neither direction (review
+                # round 3):
+                #   - ``repr`` expands escapes AFTER a cut, so 40 characters of
+                #     ``\U000e0001`` still rendered ~700, making the bound
+                #     depend on the input's alphabet.
+                #   - worse, a cut CONVERTS A LOUD FAILURE INTO A SILENT ONE.
+                #     ``_assert_redacted`` is substring-based, so a secret
+                #     longer than the cut survived as a prefix that no longer
+                #     matched the canary: the leak stopped tripping the alarm
+                #     that exists to catch it.
+                # Quoting whole-or-nothing removes both: nothing is ever
+                # reshaped on the way out, so a redaction canary still matches
+                # and the rendered length is bounded by the charset itself.
+                safe = [key for key in extra if _is_quotable_key(key)]
+                summary = ", ".join(repr(key) for key in safe[:_MAX_EXTRA_KEYS_SHOWN])
+                withheld = len(extra) - len(safe[:_MAX_EXTRA_KEYS_SHOWN])
+                if withheld and summary:
+                    summary += f" and {withheld} more"
+                elif withheld:
+                    # Every key was unsafe or over the cap: report only how many
+                    # to drop. The count alone is enough to act on, and is the
+                    # part that carries no model-supplied text at all.
+                    summary = f"{withheld} not shown"
+                parts.append(f"added {len(extra)} unexpected key(s): {summary}")
+            raise ValueError(
+                "model reply used the reserved envelope but "
+                + "; ".join(parts)
+                + '. Reply with EITHER the plain batch {"actions": [...]} and no other '
+                "top-level keys, OR the full envelope with exactly reply_version, "
+                "action_batch, public_observations"
+            )
         raise ValueError(
             "model reply requires exactly reply_version, action_batch, public_observations"
         )
