@@ -78,7 +78,7 @@ from local_operator.tui.widgets import _copy_markdown
 from local_operator.tui.widgets.assistant import AssistantBlock, flatten
 from local_operator.tui.widgets.editor import BARREN_CLICK_WINDOW_S, Editor
 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
-from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ROW_INDENT, ToolCard
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     SPINE_INDENT,
@@ -703,7 +703,10 @@ async def test_tool_card_expanded_output_copies_unindented() -> None:
         assert rows[0].startswith("bash")  # no icon, no leading pad
         assert tool_icon("bash") not in copied
         assert "✗" in rows[0] and "pytest -q" in rows[0]  # the receipt survives
-        assert card.copy_gutter(0) == ToolCard.ICON_COLS
+        # The summary's gutter is the icon field PLUS the row's left inset:
+        # both are this widget's own layout, so both leave with the copy
+        # rather than pasting a leading space into a bug report.
+        assert card.copy_gutter(0) == ROW_INDENT + ToolCard.ICON_COLS
         assert card.copy_gutter(1) == OUTPUT_INDENT
 
 
