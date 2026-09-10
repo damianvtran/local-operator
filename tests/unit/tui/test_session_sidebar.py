@@ -2419,7 +2419,9 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
     `_prewarm_sidebar` leases a real, subscribed source for every live session
     the sidebar can see. Those sources are speculative: nothing they receive is
     painted until the user clicks one, and at 12 streaming sessions delivering
-    them anyway cost ~229 discarded events/s and 1.46x median keystroke latency.
+    them anyway cost ~229 discarded events/s and +9 points of a core -- work
+    whose result is thrown away. It is NOT a keystroke-latency fix; see
+    `EventController.set_parked` for the measurements that retired that claim.
 
     Two halves, and BOTH are load-bearing:
 

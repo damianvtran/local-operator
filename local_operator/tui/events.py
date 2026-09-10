@@ -526,9 +526,24 @@ class EventController:
         dispatched, posted as a Textual message, and dequeued by the app --
         which discarded it, because ``_reduce_hidden_session_event`` paints
         nothing for a hidden source. Measured on 12 background sessions: ~229
-        such events/s, every one hidden-source, +9 points of a core, and
-        keystroke latency 1.46x worse at the median / 2.2-3.3x at p99. The full
+        such events/s, every one hidden-source, +9 points of a core. The full
         delivery cost of a result thrown away.
+
+        WHAT THIS DOES *NOT* FIX, stated here because this is where the next
+        investigator lands. Typing is measurably slower with the sidebar open
+        than closed, and THIS PATH IS NOT THE CAUSE -- do not re-derive the
+        retracted attribution from the numbers above. An ABBA A/B put this
+        change at 153.8 ms against 143.1 ms without it (within noise) while
+        closed sat at 121.1 ms; an independent QA replication measured
+        109.5 ms with / 100.3 ms without / 86.7 ms closed and reached the same
+        conclusion. A CEILING ARM that dropped the identical events at the
+        owner's ``_relay_on_loop`` -- i.e. before they ever reach a viewer --
+        did not close the gap either, which retires viewer-side gating on the
+        event path as a CLASS: no filter placed here can recover it, however
+        aggressive. The leading open suspect is ``_prepare_sidebar_session``
+        (93 ms median, on the event loop, two per prewarm refresh), not event
+        fan-in. The justification for this mode is the discarded work above,
+        and nothing else.
 
         WHY IT IS A MODE HERE, AND NOT A DEFERRED ``subscribe()``. The obvious
         fix -- do not subscribe a speculative source at all -- does not work,
@@ -639,28 +654,6 @@ class EventController:
         return self._pending_tool_ends
 
     # -- event dispatch -----------------------------------------------------
-    #: Event types a PARKED source drops outright (see :meth:`set_parked`).
-    #:
-    #: The membership rule is "carries a fragment of something in flight, and
-    #: the owner's ``live_events`` seed already accumulates it", so a reveal
-    #: rebuilds the same viewport from ``restore_live_projection`` without
-    #: this terminal having paid per token for it. Deliberately NOT here:
-    #: ``message_start``/``message_end`` (row identity and the settled row the
-    #: dedupe and card pairing key on), every turn/agent boundary, tool
-    #: start/end, compaction, retry, model change, and every delivery notice --
-    #: those change state a parked source is still expected to have right.
-    #:
-    #: These three ARE the volume: at 12 streaming sessions they were ~229
-    #: events/s of the traffic measured, against a handful per turn for
-    #: everything above.
-    _PARKED_DROP_TYPES: frozenset[str] = frozenset(
-        {
-            "message_update",  # one per assistant token
-            "tool_execution_update",  # one per streamed tool-output chunk
-            "subagent_progress",  # one per child progress beat
-        }
-    )
-
     def _on_event(self, event: AgentEvent) -> None:
         """Route one engine event to its handler (sync or async-safe)."""
         event_type = event.type
@@ -983,6 +976,39 @@ class EventController:
         "subagent_progress": _handle_subagent_progress,
         "subagent_end": _handle_subagent_end,
     }
+
+    #: Event types a PARKED source drops outright (see :meth:`set_parked`).
+    #: Grouped with ``_HANDLERS`` because both are class-level dispatch tables
+    #: read by ``_on_event``, and this file keeps its class constants together.
+    #:
+    #: MEMBERSHIP RULE, all three clauses required: the event carries a
+    #: fragment of something in flight, the owner's ``live_events`` seed
+    #: already accumulates it (so a reveal rebuilds the same viewport through
+    #: ``restore_live_projection``), AND it is emitted UNTHROTTLED, once per
+    #: token or chunk. The third clause is what makes the set finite, and it is
+    #: why ``tool_call_compose`` is DELIBERATELY EXCLUDED despite satisfying
+    #: the first two: it carries partial argument bytes of an in-flight call,
+    #: but ``harness/loop.py`` already rate-limits it to one per
+    #: ``COMPOSE_NOTICE_INTERVAL_S`` (0.2 s), so it is not volume traffic and
+    #: dropping it would buy nothing while costing a compose preview on reveal.
+    #: Do not "complete" this set by adding it.
+    #:
+    #: Also deliberately absent: ``message_start``/``message_end`` (row
+    #: identity and the settled row the dedupe and card pairing key on), every
+    #: turn/agent boundary, tool start/end, compaction, retry, model change,
+    #: and every delivery notice -- those change state a parked source is still
+    #: expected to have right.
+    #:
+    #: These three ARE the volume: at 12 streaming sessions they were ~229
+    #: events/s of the traffic measured, against a handful per turn for
+    #: everything above.
+    _PARKED_DROP_TYPES: frozenset[str] = frozenset(
+        {
+            "message_update",  # one per assistant token
+            "tool_execution_update",  # one per streamed tool-output chunk
+            "subagent_progress",  # one per child progress beat
+        }
+    )
 
     # -- flush timer --------------------------------------------------------
     def _request_flush_timer(self) -> None:

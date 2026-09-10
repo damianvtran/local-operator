@@ -5545,6 +5545,29 @@ class OperatorApp(App[None]):
         # structural property rather than a clause someone must remember.
         outgoing.parked_at = time.monotonic()
         source.parked_at = None
+        # SYMMETRIC WITH THE STAMP ABOVE, and for the same reason: `outgoing`
+        # has just stopped being on screen, so from here every delta it
+        # receives is discarded by `_reduce_hidden_session_event` exactly as a
+        # never-visited prewarmed source's is. Without this the mute is a
+        # ONE-WAY LATCH -- `_lease_sidebar_source` parks at birth and
+        # `_adopt_session` unparks on commit, and nothing ever re-parks -- so
+        # every session the user actually clicks into stays exempt for the rest
+        # of its `SIDEBAR_IDLE_RELEASE_S` retention and keeps paying full
+        # per-token delivery while hidden. That decays the saving with exactly
+        # the behaviour the sidebar exists to support (review round 1, R1).
+        #
+        # `outgoing is not source` guards the REFRESH case, where the commit
+        # re-lands the session already on screen: parking that controller would
+        # mute the conversation the user is looking at.
+        #
+        # Safe with respect to the reveal, because the return trip either
+        # rebuilds the presentation (the cache misses whenever the source is
+        # `streaming`, so an in-flight answer is never served from it) or
+        # replays the owner's `live_events` seed through
+        # `restore_live_projection`, which bypasses the mute. The buffer this
+        # drops is per-token text already superseded by that seed.
+        if outgoing.controller is not None and outgoing is not source:
+            outgoing.controller.set_parked(True)
         self._park_sidebar_aside(outgoing)
         if isinstance(previous, RemoteSession):
             self._suspend_sidebar_gates(outgoing)

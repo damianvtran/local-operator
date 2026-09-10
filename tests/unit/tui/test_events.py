@@ -544,8 +544,14 @@ async def test_controller_async_handler_compat() -> None:
 # it can see and holds a REAL subscription to each, so without a mute every
 # streaming delta of every other conversation is decoded, dispatched, posted as
 # a Textual message and dequeued by the app -- which discards it. Measured at 12
-# streaming sessions: ~229 discarded events/s and keystroke latency 1.46x worse
-# at the median, 2.2-3.3x at p99.
+# streaming sessions: ~229 discarded events/s, +9 points of a core.
+#
+# What these guard is the removal of PROVABLY DISCARDED work, NOT keystroke
+# latency: the open/closed typing gap is real but survives this change (ABBA:
+# 153.8 ms with / 143.1 ms without / 121.1 ms closed), and a ceiling arm
+# dropping the same events at the owner did not close it either. See
+# `EventController.set_parked` for the full disproof before attributing any
+# latency result to this path.
 #
 # Each of these fails on the pre-fix tree: without `set_parked` the controller
 # posts for every event regardless of whether anyone is looking.
