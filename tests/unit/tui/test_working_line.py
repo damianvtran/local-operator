@@ -385,6 +385,159 @@ async def test_the_line_holds_one_row_whatever_the_clock_says() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
+    """Design round 2, D6. A phase whose zero is not the work's zero says no number.
+
+    The clock is keyed to the PHASE, and a sidebar switch into a session with a
+    tool already executing changes the phase at the moment the viewer arrives —
+    not at the moment the tool started. So the band counted from the switch
+    while NAMING the tool: an operator switching into a thirty-minute ``wait``
+    at minute twenty-eight read ``running await_job  2s``, the one number on
+    screen, attached to the tool's name, understating its age by half an hour.
+
+    That is the same wrong-zero the row itself refuses one line above — an
+    adopted card clears ``_started`` and shows the word ``running`` with no
+    duration, because "a clock started from the wrong zero is worse than no
+    clock". Naming the tool is exactly what turns an adjacent generic clock
+    into a claim about it, so the label is kept and the number is dropped.
+
+    The number is not recoverable by trying harder: ``ToolExecutionStartEvent``
+    carries no timestamp, so the true age of an adopted call does not exist on
+    this surface at any price. Withholding it is the only honest rendering.
+
+    Asserted on the text ``_paint`` COMPOSES rather than on the rendered strip,
+    for the reason the width test above documents: Textual clips a strip to the
+    widget box before it is cached, so a strip assertion cannot tell a withheld
+    clock from a clipped one.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.post_message(TurnStarted())
+        app.post_message(_started("c0", "await_job", job_id="7a73c97ffc54"))
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+
+        composed: list[str] = []
+        original = line.set_content
+
+        def spy(content: RenderableType, **kw: Any) -> None:
+            assert isinstance(content, Text), type(content)
+            composed.append(content.plain)
+            original(content, **kw)
+
+        line.set_content = spy  # type: ignore[method-assign]
+
+        # A tool this viewer WATCHED start: its own zero is knowable, so the
+        # clock is true and must still be shown. Wound back rather than slept,
+        # the way the sibling clock tests do it — and wound back on the CARD,
+        # because a running batch's clock counts from the oldest call's own
+        # start rather than from the phase change (design round 3, D9).
+        card = app._tool_cards["c0"]
+        assert card.started_at is not None
+        card._started = time.monotonic() - 30.0
+        app._refresh_working_activity()
+        line._paint()
+        assert composed[-1].rstrip().endswith(format_duration(30)), composed[-1]
+
+        # Now the adopted row: same call, same label, but the card no longer
+        # knows when it began — which is precisely the state a sidebar switch
+        # leaves behind (`restore(state="running")` clears `_started`).
+        card.restore(state="running")
+        assert card.started_at is None
+        app._refresh_working_activity()
+        line._phase_started = time.monotonic() - 30.0
+        line._paint()
+        painted = composed[-1]
+
+        assert "await_job" in painted, "the label is the part worth keeping"
+        # No number at all, rather than a different number: the failure this
+        # pins is a plausible-looking clock, so any digits are the defect.
+        assert not any(ch.isdigit() for ch in painted.rsplit("await_job", 1)[-1]), painted
+        assert format_duration(30) not in painted, painted
+
+        line.set_content = original  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
+    """Design round 3, D9. The phase outlives the work its label names.
+
+    Round 2 keyed the number to the PHASE and suppressed it only when EVERY
+    card was adopted, arguing that one card this viewer watched start puts a
+    true floor under it. The floor holds at the instant the second card
+    arrives and decays immediately afterwards, because the phase stays
+    ``running`` as the batch sheds calls while the LABEL narrows to whatever
+    survives. A batch adopted at a switch, joined by a fresh call, then reduced
+    to that fresh call, left the band naming the young survivor and reporting
+    the age of the batch it came from — a ``read`` printing ``0s`` on its own
+    receipt one line above a band reading ``running read  14s``.
+
+    Reachable in ordinary use rather than by construction: ``max_parallel_tools``
+    is 8 and the worker refills slots as they free, so any batch of more than
+    eight calls starts its tail after the viewer arrived.
+
+    Two properties are asserted together because either alone is satisfiable by
+    a wrong fix. The number must not exceed the survivor's own age (dropping
+    ``any`` for ``all`` does NOT achieve this — the survivor here dates itself
+    perfectly well; it is the anchor that is wrong), and shedding a call must
+    still not restart the clock, which is what round 1 pinned.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.post_message(TurnStarted())
+        app.post_message(_started("old", "await_job", job_id="7a73c97ffc54"))
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+
+        # AGE the first call, then start a second — the shape a batch has when
+        # the viewer arrives mid-execution and the owner refills a slot. Wound
+        # back rather than slept, as the sibling clock tests do it.
+        aged = 14.0
+        app._tool_cards["old"]._started = time.monotonic() - aged
+        app.post_message(_started("new", "read", path="a.py"))
+        await pilot.pause()
+        app._refresh_working_activity()
+        # The batch's clock is the OLDEST call's age: both cards date
+        # themselves, so the number is true of the batch the label describes.
+        assert line._clock_text() == format_duration(aged), line._clock_text()
+
+        # Now the batch sheds the old call and the label narrows to the young
+        # survivor. This is the frame the finding was raised on.
+        app.post_message(_ended("old", "await_job"))
+        await pilot.pause()
+        assert _activity(app) == "running read"
+
+        survivor = app._tool_cards["new"]
+        survivor_started = survivor.started_at
+        assert survivor_started is not None, "the survivor watched its own start"
+        survivor_age = time.monotonic() - survivor_started
+        shown = line._clock_text()
+        # THE ASSERTION THAT FAILS ON THE OLD CODE, which showed ~14s here.
+        # A small tolerance because the survivor ages between the two reads;
+        # the defect was an overstatement of 14s, not of milliseconds.
+        assert shown == format_duration(survivor_age), (
+            f"the band says {shown!r} for a call {survivor_age:.1f}s old: the clock is "
+            "still anchored to the batch the label no longer describes"
+        )
+
+        # Round 1's property still holds: shedding a call does not RESTART the
+        # clock. The survivor's own zero is unchanged by its sibling settling,
+        # so a batch losing a call every twenty seconds still shows a number
+        # past twenty — the "has this been stuck" question the clock answers.
+        app.post_message(_started("third", "bash", command="ls"))
+        await pilot.pause()
+        app._refresh_working_activity()
+        assert line._clock_text() == format_duration(time.monotonic() - survivor_started), (
+            "a call JOINING the batch must not move the zero either: the oldest "
+            "running call is still the one the clock measures"
+        )
+
+
+@pytest.mark.asyncio
 async def test_a_dictated_call_is_reported_before_it_runs() -> None:
     """The longest silence in a turn is a large call streaming its arguments."""
     app = OperatorApp(lambda: _factory(FakeSession()))

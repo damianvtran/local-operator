@@ -524,6 +524,90 @@ async def test_working_block_falls_to_the_static_cadence_on_blur(
 
 
 @pytest.mark.asyncio
+async def test_a_blurred_working_line_still_advances_its_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design round 3, D8. Blur drops the RATE; it may not stop the row.
+
+    Round 2 added a ``_tick`` gate that repainted only when the clock's second
+    changed. Focused that is unreachable (the animated branch returns first),
+    but blur takes the same still path as the shimmer kill switch — and D26
+    pins the head glyph there, so the clock was the last moving thing on the
+    row. A phase that cannot date itself has no clock, so the two together
+    produced a completely static row: measured at ZERO repaints over four
+    seconds, reading ``running await_job`` with a dead head.
+
+    That is precisely the state a sidebar switch leaves behind, which makes it
+    the worst row to freeze rather than an acceptable one — a stopped spinner
+    and a finished job look identical, and this app uses motion as its word for
+    alive. The status band keeps spinning in that state, but it says the
+    SESSION is busy, not that this tool is.
+
+    Asserted as a count of distinct glyphs off the ticker rather than over wall
+    time, per this file's opening note: a timing assertion here proves nothing
+    under load.
+    """
+    app = _running_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        # The shimmer pin must come OFF, or `motion_enabled()` is False for the
+        # kill-switch reason and the FOCUS gate under test is never isolated.
+        monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        # A phase with no clock: the adopted-tool state from D6. This is the row
+        # that had nothing left to move.
+        working = WorkingBlock("running await_job", "running", clock=False)
+        app._append_block(working)
+        app._working_block = working
+        await pilot.pause()
+
+        app._set_animation_focused(False)
+        await pilot.pause()
+        assert not animation.motion_enabled(), "the still path is the one under test"
+        assert working._tick_ms == WorkingBlock._STATIC_FRAME_MS
+        assert working._timer is not None, "throttled, not stopped"
+
+        painted: list[str] = []
+        original = working.set_content
+
+        def spy(content: Any, **kw: Any) -> None:
+            painted.append(content.plain)
+            original(content, **kw)
+
+        working.set_content = spy  # type: ignore[method-assign]
+        # Ticked directly rather than slept: the cadence is already asserted
+        # above, and this file measures invalidation, never duration.
+        for _ in range(4):
+            working._tick()
+
+        assert len(painted) == 4, (
+            f"a blurred row repainted {len(painted)} times in 4 ticks: with no clock "
+            "and a pinned glyph, nothing on this row says the tool is still alive"
+        )
+        heads = {row.strip()[:1] for row in painted}
+        assert len(heads) == 4, f"the head did not advance: {heads}"
+        assert heads <= set(WorkingBlock._SPINNER)
+        # CONTENT is unchanged by the blur — only the rate dropped. The clock is
+        # still withheld (D6) and the label still names the tool.
+        assert all("running await_job" in row for row in painted)
+        assert not any(ch.isdigit() for row in painted for ch in row.split("await_job")[-1])
+
+        # The shimmer kill switch is NOT focus and must still pin a still frame:
+        # the snapshot harness depends on a silenced frame being reproducible.
+        monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        painted.clear()
+        frozen = working._still_head
+        for _ in range(4):
+            working._tick()
+        assert working._still_head == frozen, "a silenced frame must not animate"
+        assert painted == [], "shimmer-off with no clock repaints never"
+
+        working.set_content = original  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
 async def test_blur_never_drops_content(monkeypatch: pytest.MonkeyPatch) -> None:
     """A blurred session still paints everything it is told.
 

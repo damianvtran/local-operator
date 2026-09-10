@@ -2445,6 +2445,15 @@ class WorkingBlock(TranscriptBlock):
     #: a stale age for a gap that is still growing, which is the one number
     #: this line exists to report. One repaint a second is what the clock's own
     #: resolution needs and no more.
+    #:
+    #: It is also, and not by accident, exactly
+    #: :data:`~local_operator.tui.animation.BLURRED_SPINNER_INTERVAL_S` — the
+    #: rate the band, the sidebar and both subagent surfaces turn their heads
+    #: at on a blurred terminal. This row reaches the same cadence from the
+    #: clock's side, so one timer serves both and a blurred row advances its
+    #: glyph in step with every other spinner on screen. Asserted in
+    #: ``test_render_throttling`` rather than left as a coincidence for
+    #: someone to "tidy" apart.
     _STATIC_FRAME_MS = 1000
 
     #: The head glyph, cycled off the same timer as the shimmer. The braille
@@ -2487,20 +2496,38 @@ class WorkingBlock(TranscriptBlock):
     #: Pinned by ``test_the_line_holds_one_row_whatever_the_clock_says``.
     _CLOCK_COL = 8
 
-    def __init__(self, activity: str = DEFAULT_ACTIVITY, phase: str = DEFAULT_ACTIVITY) -> None:
+    def __init__(
+        self,
+        activity: str = DEFAULT_ACTIVITY,
+        phase: str = DEFAULT_ACTIVITY,
+        *,
+        clock: bool = True,
+        clock_from: float | None = None,
+    ) -> None:
         super().__init__()
         self.add_class("working-block")
         self._frame_ms: float = 0.0
         self._tick_ms: float = self._FRAME_MS
         self._animated = True
+        # The head's position on the STILL path, advanced once per tick while
+        # the terminal is blurred. Separate from ``_frame_ms`` (the shimmer's
+        # phase) because the two run at different rates, and pinned at 0 while
+        # the shimmer kill switch is on so a silenced frame stays byte-identical
+        # and reproducible for the snapshot harness. See :meth:`_tick`.
+        self._still_head = 0
         self._timer = None
         self._activity = activity or DEFAULT_ACTIVITY
         self._phase = phase
+        # Whether this phase's zero is the WORK's zero. See :meth:`set_activity`.
+        self._clock_known = clock
         # The clock times the CURRENT PHASE, not the turn and not the label: how
         # long the agent has been busy altogether is the status band's
         # `duration` segment, and the question this line answers is the other
         # one — how long the thing on screen has been the thing on screen.
         self._phase_started = time.monotonic()
+        # A zero supplied by the CALLER, overriding the phase's own. See
+        # :meth:`set_activity`; ``None`` means the phase's zero is correct.
+        self._clock_from = clock_from
         self._clock = ""
         self._paint()
 
@@ -2509,8 +2536,41 @@ class WorkingBlock(TranscriptBlock):
         """The label currently on the line (what the turn is doing)."""
         return self._activity
 
-    def set_activity(self, activity: str, phase: str | None = None) -> None:
+    def set_activity(
+        self,
+        activity: str,
+        phase: str | None = None,
+        *,
+        clock: bool = True,
+        clock_from: float | None = None,
+    ) -> None:
         """Name what the turn is doing now.
+
+        ``clock_from`` overrides the phase's zero with one the caller measured,
+        for the case where the phase outlives the work it names. A running batch
+        keeps the phase at ``running`` as it sheds calls, so a batch that
+        narrowed to its youngest call went on counting from the batch's start
+        while naming only the survivor — a ``read`` printing ``0s`` on its own
+        receipt one line above a band reading ``running read  14s`` (design
+        round 3, D9). The caller passes the oldest start among the cards the
+        label covers, so the number describes the work named rather than the
+        phase containing it. ``None`` keeps the phase's own zero, which is right
+        for every state whose label and phase begin together.
+
+        ``clock=False`` says the caller knows the LABEL but not when the work it
+        names began, and the number is then withheld rather than counted from
+        this moment. The case that forced it: a sidebar switch adopts a tool the
+        owner has been executing for half an hour, so the phase becomes
+        ``running <tool>`` here — at the instant of the switch. The clock is
+        phase-keyed, so it restarted, and the band read ``running await_job 2s``
+        beside a card that had deliberately blanked its own duration for exactly
+        this reason (design review round 2, D6). Naming the tool is what makes
+        the adjacent number read as a claim ABOUT that tool, so the label is
+        kept and the clock is dropped: this row's whole contract is that every
+        number on it was derived from an event the app received, and a clock
+        started from the wrong zero is worse than no clock. There is no honest
+        alternative reading available — the start event carries no timestamp, so
+        the true age is not recoverable on this surface at any price.
 
         The clock restarts only when the PHASE changes, not whenever the label
         does. Keying it to the rendered string made the row refute itself: one
@@ -2526,9 +2586,15 @@ class WorkingBlock(TranscriptBlock):
         if phase != self._phase:
             self._phase = phase
             self._phase_started = time.monotonic()
-        elif activity == self._activity:
+        elif (
+            activity == self._activity
+            and clock == self._clock_known
+            and clock_from == self._clock_from
+        ):
             return
         self._activity = activity
+        self._clock_known = clock
+        self._clock_from = clock_from
         self._paint()
 
     def on_mount(self) -> None:
@@ -2599,21 +2665,48 @@ class WorkingBlock(TranscriptBlock):
         self._paint()
 
     def _tick(self) -> None:
+        from local_operator.tui.shimmer import shimmer_enabled
+
         self._frame_ms += self._tick_ms
         if self._animated:
             self._paint()
             return
-        # With shimmer off the spinner is frozen too (D26 pins a still frame),
-        # so the clock is the only thing that can change and a repaint landing
-        # on the same second is one nobody can see.
-        if self._clock_text() != self._clock:
+        # BLURRED, NOT SILENCED. Reaching here with the shimmer still enabled
+        # means the only gate that fired was focus — and focus is allowed to
+        # drop the RATE of animation, never its content (`animation.py`'s stated
+        # invariant). So the head advances one glyph per tick, which is already
+        # the app's blurred cadence (see `_STATIC_FRAME_MS`), exactly as the
+        # status band and both subagent surfaces do.
+        #
+        # Without this the row froze completely whenever it had no clock to
+        # draw: D26 pins the glyph on the still path, so the clock was the last
+        # moving thing on the row, and a phase that cannot date itself has none
+        # — measured at ZERO repaints over 4s, a static `running await_job` with
+        # a dead head (design round 3, D8). A stopped spinner and a finished job
+        # look identical, and this app uses motion as its word for alive; that a
+        # tool this viewer adopted is the one case where the row can say nothing
+        # else makes it the worst row to freeze, not an acceptable one.
+        if shimmer_enabled():
+            self._still_head = (self._still_head + 1) % len(self._SPINNER)
+            self._paint()
+            return
+        # Shimmer OFF is a deliberate still frame (D26), so the clock is the
+        # only thing that can change and a repaint landing on the same second is
+        # one nobody can see. A phase with no clock repaints never — correct
+        # here, because nothing on the row is meant to be moving.
+        if self._clock_known and self._clock_text() != self._clock:
             self._paint()
 
     def _clock_text(self) -> str:
-        """How long the current PHASE has run, in the ledger's own grammar."""
+        """How long the work on the line has run, in the ledger's own grammar.
+
+        The phase's own zero unless the caller supplied a truer one — see
+        ``clock_from`` in :meth:`set_activity`.
+        """
         from local_operator.tui.widgets.tool_card import format_duration
 
-        return format_duration(time.monotonic() - self._phase_started)
+        zero = self._phase_started if self._clock_from is None else self._clock_from
+        return format_duration(time.monotonic() - zero)
 
     def _paint(self) -> None:
         from local_operator.tui.animation import motion_enabled
@@ -2627,16 +2720,29 @@ class WorkingBlock(TranscriptBlock):
         # the band stuttering. Focused, `motion_enabled()` is exactly
         # `shimmer_enabled()`, so nothing about the looked-at frame changes.
         animated = motion_enabled()
-        # ALWAYS shown, from the first frame. It is the one fact this row has
-        # that nothing else on screen does — a running tool's own card carries
-        # no duration until it settles, and the band's clock is the session's
-        # cumulative active time, not this phase's age.
-        self._clock = self._clock_text()
+        # Shown from the first frame WHENEVER the phase's zero is the work's
+        # zero. It is the one fact this row has that nothing else on screen does
+        # — a running tool's own card carries no duration until it settles, and
+        # the band's clock is the session's cumulative active time, not this
+        # phase's age. Withheld only where the caller says the zero is unknown
+        # (`set_activity(clock=False)`), because the alternative is a number
+        # counted from the wrong instant beside the name of the work it appears
+        # to describe.
+        self._clock = self._clock_text() if self._clock_known else ""
         # A frozen frame rather than no glyph when shimmer is off: the braille
         # head is unique to this row either way, which is what a still terminal
         # needs to tell it from an info notice.
-        head = self._SPINNER[int(self._frame_ms // self._SPIN_MS) % len(self._SPINNER)]
-        head = f"{head} " if animated else f"{self._SPINNER[0]} "
+        #
+        # Two clocks drive it, because the still path is not always still. The
+        # shimmer's own phase (`_frame_ms`) at full rate; `_still_head` when the
+        # terminal is merely blurred, where `_tick` turns it once a second. With
+        # the shimmer kill switch on, `_tick` never advances `_still_head`, so
+        # this stays pinned at frame 0 and a silenced frame is reproducible.
+        if animated:
+            head = self._SPINNER[int(self._frame_ms // self._SPIN_MS) % len(self._SPINNER)]
+        else:
+            head = self._SPINNER[self._still_head]
+        head = f"{head} "
         # ONE row, always. The block is SPACING_TRANSIENT, so nothing below it
         # re-measures against its height; a label that wrapped would take rows
         # it had told the transcript it would not, and the intents it shows are
@@ -2665,7 +2771,12 @@ class WorkingBlock(TranscriptBlock):
         # from `100h4m` and `100h45m`, and this number matters most exactly when
         # it is largest. That is why the fix for the overflow review round 15
         # found is a days branch in the formatter, not a clip here.
-        line.append(f"  {truncate_cells(self._clock, self._CLOCK_COL - 2)}", style=dim)
+        # The clock's cells stay RESERVED above even when the number is
+        # withheld, so a phase that cannot date itself clips its label at the
+        # same column as one that can — dropping the number must not reflow the
+        # text beside it.
+        if self._clock:
+            line.append(f"  {truncate_cells(self._clock, self._CLOCK_COL - 2)}", style=dim)
         # `layout=False`: this row is ONE row by construction (see above — the
         # label is clipped, never wrapped), so its footprint cannot move and the
         # update is a repaint. The default laid the whole screen out again on

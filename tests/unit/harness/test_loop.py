@@ -1970,6 +1970,195 @@ async def test_a_slow_unwind_still_reports_the_tool_as_ENDED():
 
 
 @pytest.mark.asyncio
+async def test_the_post_abort_backfill_reports_how_long_the_tool_actually_RAN():
+    """Review round 2, MAJOR-3. The backfill was the one emitter with no clock.
+
+    Three of the four ``ToolExecutionEndEvent`` emitters are built inside the
+    runner that owns ``started_at`` and stamp ``duration_s`` from it. The
+    post-abort backfill is built in the batch body instead, and so reported a
+    call it had genuinely measured \u2014 the tool really did execute for a span
+    before the abort cut it off \u2014 as having no duration at all.
+
+    That mattered beyond tidiness because ``duration_s`` has no validator ORing
+    it with ``result.duration_s`` the way ``_sync_error_flag`` does for the
+    error bit. The number is the ONLY record of the interval: a viewer that
+    watched the call start times it locally, but one that adopted the row
+    mid-execution (a sidebar switch) has no zero of its own and can print only
+    what the executor measured. So the same aborted call showed a duration to
+    the viewer who happened to be watching and a blank to the one who was not,
+    and a replay off the persisted payload agreed with neither.
+
+    Both halves are asserted, because filling one alone is what produced the
+    split: the live consumer reads the top-level field and a replay reads the
+    nested one.
+    """
+    started = asyncio.Event()
+    # Long enough that a stamp of 0.0 (or a missing one) is unambiguous, short
+    # enough not to pad the suite. Asserted as a floor, never as an equality:
+    # the sleep is a lower bound on the span, not a measurement of it.
+    ran_for = 0.4
+
+    async def execute(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # Outrun the drain budget, which is what routes this call through
+            # the BACKFILL rather than through `park`'s own stamped emitter.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(ABORT_DRAIN_TIMEOUT_S + 2)
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stubborn", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="stubborn", parameters={"type": "object", "properties": {}}, execute=execute
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stubborn", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    # Let the tool genuinely execute before the abort, so "did it measure?" and
+    # "did it stamp a zero?" are distinguishable in the assertion below.
+    await asyncio.sleep(ran_for)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + 10)
+
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert len(ends) == 1
+    end = ends[0]
+    assert end.duration_s is not None, (
+        "the backfill emitted an end event with no interval, so a viewer that "
+        "adopted this row mid-execution can never learn how long it ran"
+    )
+    assert end.duration_s >= ran_for, "the stamp must be the measured span, not a zero"
+    assert end.result.duration_s == end.duration_s, (
+        "the two halves must agree: the live consumer reads the top-level "
+        "field and a replay reads the nested one, and nothing syncs them"
+    )
+    # The receipt a REPLAY reads is the same number, which is the whole point.
+    payload = Message.tool_result(end.result).provider_payload
+    assert payload is not None, "the measured interval must survive into the persisted row"
+    assert payload["duration_s"] == end.duration_s
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_s", [ABORT_DRAIN_TIMEOUT_S + 0.5, ABORT_DRAIN_TIMEOUT_S + 4.0])
+async def test_the_backfill_measures_the_abort_not_the_drain_deadline(cleanup_s: float):
+    """Review round 3, MAJOR-4. The stamp must be a property of the TOOL.
+
+    Round 2 gave this emitter a duration; it stamped ``now``, and ``now`` here
+    is not a fact about the tool. The backfill runs only after the drain loop
+    has waited out ``ABORT_DRAIN_TIMEOUT_S``, and a call is routed here only
+    BECAUSE its unwind outran that budget — so ``now - started_at`` always
+    contains the whole drain wait. A tool that did 0.1s of work reported 2.1s,
+    and reported it for cleanups of 2.5s, 4s and 8s alike: the number was the
+    deadline, constant for every call that reaches this emitter.
+
+    That is the failure this PR exists to remove, arriving through the fix for
+    it — a plausible wrong number on the ONE surface that can print only what
+    the executor measured (a viewer that adopted the row has no zero of its
+    own), and it persists into ``provider_payload`` for every later replay.
+
+    Parametrised over two cleanup lengths straddling nothing in particular but
+    differing by 3.5s, because the tell is not the absolute value: it is that
+    the reading does NOT move when only the cleanup moves. A stamp taken at the
+    deadline would be ~equal across both AND ~equal to the budget; a stamp taken
+    at the abort is ~equal across both AND ~equal to the work. Asserting against
+    the work is what distinguishes them.
+    """
+    started = asyncio.Event()
+    # The tool's REAL work, held constant while the cleanup varies. Generous
+    # enough to sit well clear of scheduling noise and far below the budget, so
+    # "measured the tool" and "measured the deadline" cannot be confused.
+    ran_for = 0.3
+
+    async def execute(tool_call_id, args, signal, on_update, context) -> ToolResult:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # Outruns the drain budget, which is what routes this call through
+            # the BACKFILL rather than through `park`'s own stamped emitter.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(cleanup_s)
+            raise
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="stubborn", content=[TextContent(text="late")]
+        )
+
+    tool = AgentTool(
+        name="stubborn", parameters={"type": "object", "properties": {}}, execute=execute
+    )
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="stubborn", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool])
+    config = make_config(stream, interrupt_mode="immediate", has_steering_messages=lambda: False)
+    signal = AbortSignal()
+    loop = AgentLoop()
+
+    events: list[Any] = []
+
+    async def run() -> None:
+        async for event in loop.run([Message.user("go")], context, config, signal):
+            events.append(event)
+
+    task = asyncio.ensure_future(run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(ran_for)
+    signal.abort("interrupted")
+    await asyncio.wait_for(task, timeout=ABORT_DRAIN_TIMEOUT_S + cleanup_s + 15)
+
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert len(ends) == 1
+    measured = ends[0].duration_s
+    assert measured is not None
+
+    # THE ASSERTION THAT FAILS ON THE OLD CODE. The stamp must not contain the
+    # drain wait: anything at or past the budget is the deadline leaking in.
+    # Bounded well under it rather than at it, so the test states "measured the
+    # tool" rather than merely "not quite the whole budget".
+    assert measured < ABORT_DRAIN_TIMEOUT_S / 2, (
+        f"reported {measured:.3f}s for {ran_for}s of work with a {cleanup_s}s cleanup: "
+        "the stamp is measuring the drain budget, not the tool"
+    )
+    # And it IS the span, not merely a small number: a floor, because the sleep
+    # bounds the work from below and nothing measures it exactly.
+    assert measured >= ran_for
+    # Both halves and the persisted receipt carry the corrected number.
+    assert ends[0].result.duration_s == measured
+    payload = Message.tool_result(ends[0].result).provider_payload
+    assert payload is not None
+    assert payload["duration_s"] == measured
+
+
+@pytest.mark.asyncio
 async def test_a_late_parking_tool_is_not_robbed_of_its_end_event_mid_backfill(monkeypatch):
     """The final flush must emit an end parked after the drain has expired.
 

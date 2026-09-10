@@ -2172,7 +2172,14 @@ class AgentLoop:
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone] = asyncio.Queue()
         results_by_slot: list[ToolResult | None] = [None] * len(batch)
         tasks: list[asyncio.Task[None]] = []
-        started_slots: set[int] = set()
+        # Slot -> the monotonic instant its runner announced the start. A SET of
+        # started slots was enough while every end event came from `park`, which
+        # closes over its runner's own `started_at`; the post-abort backfill has
+        # no such closure and was therefore the one emitter that could not
+        # measure what it was reporting (review round 2, MAJOR-3). Membership is
+        # unchanged — `slot in started_at_by_slot` reads the same as before — so
+        # this widens what the batch remembers rather than how it decides.
+        started_at_by_slot: dict[int, float] = {}
         peek = (
             config.has_urgent_steering_messages
             if config.has_urgent_steering_messages is not None
@@ -2188,6 +2195,11 @@ class AgentLoop:
         # tell an abort apart from a steering interrupt and label their
         # synthetic results correctly.
         aborting = False
+        # WHEN the abort landed, on the same monotonic clock the runners stamp
+        # their spans from. The post-abort backfill needs an END instant for a
+        # tool it will never see finish, and every other candidate is a property
+        # of the harness rather than of the tool: see the stamp below.
+        aborted_at: float | None = None
 
         def park(
             slot: int,
@@ -2216,7 +2228,7 @@ class AgentLoop:
             # one alone leaves the other emitting it (R4-1 fixed the flush, R5-1
             # was the drain doing the same thing a moment earlier). The result
             # still parks, so the WIRE stays paired; only the event is withheld.
-            started = slot in started_slots
+            started = slot in started_at_by_slot
             if started:
                 queue.put_nowait(
                     ToolExecutionEndEvent(
@@ -2239,7 +2251,7 @@ class AgentLoop:
         async def runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
-            started_slots.add(slot)
+            started_at_by_slot[slot] = started_at
             await queue.put(
                 # `item.args`, not `item.call.arguments`: the event must show
                 # what the tool is actually being run with, and those two now
@@ -2274,7 +2286,7 @@ class AgentLoop:
         async def interruptible_runner(slot: int, item: _PlannedCall) -> None:
             tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
-            started_slots.add(slot)
+            started_at_by_slot[slot] = started_at
             await queue.put(
                 ToolExecutionStartEvent(
                     tool_call_id=item.call.id,
@@ -2348,9 +2360,13 @@ class AgentLoop:
             fully paired — cancelling here changes WHEN the turn ends, never
             whether the wire stays legal.
             """
-            nonlocal aborting
+            nonlocal aborting, aborted_at
             assert signal is not None
             await signal.wait()
+            # Stamped BEFORE the cancellations, so the instant recorded is when
+            # the tools were told to stop rather than when the last of them
+            # acknowledged it.
+            aborted_at = time.monotonic()
             aborting = True
             for task in tasks:
                 if not task.done():
@@ -2563,17 +2579,74 @@ class AgentLoop:
                 if results_by_slot[slot] is None:
                     result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
                     results_by_slot[slot] = result
-                    if slot in started_slots and item.tool is not None:
+                    if slot in started_at_by_slot and item.tool is not None:
                         # Only for calls that actually STARTED. A planning
                         # failure parked its result up front and never emitted a
                         # start event, so an end event for it would be the
                         # mirror image of this bug.
                         claimed[item.call.id] += 1
+                        # STAMPED like every other emitter. This was the one
+                        # end event in the loop carrying no interval, because it
+                        # is built here rather than inside the runner that owns
+                        # `started_at` — so an aborted call reported an active
+                        # span it had genuinely measured as blank, and the
+                        # receipt a viewer saw depended on whether it had
+                        # watched the start (review round 2, MAJOR-3). The
+                        # executor owns the start/end boundary (see `park`), and
+                        # that argument does not stop applying because the call
+                        # ended by abort: the tool really did run for this long
+                        # before it was cut off.
+                        #
+                        # MEASURED TO THE ABORT, NOT TO NOW, and the difference
+                        # is the whole finding of review round 3 (MAJOR-4).
+                        # `now` here is not a property of the tool: this code
+                        # runs only after the drain loop has waited out
+                        # ABORT_DRAIN_TIMEOUT_S, and a call reaches the backfill
+                        # only BECAUSE its unwind outran that budget — so
+                        # `now - started_at` always contains the whole drain
+                        # wait. Held the tool's real work at 0.10s and swept the
+                        # cleanup length, `now` reported 2.103 / 2.104 / 2.103s
+                        # for cleanups of 2.5 / 4 / 8s: pinned to the budget,
+                        # 21x the span, and constant regardless of the tool. It
+                        # was measuring the deadline.
+                        #
+                        # The abort instant is the honest end because it is when
+                        # the tool was cut off; what happens after is the
+                        # harness waiting, not the tool working.
+                        #
+                        # It does NOT make this identical to `park`, and the
+                        # difference is stated rather than papered over: a
+                        # runner that unwinds INSIDE the budget stamps in its
+                        # own `CancelledError` handler, after its cleanup has
+                        # run, so it reports start->cleanup-end (measured 0.603s
+                        # for the same 0.101s of work with a 0.50s cleanup).
+                        # That number is defensible there because the task was
+                        # genuinely unwinding for the whole of it and the
+                        # executor watched it happen. It is not available here:
+                        # this emitter fires precisely because the tool has NOT
+                        # finished unwinding and never will be observed doing
+                        # so, so the only instants in scope are the start, the
+                        # abort, and the deadline. Of those the abort is the
+                        # only one that is a property of the tool.
+                        #
+                        # `max(0.0, ...)` is a live guard, not decoration: the
+                        # watcher cancels tasks after stamping, so a runner that
+                        # reaches its first line in that window starts AFTER the
+                        # abort and would otherwise report a negative span.
+                        ended_at = aborted_at if aborted_at is not None else time.monotonic()
+                        result.duration_s = max(0.0, ended_at - started_at_by_slot[slot])
                         pending_ends.append(
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
                                 tool_name=item.tool.name,
                                 result=result,
+                                # Both halves, like the three sibling emitters.
+                                # `duration_s` has no validator ORing it with
+                                # `result.duration_s` the way `_sync_error_flag`
+                                # does for the error bit, so an emitter that
+                                # sets only one ships an event whose live
+                                # consumer and whose replay disagree.
+                                duration_s=result.duration_s,
                                 is_error=result.is_error,
                             )
                         )

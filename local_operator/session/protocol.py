@@ -646,6 +646,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Tool ids whose result rows have not arrived yet."""
         ...
 
+    def executing_display_tool_ids(self) -> set[str]:
+        """Tool ids of a STILL-RUNNING turn, so a replayed row is not settled.
+
+        The gate's counterpart: a long tool parks the turn inside execution
+        with no gate open, so ``pending_display_tool_ids`` is empty while the
+        call is alive and a replay would paint ``⊘ interrupted`` over it.
+        Viewer-side for the same reason as its sibling above — it answers a
+        display question off ``is_streaming`` plus the latest call group, and
+        has no meaning on a runtime nobody is viewing.
+        """
+        ...
+
     async def ensure_display_anchor(self, anchor: str) -> bool:
         """Load whichever page contains ``anchor``; False when it is gone."""
         ...
