@@ -8,7 +8,16 @@ preserving (they are scar tissue from real provider behaviour):
 - When the provider validates redirect URIs (``redirect_uri`` pinned or
   ``allow_port_fallback=False``), a busy port MUST fail before the browser
   opens — otherwise the user gets an opaque 500 at the IdP and a 5-minute
-  hang locally.
+  hang locally. ``fallback_ports`` widens this to a BOUNDED allowlist (the
+  only ports the provider accepts) without weakening it: an OS-assigned port
+  is still never advertised to such a provider.
+- A busy port is retried briefly before it is believed. The common cause is a
+  sibling login of ours still parked on its timeout, not a permanent squatter,
+  so the ladder pokes ``GET /cancel`` at the incumbent once and retries —
+  matching upstream Codex's ``bind_server``. **That poke only works because
+  this server also ANSWERS ``/cancel``** (see ``_handle_connection``): sending
+  it without implementing it, as this did at first, leaves the sibling holding
+  the port and the retry waiting for something that will never happen.
 - Two routes on one server: the callback path and ``/launch`` (302 to the
   pending auth URL) so a TUI can hand the user a short copy target.
 - The paste-code prompt may only race the HTTP callback for providers that
@@ -23,6 +32,8 @@ import inspect
 import json
 import logging
 import secrets
+import shutil
+import subprocess
 import urllib.parse
 import webbrowser
 from abc import ABC, abstractmethod
@@ -32,6 +43,20 @@ from local_operator.callback_page import Tone, render_callback_page
 from local_operator.harness.types import AbortSignal
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
+
+#: Retry budget for a busy loopback port, per candidate port. Mirrors upstream
+#: Codex (`codex-rs/login/src/server.rs::bind_server`, MAX_ATTEMPTS/RETRY_DELAY)
+#: because the thing being waited out is the same: a just-exited sibling login
+#: whose listening socket is still in the kernel's teardown path. Ten attempts
+#: at 200 ms is ~2 s per port -- long enough to outlast that teardown, short
+#: enough that a genuinely occupied port still fails before the browser opens.
+PORT_RETRY_ATTEMPTS = 10
+PORT_RETRY_DELAY_SECONDS = 0.2
+
+#: How long the best-effort `GET /cancel` to a stale login server may take.
+#: It is a courtesy shove, not a dependency: everything after it works whether
+#: or not anything answered, so the budget is small on purpose.
+STALE_CANCEL_TIMEOUT_SECONDS = 2.0
 
 
 def _parse_pasted_callback(pasted: str) -> tuple[str, str]:
@@ -90,8 +115,81 @@ def _parse_pasted_callback(pasted: str) -> tuple[str, str]:
     # Providers hand users "code#state" in the redirect URL fragment.
     if "#" in pasted:
         code, _, frag_state = pasted.partition("#")
-        return code.strip(), frag_state.strip()
-    return pasted, ""
+        return _require_code(code.strip()), frag_state.strip()
+    return _require_code(pasted), ""
+
+
+def _require_code(code: str) -> str:
+    """Reject a paste that yields no authorization code.
+
+    A stray Enter at the prompt, or a fragment-only paste like ``#state``,
+    otherwise reaches the token endpoint AS the code: the login is spent on a
+    round trip that must fail, and the user gets an opaque provider error in
+    the one place this flow exists to help people whose browser cannot reach
+    the loopback port. Raising instead re-offers the prompt, which is what
+    every other unusable shape in this parser already does.
+
+    Checks the RESULT rather than the input's shape, so every branch that can
+    produce an empty code is covered by construction.
+    """
+    if not code.strip():
+        raise LoginError(
+            "That paste carried no authorization code. Paste the code itself, "
+            "or the whole redirect URL from your browser's address bar."
+        )
+    return code
+
+
+def _describe_port_holders(ports: tuple[int, ...]) -> str:
+    """Name the processes listening on ``ports``, or return "" if we cannot.
+
+    "Port 1455 is in use" is true and useless; "Cursor (pid 4711) is holding
+    it" is the same fact with the next action attached. `lsof` is the only
+    portable-enough way to get it without taking a dependency (psutil is
+    deliberately not one here -- see AGENTS.md), and it is absent or
+    permission-limited often enough that this must degrade to silence rather
+    than to a wrong answer: an empty string simply omits the clause.
+
+    Never raises, and never blocks the failure path for long -- the login has
+    already failed by the time this runs, and a hung diagnostic would turn a
+    clear error into a hang.
+    """
+    binary = shutil.which("lsof")
+    if binary is None:
+        return ""
+    holders: list[str] = []
+    for port in ports:
+        try:
+            # Ports are ints from our own config, so there is no shell and no
+            # interpolation risk; -F pcn asks for a stable machine-readable
+            # stream of p(id), c(ommand) and n(ame) fields rather than the
+            # localised table layout. The parse below reads the `c` field, so
+            # dropping it from this argv silently removes the "X (pid N) is
+            # holding it" clause from every message.
+            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [binary, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pcn"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        pid = ""
+        for line in completed.stdout.splitlines():
+            tag, value = line[:1], line[1:].strip()
+            if tag == "p":
+                pid = value
+            elif tag == "c" and value:
+                label = f"{value} (pid {pid})" if pid else value
+                entry = f"{label} on port {port}" if len(ports) > 1 else label
+                if entry not in holders:
+                    holders.append(entry)
+    if not holders:
+        return ""
+    if len(holders) == 1:
+        return f"{holders[0]} is holding it."
+    return f"Held by {', '.join(holders)}."
 
 
 class LoginError(Exception):
@@ -371,6 +469,22 @@ class CallbackFlowOptions:
     ``redirect_uri`` pins the exact URI and disables port fallback (provider
     allowlist). ``manual_input_only`` skips the server entirely; the user
     pastes the code from the provider page.
+
+    Three port policies are expressible, and the difference matters because a
+    provider that validates redirect URIs rejects anything not on ITS
+    allowlist -- with an opaque error raised at the IdP, after the browser has
+    already opened:
+
+    - ``allow_port_fallback=True`` (default): any OS-assigned port is fine.
+      For providers that do not validate the redirect URI.
+    - ``allow_port_fallback=False`` with no ``fallback_ports``: exactly one
+      port, and a busy port fails locally before the browser opens.
+    - ``fallback_ports`` non-empty: a BOUNDED allowlist -- ``preferred_port``
+      first, then each fallback in order, and nothing else. This exists
+      because a boolean cannot express "these two ports and no others", which
+      is precisely OpenAI's situation: 1455 and 1457 are both server-side
+      allowlisted for the Codex client id, and an OS-assigned third port is
+      still a hard failure.
     """
 
     preferred_port: int
@@ -378,6 +492,14 @@ class CallbackFlowOptions:
     callback_hostname: str = "localhost"
     redirect_uri: str | None = None
     allow_port_fallback: bool = True
+    #: Additional provider-allowlisted ports tried, in order, after
+    #: ``preferred_port``. Only meaningful with ``allow_port_fallback=False``
+    #: and ``redirect_uri=None``: the advertised URI is built from the port
+    #: actually bound, so pinning a literal URI and then binding a different
+    #: port from this ladder would advertise an address nothing is listening
+    #: on. ``__post_init__`` rejects that combination rather than letting it
+    #: reach a provider as an opaque redirect-mismatch.
+    fallback_ports: tuple[int, ...] = ()
     manual_input_only: bool = False
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     #: Display name of the provider being signed into ("Anthropic", "OpenAI"),
@@ -386,6 +508,37 @@ class CallbackFlowOptions:
     #: without it — the trough is omitted rather than faked (mirrors how the
     #: MCP flow treats its server URL).
     provider_label: str | None = None
+
+    def __post_init__(self) -> None:
+        # A port ladder and a pinned literal URI are mutually exclusive by
+        # construction: `redirect_uri()` returns the pinned string verbatim, so
+        # binding the second rung would advertise the first rung's port and the
+        # provider would redirect the browser to a closed socket. Refusing here
+        # turns a subtle, provider-side, post-browser failure into an obvious
+        # local one at construction time.
+        if self.fallback_ports and self.redirect_uri is not None:
+            raise ValueError(
+                "fallback_ports cannot be combined with a pinned redirect_uri: the "
+                "advertised URI must name the port actually bound."
+            )
+        if self.fallback_ports and self.allow_port_fallback:
+            raise ValueError(
+                "fallback_ports requires allow_port_fallback=False: the ladder IS the "
+                "allowlist, and an OS-assigned port would defeat it."
+            )
+
+    @property
+    def candidate_ports(self) -> tuple[int, ...]:
+        """Every port this flow may bind, in the order they are tried.
+
+        Deduplicated so a provider that lists its preferred port again among
+        the fallbacks does not spend a second retry budget on it.
+        """
+        ordered = (self.preferred_port, *self.fallback_ports)
+        seen: dict[int, None] = {}
+        for port in ordered:
+            seen.setdefault(port, None)
+        return tuple(seen)
 
 
 class OAuthCallbackFlow(ABC):
@@ -414,6 +567,11 @@ class OAuthCallbackFlow(ABC):
         self._pending_auth_url: str | None = None
         self._captured: asyncio.Future[tuple[str, str]] | None = None
         self._capture_error: asyncio.Future[str] | None = None
+        #: Resolved when a newer login asks this one to stand down over
+        #: ``/cancel``. Separate from ``_capture_error`` because the outcome is
+        #: a CANCELLATION, not a failure: hosts report the two differently, and
+        #: a superseded login is not an error the user did anything about.
+        self._cancelled: asyncio.Future[str] | None = None
         self._sent_state: str | None = None
 
     # -- subclass hooks ----------------------------------------------------
@@ -442,29 +600,162 @@ class OAuthCallbackFlow(ABC):
         port = self._bound_port if self._bound_port is not None else opts.preferred_port
         return f"http://{opts.callback_hostname}:{port}{opts.callback_path}"
 
+    async def _cancel_stale_server(self, port: int) -> None:
+        """Ask whatever holds ``port`` to shut down, if it is one of ours.
+
+        A previous login of ours that is still parked on its timeout keeps the
+        port for up to five minutes, and the user experiences that as "login is
+        broken" with no way to tell it apart from Cursor squatting on 1455.
+        Upstream Codex handles it by poking ``/cancel`` on the incumbent before
+        retrying (`server.rs::send_cancel_request`), and this mirrors it.
+
+        The other half of this is the ``/cancel`` ROUTE in
+        ``_handle_connection``. Without it this method is theatre: the request
+        is sent, our sibling answers 404, the port stays held, and the retry
+        budget is spent waiting for a release that never comes. That was the
+        state this code shipped in first, and it mattered most for Anthropic
+        and Z.AI, which have no second rung to fall back to.
+
+        Strictly best-effort: an unrelated server on that port answers 404 or
+        garbage and nothing changes, so every failure here is swallowed and the
+        retry ladder proceeds either way. It is deliberately a raw request
+        rather than an httpx call -- the target may not speak HTTP at all.
+        """
+        writer: asyncio.StreamWriter | None = None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", port),
+                timeout=STALE_CANCEL_TIMEOUT_SECONDS,
+            )
+            writer.write(
+                b"GET /cancel HTTP/1.1\r\n"
+                + f"Host: 127.0.0.1:{port}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+            )
+            await asyncio.wait_for(writer.drain(), timeout=STALE_CANCEL_TIMEOUT_SECONDS)
+            # Read the reply only to give the peer a chance to act on the
+            # request before the socket closes; the content is irrelevant.
+            await asyncio.wait_for(reader.read(64), timeout=STALE_CANCEL_TIMEOUT_SECONDS)
+        except Exception:
+            logger.debug("stale-login cancel on port %s did not complete", port, exc_info=True)
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+    async def _try_bind(self, port: int, *, required: bool, may_cancel: bool = True) -> bool:
+        """Bind ``port``. Returns True on success.
+
+        ``required`` says whether this port is the only acceptable answer, and
+        it decides whether waiting is worth anything. When the provider
+        validates the redirect URI, a busy port is the difference between a
+        login and no login, so it is worth ~2 s of retries to outlast a sibling
+        login still tearing down. When ANY port will do, that same wait buys
+        nothing: an OS-assigned port is one syscall away and just as valid, so
+        retrying only delays every login that happens to find the preferred
+        port occupied. Spending the budget there was a straight regression --
+        3.8 s added to a case that used to be instant.
+
+        The ``/cancel`` poke follows the same rule for a subtler reason: it is
+        aimed at a stale login server of OURS, and standing one down is only
+        justified when we actually need its port.
+        """
+        attempts = PORT_RETRY_ATTEMPTS if required else 1
+        cancel_attempted = False
+        for attempt in range(attempts):
+            try:
+                self._server = await asyncio.start_server(
+                    self._handle_connection, "127.0.0.1", port
+                )
+                self._bound_port = self._socket_port()
+                return True
+            except OSError:
+                if not required:
+                    return False
+                if may_cancel and not cancel_attempted:
+                    cancel_attempted = True
+                    await self._cancel_stale_server(port)
+                if attempt < attempts - 1:
+                    await asyncio.sleep(PORT_RETRY_DELAY_SECONDS)
+        return False
+
     async def _start_server(self) -> None:
         opts = self.options
-        try:
-            self._server = await asyncio.start_server(
-                self._handle_connection, "127.0.0.1", opts.preferred_port
-            )
-            self._bound_port = self._socket_port()
-            return
-        except OSError:
-            pass
-        # Preferred port busy: fall back to an OS-assigned port only when the
-        # provider does not pin the redirect URI.
+        # A provider that validates redirect URIs gets a BOUNDED ladder of
+        # allowlisted ports and nothing else; everyone else keeps the single
+        # preferred port plus an OS-assigned fallback. Either way a port we
+        # cannot use must fail HERE -- before the browser opens -- which is the
+        # invariant this module's docstring states.
         pinned = opts.redirect_uri is not None or not opts.allow_port_fallback
+        candidates = opts.candidate_ports if pinned else (opts.preferred_port,)
+
+        for index, port in enumerate(candidates):
+            # Only the PREFERRED rung is poked, matching upstream's
+            # `!using_fallback_port` guard. A fallback rung is a port we merely
+            # may use, so an incumbent there has at least as much claim to it
+            # as we do; standing one down to save ourselves a rung we do not
+            # need would be taking someone else's login for our convenience.
+            if await self._try_bind(port, required=pinned, may_cancel=index == 0):
+                return
+
         if pinned:
-            raise ConfigurationError(
-                f"Port {opts.preferred_port} is required for this login flow but is already "
-                "in use. Stop the process holding it and retry."
-            )
+            # `lsof` is a blocking subprocess, and this runs on the event loop
+            # that a TUI is drawing from. Off-thread so the failure message
+            # costs a thread rather than a visible freeze.
+            holders = await asyncio.to_thread(_describe_port_holders, candidates)
+            raise ConfigurationError(self._port_unavailable_message(candidates, holders))
+
         try:
             self._server = await asyncio.start_server(self._handle_connection, "127.0.0.1", 0)
         except OSError as exc:
             raise ConfigurationError(f"Could not bind a loopback callback server: {exc}") from exc
         self._bound_port = self._socket_port()
+
+    def _port_unavailable_message(self, candidates: tuple[int, ...], holders: str = "") -> str:
+        """Explain a failed bind in terms the user can act on.
+
+        This message is the entire user-visible surface of the failure, and the
+        opaque version of it ("Port N is required ... Stop the process holding
+        it") sent users to search engines: it named no way to FIND the process,
+        and it did not say why an arbitrary port could not simply be used
+        instead. So it names the port, names what is holding it when the OS will
+        tell us, and gives the command to look for oneself.
+        """
+        provider = self.options.provider_label or "This provider"
+        if len(candidates) == 1:
+            port = candidates[0]
+            where = f"Port {port} is required for the {provider} login"
+        else:
+            listed = ", ".join(str(port) for port in candidates)
+            where = f"The {provider} login can only use port {listed}, and all are"
+        busy = " but is already in use." if len(candidates) == 1 else " in use."
+        detail = f" {holders}" if holders else ""
+        # `lsof` takes a comma list, so one command covers every candidate --
+        # naming only the first left the second port's holder unfindable in
+        # exactly the two-port case this message exists for.
+        probe = f"lsof -nP -iTCP:{','.join(str(port) for port in candidates)} -sTCP:LISTEN"
+        message = (
+            f"{where}{busy}{detail} {provider} only accepts redirect URIs on "
+            f"{'that port' if len(candidates) == 1 else 'those ports'}, so the login "
+            "cannot fall back to another one. Quit the process holding it and run the "
+            f"login again — `{probe}` shows what it is."
+        )
+        # This failure happens BEFORE the server starts, so the paste prompt --
+        # the fallback this flow otherwise leans on -- is never offered. That
+        # left the only stated remedy "kill the other process", which a user
+        # who does not own that process cannot do. Naming the paste route makes
+        # the hard failure recoverable, and it is only mentioned where a host
+        # has actually attached a prompt.
+        if self.callbacks.on_manual_code_input is not None:
+            message += (
+                " If you cannot free the port, run the login again and use the "
+                "paste option: approve the sign-in in your browser, then paste "
+                "the code or the whole redirect URL at the prompt."
+            )
+        return message
 
     def _socket_port(self) -> int | None:
         """The actually-bound port — the one that lands in redirect_uri."""
@@ -512,7 +803,14 @@ class OAuthCallbackFlow(ABC):
             error = query.get("error")
             if error:
                 desc = query.get("error_description", "")
-                self._finish_error(f"Authorization failed: {error} {desc}".strip())
+                # The raw error code is preserved verbatim (it is the string a
+                # user searches for), but a bare `access_denied` left the
+                # terminal with a verdict and no next step. Naming the remedy
+                # matches the paste-fallback path's message above.
+                self._finish_error(
+                    f"Authorization failed: {error} {desc}".strip()
+                    + ". Nothing was connected — run the login again to retry."
+                )
                 # The provider's words go in their own labelled trough rather
                 # than into our sentence — same voice boundary the MCP flow
                 # draws, and where a bare `access_denied` reads as data rather
@@ -579,6 +877,31 @@ class OAuthCallbackFlow(ABC):
                         tone="danger",
                     )
                     await self._respond(writer, 200, body)
+        elif path == "/cancel" and method == "GET":
+            # A NEWER login of ours found this port busy and is asking this
+            # one to stand down so it can have it. Without this route the poke
+            # in `_cancel_stale_server` lands on the 404 below and the
+            # incumbent keeps the port -- which made the retry ladder's whole
+            # premise ("the usual holder is a sibling still parked on its
+            # timeout") false for our own servers. Upstream Codex implements
+            # the same route for the same reason (`server.rs` `"/cancel" =>
+            # ResponseAndExit`).
+            #
+            # Safe to honour unauthenticated: it is reachable only from
+            # loopback, it destroys no credential, and the worst a local
+            # process can do with it is end a login the user can simply run
+            # again. It deliberately carries NO state check -- the caller is a
+            # sibling process that never saw our `state`, which is the whole
+            # point.
+            self._finish_cancelled("Login superseded by a newer sign-in that needed this port.")
+            body = self._page(
+                "Sign-in cancelled",
+                "Another sign-in started and took over this address, so this "
+                "one was stopped. Nothing was connected. Continue in the "
+                "window where you started the newer sign-in.",
+                closable=False,
+            )
+            await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:
                 await self._respond(
@@ -675,6 +998,10 @@ class OAuthCallbackFlow(ABC):
         if self._capture_error and not self._capture_error.done():
             self._capture_error.set_result(message)
 
+    def _finish_cancelled(self, message: str) -> None:
+        if self._cancelled and not self._cancelled.done():
+            self._cancelled.set_result(message)
+
     def _launch_url(self) -> str | None:
         """Short 302 alias for the auth URL; only safe for loopback http(s)."""
         if self.options.manual_input_only or self._server is None or self._bound_port is None:
@@ -689,6 +1016,66 @@ class OAuthCallbackFlow(ABC):
             return None
         return f"http://{self.options.callback_hostname}:{self._bound_port}/launch"
 
+    def _timeout_message(self) -> str | None:
+        """Timeout copy that names the recovery, when there is one.
+
+        A timeout has two quite different causes and the generic message serves
+        only the rarer one. Either the user walked away — nothing to say beyond
+        "try again" — or the browser DID complete the sign-in but its redirect
+        never reached this machine, which is the remote/SSH case and the
+        reported claude.ai-portal case. In the second, the user has been
+        staring at a page carrying the code all along; the default message
+        ("check that the system clock is in sync") sends them nowhere useful.
+
+        Returning None keeps :class:`LoginTimeoutError`'s existing default,
+        including the WSL/VM clock-drift note, for flows with no paste path.
+        """
+        if self.callbacks.on_manual_code_input is None:
+            return None
+        provider = self.options.provider_label or "the provider"
+        return (
+            f"Timed out waiting for the {provider} login callback. If your browser "
+            "finished the sign-in but showed you a login code — or stayed on the "
+            f"{provider} website instead of returning here — its redirect never "
+            "reached this machine. Run the login again and paste that code, or the "
+            "whole redirect URL from the address bar, at the prompt. If you run "
+            "inside WSL/a VM, check that the system clock is in sync."
+        )
+
+    def _instructions(self) -> str | None:
+        """The line shown under the auth URL while the login is pending.
+
+        Two affordances, and the second one is why this method exists. The
+        ``/launch`` URL is a convenience. The PASTE fallback is the escape
+        hatch for the failure users actually hit — a browser that never reaches
+        this machine's loopback port (a remote/SSH/WSL session, or the reported
+        case where the provider leaves the user sitting in its own web portal
+        instead of redirecting). Anthropic's own documentation points at it:
+        if the browser shows a login code instead of redirecting back, paste
+        the code into the terminal.
+
+        It used to be invisible. The prompt was attached and functional, but
+        nothing on screen said it existed, so a user watching a browser that
+        was never going to redirect had no way to learn there was anything to
+        do but wait out the five-minute timeout. Announcing it up front costs
+        one line and turns a dead end into a recovery.
+
+        Only announced when a prompt is actually attached
+        (``on_manual_code_input``): promising a paste target that no host will
+        offer is worse than saying nothing.
+        """
+        parts: list[str] = []
+        launch_url = self._launch_url()
+        if launch_url:
+            parts.append(f"Or open: {launch_url}")
+        if self.callbacks.on_manual_code_input is not None:
+            parts.append(
+                "If your browser shows a login code instead of returning here, "
+                "paste that code — or the whole redirect URL from the address "
+                "bar — at the prompt below."
+            )
+        return "\n".join(parts) if parts else None
+
     # -- driver ------------------------------------------------------------
 
     async def run(self) -> dict[str, Any]:
@@ -700,6 +1087,7 @@ class OAuthCallbackFlow(ABC):
         loop = asyncio.get_running_loop()
         self._captured = loop.create_future()
         self._capture_error = loop.create_future()
+        self._cancelled = loop.create_future()
         state = secrets.token_hex(16)
         self._sent_state = state
         try:
@@ -709,10 +1097,10 @@ class OAuthCallbackFlow(ABC):
             auth_url = await self.generate_auth_url(state, redirect_uri)
             self._pending_auth_url = auth_url
 
-            launch_url = self._launch_url()
             if self.callbacks.on_auth_url is not None:
-                instructions = f"Or open: {launch_url}" if launch_url else None
-                await maybe_await(self.callbacks.on_auth_url(auth_url, instructions=instructions))
+                await maybe_await(
+                    self.callbacks.on_auth_url(auth_url, instructions=self._instructions())
+                )
             if not self.options.manual_input_only:
                 try:
                     self._open_browser(auth_url)
@@ -726,6 +1114,12 @@ class OAuthCallbackFlow(ABC):
 
     async def _await_code(self) -> tuple[str, str]:
         assert self._captured is not None and self._capture_error is not None
+        # `run()` creates this, but `_await_code` is also driven directly (by
+        # tests, and by any caller that owns its own server lifecycle). A
+        # future added to this class must not become a precondition existing
+        # callers have to learn about, so it is created on demand here.
+        if self._cancelled is None:
+            self._cancelled = asyncio.get_running_loop().create_future()
         waiters: list[asyncio.Future[Any]] = []
         loop = asyncio.get_running_loop()
 
@@ -810,6 +1204,7 @@ class OAuthCallbackFlow(ABC):
 
         waiters.append(self._captured)
         waiters.append(self._capture_error)
+        waiters.append(self._cancelled)
         waiters.append(loop.create_task(_manual()))
         if self._signal is not None:
             waiters.append(loop.create_task(_abort_watch()))
@@ -825,13 +1220,60 @@ class OAuthCallbackFlow(ABC):
                 task.cancel()
 
         if not done:
-            raise LoginTimeoutError()
-        for task in done:
+            raise LoginTimeoutError(self._timeout_message())
+
+        # ``done`` is a SET, and more than one waiter can land in it: futures
+        # that resolve in the same event-loop pass are all reported together,
+        # so iterating it directly lets HASH ORDER pick the outcome. That is
+        # not a theoretical concern -- a browser callback arriving as a sibling
+        # login pokes ``/cancel`` co-resolves ``_captured`` with ``_cancelled``
+        # and discarded an authorization code we already held (28% of
+        # concurrent trials), and it downgraded a genuine
+        # ``_capture_error`` -- the forged-redirect/state-mismatch check -- to a
+        # cancellation that hosts render as a quiet "login cancelled" with no
+        # remedy offered.
+        #
+        # So the outcomes are ranked and the most significant one wins,
+        # regardless of which future the set happens to yield first:
+        #
+        #   0 success -- we hold a code. NEVER lose one that was captured:
+        #     the user already approved in the browser, and a cancellation
+        #     racing it does not un-approve it.
+        #   1 failure -- a real error the user must see.
+        #   2 cancellation -- correct only when nothing better happened.
+        #
+        # A cancelled waiter carries no outcome at all (the ``finally`` above
+        # cancels every waiter, and ``.exception()`` on one raises rather than
+        # returning), so it is ranked last and skipped.
+        def _outcome_rank(task: asyncio.Future[Any]) -> int:
+            if task.cancelled():
+                return 3
+            exc = task.exception()
+            if exc is not None:
+                # ``_abort_watch`` signals ctrl+C by RAISING; every other
+                # exception is a real failure and outranks a cancellation.
+                return 2 if isinstance(exc, LoginCancelledError) else 1
+            # ``_captured`` and the manual-paste task both resolve to a
+            # ``(code, state)`` tuple; only the string-valued futures below
+            # describe a non-success.
+            if isinstance(task.result(), str):
+                return 2 if task is self._cancelled else 1
+            return 0
+
+        for task in sorted(done, key=_outcome_rank):
+            if task.cancelled():
+                continue
             exc = task.exception()
             if exc is not None:
                 raise exc
             result = task.result()
-            if isinstance(result, str):  # capture_error path
+            if isinstance(result, str):
+                # Which future resolved decides the EXCEPTION TYPE: a
+                # superseded login is a cancellation (hosts report it quietly
+                # and offer no remedy), while `_capture_error` is a real
+                # failure worth surfacing.
+                if task is self._cancelled:
+                    raise LoginCancelledError(result)
                 raise LoginError(result)
             return result
-        raise LoginTimeoutError()  # unreachable
+        raise LoginTimeoutError()  # every waiter was cancelled during teardown
