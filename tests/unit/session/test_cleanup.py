@@ -865,7 +865,7 @@ def _aggressive_store(tmp_path: Path, count: int = 15) -> None:
 
 @pytest.mark.parametrize(
     "target",
-    ["_claimed", "_lease_owner_alive", "_has_wake", "_has_spooled_mail"],
+    ["_claimed", "_lease_runtime_alive", "_has_wake", "_has_spooled_mail"],
 )
 def test_a_guard_that_raises_keeps_the_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str

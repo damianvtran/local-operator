@@ -20,7 +20,7 @@ from local_operator.session.remote import RemoteSession
 
 
 def _facade(tmp_path, monkeypatch, *, can_go_cold: bool = False) -> RemoteSession:
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -264,7 +264,7 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
     THIS TEST LETS THE REAL LOOP RUN. Every other verdict test here hand-calls
     ``_settle_suspect_turn`` / ``_go_cold``, and that test shape is what let
     the blocker through — ``_facade`` defaults ``can_go_cold=False`` and no
-    test ever drove ``_recover_owner`` itself on that surface.
+    test ever drove ``_recover_runtime`` itself on that surface.
 
     ``COLD_FALLBACK_S`` is monkeypatched so the bound is exercised in
     milliseconds; the assertion is on the VERDICT, never on elapsed time.
@@ -276,7 +276,7 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
         takeover_attempts.append(1)
         raise RuntimeError("the lease is held by another follower")
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -327,7 +327,7 @@ async def test_the_terminal_bound_does_not_fire_when_no_turn_was_live(
     async def failing_takeover() -> Any:
         raise RuntimeError("no successor yet")
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -479,7 +479,7 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[RemoteSession, list[flo
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BLOCKED_S", 0.05)
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (_live_record(), None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = RemoteSession(
         config_dir=tmp_path,
@@ -586,7 +586,7 @@ async def test_the_refusal_is_no_longer_driven_by_the_recovery_flag(tmp_path, mo
     import local_operator.mobile.attach_client as attach_client
     import local_operator.session.runtime.launch as launch
 
-    monkeypatch.setattr(attach_client, "find_owner_record", lambda *a: (_live_record(), None))
+    monkeypatch.setattr(attach_client, "find_runtime_record", lambda *a: (_live_record(), None))
     monkeypatch.setattr(launch, "engage_runtime", lambda *a, **k: asyncio.sleep(0))
 
     remote._on_disconnected("send timeout")
@@ -614,9 +614,9 @@ async def test_the_refusal_is_no_longer_driven_by_the_recovery_flag(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch) -> None:
-    """The silent half of the defect: `prompt` waits on `_owner_ready` forever.
+    """The silent half of the defect: `prompt` waits on `_runtime_ready` forever.
 
-    `_on_disconnected` clears `_owner_ready` and the only setters are
+    `_on_disconnected` clears `_runtime_ready` and the only setters are
     `_go_cold`, the takeover branch and the deliberate-stop arms — none of
     which fired on this path. The user saw no message and no spinner
     resolution, which is worse than the refusal `/model` at least printed.
@@ -625,7 +625,7 @@ async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch)
     released = asyncio.Event()
 
     async def parks_on_owner_ready() -> None:
-        await remote._owner_ready.wait()
+        await remote._runtime_ready.wait()
         released.set()
 
     waiter = asyncio.create_task(parks_on_owner_ready())
@@ -642,7 +642,7 @@ async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch)
     waiter.cancel()
     await _cancel_recovery(remote)
 
-    assert was_released is True, "the prompt path is still parked on _owner_ready"
+    assert was_released is True, "the prompt path is still parked on _runtime_ready"
 
 
 @pytest.mark.asyncio
@@ -652,7 +652,7 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
     """Guard against over-reach: the chase contract survives for a DEAD owner.
 
     The give-up exit is scoped to a record having been SEEN (`record_seen` in
-    `_recover_owner`). With no record the loop must still reach
+    `_recover_runtime`). With no record the loop must still reach
     `_takeover_factory` and keep chasing, exactly as
     ``test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer`` pins.
 
@@ -667,7 +667,7 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
     attempts: list[int] = []
 
     async def failing_takeover() -> Any:
@@ -725,7 +725,7 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
 
     stale = _live_record()
     stale.protocol = 4  # a pre-frontend owner: discoverable, not attachable
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (stale, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (stale, None))
     attempts: list[int] = []
 
     async def failing_takeover() -> Any:
@@ -771,7 +771,7 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 60.0)
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 60.0)
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *a: (_live_record(), None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = RemoteSession(
         config_dir=tmp_path,

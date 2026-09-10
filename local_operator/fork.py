@@ -27,7 +27,7 @@ THE COPY IS AN EXPLICIT ALLOW-LIST, NEVER A DIRECTORY COPY
 ----------------------------------------------------------
 :data:`COPIED_SIDECARS` names every file a fork inherits. A ``shutil.copytree``
 would be one line shorter and would copy ``.session.pid`` — the liveness marker
-— which makes ``live_session_owner`` report the fork as owned by the PARENT's
+— which makes ``live_runtime_pid`` report the fork as owned by the PARENT's
 pid, so the fork's own boot takes the *attach* path instead of opening its
 conversation. That failure is spectacular and silent, so the allow-list is
 pinned by a set-equality test rather than by review attention.
@@ -268,14 +268,14 @@ def fork_session(
     # spectacular one. ``claim_session`` stamps ``os.getpid()``, and this
     # function runs inside the PARENT's TUI process, so the marker left behind
     # names the parent as the fork's live owner. The fork's own boot then reads
-    # it through ``live_session_owner`` and either refuses outright ("session
+    # it through ``live_runtime_pid`` and either refuses outright ("session
     # <id> is open in an older Local Operator process") or, when a discovery
     # record exists, attaches the new window as a FOLLOWER of its parent
     # instead of opening the branched conversation. That is exactly the failure
     # the sidecar allow-list exists to prevent, arriving through a different
     # door than ``copytree`` — the module docstring above describes the
     # consequence, and the claim reintroduced the cause. Guarded by
-    # ``live_session_owner(config_dir, fork_id) is None`` in the tests, which is
+    # ``live_runtime_pid(config_dir, fork_id) is None`` in the tests, which is
     # the property that actually matters; asserting the file's absence alone
     # would not survive a future claim written by some other path.
     release_session(fork_dir)

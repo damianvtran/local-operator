@@ -13,15 +13,15 @@ returns, so the number a user actually feels is exactly the wall time of
       └─ child: import           the composition root's import graph
       └─ child: spawn_owned_session()  build the session
       └─ child: RuntimeServer.start_in_process()  bind + publish record
-      └─ parent poll loop        find_owner_record() every _POLL_* seconds
-    find_owner_record()         one more scan once the errand is delivered
+      └─ parent poll loop        find_runtime_record() every _POLL_* seconds
+    find_runtime_record()         one more scan once the errand is delivered
     _bind_to(record)            dial the socket, await the frontend snapshot,
                                 load history, install state
 
 Two of those phases are pure latency the parent adds on top of the child's
 real work: the **poll grid** (the parent only notices the record on a poll
 boundary, so up to one full backoff step is dead time) and the **serialized
-spawn** (nothing is started until the first `find_owner_record` scan has
+spawn** (nothing is started until the first `find_runtime_record` scan has
 already come back empty). This benchmark reports every phase separately so a
 change can be shown to move the phase it claims to move, rather than showing
 one aggregate number that improved for unknown reasons.
@@ -89,7 +89,7 @@ async def _one_run(config_dir: Path) -> dict[str, float]:
     Returns a mapping of phase name to milliseconds. `total` is the number the
     user feels — the whole of `_ensure_bound`.
     """
-    from local_operator.mobile.attach_client import find_owner_record
+    from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
     session_id = f"bench-{uuid.uuid4().hex[:12]}"
@@ -103,7 +103,7 @@ async def _one_run(config_dir: Path) -> dict[str, float]:
     out["engage_ms"] = engage.stop()
 
     lookup = Phase("lookup")
-    record, _owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+    record, _owner = await asyncio.to_thread(find_runtime_record, config_dir, session_id)
     out["lookup_ms"] = lookup.stop()
 
     out["total_ms"] = total.stop()

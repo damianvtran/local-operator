@@ -435,11 +435,11 @@ async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
         # Feed the loop that unreachable record instead of the registry, then
         # let it take a few passes and go cold on its own deadline.
         monkeypatch.setattr(
-            "local_operator.session.remote.find_owner_record",
+            "local_operator.session.remote.find_runtime_record",
             lambda *_a, **_k: (dead, None),
         )
         monkeypatch.setattr("local_operator.session.remote.COLD_FALLBACK_S", 0.4)
-        await viewer._recover_owner()
+        await viewer._recover_runtime()
 
         assert viewer._client is None, "a failed dial installs no client"
         assert viewer.is_cold is True

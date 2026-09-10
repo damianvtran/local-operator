@@ -929,11 +929,11 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
 
     (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 
-    # The recovery hold (step 4). ``find_owner_record`` answering "no record
+    # The recovery hold (step 4). ``find_runtime_record`` answering "no record
     # yet" is a real transient the viewer already handles — the recovery loop
     # polls until one appears — so this delays the rebind without touching the
     # code under test.
-    real_find = remote_module.find_owner_record
+    real_find = remote_module.find_runtime_record
 
     def gated_find(*args: Any, **kwargs: Any) -> Any:
         if not second_running.is_set():
@@ -978,7 +978,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
             assert conns, "no full-TUI client to drop"
             # Arm the hold BEFORE the drop, so the very first recovery poll
             # already sees "no record yet".
-            remote_module.find_owner_record = gated_find
+            remote_module.find_runtime_record = gated_find
             server._drop_client(conns[0], reason="test")
             drop_done.set()
 
@@ -991,7 +991,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
             assert second_running.is_set(), "the gap step never started"
             # B's start is now in the owner's ``live_events``; releasing the
             # hold lets recovery re-bind and take that snapshot.
-            remote_module.find_owner_record = real_find
+            remote_module.find_runtime_record = real_find
 
             # Let recovery rebind; B exists only in the snapshot seed.
             rebound = False
@@ -1032,7 +1032,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
                 gap_cards[0]._state == "success"
             ), f"the gap tool settled as {gap_cards[0]._state!r}, not success"
     finally:
-        remote_module.find_owner_record = real_find
+        remote_module.find_runtime_record = real_find
         drop_done.set()
         release_second.set()
         if viewer is not None:
@@ -1197,7 +1197,7 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
     handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    # A real runtime process writes this; without it `find_owner_record` cannot
+    # A real runtime process writes this; without it `find_runtime_record` cannot
     # see a perfectly healthy runtime and the viewer goes cold, faking an abort.
     (directory / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 

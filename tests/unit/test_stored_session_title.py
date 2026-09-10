@@ -18,7 +18,7 @@ from local_operator.resume import (
     TITLE_SIDECAR_NAME,
     _read_title_sidecar,
     backfill_session_titles,
-    live_session_owner,
+    live_runtime_pid,
     read_title_names,
     session_name,
     stored_session_title,
@@ -51,12 +51,12 @@ def test_a_live_pid_marker_is_the_owner_of_the_session(tmp_path: Path, monkeypat
     session.mkdir(parents=True)
     (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
     (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
-    assert live_session_owner(tmp_path, "live00000001") == os.getpid()
+    assert live_runtime_pid(tmp_path, "live00000001") == os.getpid()
 
     (session / ".session.pid").write_text("2147483646", encoding="utf-8")
     monkeypatch.setattr(os, "kill", lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()))
-    assert live_session_owner(tmp_path, "live00000001") is None
-    assert live_session_owner(tmp_path, "missing000001") is None
+    assert live_runtime_pid(tmp_path, "live00000001") is None
+    assert live_runtime_pid(tmp_path, "missing000001") is None
 
 
 def test_a_windows_live_marker_is_trusted_without_os_kill(tmp_path: Path, monkeypatch) -> None:
@@ -76,7 +76,7 @@ def test_a_windows_live_marker_is_trusted_without_os_kill(tmp_path: Path, monkey
 
     monkeypatch.setattr("local_operator.resume.sys.platform", "win32")
     monkeypatch.setattr(os, "kill", _kill)
-    assert live_session_owner(tmp_path, "live00000002") == 4242
+    assert live_runtime_pid(tmp_path, "live00000002") == 4242
     assert killed == []
 
 

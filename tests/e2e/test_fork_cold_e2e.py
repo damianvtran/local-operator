@@ -49,7 +49,7 @@ async def test_cold_snapshot_live_preferences_overrides_and_cancel(
     # Real process discovery deliberately excludes our own PID. This owner is
     # hosted in the test's process; only that discovery boundary is supplied.
     monkeypatch.setattr(
-        "local_operator.mobile.attach_client.find_owner_record",
+        "local_operator.mobile.attach_client.find_runtime_record",
         lambda *_: (server._record, server._record.pid),
     )
     launches = []

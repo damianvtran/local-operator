@@ -2479,7 +2479,7 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
         with (
             patch("local_operator.session.remote.RemoteSession.connect", side_effect=connect),
             patch(
-                "local_operator.mobile.attach_client.find_owner_record",
+                "local_operator.mobile.attach_client.find_runtime_record",
                 return_value=(SimpleNamespace(pid=1), SimpleNamespace()),
             ),
         ):

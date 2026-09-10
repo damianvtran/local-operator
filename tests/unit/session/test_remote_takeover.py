@@ -32,7 +32,7 @@ async def test_owner_death_takes_over_silently_and_retains_submitted_input(
     async def takeover():
         return winner
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -47,7 +47,7 @@ async def test_owner_death_takes_over_silently_and_retains_submitted_input(
         await remote.dispose()
 
     remote.set_takeover_callback(adopt)
-    remote._owner_ready.set()
+    remote._runtime_ready.set()
     remote._on_disconnected("owner exited")
     submitted = asyncio.create_task(remote.prompt("continue after death"))
     await asyncio.wait_for(submitted, timeout=2)
@@ -91,7 +91,7 @@ async def test_takeover_swaps_subscription_and_updates_flow_from_the_winner(
     async def takeover():
         return winner
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=takeover)
     remote._install_frontend(
         FrontendSessionState(session_id="s1", epoch="dead-owner", cumulative_parent_cost=12.34)
@@ -110,7 +110,7 @@ async def test_takeover_swaps_subscription_and_updates_flow_from_the_winner(
         await remote.dispose()
 
     remote.set_takeover_callback(adopt)
-    remote._owner_ready.set()
+    remote._runtime_ready.set()
     remote._on_disconnected("owner exited")
     for _ in range(200):
         if adopted:
@@ -130,7 +130,7 @@ async def test_deliberate_stop_never_takes_over(tmp_path, monkeypatch) -> None:
 
     The disconnect after the follower's own ``request_stop`` is the op
     landing, not owner death (U2-4): ``_deliberate_stop`` is set before the
-    op is sent, and ``_recover_owner`` must return immediately instead of
+    op is sent, and ``_recover_runtime`` must return immediately instead of
     calling the takeover factory (which would republish a live record for a
     session the user just ended).
     """
@@ -140,7 +140,7 @@ async def test_deliberate_stop_never_takes_over(tmp_path, monkeypatch) -> None:
         takeover_calls.append(True)
         raise AssertionError("takeover must not run after a deliberate stop")
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -174,7 +174,7 @@ async def test_wire_stop_by_another_process_never_takes_over(tmp_path, monkeypat
         takeover_calls.append(True)
         raise AssertionError("takeover must not run after a deliberate stop")
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -207,7 +207,7 @@ async def test_owner_death_without_stopped_marker_still_takes_over(tmp_path, mon
             pass
 
     winner = Winner()
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -250,7 +250,7 @@ async def test_wire_stopping_frame_prevents_takeover_without_any_wake_entry(
     async def takeover():
         raise AssertionError("takeover must not run after an announced stop")
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -263,7 +263,7 @@ async def test_wire_stopping_frame_prevents_takeover_without_any_wake_entry(
     assert remote._takeover_target is None
     # The viewer stays usable: a prompt resolves against the stopped notice
     # instead of blocking forever on an owner that will never return.
-    assert remote._owner_ready.is_set()
+    assert remote._runtime_ready.is_set()
 
 
 @pytest.mark.asyncio
@@ -292,7 +292,7 @@ async def test_a_failed_stop_does_not_disable_later_owner_death_recovery(
             pass
 
     winner = Winner()
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -321,7 +321,7 @@ async def test_a_failed_stop_does_not_disable_later_owner_death_recovery(
 @pytest.mark.asyncio
 async def test_stop_with_no_client_attached_does_not_latch(tmp_path, monkeypatch) -> None:
     """The simpler failure shape: nothing attached, so nothing was stopped."""
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -348,7 +348,7 @@ async def test_a_stopped_viewer_is_told_so_and_never_says_reconnecting(
     from local_operator.mobile.attach_client import STOPPED_REASON
 
     told: list[str] = []
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -374,7 +374,7 @@ async def test_a_dropped_connection_still_says_reconnecting(tmp_path, monkeypatc
     The two states are opposites and must not collapse into one sentence —
     this is what stops the D3-1 fix from lying in the other direction.
     """
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -400,7 +400,7 @@ async def test_a_deliberate_stop_ends_the_turn_in_both_states(
     """
     from local_operator.mobile.attach_client import STOPPED_REASON
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -436,7 +436,7 @@ async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch)
     """
     from local_operator.harness.types import AgentEndEvent
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -471,7 +471,7 @@ async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
     """
     from local_operator.harness.types import AgentEndEvent
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -529,7 +529,7 @@ async def test_going_cold_survives_a_controllers_higher_adopted_generation(
     previous_owner_generation = 6
     successor_first_turn_generation = 1  # Session.__init__ starts a fresh count
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -576,7 +576,7 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
     ``_go_cold`` already guards the client close and the went-cold callback
     because "a viewer notice must not break teardown". The end-the-turn call
     now sits between them and takes the same guard: without it a raising
-    handler skips ``_owner_ready.set()``, and the prompt path waits forever on
+    handler skips ``_runtime_ready.set()``, and the prompt path waits forever on
     an event nothing else will set.
 
     BOTH HALVES OF THE INVARIANT, deliberately (review round 2, MAJOR-2). The
@@ -589,7 +589,7 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
     write, so a stuck True is a tab title asserting ``working`` for the life
     of the process.
     """
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(
         config_dir=tmp_path,
         session_id="s1",
@@ -606,6 +606,6 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
 
     remote._go_cold()
 
-    assert remote._owner_ready.is_set(), "teardown was stranded by a raising handler"
+    assert remote._runtime_ready.is_set(), "teardown was stranded by a raising handler"
     assert remote.is_cold
     assert remote.is_streaming is False, "the facade reports a live turn forever on a cold session"

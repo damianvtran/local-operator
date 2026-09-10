@@ -228,7 +228,7 @@ class SessionRecord:
     # is required to read.
     #
     # The record IS the version channel between a viewer and a runtime. An
-    # attach client reads it before dialing (``find_owner_record``) and holds
+    # attach client reads it before dialing (``find_runtime_record``) and holds
     # it at bind, so one comparison there is complete — a runtime's build
     # cannot change while the process lives.
 

@@ -192,7 +192,7 @@ async def live_owners(
                 display_window=True,
             )
 
-        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", find)
+        monkeypatch.setattr("local_operator.mobile.attach_client.find_runtime_record", find)
         # Exposed on the callable so a test can reach the OWNER session (to run
         # its turn) without the fixture returning a second value every caller
         # would have to unpack.

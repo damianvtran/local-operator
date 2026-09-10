@@ -47,7 +47,7 @@ from local_operator.resume import (
     TITLE_SIDECAR_NAME,
     TRANSCRIPT_NAME,
     is_user_session,
-    live_session_owner,
+    live_runtime_pid,
     mark_session_origin,
     recent_sessions,
     session_origin,
@@ -133,7 +133,7 @@ class TestTheCloneItself:
         process") or attaches the new window as a FOLLOWER of its parent
         instead of opening the branched conversation.
 
-        Asserted through ``live_session_owner`` rather than by checking that
+        Asserted through ``live_runtime_pid`` rather than by checking that
         the file is absent, deliberately: ownership is the property that
         actually matters, and a future claim written by some other path would
         slip past a filename assertion while breaking the boot exactly the same
@@ -142,7 +142,7 @@ class TestTheCloneItself:
         _seed_parent(tmp_path)
         fork_id = fork_session(tmp_path, PARENT_ID)
 
-        assert live_session_owner(tmp_path, fork_id) is None
+        assert live_runtime_pid(tmp_path, fork_id) is None
         assert not (tmp_path / "sessions" / fork_id / ".session.pid").exists()
 
     def test_the_parents_own_claim_is_untouched_by_a_fork(self, tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ class TestTheCloneItself:
 
         fork_session(tmp_path, PARENT_ID)
 
-        assert live_session_owner(tmp_path, PARENT_ID) == os.getpid()
+        assert live_runtime_pid(tmp_path, PARENT_ID) == os.getpid()
 
     def test_a_missing_optional_sidecar_is_not_an_error(self, tmp_path: Path) -> None:
         """A young conversation has no title and no persona; forking still works."""

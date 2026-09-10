@@ -189,7 +189,7 @@ def build_remote(state: FrontendSessionState) -> RemoteSession:
     """A viewer bound to a real store and nothing else.
 
     The accessors under measurement read only the store, so a socket would add
-    setup without changing a single number. ``find_owner_record`` is patched to
+    setup without changing a single number. ``find_runtime_record`` is patched to
     find nothing so construction does no disk work.
     """
 
@@ -197,7 +197,7 @@ def build_remote(state: FrontendSessionState) -> RemoteSession:
         raise AssertionError("the benchmark never takes a session over")
 
     with (
-        patch("local_operator.session.remote.find_owner_record", lambda *a, **k: (None, None)),
+        patch("local_operator.session.remote.find_runtime_record", lambda *a, **k: (None, None)),
         tempfile.TemporaryDirectory() as config_dir,
     ):
         remote = RemoteSession(

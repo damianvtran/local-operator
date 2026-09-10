@@ -16,7 +16,7 @@ import httpx
 import pytest
 import uvicorn
 
-from local_operator.mobile.attach_client import AttachClient, find_owner_record
+from local_operator.mobile.attach_client import AttachClient, find_runtime_record
 from local_operator.server.app import app
 from tests.e2e.test_desktop_sessions import next_frame
 
@@ -97,7 +97,7 @@ async def test_spawn_and_reopen_after_http_restart(
                     },
                 )
                 assert renamed.status_code == 200, renamed.text
-                record, _ = await asyncio.to_thread(find_owner_record, root, sid)
+                record, _ = await asyncio.to_thread(find_runtime_record, root, sid)
                 assert record is not None and record.pid != os.getpid()
                 owner_pid = record.pid
                 body = {
@@ -159,7 +159,7 @@ async def test_spawn_and_reopen_after_http_restart(
             )
     finally:
         if sid is not None:
-            record, _ = await asyncio.to_thread(find_owner_record, root, sid)
+            record, _ = await asyncio.to_thread(find_runtime_record, root, sid)
             if record is not None:
                 client = AttachClient(lambda _: None, lambda _: None)
                 await client.connect(record, sid)

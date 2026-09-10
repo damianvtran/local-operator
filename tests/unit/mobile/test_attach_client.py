@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.mobile.attach_client import AttachClient, find_owner_record
+from local_operator.mobile.attach_client import AttachClient, find_runtime_record
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
@@ -103,7 +103,7 @@ async def test_discovery_finds_the_live_owner(config: Path) -> None:
     try:
         record = await _wait_record()
         _marker(config, "sess-a", os.getpid())
-        found, owner = find_owner_record(config, "sess-a")
+        found, owner = find_runtime_record(config, "sess-a")
         assert found is not None
         assert found.pid == record.pid
         assert owner == os.getpid()
@@ -113,7 +113,7 @@ async def test_discovery_finds_the_live_owner(config: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_discovery_without_owner_returns_none(config: Path) -> None:
-    found, owner = find_owner_record(config, "never-started")
+    found, owner = find_runtime_record(config, "never-started")
     assert found is None
     assert owner is None
 
@@ -123,7 +123,7 @@ async def test_discovery_owner_without_record_reports_pid_only(config: Path) -> 
     # A live pid holds the claim but publishes nothing (old binary,
     # registrant failed): the caller needs the pid for the refusal copy.
     _marker(config, "sess-x", os.getpid())
-    found, owner = find_owner_record(config, "sess-x")
+    found, owner = find_runtime_record(config, "sess-x")
     assert found is None
     assert owner == os.getpid()
 
@@ -139,7 +139,7 @@ async def test_protocol_gate_refuses_v1_records(config: Path) -> None:
         # Degrade the published record to protocol 1, as an old binary would.
         record.protocol = 1
         registry.publish(record, root=config)
-        found, owner = find_owner_record(config, "sess-old")
+        found, owner = find_runtime_record(config, "sess-old")
         # The gate reports the owner (refusal copy needs the pid) but no
         # dialable record.
         assert found is None

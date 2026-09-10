@@ -34,7 +34,7 @@ async def test_retiring_goes_cold_now_and_fires_the_refresh_callback(tmp_path, m
     exist yet — the app spawns it. No ``_end_turn_locally``: that is what
     would paint ``interrupted`` for a turn that never existed.
     """
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
     ended: list[str] = []
     monkeypatch.setattr(
@@ -54,13 +54,13 @@ async def test_retiring_goes_cold_now_and_fires_the_refresh_callback(tmp_path, m
     assert cold == [], "the went-cold callback is the death path; a refresh is not one"
     assert ended == [], "no turn end may be synthesised for an idle runtime that retired"
     assert remote._deliberate_stop is False, "a refresh is not a stop; the next prompt engages"
-    assert remote._owner_ready.is_set(), "a cold viewer is READY: the next prompt engages"
+    assert remote._runtime_ready.is_set(), "a cold viewer is READY: the next prompt engages"
 
 
 @pytest.mark.asyncio
 async def test_stopped_reason_still_parks_the_viewer(tmp_path, monkeypatch):
     """Regression guard: the new branch must not shadow the stop path."""
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
     refreshed: list[str] = []
     remote.set_refresh_callback(lambda: refreshed.append("refresh"))
@@ -75,8 +75,8 @@ async def test_stopped_reason_still_parks_the_viewer(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_owner_death_still_recovers(tmp_path, monkeypatch):
-    """Regression guard: an unannounced exit still runs ``_recover_owner``."""
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    """Regression guard: an unannounced exit still runs ``_recover_runtime``."""
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
     refreshed: list[str] = []
     remote.set_refresh_callback(lambda: refreshed.append("refresh"))
@@ -96,7 +96,7 @@ async def test_owner_death_still_recovers(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_request_refresh_never_raises(tmp_path, monkeypatch):
     """Every failure is "kept": the reaper's own check is the fallback."""
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
     assert (await remote.request_refresh()).startswith("kept:")
 
@@ -124,7 +124,7 @@ def test_owner_idle_reads_the_snapshot(tmp_path, monkeypatch):
     parked gate → busy; otherwise idle."""
     from types import SimpleNamespace
 
-    monkeypatch.setattr(remote_module, "find_owner_record", lambda *args: (None, None))
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
     assert remote.owner_idle() is False, "a cold viewer has no owner to refresh"
 

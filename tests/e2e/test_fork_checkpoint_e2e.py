@@ -143,7 +143,7 @@ def _kill_runtime_children(config: Path) -> None:
 async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_followers(
     headless_tui_env: Path, workspace: Path, monkeypatch
 ) -> None:
-    from local_operator.mobile.attach_client import find_owner_record
+    from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.controller import ProviderController
     from local_operator.spawn import registry as spawn_registry
@@ -172,7 +172,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
         session_id = resume_id or "newsession01"
         record = None
         if resume_id:
-            record, _ = await asyncio.to_thread(find_owner_record, config, session_id)
+            record, _ = await asyncio.to_thread(find_runtime_record, config, session_id)
         if record is not None:
             return await RemoteSession.connect(
                 record, session_id, config_dir=config, takeover_factory=take_over
@@ -259,7 +259,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
                 ), "the switch never reached the owner"
 
                 # A SECOND terminal attaches as a follower (#573's report).
-                record, _ = await asyncio.to_thread(find_owner_record, config, fork_id)
+                record, _ = await asyncio.to_thread(find_runtime_record, config, fork_id)
                 assert record is not None
                 follower = await RemoteSession.connect(
                     record, fork_id, config_dir=config, takeover_factory=_never_take_over
@@ -279,7 +279,7 @@ async def test_a_fork_of_a_fork_serves_its_own_id(headless_tui_env: Path, worksp
     """#573 observed the GRANDPARENT's id two hops down. Chain two forks on
     disk and boot a real runtime for the second: its sync names itself."""
     from local_operator.fork import fork_session
-    from local_operator.mobile.attach_client import find_owner_record
+    from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.session.runtime import registry
 
     config = headless_tui_env
@@ -315,8 +315,8 @@ async def test_a_fork_of_a_fork_serves_its_own_id(headless_tui_env: Path, worksp
                         record = candidate
                 await asyncio.sleep(0.1)
             assert record is not None, "the fork-of-a-fork runtime never published"
-            # ``find_owner_record`` needs the liveness marker the child wrote.
-            found, _ = await asyncio.to_thread(find_owner_record, config, second)
+            # ``find_runtime_record`` needs the liveness marker the child wrote.
+            found, _ = await asyncio.to_thread(find_runtime_record, config, second)
             assert found is not None
             viewer = await RemoteSession.connect(
                 found, second, config_dir=config, takeover_factory=_never_take_over

@@ -169,7 +169,7 @@ async def test_the_first_prompt_binds_the_viewer_to_a_runtime(tmp_path: Path, mo
         nonlocal engagements
         engagements += 1
         server.start()
-        # A real runtime claims the transcript, and ``find_owner_record``
+        # A real runtime claims the transcript, and ``find_runtime_record``
         # consults that liveness marker before trusting any record. Writing it
         # is part of standing in for the process, not test scaffolding.
         marker = config_dir / "sessions" / session_id / ".session.pid"
@@ -226,7 +226,7 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
         # actually contended and the test would prove nothing.
         await asyncio.sleep(0.2)
         server.start()
-        # A real runtime claims the transcript, and ``find_owner_record``
+        # A real runtime claims the transcript, and ``find_runtime_record``
         # consults that liveness marker before trusting any record. Writing it
         # is part of standing in for the process, not test scaffolding.
         marker = config_dir / "sessions" / session_id / ".session.pid"

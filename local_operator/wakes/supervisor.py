@@ -125,9 +125,9 @@ async def _has_live_runtime(config_dir: Path, session_id: str) -> bool:
     The no-live-record rule's implementation. Off the loop: it walks the
     record directory.
     """
-    from local_operator.mobile.attach_client import find_owner_record
+    from local_operator.mobile.attach_client import find_runtime_record
 
-    record, _owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+    record, _owner = await asyncio.to_thread(find_runtime_record, config_dir, session_id)
     return record is not None
 
 

@@ -186,7 +186,7 @@ async def live_owners(
                 display_window=True,
             )
 
-        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", find)
+        monkeypatch.setattr("local_operator.mobile.attach_client.find_runtime_record", find)
         monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
         yield ids, resume
     finally:
