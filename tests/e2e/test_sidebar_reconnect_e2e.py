@@ -213,7 +213,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
                 else:
                     assert not viewer._recovering
 
-                # THE USER ACTION: "Reselect to retry" on the sidebar.
+                # THE USER ACTION: selecting the session again from the sidebar.
                 recoveries_before = app._sidebar_gate_recoveries
                 app._start_sidebar_connection(source)
                 seen = await _settle(app, pilot, source)

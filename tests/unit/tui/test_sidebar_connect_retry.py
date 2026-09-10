@@ -46,7 +46,16 @@ from local_operator.session.remote import COLD_FALLBACK_S, RemoteSession
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
+from local_operator.tui.session_navigation import SurfaceNotReady
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+#: The shipped schedule, captured at import BEFORE any test patches it for
+#: speed. `_shipped_span_from` asserts against these rather than against the
+#: live module attributes, because the property under test is what a user's
+#: next connect actually gets.
+_SHIPPED_BACKOFF_S = app_module.SIDEBAR_CONNECT_BACKOFF_S
+_SHIPPED_CEILING_S = app_module.SIDEBAR_CONNECT_BACKOFF_CEILING_S
+_SHIPPED_ATTEMPTS = app_module.SIDEBAR_CONNECT_ATTEMPTS
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +156,19 @@ class UnreachableRemote(RecoveringRemote):
         if heals is not None and self.display_calls >= heals:
             return None
         raise ConnectionError("history owner is unavailable")
+
+
+def _shipped_span_from(spent: int) -> float:
+    """Total backoff still available after `spent` attempts, on the SHIPPED schedule.
+
+    Deliberately reads the module's real constants rather than whatever a test
+    has patched for speed: the property under test is what a user's next connect
+    actually gets, which is a fact about the shipped numbers.
+    """
+    return sum(
+        min(_SHIPPED_BACKOFF_S * (2 ** (attempt - 1)), _SHIPPED_CEILING_S)
+        for attempt in range(spent + 1, _SHIPPED_ATTEMPTS + 1)
+    )
 
 
 async def _current_source(
@@ -263,8 +285,10 @@ async def test_a_bind_that_did_not_bind_is_not_committed(monkeypatch):
         commit.assert_not_called()
         assert source.display_only is True
         # The failure is not the end of the story — it re-arms rather than
-        # latching — but nothing was published in the meantime.
-        rearmed.assert_called_once_with(source)
+        # latching — but nothing was published in the meantime. `continues_retry`
+        # is what stops that re-arm refilling the budget it is spending; see
+        # `test_the_retry_loops_own_rearm_still_spends_the_budget`.
+        rearmed.assert_called_once_with(source, continues_retry=True)
 
 
 @pytest.mark.asyncio
@@ -385,8 +409,11 @@ async def test_only_exhaustion_latches_and_it_says_so_honestly(monkeypatch):
         assert source.connection_error == "the runtime is not responding"
         assert app._status is not None
         status = app._status.render_text(120).plain
-        assert "Connection unavailable" in status
-        assert "Reselect" in status
+        # The terminal copy now says the app already TRIED (design round D3):
+        # "Connection unavailable" described a state, so the advice that
+        # followed read as "try the thing I was already doing".
+        assert "Reconnect failed" in status
+        assert "Select again to retry" in status
         # Surrendering hands the user a FULL budget, not one last attempt.
         assert source.connect_attempts == 0
 
@@ -571,6 +598,260 @@ async def test_the_retry_releases_its_preparation_before_waiting(monkeypatch):
         # Once per attempt, not once at the end of the whole sequence.
         assert len(released) == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
         assert source.command_frame_pending is False
+
+
+@pytest.mark.asyncio
+async def test_a_reselect_after_navigating_away_gets_a_full_budget(monkeypatch):
+    """F2/Q1: the budget available ON A RESELECT, not merely at birth.
+
+    THE DEFECT THIS PINS. A source navigated away from mid-retry keeps its spent
+    `connect_attempts`: the chain stops because the `finally` declines to re-arm
+    a source that is no longer current, and nothing on that path resets the
+    counter. The user's next reselect then started partway through the budget —
+    reproduced independently by review (carried 4, resuming at 5 of 7) and by QA
+    against a real attach-cap eviction (carried 6 → 3.0 s remaining → failed,
+    where the identical eviction from a fresh budget healed).
+
+    WHY THE EXISTING RELATIONSHIP TEST DOES NOT COVER THIS.
+    `test_the_retry_budget_outlasts_the_recovery_give_up_bound` asserts the
+    span of the FULL schedule and passes while this defect is live, because the
+    arithmetic never changed — what changed was how much of it a reselect gets
+    to use. This test therefore asserts the property in the units the defect
+    speaks: the remaining span at the moment a user-initiated connect begins.
+    """
+    session = RecoveringRemote("recovering")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        # A SHORT REAL BACKOFF, not a zeroed one. The residue is left by a
+        # chain stopped BETWEEN rounds — the user switches away while a backoff
+        # is sleeping — so the window has to exist for the test to enter it.
+        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_S", 0.05)
+        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", 0.05)
+        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 7)
+
+        app._start_sidebar_connection(source)
+        # Part-way through, NOT to exhaustion: an exhausted budget resets itself
+        # on surrender, and the residue this pins is the one a chain leaves when
+        # it is stopped early.
+        for _ in range(3):
+            await asyncio.sleep(0.06)
+        assert source.connect_attempts > 0, "the precondition never spent any budget"
+        assert source.connect_attempts < app_module.SIDEBAR_CONNECT_ATTEMPTS
+
+        # The user navigates away mid-backoff; the chain stops itself.
+        app._interaction = SessionInteraction(FakeSession())
+        task = source.connection_task
+        if task is not None:
+            await task
+        await asyncio.sleep(0)
+        carried = source.connect_attempts
+        assert carried > 0, "the precondition left no residue to clear"
+        assert not source.connection_error, "the budget was spent, not carried"
+
+        # The user comes back and reselects. Sampled SYNCHRONOUSLY, before the
+        # new task gets a turn: the budget a connect begins with is the property
+        # under test, and letting the task run first hides it — a successful
+        # connect zeroes the counter on its own, so a later sample reads 0 even
+        # on a tree where the reselect inherited a spent budget. That made an
+        # earlier version of this test survive its own mutation.
+        app._interaction = source
+        app._start_sidebar_connection(source)
+
+        assert source.connect_attempts == 0, "a reselect inherited a spent budget"
+
+        # AND IN THE UNITS THE DEFECT SPEAKS: the span still available at the
+        # moment a user-initiated connect begins must outlast the bound the
+        # whole constant is derived from. Computed from the SHIPPED schedule
+        # (this test patches the backoff to keep itself fast, and a span
+        # measured off the patched values would assert nothing about what
+        # users get).
+        shipped = _shipped_span_from(source.connect_attempts)
+        assert shipped > COLD_FALLBACK_S
+        # NOT VACUOUS, in two steps. Carrying a residue strictly shortens what
+        # the next connect gets...
+        assert _shipped_span_from(carried) < shipped
+        # ...and carrying enough of one takes it below the bound entirely, which
+        # is the failure QA reproduced against a real eviction (carried 6 → 3.0 s
+        # → failed, where the same eviction healed from a fresh budget). Pinned
+        # as the existence of such a value rather than as one number, so it
+        # keeps meaning the same thing if the schedule is retuned.
+        assert any(
+            _shipped_span_from(spent) < COLD_FALLBACK_S for spent in range(1, _SHIPPED_ATTEMPTS + 1)
+        ), "no residue could ever break the bound; this test would be vacuous"
+
+
+@pytest.mark.asyncio
+async def test_the_retry_loops_own_rearm_still_spends_the_budget(monkeypatch):
+    """The other half of F2/Q1: the reset must not make the budget infinite.
+
+    The reviewers' proposed one-liner — clear the counter beside
+    `connection_error` in `_start_sidebar_connection` — is the right place and
+    the right intent, but the retry loop re-arms through that same method. Taken
+    unconditionally it zeroes the counter the previous round just incremented,
+    and a permanently unreachable owner is re-dialled forever instead of
+    surrendering: measured at `attempts=1` on every round for 16 rounds with no
+    terminal state, which is a worse bug than the one being fixed.
+
+    So this asserts the pair: a user start refills, the loop's own re-arm does
+    not, and exhaustion is still reachable.
+    """
+    session = RecoveringRemote("gone")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert source.connection_error == "the runtime is not responding"
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+
+
+@pytest.mark.asyncio
+async def test_a_readiness_gate_timeout_is_not_retried(monkeypatch):
+    """F1: a PAINT failure is terminal on the first occurrence.
+
+    `_await_sidebar_frame` runs its own 15 s timer to expiry before raising, so
+    folding its failure into the reconnect budget does not re-dial anything — it
+    re-commits an already-bound session and waits the timer out again, once per
+    attempt. Reviewer measured 8 commits and ~120 s of "Connecting…" where the
+    honest behaviour is a single 15 s failure, plus 8 forced full-screen arming
+    relayouts through a recovery branch whose author documents any firing as a
+    signal.
+
+    Asserted as a COUNT of commits, not a duration: the defect is "the budget is
+    spent on this", which is a fact about how many times the body ran.
+    """
+    session = RecoveringRemote("painting", heals_after=1)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        commits = {"n": 0}
+
+        def commit(*_args: Any, **_kwargs: Any) -> Any:
+            commits["n"] += 1
+            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            # Exactly what `expired()` does when the 15 s timer fires.
+            future.set_exception(
+                SurfaceNotReady(
+                    "The conversation connected but its input surface did not become ready"
+                )
+            )
+            return future
+
+        monkeypatch.setattr(app, "_commit_sidebar_session", commit)
+        _instant_backoff(monkeypatch, attempts=7)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert commits["n"] == 1, "a readiness-gate timeout was retried"
+        assert source.display_only is True
+        assert source.connection_error == (
+            "The conversation connected but its input surface did not become ready"
+        )
+        # Surrendering on a paint failure still hands the user a full budget for
+        # the connection attempt their reselect will make.
+        assert source.connect_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_the_retry_window_animates_and_the_failed_state_does_not(monkeypatch):
+    """D1/D4: the band moves while it is working, and stops when it is not.
+
+    The retry window was a byte-identical frozen frame for its whole ~12.75 s —
+    a design round measured six frames from t=0.5s to t=12.0s hashing to one
+    file, because `_sync_spinner_timer` animates only on `_streaming or
+    _starting` and the reconnect path sets neither. Seven attempts behind a
+    surface that acknowledged none of them reads as a hang.
+
+    Asserted on the band's own STATE rather than on rendered pixels, so it
+    cannot flake on paint timing; the rendered frames are attached to the PR.
+    """
+    session = RecoveringRemote("recovering")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=4)
+        assert app._status is not None
+
+        # Mid-retry: working, so it animates. Published through the same method
+        # the connect body calls, which is what owns this state.
+        source.display_only = True
+        source.connect_attempts = 2
+        source.connection_error = ""
+        app._show_sidebar_connection(source)
+        await pilot.pause()
+        assert app._status._connecting is True
+        assert app._status._spinner_timer is not None, "the retry window has no animation"
+        frame = app._status._spinner_index
+        app._status._advance_spinner()
+        assert app._status._spinner_index != frame
+
+        # Exhausted: not working, so the motion stops — which is the state
+        # change the eye catches without reading the words.
+        source.connection_error = "the runtime is not responding"
+        app._show_sidebar_connection(source)
+        await pilot.pause()
+        assert app._status._connecting is False
+        assert app._status._spinner_timer is None
+
+
+@pytest.mark.asyncio
+async def test_guidance_answers_wait_or_act_in_every_disconnected_state(monkeypatch):
+    """D2: the state with the most uncertainty must not carry the least advice.
+
+    `connection_error` is cleared between attempts so the band can say
+    "Connecting…", and it was also the only thing gating the refusal hint — so
+    pressing Enter mid-retry produced a bare "unavailable" with no answer, while
+    pressing it after the app gave up produced the fuller sentence. Inverted
+    against need. Suppressing the reselect advice mid-retry is right; nothing
+    had replaced it.
+    """
+    session = RecoveringRemote("recovering")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        source.display_only = True
+        notices: list[str] = []
+        monkeypatch.setattr(app, "_notice", lambda text, kind="info": notices.append(text))
+
+        # Mid-retry: the app is working and the user need not act.
+        source.connect_attempts = 2
+        source.connection_error = ""
+        app.composer_submission_refused()
+        assert "Reconnecting" in notices[-1]
+        assert "Select this session again" not in notices[-1]
+
+        # Exhausted: the app has stopped, and reselecting is the right advice.
+        source.connection_error = "the runtime is not responding"
+        app.composer_submission_refused()
+        assert "Select this session again to retry." in notices[-1]
+
+        # Never-attempted: nothing to say beyond the refusal itself.
+        source.connect_attempts = 0
+        source.connection_error = ""
+        app.composer_submission_refused()
+        assert notices[-1] == "Send unavailable until connected."
+
+
+def test_the_derivation_refuses_a_backoff_it_cannot_solve(monkeypatch):
+    """F4: a mistuned constant fails loudly at the edit, not at import.
+
+    `_attempts_outlasting` runs at module scope, so its unbounded loop put a
+    hang — or, with a zeroed backoff, an `OverflowError` from the doubling — at
+    IMPORT time of `app.py`. Unreachable from the shipped values, but the
+    trigger is a one-character edit to constants a future agent has explicit
+    reason to tune, which is the worst place for a silent failure.
+    """
+    monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_S", 0.0)
+    monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", 0.0)
+    with pytest.raises(ValueError, match="cannot outlast"):
+        app_module._attempts_outlasting(COLD_FALLBACK_S)
 
 
 async def _noop() -> None:

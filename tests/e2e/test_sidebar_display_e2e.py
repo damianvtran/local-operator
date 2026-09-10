@@ -228,7 +228,10 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                     assert source.display_only and app.composer_submission_blocked()
                     assert initial_content in visible_text(app)
                     assert editor.text == "Keep this unsent draft"
-                    assert "Connection unavailable" in app._status.render_text(80).plain
+                    # "Reconnect failed", not "Connection unavailable": the
+                    # terminal copy now says the app already tried, since by the
+                    # time it is shown a whole retry budget has been spent.
+                    assert "Reconnect failed" in app._status.render_text(80).plain
                     assert "retry" in app._status.render_text(80).plain
                     fail_sync = False
                     released.set()
