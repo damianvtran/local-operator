@@ -251,6 +251,25 @@ class StoredCandidate(NamedTuple):
 #: on name and id only.
 
 
+def live_scan_found_nothing(error: str) -> bool:
+    """True only for the live resolver's "no match anywhere" refusal.
+
+    The stored fallback (:func:`resolve_stored_target`'s callers) runs on this
+    predicate and NOTHING looser. Every OTHER no-record outcome of
+    :func:`resolve_peer_target` is a refusal ABOUT a live session the caller
+    did reach — a conflicting ``target``+selector pair, a unique match that is
+    wedged, a selector naming a dead session — and each of those must stand as
+    the answer: delivering anyway, to a stored session that merely shares the
+    name, would send the message to a recipient the call never named
+    (review round 1, BLOCKER-1) or spool it behind a wedged process that
+    still owns the session (MAJOR-1). ``record is None`` cannot tell those
+    apart; only this error form means the live scan genuinely came up empty
+    and a stored search is a NEW question rather than a second try at a
+    refused one.
+    """
+    return "no live session matches" in error
+
+
 def resolve_stored_target(
     needle: str,
     *,
@@ -270,18 +289,25 @@ def resolve_stored_target(
     path does, over name and session id (a stored session has no recoverable
     cwd — see :class:`StoredCandidate`).
 
-    ``live_ids`` excludes sessions that already have a runtime: live wins over
-    stored for the same substring, and without the exclusion a name both a
-    running session and its own stored directory answer to would be reported
-    ambiguous between itself. ``resolve_peer_target`` passes every id its scan
-    saw; the CLI's exact-id path does not consult this function at all.
+    ``live_ids`` is an optional exclusion for callers that know which session
+    ids already have a runtime; it exists for the id-collision case, where a
+    stored row's id belongs to a live session and a cold delivery would queue
+    behind a process that could have been dialled. The CLI and the tool pass
+    none: they enter this fallback only on :func:`live_scan_found_nothing`, so
+    no live NAME match can have survived to here, and a stored row and its
+    live session read their name from the same transcript — a collision that
+    differs by name is a rename-timing edge, not a case worth a second
+    registry scan on every stored send to catch.
 
-    Returns ``(session_id, candidates, error)`` with the same contract as
-    :func:`resolve_peer_target`: exactly one of the first or last is
-    meaningful, and ``candidates`` lists the ambiguous matches for the caller
-    to disambiguate. The resolved id feeds the EXISTING
-    :func:`resolve_cold_session` / :func:`deliver_peer_message` path — this
-    function decides WHO, never HOW a message is delivered.
+    Returns ``(session_id, candidates, error)`` shaped like
+    :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
+    difference: ``error`` is ALWAYS empty. A plain no-match is not this
+    function's fact to report — the caller just watched the live scan miss,
+    so the refusal it owes the user names BOTH searches ("searched live and
+    stored sessions"), a sentence only the caller can say. The first or the
+    second element is meaningful, never both; the resolved id feeds the
+    EXISTING :func:`resolve_cold_session` / :func:`deliver_peer_message`
+    path — this function decides WHO, never HOW a message is delivered.
     """
     from local_operator.resume import recent_session_rows
 

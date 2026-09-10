@@ -722,3 +722,45 @@ def test_a_grandparent_session_does_not_block_a_send_to_a_third_party(capsys) ->
     assert "that target is this session" not in err
     # It got past the guard and failed on the dial instead (no live peer here).
     assert code == 1
+
+
+def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, monkeypatch) -> None:
+    """BLOCKER-1/MAJOR-1 at the CLI: a refusal about a live session stands.
+
+    The binder rejects `target` + `--pid` before resolution, so this drives the
+    guard the way the in-session tool actually reaches it: resolution returns
+    one of the no-record refusals (a conflicting pair, or a wedged unique
+    match) while a stored session sharing the substring exists on disk. Either
+    falling through to the store would deliver the message to a session the
+    command never named, so both forms must be refused with their own error
+    and nothing spooled.
+    """
+    monkeypatch.setattr("sys.stdin", _FakeTtyStdin())
+    monkeypatch.setattr("local_operator.cli.config_dir", lambda: tmp_path)
+    monkeypatch.setattr("local_operator.mobile.peer_send.config_dir", lambda: tmp_path)
+    sid = "dead00000abc"
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+
+    class _Row:
+        id = sid
+        name = "Improve /credential skill"
+        mtime = 0.0
+
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows", lambda directory, limit=None: [_Row()]
+    )
+    refusals = {
+        "conflict": (
+            "pass either a target substring or an exact pid/session, not both — "
+            "they name different sessions"
+        ),
+        "wedged": "the only match for 'credential' is not responding (pid 4242); try again shortly",
+    }
+    for label, live_error in refusals.items():
+        with patch("local_operator.cli._resolve_peer_target", return_value=(None, [], live_error)):
+            rc = send_command(_parse_send(["credential", "hello"]))
+        assert rc == 1, label
+        err = capsys.readouterr().err
+        assert ("not both" in err) or ("not responding" in err), label
+        # The stored lookalike received nothing: the refusal was the answer.
+        assert not (tmp_path / "sessions" / sid / "inbox.jsonl").exists(), label

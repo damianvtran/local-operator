@@ -344,7 +344,9 @@ def collect_sessions(
     Stored rows come from the same ``resume.recent_session_rows`` scan the
     ``/resume`` picker uses, so a session is named here by the title the picker
     would show, and a directory the picker hides (subagent scratch) is not a
-    session for messaging either.
+    session for messaging either. ``stored_limit`` is the CLI's ``--limit``
+    verbatim; ``None`` (no flag passed) becomes
+    :data:`STORED_SESSIONS_DEFAULT_LIMIT` inside ``_stored_lines``.
     """
     from local_operator.mobile.resources import session_resource_usage
     from local_operator.session.runtime import registry
@@ -450,8 +452,11 @@ def collect_sessions(
 #: given. The store grows without bound on a well-used machine, so the listing
 #: caps the rows it shows to the most recent rather than printing a wall; the
 #: flag is an opt-in and the cap is named so a consumer can see where it is
-#: chosen. ``None`` (no cap) is expressible via ``--limit 0``'s absence being a
-#: distinct argument — see ``sessions_command``.
+#: chosen. Applied inside ``_stored_lines`` — the CLI passes ``None`` for
+#: "no --limit given" and relies on this default; a caller that wants a
+#: different number passes its own at its own call site, and there is no
+#: uncapped spelling (review round 1, MAJOR-2: the constant shipped unwired
+#: and ``--all`` listed the entire store).
 STORED_SESSIONS_DEFAULT_LIMIT = 50
 
 
@@ -472,11 +477,19 @@ def _stored_lines(root: Path, live_ids: set[str], limit: int | None) -> list[Ses
 
     Best-effort, never a gate: a store that cannot be read yields no stored rows
     rather than failing a listing whose first job is the LIVE fleet.
+
+    ``limit`` is the CLI's ``--limit`` verbatim when given; ``None`` means no
+    flag was passed and becomes :data:`STORED_SESSIONS_DEFAULT_LIMIT` HERE
+    rather than in argparse, so the number a consumer reads out of the listing
+    is the number this module chose and advertises in ``--limit``'s help. The
+    caller validates positivity; a given value is forwarded as-is because
+    ``recent_session_rows`` owns slicing semantics.
     """
     from local_operator.resume import recent_session_rows
 
+    resolved = STORED_SESSIONS_DEFAULT_LIMIT if limit is None else limit
     try:
-        rows = recent_session_rows(root, limit)
+        rows = recent_session_rows(root, resolved)
     except Exception:  # noqa: BLE001 — a listing must not fail on the store
         return []
     lines: list[SessionLine] = []
