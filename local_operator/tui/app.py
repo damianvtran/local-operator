@@ -3064,6 +3064,18 @@ class OperatorApp(App[None]):
         # Serializes interactive login flows so two /login commands can never
         # race the one suspended terminal.
         self._login_lock: Any | None = None
+        #: AbortSignal for the login `_login_flow` currently has in flight, or
+        #: None when no login is pending. Set for the WHOLE flow (from before
+        #: the provider callable is entered until its `finally`), because that
+        #: is the window in which Ctrl+C has to mean "cancel this login": a
+        #: browser that lands somewhere other than the loopback redirect leaves
+        #: the flow parked with nothing on screen to press, and the only other
+        #: way out is the 300 s `DEFAULT_TIMEOUT_SECONDS`.
+        #:
+        #: Typed loosely for the same reason `_login_lock` is: `harness.types`
+        #: is imported lazily by the paths that need it, and this attribute is
+        #: declared on a class every interactive session constructs.
+        self._login_signal: Any | None = None
         # ``/loop`` state: one loop at a time, cooperatively cancellable at
         # the turn boundary (never mid-turn, so a turn is never half-applied).
         self._loop_running = False
@@ -14385,6 +14397,45 @@ class OperatorApp(App[None]):
         if self._sidebar_navigation.requested_id:
             self._sidebar_navigation.cancel()
             return
+        # A PENDING LOGIN takes the press, ahead of the draft rung and every
+        # rung below it.
+        #
+        # Placed here because of what the state IS, not because a login is
+        # important. While `/login` is in flight the app is effectively modal on
+        # something OUTSIDE itself: a browser tab that was supposed to come back
+        # to the loopback listener. The scenario this rung exists for is that
+        # tab landing somewhere else entirely — the user closes it, returns to a
+        # terminal that is still narrating "opening your browser to authorize…",
+        # and Ctrl+C is overwhelmingly what they mean by "get me out of this".
+        # Before this rung the only exit was the 300 s
+        # `DEFAULT_TIMEOUT_SECONDS`, which is not an escape hatch, it is a wait.
+        #
+        # AHEAD OF THE DRAFT RUNG, which is the ordering that needs justifying,
+        # since the draft rung is otherwise first for good reason. Two things
+        # decide it. A draft survives this rung — the composer is untouched and
+        # the text is still there to clear with the next press — whereas a login
+        # cancelled late is a login that was never cancelled at all, so the
+        # asymmetric cost points one way. And a login flow mounts a paste prompt
+        # that TAKES FOCUS (`KeyPromptBlock`), so during the window this rung
+        # covers, the composer is not even where the user's attention is.
+        #
+        # It CONSUMES the press without arming the exit ladder, exactly as the
+        # draft rung does, and that is the load-bearing half. This area's whole
+        # history is rungs stealing each other's presses and costing users their
+        # work; here the specific hazard is a user reflex-double-tapping Ctrl+C
+        # to kill a stuck login and QUITTING THE APP on the second tap.
+        # Measured on the pre-change tree: one Ctrl+C during a pending login
+        # rendered "ctrl+c again to exit" while the login stayed pending, so the
+        # reflex was already live and already loaded.
+        if self._cancel_pending_login():
+            # Same two lines the draft and barren-click rungs run for the same
+            # reason: the press was absorbed, so a live "ctrl+c again to exit"
+            # would promise an exit the next press does not make.
+            self._last_interrupt_at = 0.0
+            if self._exit_hint is not None:
+                self._transcript_view().remove_block(self._exit_hint)
+                self._exit_hint = None
+            return
         editor = self._editor()
         # A COPY GESTURE IN FLIGHT is not a draft the user is scrapping, so
         # Ctrl+C keeps its older meaning there — the interrupt and the first
@@ -15406,6 +15457,51 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a phone bridge must never break naming
             logger.debug("mobile title notify failed", exc_info=True)
 
+    def _cancel_pending_login(self) -> bool:
+        """Abort the `/login` in flight, if there is one. True when it took the press.
+
+        The return value is what the Ctrl+C ladder branches on, so it must be
+        an honest "did this press do something": False when no login is
+        pending, so the press falls through to the rungs below EXACTLY as it
+        did before this rung existed.
+
+        Aborting the signal is the whole action, and everything else follows
+        from the layers that already handle it:
+
+        * `OAuthCallbackFlow._await_code` is racing an abort watcher against
+          its capture futures, so it raises `LoginCancelledError` immediately
+          rather than sitting out the 300 s timeout;
+        * `run()`'s `finally: await self._stop_server()` tears the loopback
+          listener down, which releases the port (54545 for Anthropic, 1455 for
+          OpenAI) so an immediately retried `/login` can bind it again;
+        * `_login_flow`'s own `finally` releases `_login_lock` and clears
+          `_login_signal`, which is what stops the retry being refused with "a
+          login is already in progress".
+
+        The key prompt is settled here as well, and not left to `_interrupt`.
+        This rung returns before that runs, and a prompt left mounted and
+        focused for a login that has just been cancelled owns the keyboard for
+        a flow that no longer exists — which is the same class of bug as the
+        one being fixed. `_settle_key_prompt` is idempotent, so the ordinary
+        interrupt path settling it too is harmless.
+        """
+        signal = self._login_signal
+        if signal is None or signal.aborted:
+            # An already-aborted signal is NOT this rung's press to take: the
+            # flow is unwinding, and claiming the key again would swallow a
+            # second press that should reach the rungs below.
+            return False
+        # The reason travels to the user: `_await_code` raises
+        # `LoginCancelledError(signal.reason)`, so this string is what a host
+        # without the TUI's own notice would print.
+        signal.abort("Login cancelled")
+        # `superseded`, not a plain decline: the login is over, so the optional
+        # paste did not get "skipped" while the browser carried on — it stopped
+        # being needed. The flow's own "login cancelled" notice states the
+        # outcome a line below.
+        self._settle_key_prompt(superseded=True)
+        return True
+
     def _settle_ask_picker(self) -> None:
         """Take down a live ``ask`` picker, answering with whatever was chosen.
 
@@ -15642,7 +15738,7 @@ class OperatorApp(App[None]):
         except Exception:  # pragma: no cover - no composer in reduced hosts
             logger.debug("no composer to hand focus back to", exc_info=True)
 
-    def _settle_key_prompt(self) -> None:
+    def _settle_key_prompt(self, *, superseded: bool = False) -> None:
         """Cancel a live API-key prompt, freeing the login parked on it.
 
         Called by the paths that END a turn or tear the app down, for the same
@@ -15655,6 +15751,15 @@ class OperatorApp(App[None]):
         credential row that shadows a working environment key. Unlike the ask
         picker — where a partial answer still tells the agent something — there
         is no useful partial value here.
+
+        ``superseded`` says the prompt stopped being NEEDED rather than being
+        declined, which changes the receipt it settles into. It exists because
+        the default receipt for a declined optional paste reads "paste skipped
+        — still waiting for the browser", and after a cancelled login that
+        sentence is simply false: nothing is waiting for the browser any more,
+        the loopback listener has been stopped. Callers that end the whole
+        login pass True; the turn-end and teardown paths keep the default,
+        where the flow may genuinely still be running.
         """
         block = self._key_prompt
         self._key_prompt = None
@@ -15685,7 +15790,7 @@ class OperatorApp(App[None]):
 
         if block is not None:
             try:
-                block.resolve(None)
+                block.resolve(None, superseded=superseded)
             except Exception:  # pragma: no cover - teardown races only
                 logger.debug("key prompt was already settled", exc_info=True)
 
@@ -29322,6 +29427,7 @@ class OperatorApp(App[None]):
         # own name lazily: ``callback_server`` drags in http.server, ssl and
         # email (~138 ms) for a loopback listener only a login needs, and this
         # module is what every interactive session imports.
+        from local_operator.harness.types import AbortSignal
         from local_operator.providers.oauth.callback_server import LoginCancelledError
 
         assert self._providers is not None
@@ -29331,9 +29437,15 @@ class OperatorApp(App[None]):
             await notice("a login is already in progress.", "warning")
             return
         self._login_lock.acquire()
+        # Published BEFORE the flow is entered and cleared in the `finally`, so
+        # the window in which Ctrl+C can cancel is exactly the window in which
+        # a login is actually pending. Ordered right after `acquire()` so the
+        # two pieces of pending-login state are always set together.
+        signal = AbortSignal()
+        self._login_signal = signal
         try:
             self._providers.set_login_callbacks(self._login_callbacks)
-            message = await self._providers.login(provider)
+            message = await self._providers.login(provider, signal=signal)
             await notice(message, "success")
             # Make the fresh login usable as the boot default when nothing is
             # configured yet: set hosting to this provider and model_name to its
@@ -29388,16 +29500,44 @@ class OperatorApp(App[None]):
             # painted its own "cancelled" receipt, so this stays quiet about the
             # detail and only closes the sentence the "logging in to …" notice
             # opened.
-            local = getattr(self._providers.provider(provider), "local_setup", False)
-            await notice(
-                "setup cancelled; previous configuration kept." if local else "login cancelled.",
-                "info",
-            )
+            definition = self._providers.provider(provider)
+            local = getattr(definition, "local_setup", False)
+            if local:
+                await notice("setup cancelled; previous configuration kept.", "info")
+            else:
+                # The sentence has to answer the question the user is actually
+                # holding, which is "is that thing still running, and how do I
+                # try again?". The scenario this exists for is a browser that
+                # landed somewhere other than the loopback redirect: from the
+                # user's side nothing visibly happened, so a bare "cancelled"
+                # leaves them unsure whether a half-finished login is still
+                # listening on the port. Naming the retry command spares them
+                # scrolling back for the provider id they typed.
+                #
+                # The listener clause is conditional because it must stay TRUE:
+                # a paste-a-key provider never started a server, and telling
+                # someone a port was released when none was bound is the kind
+                # of confident-and-wrong detail that costs trust in the rest of
+                # the message.
+                stopped = (
+                    "local sign-in listener stopped; "
+                    if getattr(definition, "callback_port", None) is not None
+                    else ""
+                )
+                await notice(
+                    f"login cancelled. {stopped}retry with /login {provider}",
+                    "info",
+                )
         except Exception as error:
             local = getattr(self._providers.provider(provider), "local_setup", False)
             await notice(f"{'setup' if local else 'login'} failed: {error}", "error")
         finally:
             self._login_lock.release()
+            # Cleared unconditionally and alongside the lock: a stale signal
+            # would make `_cancel_pending_login` claim a login to cancel after
+            # this one has ended, so the Ctrl+C rung would swallow a press the
+            # rungs below it should have had.
+            self._login_signal = None
 
     def _cmd_logout(self, arg: str, notice: NoticeFn) -> None:
         """``/logout [provider]`` — remove stored credentials for a provider."""

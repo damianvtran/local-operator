@@ -1459,7 +1459,9 @@ class TestPerAccountLastKnown:
         # The same identity logs in again: the fake's upsert appends rather
         # than replacing, so pin the fingerprint to prove the key is unchanged
         # and the drop below is the login's own doing, not a key move.
-        async def fake_login(_callbacks):
+        # ``**_kwargs``: the controller passes ``signal=`` to every login so a
+        # host can offer a cancel; a narrower double raises TypeError.
+        async def fake_login(_callbacks, **_kwargs):
             return {
                 "access_token": "t2",
                 "refresh_token": "r2",
@@ -1892,7 +1894,9 @@ async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatc
         lambda provider_id: dropped.append(provider_id) or 1,
     )
 
-    async def fake_login(_callbacks):
+    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
+    # host can offer a cancel; a narrower double raises TypeError.
+    async def fake_login(_callbacks, **_kwargs):
         return {"access_token": "t", "refresh_token": "r", "email": "you@example.com"}
 
     # ProviderDefinition is a frozen dataclass, so the login is swapped by
@@ -1925,7 +1929,9 @@ async def test_an_api_key_login_drops_the_listing_under_the_storage_id(
         lambda provider_id: dropped.append(provider_id) or 1,
     )
 
-    async def fake_login(_callbacks):
+    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
+    # host can offer a cancel; a narrower double raises TypeError.
+    async def fake_login(_callbacks, **_kwargs):
         return "xai-key"
 
     definition = controller.provider("xai-oauth")
@@ -1971,7 +1977,9 @@ async def test_a_failed_invalidation_never_fails_a_successful_login(
 
     monkeypatch.setattr("local_operator.providers.controller.invalidate_listing", boom)
 
-    async def fake_login(_callbacks):
+    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
+    # host can offer a cancel; a narrower double raises TypeError.
+    async def fake_login(_callbacks, **_kwargs):
         return "sk-ant"
 
     definition = controller.provider("anthropic")
@@ -2004,7 +2012,9 @@ async def test_login_and_logout_drop_the_in_process_model_info_memo(
         lambda: cleared.append("memo"),
     )
 
-    async def fake_login(_callbacks):
+    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
+    # host can offer a cancel; a narrower double raises TypeError.
+    async def fake_login(_callbacks, **_kwargs):
         return "sk-ant"
 
     definition = controller.provider("anthropic")

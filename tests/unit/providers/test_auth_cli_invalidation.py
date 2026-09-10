@@ -57,7 +57,12 @@ def _swap_login(monkeypatch, provider_id: str, answer):
     definition = get_provider_definition(provider_id)
     assert definition is not None
 
-    async def fake_login(_callbacks):
+    # ``**_kwargs`` mirrors the shape of every real login callable: the CLI and
+    # the controller pass ``signal=`` to all of them so a host can offer a
+    # cancel without knowing which flavour of provider it is talking to. A
+    # double that pins the old narrow signature fails with TypeError instead of
+    # exercising the invalidation this file is about.
+    async def fake_login(_callbacks, **_kwargs):
         return answer
 
     monkeypatch.setattr(
