@@ -1647,6 +1647,11 @@ Every instrument below succeeded, in the sense that none of it errored:
   landing; the one apparent catch was a `SyntaxError`.
 - A containment grep reporting "canary absent, len=2" — the `2` was `[]`,
   serialised. An empty container greps clean.
+- A footer legend certified at a width no caller can produce: the picker's
+  content box is capped at 74 cells and the hint row carrying the legend
+  wants 88, so the legend could only ever appear by displacing another hint.
+  Passing the function a width the terminal cannot reach tests a code path
+  that does not exist.
 
 The reciprocal is equally real, and just as invisible — the instrument is dead
 *to the thing you changed*, so it fails what should pass:
@@ -1671,6 +1676,29 @@ exist. The second is cheaper, but it is not free — and the reading itself
 looks identical either way, which is exactly why the canary is the only
 defence.
 
+One species sits off that axis, being about what the instrument does to the
+subject rather than which way it errs: **the instrument cures it.** A fixture
+pinned `history_generation=1` against a snapshot at state 0, permanently
+invalidating the follower, so every ordinary delta restarted a refresh — and
+that refresh serviced the orphaned debt the test existed to catch. It passed
+because the harness was broken in a way that repaired the defect.
+
+That beats all three defences above: the instrument is live and
+discriminating, the mutation does land, and the pre-fix tree goes green too,
+because the harness cures the old tree as readily as the new one. A
+both-sides green reads as "already fixed" or "the test does not
+discriminate", never as "my fixture is repairing the bug".
+
+The defence is a precondition on the precondition: **assert the fixture's
+starting state is one the system can actually reach**, not merely that it is
+set. `history_generation=1` over snapshot state 0 is a state production never
+produces. It can drift there rather than be mis-set, too — a "known-bad"
+session artifact kept as a reproduction had healed past its failure mode
+(15,171 entries against the 14,905 it was captured at) and binds happily on
+the unfixed tree. This is the query rule below applied to fixtures: a
+fixture's state is part of its basis, so assert it at use time rather than
+inheriting it from when it was captured.
+
 Two rules sit beside this one, each earned the hard way:
 
 **When you fix something that raises or refuses, verify it still raises where
@@ -1683,14 +1711,14 @@ was structurally blind to the distinction the fix depended on. A separate
 session converged on the same rule from the opposite direction: an integrity
 refusal that survived a heal.
 
-**Quote the query, not just the result.** A `df` against `/` — a sealed,
-read-only APFS system volume whose percentage cannot move — and a
-`dict.get()` against the wrong nesting level both return clean, confident,
-wrong answers. State the basis alongside the number so a reader can check the
-*question*, not just the digit. A disk figure taken against the wrong mount
-propagated through a dozen sessions, each one confirming it back against the
-same wrong basis; every confirmation strengthened a number that was never
-right.
+**Quote the query, not just the result.** A `df` against `/` — which reports
+how full the sealed system volume is, not the writable `/System/Volumes/Data`
+that every byte you write lands on — and a `dict.get()` against the wrong
+nesting level both return clean, confident, wrong answers. State the basis
+alongside the number so a reader can check the *question*, not just the
+digit. A disk figure taken against the wrong mount propagated through a dozen
+sessions, each one confirming it back against the same wrong basis; every
+confirmation strengthened a number that was never right.
 
 And the corollary, for when the canary finally catches your own earlier
 finding: **withdraw it, do not defer it.** A deferred wrong finding is a
