@@ -58,6 +58,28 @@ against does not exist there. Applying it anyway halved CI parallelism (a
 4-vCPU runner resolved to 2 workers instead of 4), which is a regression paid on
 every PR. The memory budget and the 2-8 clamp still apply on CI.
 
+**One exception, and it is our own doing.** The bash tool sets `CI=1` on every
+agent-run command so CLIs behave non-interactively, which made every agent-run
+suite on a developer laptop look like a dedicated runner and take all 14 cores
+— disabling the share exactly where it was needed. The tool now also exports
+`LOCAL_OPERATOR_AGENT_SHELL=1`, and the hook denies on it, so `CI` still means
+"dedicated runner" for every real provider. Deliberately a denylist: an
+allowlist of provider variables (`GITHUB_ACTIONS` and friends) would silently
+halve parallelism on every provider nobody remembered to add, which is the
+regression above. If you are adding a new non-interactive variable to
+`NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
+
+**A memory reserve is also held back**, scaled per host (`min(3072, total / 8)`
+MB), because the budget otherwise claims a fraction of what *remains* and
+sibling suites converge toward zero free memory instead of toward a floor. Know
+its actual reach before tuning it: the shape is `min(share, available -
+reserve)`, so it binds only below **twice** itself (~6 GB free on a 36 GB box)
+and is invisible above that. It is a floor under one suite's appetite, not a
+cap on the fleet — six *simultaneous* suites are still not bounded by it, and
+the durable lever for that would be a cross-process budget, deliberately not
+built (see `harness/group_reaper.py` on wedged `flock` holders propagating a
+freeze between sessions).
+
 `--dist worksteal` is also in `addopts` — per-test
 durations here vary by orders of magnitude, and the default `load` scheduler
 pre-assigns chunks, leaving workers idle at the tail while one grinds through
@@ -816,15 +838,20 @@ gh workflow run chrome-web-store.yml -R damianvtran/local-operator \
 This builds the extension from the named commit, validates the zip, and calls
 the store's upload + `STAGED_PUBLISH` endpoint. The item enters Google's review
 queue as `PENDING_REVIEW`. While an item is in review, the store refuses all
-further uploads with `HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE` — so a
-rejected upload with that exact error is the sanctioned status probe (it is
-non-destructive and leaves the queued item untouched).
+further uploads with `HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE`. That
+rejection is non-destructive and leaves the queued item untouched, so
+re-dispatching the stage workflow is the practical way to read the queue state
+(observed across runs 34184188091, 34211464472, 34259291271, 34316525125,
+34385550911, 34452314995 while 0.1.8 sat in review). The script itself
+deliberately does not translate error reasons into behaviour — it only prints
+the store's body — so treat the rejection as an observation, not a contract.
 
 Google publishes no SLA for review. Extensions using the `debugger` permission
 with broad host access routinely draw extended manual review (the 0.1.8 review
 took ~4.5 days). **Do not cancel a pending review to force a new submission** —
 cancelling forfeits the accrued queue position with no visibility into how
-close it was.
+close it was. Once the review finishes, promote the approved revision; that
+clears the queue and the next version can be staged immediately.
 
 ### Phase 2: Publish an approved staged revision
 
