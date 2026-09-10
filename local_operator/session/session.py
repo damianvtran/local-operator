@@ -1792,9 +1792,19 @@ class Session:
             logger.warning(
                 "attention bootstrap failed for %s (%r); continuing without it",
                 # `getattr` because a handler that can itself raise is not a
-                # guard: a transcript whose `.directory` raises would be
-                # survived by the inner guard and then killed by this one,
-                # which is the exact failure this block exists to prevent.
+                # guard: a transcript object that never grew a `.directory` —
+                # a stub, a partially constructed instance — would be survived
+                # by the inner guard and then killed by this one, which is the
+                # exact failure this block exists to prevent.
+                #
+                # Precisely: this survives a MISSING `.directory`, not a
+                # raising one. `getattr(obj, name, default)` suppresses
+                # `AttributeError` and nothing else, so a `.directory` that
+                # raised `OSError` would still propagate out of this handler.
+                # No third guard for that, because it is unreachable on every
+                # real path: `Transcript.directory` is a plain instance
+                # attribute, `transcript.py` defines no `@property`, and
+                # `Path.name` does not raise.
                 # Mirrors the same defensive read in `attention.py`.
                 getattr(getattr(transcript, "directory", None), "name", None),
                 exc,

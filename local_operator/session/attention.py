@@ -82,10 +82,13 @@ _CREATE_MUTATIONS = (
     "CREATE TABLE mutations (id INTEGER PRIMARY KEY CHECK(id=1), supersedes INTEGER NOT NULL)"
 )
 
-#: Upsert rather than UPDATE so the counter cannot silently stick at its seed on
-#: a database whose additive migration never ran -- a no-op UPDATE would leave
-#: every heal undetectable again, which is the defect this table exists to fix.
-#: Same self-healing form `acknowledge` already uses for `receipts`.
+#: Upsert rather than UPDATE because the table is created with NO row: both
+#: `_CREATE_MUTATIONS` sites above create it empty and nothing seeds it, so the
+#: first bump has nothing to update. A plain UPDATE would match zero rows and
+#: silently succeed with rowcount 0, leaving every heal undetectable again --
+#: the exact defect this table exists to fix. The `INSERT ... ON CONFLICT`
+#: writes the seed and the increment in one statement, so the first caller and
+#: every later one take the same path.
 _BUMP_SUPERSEDES = (
     "INSERT INTO mutations(id,supersedes) VALUES(1,1) "
     "ON CONFLICT(id) DO UPDATE SET supersedes=mutations.supersedes+1"
@@ -163,6 +166,15 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
     try:
         _import_transcript_outcome(transcript, store)
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
+        # `getattr` so the handler cannot itself raise on a transcript that
+        # never grew a `.directory` (a stub, a partially constructed instance)
+        # and turn a swallowed failure back into a fatal one. It survives a
+        # MISSING attribute only: `getattr` suppresses `AttributeError` and
+        # nothing else, so a `.directory` raising `OSError` would still escape.
+        # That case is unreachable — `Transcript.directory` is a plain instance
+        # attribute, `transcript.py` defines no `@property`, `Path.name` does
+        # not raise — so the read stays as-is rather than growing a third guard.
+        # `session.py` mirrors this same defensive read.
         directory = getattr(transcript, "directory", None)
         logger.warning(
             "attention: skipping outcome import for %s (%r)",
