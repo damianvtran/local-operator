@@ -64,6 +64,10 @@ from textual.widgets import Static
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.composer_focus import (
+    composer_may_take_focus,
+    return_focus_to_composer,
+)
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the gutter column reads at a glance.
@@ -300,6 +304,24 @@ class TranscriptBlock(Static):
     """
 
     DEFAULT_CSS = ""  # all styling lives in local_operator.tcss
+
+    #: Tab on ANY focusable row is "put me back in the composer", overriding
+    #: the screen's ``tab -> app.focus_next``.
+    #:
+    #: Declared HERE rather than on :class:`ExpandableActionBlock`, and that
+    #: placement is load-bearing: the focusable rows are not all action rows.
+    #: ``HistoryPageNotice``, ``OlderHistoryNotice`` and ``DraftRecoveryNotice``
+    #: descend from ``NoticeBlock`` -> this class, so binding one level down
+    #: would leave three notice kinds still trapping Tab.
+    #:
+    #: What it replaces: ``focus_next`` walked the ledger row by row, so the
+    #: presses needed to get back to the input SCALED WITH THE CONVERSATION.
+    #: Measured with three cards, Tab from the first went card -> card ->
+    #: Editor — three presses to escape a transcript that in a real session is
+    #: hundreds of rows long. Up/Down remain the scoped ledger walk
+    #: (:meth:`TranscriptView.focus_neighbour`); Tab was the badly scoped
+    #: duplicate of them.
+    BINDINGS = [Binding("tab", "focus_composer", "Back to the composer", show=False)]
 
     #: Grouping key for adaptive spacing. Blocks that share a kind stack
     #: tight while each stays one row; a change of kind always opens a gap.
@@ -663,6 +685,51 @@ class TranscriptBlock(Static):
             return None
         return "\n".join(row.rstrip() for row in copied), "\n"
 
+    # -- focus -------------------------------------------------------------
+    def action_focus_composer(self) -> None:
+        """Hand the keyboard back to the composer (the ``tab`` binding).
+
+        Focus and NOTHING ELSE: no text inserted, no caret moved. Tab here
+        means "I am done reading, put me back in the input", and a row has no
+        document position to map a caret onto.
+
+        Guarded through ``composer_focus.return_focus_to_composer`` because
+        ``can_focus`` alone was not enough. A read-only composer is a real
+        state (the subagent page and the login prompt make it refuse every key
+        via ``_set_composer_read_only``) and focusing it there would hand the
+        keyboard to a field that answers nothing — but ``can_focus`` is TRUE
+        while an approval or an ask picker owns the keyboard, and this binding
+        is inherited by every row.
+
+        ``ApprovalBlock`` and ``KeyPromptBlock`` both descend from this class,
+        so before the shared guard a prompt row had a one-press ``tab`` exit
+        that handed the keyboard away from the question it was asking.
+        Measured with a live ``multi=True`` picker and a focused ToolCard: Tab
+        left ``editor.has_focus`` True, so the picker's Space/Enter answers
+        were unreachable.
+
+        Either way Tab correctly does nothing and focus stays on the row.
+        """
+        composer = self._composer()
+        if composer is None:
+            return
+        return_focus_to_composer(self.app, composer)
+
+    def _composer(self):  # type: ignore[no-untyped-def]
+        """The app's one text input, or None when there is not one.
+
+        Imported lazily and queried defensively: the row is mounted in
+        harnesses that host a transcript and nothing else, and a missing
+        composer there must degrade to "the key does nothing" rather than
+        raise out of a key handler.
+        """
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            return self.app.query_one(Editor)
+        except Exception:
+            return None
+
 
 class ExpandableActionBlock(TranscriptBlock):
     """Shared interaction contract for expandable transcript action rows.
@@ -691,12 +758,41 @@ class ExpandableActionBlock(TranscriptBlock):
         Binding("up", "focus_previous_action", "Previous action", show=False),
         Binding("down", "focus_next_action", "Next action", show=False),
     ]
-    _BOUND_KEYS = frozenset(
-        key.strip()
-        for binding in BINDINGS
-        for key in (binding.key if isinstance(binding, Binding) else binding[0]).split(",")
-    )
     can_focus = True
+
+    @classmethod
+    def _bound_keys(cls) -> frozenset[str]:
+        """Every key this row class answers itself, MERGED across the hierarchy.
+
+        Read by :meth:`on_key` to exclude the row's own keys from the printable
+        passthrough. Computed at read time from ``_merged_bindings`` rather than
+        in the class body, and both halves of that are deliberate:
+
+        * A class-body comprehension over ``BINDINGS`` sees only the list
+          literal of the class it is written in, so a key inherited from a base
+          (``tab``, on :class:`TranscriptBlock`) never appeared in it.
+        * Reading ``cls._merged_bindings`` in the body does not fix that
+          either: ``DOMNode.__init_subclass__`` assigns that map AFTER the body
+          finishes, so a body-time read silently gets the PARENT's map —
+          verified, a subclass saw ``['tab']`` where its own answer was
+          ``['enter', 'tab']``.
+
+        Tab is not printable, so :meth:`on_key` returns early on it today and
+        the stale list could not yet be observed. It is fixed anyway: the set
+        states an invariant — "the keys this row handles" — that was already
+        false, and the next printable key bound on a base class would have been
+        typed into the composer instead of running its action, which is exactly
+        the Space defect :meth:`on_key` documents.
+
+        The ``None`` arm is Textual's own contract, not defensiveness for its
+        own sake: ``DOMNode`` declares ``_merged_bindings`` as
+        ``ClassVar[BindingsMap | None]`` and guards it the same way, because it
+        is unset until ``__init_subclass__`` runs. Degrading to "this row binds
+        nothing" is the safe direction — the passthrough forwards a key rather
+        than swallowing it.
+        """
+        merged = cls._merged_bindings
+        return frozenset() if merged is None else frozenset(merged.key_to_bindings)
 
     def can_expand(self) -> bool:
         """Whether opening the row reveals more than its one-line summary."""
@@ -797,7 +893,7 @@ class ExpandableActionBlock(TranscriptBlock):
         (bubbling, default-handling flags) and re-delivering it would be
         re-entering a lifecycle it has half finished.
         """
-        if event.key in self._BOUND_KEYS or not event.is_printable:
+        if event.key in self._bound_keys() or not event.is_printable:
             return
         composer = self._composer()
         if composer is None:
@@ -806,21 +902,6 @@ class ExpandableActionBlock(TranscriptBlock):
         composer.post_message(Key(event.key, event.character))
         event.stop()
         event.prevent_default()
-
-    def _composer(self):  # type: ignore[no-untyped-def]
-        """The app's one text input, or None when there is not one.
-
-        Imported lazily and queried defensively: the row is mounted in
-        harnesses that host a transcript and nothing else, and a missing
-        composer there must degrade to "the key does nothing" rather than
-        raise out of a key handler.
-        """
-        from local_operator.tui.widgets.editor import Editor
-
-        try:
-            return self.app.query_one(Editor)
-        except Exception:
-            return None
 
     def on_enter(self, event) -> None:  # type: ignore[no-untyped-def]
         self._set_hovered(True)
@@ -2868,6 +2949,103 @@ class TranscriptView(ScrollableContainer):
 
     DEFAULT_CSS = ""
 
+    #: FOCUSABLE, AND THAT IS LOAD-BEARING — do not "clean this up".
+    #:
+    #: It looks like dead weight. This container is not a text input, and being
+    #: focusable is what let it SWALLOW KEYSTROKES: focus it, type ``hello``,
+    #: and the buffer stayed empty with focus still here. :meth:`on_key` below
+    #: is the fix for that; removing the focus stop is NOT, and the difference
+    #: was measured the expensive way.
+    #:
+    #: ``can_focus = False`` here broke THIRTEEN tests across six suites
+    #: (``test_resume_render``, ``test_stream_anchor``, ``test_subagent_view``,
+    #: ``test_sidebar_switch_smoothness``, ``test_rendered_history_paging``,
+    #: and this widget's own) against a clean base that passed all 243.
+    #: ``Widget.focusable`` gates ``allow_vertical_scroll`` and Textual's
+    #: anchor-release paths, so clearing it silently disables transcript
+    #: scrolling behaviour those suites assert on.
+    #:
+    #: It is also the one focus target GUARANTEED to be inside the viewport,
+    #: which two paths depend on: ``OlderHistoryNotice.set_interactive``'s blur
+    #: (see its ORDER-IS-LOAD-BEARING note — the alternative landed ~770 rows
+    #: off screen) and the subagent view's Escape restore.
+    #:
+    #: Why this is easy to get wrong: ``ctrl+home``/``ctrl+end`` and the mouse
+    #: wheel all keep working without focus (verified — the wheel scrolled
+    #: 48 -> 42 with it cleared), so a targeted run looks green and only the
+    #: full suite finds it.
+    can_focus = True
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Typing at the transcript goes to the COMPOSER, not into the void.
+
+        The container has to stay focusable (see ``can_focus``), so it must not
+        be somewhere keystrokes die. Measured before this existed: focus the
+        transcript, type ``hello``, and ``editor.text`` was still ``''`` with
+        focus still here — every character gone, with nothing on the frame to
+        say so. ``todo_panel``'s scroll region names the identical defect in
+        its own comment ("the app looked focused while every keystroke vanished
+        into a widget that does nothing with them").
+
+        Deliberately the same shape as :meth:`ExpandableActionBlock.on_key`,
+        one level up: the app has exactly one text input, so a printable key
+        here is unambiguous — hand it the focus and re-post the keystroke, and
+        the user never learns the transcript had focus at all. A FRESH ``Key``
+        is posted rather than the original for the reason recorded there: the
+        event is already part-way through Textual's dispatch.
+        """
+        if not self.has_focus:
+            # A focused CHILD bubbled this up, and it is not ours to take.
+            #
+            # Without this guard the container re-created the exact Space
+            # defect `ExpandableActionBlock.on_key` documents, one level
+            # higher: `space` on a focused ToolCard is that row's toggle AND a
+            # printable character, the row left it to its own bindings, and
+            # this handler caught it on the way past and typed a space into the
+            # composer instead of expanding the row the user was standing on.
+            # Measured: `space` gave `editor.text == ' '` with the row still
+            # collapsed.
+            return
+        if event.key in self._bound_keys() or not event.is_printable:
+            return
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:
+            return  # a harness that hosts a transcript and no composer
+        # Refuse rather than steal, on BOTH counts: inert while the composer is
+        # read-only (subagent page, login prompt — it answers no key), and
+        # claimed while a live approval or ask picker owns the keyboard.
+        #
+        # The claimed half is what makes a key already in flight safe. A click
+        # and a keypress can land in the same drain, and forwarding the key
+        # after moving focus is exactly how a keystroke ends up somewhere the
+        # user was not looking. Measured with the draft `draft` and a focused
+        # ToolCard: `space` was typed into the composer, leaving `' draft'`
+        # AND losing the row's own expand gesture.
+        #
+        # Returning WITHOUT stopping the event is deliberate: the key was not
+        # ours to take, so it must stay available to whatever does own it.
+        if not composer_may_take_focus(self.app, editor):
+            return
+        editor.focus()
+        editor.post_message(Key(event.key, event.character))
+        event.stop()
+        event.prevent_default()
+
+    @classmethod
+    def _bound_keys(cls) -> frozenset[str]:
+        """The scroll keys this container answers itself, merged across bases.
+
+        Read at call time from ``_merged_bindings`` rather than derived in the
+        class body, for the reason :meth:`ExpandableActionBlock._bound_keys`
+        records: ``DOMNode.__init_subclass__`` assigns that map AFTER the body
+        runs, so a body-time read sees the PARENT's map.
+        """
+        merged = cls._merged_bindings
+        return frozenset() if merged is None else frozenset(merged.key_to_bindings)
+
     def __init__(
         self, *, id: str | None = None, classes: str | None = None  # noqa: A002 (Textual's name)
     ) -> None:
@@ -2968,6 +3146,49 @@ class TranscriptView(ScrollableContainer):
         affordance and this is a progressive-enhancement bonus.
         """
         self.vertical_scrollbar.styles.pointer = "grab"
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        """A click on blank transcript returns focus to the composer.
+
+        Measured: with a card holding focus, clicking the empty column beside
+        it left the card focused and the composer dark. The gesture said "I am
+        done with that row" and the frame did not answer.
+
+        The container taking focus itself would NOT be the fix — it is a
+        scrolling surface, not an input, and focus resting there is the state
+        :meth:`on_key` exists to rescue. Sending it to the composer is.
+
+        Only the blank column reaches this. A row's own handler runs first
+        (:meth:`ExpandableActionBlock.on_click` stops the event when it
+        expands), and the ``TranscriptBlock`` test below leaves a click that hit
+        a row alone, so clicking a card still focuses and expands it.
+
+        ``event.stop()`` is deliberately NOT called: ``Click`` bubbles up from
+        children, and stopping it at the container would swallow an event a
+        descendant already owned. The rule is "focus the composer if nothing
+        claimed the click", not "claim the click".
+        """
+        if isinstance(event.widget, TranscriptBlock):
+            return
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:
+            return  # a harness that hosts a transcript and no composer
+        # Refuse rather than steal, on BOTH counts: inert while the composer is
+        # read-only (subagent page, login prompt — focusing it would hand the
+        # keyboard to a field that swallows every keystroke), and claimed while
+        # a surface that took focus ON PURPOSE still needs it.
+        #
+        # The claimed half matters here even though the transcript is nowhere
+        # near the prompt: a live question parks in the dock while the user
+        # scrolls the transcript back to find what they need to answer it, so
+        # "click the conversation to re-read it" is the ordinary gesture in the
+        # middle of answering. Measured with a live `multi=True` picker: a
+        # click on blank transcript left `editor.has_focus` True and the
+        # question unanswerable.
+        return_focus_to_composer(self.app, editor)
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""

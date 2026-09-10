@@ -136,6 +136,7 @@ from local_operator.slash_commands import (
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
 from local_operator.tui.events import (
@@ -2224,6 +2225,88 @@ class Band(Chrome):
 
     def on_resize(self, event: Resize) -> None:
         self.post_message(self.BoxChanged())
+
+
+class ComposerDock(Container):
+    """The input's two containers, made clickable — a click anywhere is "focus me".
+
+    Textual routes a click to focus by walking UP from the widget under the
+    pointer: ``Screen._forward_event`` calls ``get_focusable_widget_at`` on
+    ``MouseDown`` (``screen.py:1933-1939``), which walks ``ancestors_with_self``
+    for the first node whose ``focusable`` is true (``screen.py:709-712``).
+    ``#input-dock`` and ``#input-shell`` were plain containers, neither
+    focusable, so the walk ran off the top and terminated at the screen with
+    ``None`` — and Textual does NOT call ``set_focus(None)`` on that path (it
+    only does that for ``NoWidget``). The click was swallowed in silence: no
+    focus change, no error, nothing on the frame.
+
+    The dead zone that produced is far wider than the shell's 1-cell padding.
+    Measured at 120x40 settled, dock and shell both ``Region(x=1, y=34, w=118,
+    h=5)`` with the editor body at ``Region(x=4, y=35, w=114, h=1)``: clicking
+    ``x = dock.region.x + 2`` on EVERY dock row left focus on the ToolCard —
+    rows 34, 35, 36 and 37 all dead, rows that focused the editor: NONE.
+    Columns 1..3 are dead on every row because the editor body starts at x=4,
+    and that includes the chevron cell. The chevron is the app's own "you are
+    focused" affordance, so the user clicked the exact glyph that means
+    "focused" and got nothing back. In the boot layout it is worse: the shell
+    is clamped to a centred card and the dock spans full width behind it, so
+    the whole gutter either side hits ``#input-dock`` directly and is dead too.
+
+    One class for both containers, because both are reachable by a click that
+    means the same thing.
+    """
+
+    def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
+        # No `event.stop()`, deliberately. `Click` BUBBLES from the child that
+        # was hit, so by the time it arrives here the editor's own mouse
+        # handling (`editor.py:4391/4405/4438`) has already run for a click on
+        # the body, and stopping it would be stopping an event somebody else
+        # owned. The guard is "focus only if nothing already took it", not
+        # "claim the event" — which is also why a body click is a harmless
+        # no-op below rather than a second, competing focus call.
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        # A surface with a legitimate claim on the keyboard keeps it, and the
+        # click route needs this as much as the Esc route does.
+        #
+        # `#prompt-host` is a CHILD of `#input-dock` (see `compose`), so a
+        # `Click` on a live question BUBBLES here and this handler is the LAST
+        # one to run. Measured at 120x40 with a live approval in
+        # `Region(x=1, y=16, w=118, h=14)`, tracing both handlers: a click on
+        # the card's own interior fired `AskPickerScreen.on_click` and then
+        # `ComposerDock.on_click`, and left `focused=Editor` with the `rm -rf`
+        # still unanswered.
+        #
+        # NOTHING in the prompt widgets protects them from this, and an earlier
+        # version of this comment wrongly said `ApprovalPrompt.on_click` called
+        # `event.stop()` and was therefore safe. It does not: `ApprovalPrompt`
+        # extends `AskPickerScreen` (`approval.py:980`) and INHERITS
+        # `AskPickerScreen.on_click` (`ask_picker.py:1117`), which calls
+        # `event.stop()` only after `_index_at` finds a row and returns without
+        # stopping when the click misses one. The `event.stop()` at
+        # `approval.py:465` belongs to `ApprovalBlock`, a DIFFERENT class that
+        # is not what the dock hosts. Traced on a card-interior click:
+        # `PROMPT done stopped_after=False` -> `DOCK(input-dock) recv
+        # stopped=False`. The guard below is the only thing protecting a live
+        # prompt from this handler.
+        #
+        # The predicate rather than an `#prompt-host` containment test, because
+        # it is the general answer: it already covers the approval, the picker,
+        # the aside, the full-page modes, the focused sidebar and any pushed
+        # screen, so a future surface hosted in the dock is protected by
+        # default instead of by someone remembering to extend a selector list.
+        # Shared with the transcript's three routes through
+        # `tui/composer_focus.py`, which is what makes "what must never be
+        # stolen from" one rule rather than four that can drift apart.
+        #
+        # Focus and nothing else: the caret is left exactly where the user put
+        # it. A click on the padding means "put me back in the input", not "put
+        # the caret here" — there is no document position that a padding cell
+        # maps to, and moving the caret would cost the user the place they were
+        # editing to buy them nothing.
+        return_focus_to_composer(self.app, editor)
 
 
 class TranscriptScreen(Screen[None]):
@@ -6924,7 +7007,7 @@ class OperatorApp(App[None]):
                 # never be overdrawn or pushed off-screen by the editor, and it travels
                 # with the input when the panel becomes a card. One row does double duty
                 # — zero extra height (D3/D17).
-                with Container(id="input-dock"):
+                with ComposerDock(id="input-dock"):
                     # The prompt host: where a question the turn is PARKED ON lives.
                     #
                     # Above the band and inside the dock, and both halves of that are
@@ -6953,7 +7036,7 @@ class OperatorApp(App[None]):
                         yield self._subagent_panel
                         yield self._wake_panel
                         yield self._todo_panel
-                    with Container(id="input-shell"):
+                    with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
                         editor = Editor(commands=SLASH_COMMANDS)
                         with Horizontal(id="input-row"):
@@ -15233,6 +15316,129 @@ class OperatorApp(App[None]):
             return picker
         return None
 
+    def _focus_is_claimed(self) -> bool:
+        """Whether some surface has a claim on the keyboard the composer must not take.
+
+        READ-ONLY, and that is load-bearing: it runs on keystroke and click
+        paths, so it must not move focus, mount, unmount, or mutate anything.
+        Callers ask it before reasserting composer focus; if asking the question
+        changed the answer, the reassertion would be racing itself.
+
+        Every branch is guarded individually and the degrade direction is
+        ``True`` — "something might be claiming it". Refusing to steal focus is
+        always the safe failure: the cost of a wrong ``True`` is the user
+        pressing a key that does nothing, while the cost of a wrong ``False`` is
+        the composer pulling focus off a live surface mid-answer. A stripped
+        harness with no composer therefore reads as claimed rather than raising
+        out of a focus path.
+
+        ``_live_prompt`` is CALLED rather than reimplemented: the
+        approval/ask conditions (answered, settled, attached) are subtle enough
+        that a second copy would drift, and this predicate wants exactly the
+        prompt that method already defines.
+        """
+        # An unanswered approval or an unsettled ask owns the keys the composer
+        # would otherwise swallow.
+        try:
+            if self._live_prompt() is not None:
+                return True
+        except Exception:  # noqa: BLE001 — defensive, see the docstring
+            return True
+        try:
+            if self._aside_is_open():
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The three full-page modes and the login prompt: each hides the
+        # transcript or is the only thing on the frame the user can answer.
+        try:
+            if (
+                self._subagent_view is not None
+                or self._org_chart_view is not None
+                or self._settings_view is not None
+                or self._key_prompt is not None
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        try:
+            if self._session_sidebar.has_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The catch-all, and the reason a future overlay is safe by DEFAULT
+        # rather than by someone remembering to extend the list above: any
+        # pushed Screen is a modal route (`/resume`'s session picker is one —
+        # `conftest.py:352`), and the composer is not even on that frame.
+        try:
+            if len(self.screen_stack) > 1:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # Read-only subsumes `_set_composer_read_only` here rather than at each
+        # call site: that method drops `can_focus` precisely so nothing lands a
+        # caret in a field that refuses every key.
+        try:
+            if not self._editor().can_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        return False
+
+    def _return_focus_to_composer(self) -> None:
+        """Put the keyboard back in the composer unless something claims it.
+
+        The guard is :meth:`_focus_is_claimed`, and it is the whole safety
+        mechanism: a live approval or ask picker that pulled focus deliberately
+        keeps it, or the one question the routed keys cannot reach becomes
+        unanswerable. Never unconditional.
+
+        TWO call sites in :meth:`action_stop`, deliberately, and they are not
+        collapsible into one. The reported defect is Esc from a focused tool
+        card on an IDLE app, and that case measures ``pending=False
+        streaming=False children=0`` — it leaves through the nothing-to-stop
+        return partway down the method and never reaches the tail. A single
+        call at the end of ``action_stop`` would therefore fix nothing for the
+        case the fix exists for, while a single call at the nothing-to-stop
+        return would miss Esc during a live turn. Both, or half the fix.
+
+        THREE call sites in :meth:`action_stop`, and the third is the
+        bang-mode abort — see that branch for why it is not collapsible into
+        the sibling return two lines below it.
+
+        The other early returns are NOT a single category, and an earlier
+        version of this docstring claimed they were: it said they "either
+        restore focus themselves or hand the key to a surface that is supposed
+        to keep it", which is false for at least one of them and was measured
+        false during review. A docstring asserting an invariant the code does
+        not hold is how the next person ships the same defect, so what follows
+        states only what was measured.
+
+        Restoring or handing off, as the old blanket described: the aside and
+        the three close paths (subagent view, org chart, settings) all end on
+        the editor; the ``SubagentRow`` navigation exit returns to the
+        draft-bearing composer; the ask picker's ``esc skip`` settles a
+        question whose answer the user is still owed.
+
+        NOT restoring, deliberately: the ``_allow_source_command`` refusal
+        (measured with focus on a ``ToolCard`` and ``_focus_is_claimed()``
+        False — focus stays on the card). That return is not a stop at all. It
+        posted a "commands unavailable until connected" notice and declined to
+        act, and a press the app has just refused should not also move the
+        user's keyboard; the disconnect is transient and the composer is not
+        read-only during it, so the restoration WOULD fire if it were called
+        here. Revisit this if the refusal ever stops posting a notice — then
+        the press really would be silent, and silence in the ledger is the
+        defect this method exists to fix.
+        """
+        if self._focus_is_claimed():
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        editor.focus()
+
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
 
@@ -16026,8 +16232,33 @@ class OperatorApp(App[None]):
             # streaming test so a live turn still takes the first press —
             # the command is local and cheap to re-run, the turn is not.
             if self._abort_shell_command():
+                # ...and come home from here too. This return sits one line
+                # above its sibling below, inside the same block and reached by
+                # the same idle measurement, so the case it covers — a `!`
+                # command in flight while the user reads a tool card — was the
+                # reported defect with an extra condition on it. Measured
+                # before this line, with a real `! sleep 30` running and the
+                # branch traced: `focused=ToolCard claimed=False` ->
+                # `_abort_shell_command->True` -> focus still `ToolCard`.
+                #
+                # Aborting the command is not a surface that wants the
+                # keyboard: the card it marks interrupted is a ledger row, not
+                # an input, so there is nothing here for Esc to hand the key
+                # to. `_return_focus_to_composer` is still guarded, so a
+                # command aborted while an approval is up leaves the approval
+                # holding focus.
+                self._return_focus_to_composer()
                 return
             # Nothing to stop. Explicitly NOT clearing the composer.
+            #
+            # But DO come home: this is the return the reported defect leaves
+            # through. Esc from a focused tool card on an idle app measures
+            # `pending=False streaming=False children=0`, so it exits here and
+            # never reaches the call at the end of this method. Measured before
+            # the fix: Esc from a focused card left `focused=ToolCard` with
+            # `_focus_is_claimed()` False — the app's one "get me out of here"
+            # key left the user stranded in the ledger.
+            self._return_focus_to_composer()
             return
 
         if pending or streaming:
@@ -16078,6 +16309,13 @@ class OperatorApp(App[None]):
         else:
             self._stop_offered_at = None
             self._stop_offer_count = 0
+
+        # The live-turn half of the same behaviour: Esc that actually stopped
+        # something also brings the keyboard home. Last, so every branch above
+        # that legitimately owns the key has already returned — the docstring's
+        # rule is that Esc means one thing wherever focus happens to be, and
+        # landing back in the composer is the rest of that promise.
+        self._return_focus_to_composer()
 
     def _expire_stop_offer(self, armed_at: float) -> None:
         """Drop the escalation promise from a standing offer once it lapses.
@@ -22027,7 +22265,20 @@ class OperatorApp(App[None]):
         restore = self._org_chart_focus_restore
         self._org_chart_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # The `or` alone was not enough, and the `except` was not catching
+            # what it looked like it caught: a widget removed while the mode was
+            # up is not None, so `or` does not fire, and `.focus()` on a DETACHED
+            # widget is a silent NO-OP rather than a raise (measured: stale card
+            # is_attached=False display=False, .focus() raised nothing and left
+            # focus exactly where it was). The close path therefore left focus
+            # stranded on whatever held it. Same guard as
+            # `_close_subagent_view`, which already had this right.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
@@ -22238,7 +22489,16 @@ class OperatorApp(App[None]):
         restore = self._settings_focus_restore
         self._settings_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # Stale-target guard, for the reason `_close_org_chart_view` records:
+            # `.focus()` on a detached widget is a silent no-op, so neither the
+            # `or` nor the `except` below caught a restore target that had been
+            # removed while the page was up.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
