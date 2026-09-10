@@ -34,6 +34,7 @@ from local_operator.mobile.attach_client import (
     _READ_LIMIT_BYTES,
     AttachClient,
     OversizedRequest,
+    _megabytes,
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -2477,7 +2478,12 @@ async def test_an_unsendable_message_is_refused_by_name_not_silently_lost(
         with pytest.raises(OversizedRequest) as prose:
             await client.prompt("x" * (_MAX_LINE_BYTES + 200_000))
         assert "shorten" in str(prose.value), str(prose.value)
-        assert f"{_MAX_LINE_BYTES:,}" in str(prose.value), "the refusal hides the actual limit"
+        # The LIMIT, in the same scale as the size beside it. Asserted as "the
+        # sentence carries the ceiling" rather than against a raw byte count:
+        # both figures print as MB now, because a refusal that quotes
+        # `1,341,208 bytes` against an image refusal quoting MB makes the user
+        # compare two scales to understand one failure (design round 1, D1).
+        assert _megabytes(_MAX_LINE_BYTES) in str(prose.value), "the refusal hides the actual limit"
         assert client.connected, "reporting the refusal killed the connection"
 
         junk = {
@@ -2551,3 +2557,253 @@ def test_the_refit_prefers_the_codec_over_the_users_pixels() -> None:
         "the refit gave up pixels when a re-encode would have been enough; "
         f"it delivered {info.width}x{info.height}"
     )
+
+
+def test_the_every_rung_jpeg_rule_has_its_own_test() -> None:
+    """A 1400x1400 continuous-tone frame against 240 KB must FIT, not be refused.
+
+    The self-reported defect this pins: the JPEG re-encode was applied only to
+    the no-resize rung, so every descending rung handed back a PNG of content
+    PNG cannot compress, the ladder ran out of rungs, and the image was refused
+    while the real remedy had never been tried below full size.
+
+    Its own test, named for the claim. The regression was previously caught only
+    as a side effect of ``test_several_images_share_one_frame_budget``, whose
+    stated subject is the shared budget — so a legitimate refactor of the budget
+    split could rewrite that test and silently drop coverage of this rule
+    (review round 1, NIT-1). Asserted as a PROPERTY (it fits at all) rather than
+    against a byte count or a specific rung, so the ladder stays free to change.
+    """
+    from local_operator.imaging import refit_image_to_budget
+
+    data_b64 = base64.b64encode(_png_bytes(1400, 1400)).decode("ascii")
+    result = refit_image_to_budget(data_b64, "image/png", 240 * 1024)
+
+    assert result is not None, (
+        "a 1400x1400 frame against a 240 KB budget was refused; the JPEG "
+        "re-encode is not being applied at every rung"
+    )
+    refitted_b64, mime = result
+    assert len(refitted_b64) <= 240 * 1024
+    assert mime == "image/jpeg", f"the descending rung returned {mime}, not a re-encode"
+
+
+@pytest.mark.asyncio
+async def test_a_long_prompt_beside_a_screenshot_still_sends(tmp_path: Path, monkeypatch) -> None:
+    """The PR's OWN headline repro: a big screenshot over ~780 KB of source.
+
+    The image budget used to be ``limit - 64 KiB``, a constant, while the text
+    it had to cover is bounded only by ``MAX_CLIPBOARD_TEXT_BYTES`` (1 MiB). Any
+    prompt past ~64 KiB therefore had its images fitted against room that was
+    never available, the post-refit re-measure caught the overflow, and the
+    whole message was refused — including the exact "one pasted screenshot over
+    ~780 KB of source" this module's docstring names as the bug being fixed
+    (review round 1, MAJOR-1).
+
+    Parametrized over the text sizes that used to fail, because the threshold is
+    what regressed: 32 KiB passed before this fix and everything above it did
+    not.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1672, 941)
+
+        for text_bytes in (100 * 1024, 300 * 1024, 780 * 1024):
+            prompt = "x" * text_bytes
+            assert await client.prompt(prompt, images=[image]) == "prompt ok", (
+                f"a {text_bytes // 1024} KiB prompt beside a screenshot was refused; "
+                "the image budget is not being measured against the real text"
+            )
+            delivered_text, delivered = handle.received[-1]
+            assert delivered_text == prompt, "the text was altered to make it fit"
+            assert len(delivered) == 1, "the attachment was dropped rather than resized"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_small_image_hands_its_unused_budget_to_a_large_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An icon must not reserve the same share as a screenshot and waste it.
+
+    A flat ``budget // len(images)`` split gave a 32x32 icon the same share as a
+    1600x1000 screenshot, and the icon handed nothing back: the screenshot lost
+    half its pixels while most of the frame went unspent (review round 1,
+    MINOR-2). Asserted against the SHARE the flat split would have imposed
+    rather than a fixed size, so the test states the property — the big image
+    got more than an equal share — instead of pinning today's ladder rung.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        assert (
+            await client.prompt(
+                "what is this", images=[_wire_image(32, 32), _wire_image(1600, 1000)]
+            )
+            == "prompt ok"
+        )
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 2
+
+        payloads = [getattr(image, "data", None) or image.get("data_b64") for image in delivered]
+        flat_share = (_MAX_LINE_BYTES - len("what is this")) // 2
+        assert len(payloads[0]) < flat_share // 4, "the icon grew to fill its share"
+        assert len(payloads[1]) > flat_share, (
+            "the screenshot was held to an equal share while the icon's went "
+            f"unspent: it got {len(payloads[1])} of a {flat_share} flat share"
+        )
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_quotes_the_marker_the_user_can_see(tmp_path: Path, monkeypatch) -> None:
+    """ "image 3" must name the chip on screen, not the wire position.
+
+    Marker numbers do not renumber when an attachment is deleted, so after three
+    pastes and two backspaces the survivor's chip reads ``[Image #3]`` while its
+    wire position is 1 — and the refusal said "image 1", pointing at a chip that
+    is not on the user's screen (design round 1, D4).
+
+    Also pins the two numbers the sentence carries (design round 1, D1): the
+    IMAGE's size rather than its base64 (which inflates by 4/3 and overstated a
+    2.4 MB file as 3.2 MB), and the ceiling that actually applied, without which
+    the user cannot tell whether cropping would help.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        # Sixteen attachments is where even the tightest rung cannot fit, which
+        # is what makes the refusal reachable at all (design round 1, D6).
+        images = [{**_wire_image(1024, 1024), "marker": 20 + index} for index in range(16)]
+
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt("compare these", images=images)
+
+        message = str(refusal.value)
+        assert "image 2" in message, f"the refusal quoted a wire position: {message}"
+        assert "image 1 " not in message, f"the refusal quoted a wire position: {message}"
+        assert "per-image budget" in message, f"the refusal hides the ceiling: {message}"
+        assert "16 attachments" in message, f"the refusal hides the share's cause: {message}"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_only_a_downscale_is_reported_to_the_user(tmp_path: Path, monkeypatch) -> None:
+    """A codec swap keeps every pixel and must stay silent; a downscale must not.
+
+    The product call design round 1 (D2) argued rather than deferred: because the
+    composer bounds every paste to 1024px, the common rung is a re-encode at
+    unchanged dimensions, and a notice on that would be pure noise on a routine
+    gesture. Losing pixels is different in kind — measured at ~40% edge energy —
+    so that rung, and only that rung, is surfaced.
+
+    Asserted on ``downscaled``, which is the predicate the transcript row is
+    gated on, and measured from the DELIVERED bytes on both sides so a rung
+    change cannot make the two cases agree by accident.
+    """
+    from local_operator.mobile.attach_client import taken_refit_report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # Two composer-bounded screenshots: over the limit together, but the
+        # codec alone closes the gap, so every pixel survives.
+        await client.prompt("look", images=[_wire_image(1024, 576) for _ in range(2)])
+        codec_only = taken_refit_report()
+        assert not [entry for entry in codec_only if entry.downscaled], (
+            "a codec-only refit was reported as a downscale; the transcript "
+            f"would put a notice on a routine paste: {codec_only}"
+        )
+
+        # Far past what the codec can absorb, so pixels genuinely go.
+        await client.prompt("look", images=[_wire_image(1400, 1400) for _ in range(8)])
+        downscaled = [entry for entry in taken_refit_report() if entry.downscaled]
+        assert downscaled, "pixels were lost and nothing was reported"
+        for entry in downscaled:
+            assert entry.width * entry.height < entry.source_width * entry.source_height
+            assert entry.marker >= 1
+
+        # CONSUMED, not merely read: a stale report would caption the next,
+        # untouched message with this one's resize.
+        assert taken_refit_report() == ()
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_junk_scalar_frame_does_not_kill_the_connection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A frame that parses as a bare JSON scalar must be dropped, not fatal.
+
+    ``json.loads`` succeeds on any scalar, so a discarded oversized line whose
+    surviving tail happens to read ``12345``/``null``/``true``/``"s"``/``[1,2]``
+    reached ``_on_request`` and hit ``.get`` on an int/None/bool/str/list. The
+    resulting ``AttributeError`` escaped the reader loop's
+    ``ConnectionResetError``/``BrokenPipeError`` handler and the ``finally``
+    dropped the client — the exact session death this module exists to prevent,
+    made reachable by the new discard path (review round 1, MAJOR-2).
+
+    Driven over a REAL socket, and the assertion is not merely "still
+    connected": the NEXT message must be DELIVERED, which is what the operator
+    actually lost.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        assert client._writer is not None
+
+        for raw in ("12345", "null", "true", '"str"', "[1,2]"):
+            # The fixture only tests what it claims if it really is a non-dict.
+            assert not isinstance(json.loads(raw), dict), f"{raw} is not a scalar frame"
+            client._writer.write(raw.encode() + b"\n")
+            await client._writer.drain()
+
+            assert (
+                await client.prompt(f"after {raw}") == "prompt ok"
+            ), f"a {raw} frame killed the connection; the next message was lost"
+            assert handle.received[-1][0] == f"after {raw}"
+            assert client.connected
+    finally:
+        client.close()
+        registrant.close()

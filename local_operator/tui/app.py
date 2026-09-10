@@ -3866,6 +3866,94 @@ class OperatorApp(App[None]):
             held for held in source.turn.pending_echoes if held is not entry
         ]
 
+    def _report_wire_refit_for(self, source: SessionInteraction) -> None:
+        """Say so when the transport had to COST the user pixels to send.
+
+        SILENT ON THE COMMON CASE, deliberately. The composer already bounds
+        every paste to ``IMAGE_INGEST_MAX_EDGE`` (1024px), so an ordinary
+        message meets the refit's first rung — a re-encode at unchanged
+        dimensions — and every pixel survives. Measured across both shapes an
+        operator pastes, one to six attachments are a codec swap and nothing
+        else: stack traces and identifiers are equally readable before and
+        after. A row on every paste would be pure noise on a routine gesture
+        (design round 1, D2).
+
+        THE DOWNSCALE RUNG IS DIFFERENT IN KIND. Once the ladder gives up
+        pixels the loss is not subtle — measured at ~40% edge energy at 768px,
+        enough that `1234553` reads as `1?34553`. A screenshot pasted BECAUSE
+        it contains a number, silently made to contain a different number, with
+        the model answering confidently about the wrong one, is the exact
+        failure the user cannot detect for themselves. So that rung, and only
+        that rung, gets a row.
+
+        IN THE VOCABULARY THE APP ALREADY OWNS: ``editor.RESIZED_MARK`` is the
+        ``↓`` the composer puts on a marker whose image was downscaled at
+        ingest, and its comment says it exists to answer "why is this not the
+        size I pasted?" — which is verbatim the question the wire refit
+        provokes. Reusing the glyph means one idiom for one fact rather than a
+        second convention for the same event two files apart.
+
+        At ``note`` weight, not ``warning``: nothing is wrong and nothing needs
+        acting on — the message was delivered — but it answers something the
+        user just did, which is exactly the role ``NoticeBlock`` documents for
+        that tier.
+        """
+        # Function-local for the reason the other `attach_client` references in
+        # this file give: the startup path must not import the transport.
+        from local_operator.mobile.attach_client import taken_refit_report
+        from local_operator.tui.widgets.editor import RESIZED_MARK
+
+        # CONSUMED whatever the outcome, so a report never outlives its send:
+        # reading it without taking it would let the next, untouched message
+        # inherit this one's caption.
+        lost = [entry for entry in taken_refit_report() if entry.downscaled]
+        if not lost:
+            return
+        detail = ", ".join(
+            f"#{entry.marker} {entry.source_width}x{entry.source_height} → "
+            f"{entry.width}x{entry.height}"
+            for entry in lost
+        )
+        plural = "s" if len(lost) != 1 else ""
+        self._notice_for(
+            source,
+            f"image{plural} resized to fit this message: {detail}{RESIZED_MARK}",
+            "note",
+        )
+
+    def _withdraw_user_echo_for(self, source: SessionInteraction) -> None:
+        """Take the painted prompt rows back off the transcript.
+
+        FOR A MESSAGE THAT WAS NEVER SENT, and only for that. The echo is
+        painted at submit so the app answers the keystroke immediately, which is
+        right for every path where the prompt does reach the session. A refused
+        send is the one path where it does not, and there the row is a durable
+        lie: identical styling to a delivered message — same rule, same weight,
+        same full-width thumbnail — so a scroll-back a week later cannot tell it
+        from a real turn. Worse after the user complies than before: they follow
+        the refusal's advice, resend, and the transcript now shows the message
+        twice with an attachment that never left the machine (design round 1,
+        D3).
+
+        REMOVED rather than dimmed or struck through. The draft is back in the
+        composer by the time this runs and is about to be echoed again by the
+        resend, so a marked-up copy would leave the user reading two rows for
+        one message and deciding which is real. The same reasoning
+        ``_recall_queued_steers`` gives for lifting a recalled steer's rows, and
+        the removal is the same call it makes.
+
+        Only touches the CURRENT view's transcript, because that is the only
+        one holding widgets: a background source's rows were never mounted, and
+        its restored draft is carried by ``source.unsent`` instead.
+        """
+        held, source.turn.submitted_blocks = source.turn.submitted_blocks, None
+        if held is None or not self._is_current(source):
+            return
+        user_block, image_blocks = held
+        transcript = self._transcript_view()
+        for block in (*image_blocks, user_block):
+            transcript.remove_block(block)
+
     def _post_turn_abandoned_for(
         self,
         source: SessionInteraction,
@@ -17881,6 +17969,12 @@ class OperatorApp(App[None]):
             self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
             self._maybe_name_conversation(named)
             return
+        # HELD ACROSS THE DISPATCH so a refusal can take the echo back down.
+        # Set before `_start_turn` rather than after: the worker it starts can
+        # reach its `except` before this line would otherwise run, and an echo
+        # the worker cannot see is one it cannot withdraw. Cleared by the
+        # worker's `finally` on every path (see `_start_turn_for`).
+        self._interaction.turn.submitted_blocks = (user_block, image_blocks)
         echo = self._start_turn(sent, images)
         if isinstance(echo, _PendingUserEcho):
             user_block.navigation_anchor_id = echo.message_id
@@ -17962,6 +18056,10 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
+                # DELIVERED — so if the transport had to shrink an attachment to
+                # get it here, this is the moment the user can be told. See
+                # `_report_wire_refit_for`.
+                self._report_wire_refit_for(source)
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
                 # `CancelledError` is a `BaseException`, so it slides straight
@@ -18006,10 +18104,31 @@ class OperatorApp(App[None]):
                     #
                     # So the draft goes back the same way a dead runtime returns
                     # it, and the error's own sentence is the notice — it
-                    # already names the size, the limit, and which attachment to
-                    # drop, which is what makes the refusal actionable.
+                    # already names the size, the ceiling that applied, and
+                    # which attachment to drop, which is what makes the refusal
+                    # actionable.
+                    #
+                    # AND THE ECHO COMES DOWN WITH IT, before anything is said,
+                    # so the refusal is not printed under a prompt row the
+                    # transcript is about to retract.
+                    self._withdraw_user_echo_for(source)
+                    self._notice_for(
+                        source,
+                        # The neighbouring runtime-stopped notice tells the user
+                        # their text survived and this one did not, so the user
+                        # was told to act without being told they still had
+                        # anything to act with (design round 1, D7).
+                        f"{error} — your message is back in the composer",
+                        "warning",
+                    )
+                    # AFTER the explanation. `_restore_unsent_for` can append a
+                    # `DraftRecoveryNotice`, and appending it first put the
+                    # offer to restore ABOVE the reason anything needs restoring
+                    # — the transcript read effect-then-cause (design round 1,
+                    # D5). On the common branch it loads the composer directly
+                    # and appends nothing, so this only reorders the case that
+                    # has two rows to order.
                     self._restore_unsent_for(source, text, images, accepted=accepted)
-                    self._notice_for(source, str(error), "warning")
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -18050,6 +18169,12 @@ class OperatorApp(App[None]):
             finally:
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
+                # The echo is only withdrawable while the send's outcome is
+                # unknown. Past this point the prompt was either delivered (the
+                # row is true and permanent) or already withdrawn above, and a
+                # stale reference would let a LATER refusal remove the rows of
+                # an earlier, successfully delivered message.
+                source.turn.submitted_blocks = None
                 source.active_workers -= 1
                 self.call_later(self._source_frontend_changed, source)
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong

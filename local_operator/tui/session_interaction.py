@@ -29,6 +29,19 @@ class TurnInteraction:
     accrued_cost: float = 0.0
     pending_echoes: list[Any] = field(default_factory=list)
     submitted_draft: SessionDraft | None = None
+    #: The transcript rows this surface painted for the prompt currently in
+    #: flight — ``(UserBlock, [ImageBlock, ...])`` — held only until the turn
+    #: is admitted or refused.
+    #:
+    #: The echo is painted at SUBMIT, before the worker runs, because a prompt
+    #: that appears the instant Enter is pressed is what makes the app feel
+    #: answerable. When the send is then REFUSED the row is a lie that outlives
+    #: the failure: styled exactly like a delivered message, and still there
+    #: after the user follows the refusal's advice and resends, so the
+    #: transcript shows the message twice and asserts an image was sent that
+    #: never left the machine (design round 1, D3). Holding the blocks is what
+    #: lets that echo be withdrawn; ``_withdraw_user_echo_for`` is the consumer.
+    submitted_blocks: tuple[Any, list[Any]] | None = None
     completion_deferred: bool = False
     settled_child_ids: set[str] = field(default_factory=set)
     waiting_kind: str | None = None
