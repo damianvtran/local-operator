@@ -135,8 +135,11 @@ class SessionLine:
 
     pid: int = 0
     kind: str = ""
-    #: ``live`` | ``wedged`` | ``stale``. ``stale`` means the scan just DELETED
-    #: the record file (``registry.scan``), not that the session is idle.
+    #: ``live`` | ``wedged`` | ``stale`` | ``stored``. ``stale`` means the scan
+    #: just DELETED the record file (``registry.scan``), not that the session is
+    #: idle. ``stored`` is a session directory with NO live record — the
+    #: ``--all`` listing's addition — where the process-level fields (pid, RSS,
+    #: uptime, heartbeat) are meaningless and left at their empty defaults.
     state: str = ""
     session_id: str = ""
     conversation_name: str = ""
@@ -146,6 +149,11 @@ class SessionLine:
     heartbeat_age_s: float = 0.0
     rss_bytes: int | None = None
     footprint_bytes: int | None = None
+    #: Last-activity stamp for a ``stored`` row (transcript mtime), so the
+    #: ``--all`` listing can sort and show recency for a session that has no
+    #: uptime to report. ``None`` for a live/wedged/stale row, which carries
+    #: ``uptime_s``/``heartbeat_age_s`` instead.
+    last_activity_s: float | None = None
     pending: str | None = None
     busy: bool = False
     detached: bool = False

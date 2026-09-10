@@ -312,6 +312,8 @@ def collect_sessions(
     usage: Callable[..., dict[int, Any]] | None = None,
     self_pid: int | None = None,
     now: float | None = None,
+    include_stored: bool = False,
+    stored_limit: int | None = None,
 ) -> SessionsInfo:
     """Every session on this machine, as ``lop sessions`` already describes them.
 
@@ -331,6 +333,18 @@ def collect_sessions(
 
     ``scan`` / ``usage`` / ``now`` are injectable seams so the tests can pin the
     degradation matrix without a real machine's sessions under them.
+
+    ``include_stored`` folds in sessions that are NOT running — directories
+    under ``config_dir()/sessions/`` with no live record — as ``stored`` rows
+    carrying only ``session_id`` / ``conversation_name`` / ``last_activity_s``
+    (the process-level fields are meaningless for a dead session and stay at
+    their defaults). It is the ``lop sessions --all`` opt-in: the default path
+    stays exactly the live-only listing every consumer already reads, and the
+    /info panel — which is about the running fleet's cost — never asks for it.
+    Stored rows come from the same ``resume.recent_session_rows`` scan the
+    ``/resume`` picker uses, so a session is named here by the title the picker
+    would show, and a directory the picker hides (subagent scratch) is not a
+    session for messaging either.
     """
     from local_operator.mobile.resources import session_resource_usage
     from local_operator.session.runtime import registry
@@ -380,7 +394,17 @@ def collect_sessions(
             )
         )
 
-    builds = {(line.version, line.source_ref) for line in lines if line.state == "live"}
+    if include_stored and root is not None:
+        lines.extend(_stored_lines(root, {line.session_id for line in lines}, stored_limit))
+
+    # The roll-up counters describe the RUNNING fleet, so they count only the
+    # rows the registry published. A ``stored`` row (``include_stored``) names a
+    # session that is not running; counting it under ``total``/``live`` would
+    # make the /info header report sessions that have no runtime, the exact
+    # misreading those counters exist to prevent. ``lines`` keeps them (the
+    # listing is the point of the flag); the counters ignore them.
+    live_only = [line for line in lines if line.state != "stored"]
+    builds = {(line.version, line.source_ref) for line in live_only if line.state == "live"}
     builds.discard(("", ""))
 
     # The population is every RUNNING PROCESS: ``live`` and ``wedged`` both
@@ -390,7 +414,7 @@ def collect_sessions(
     # last published counts and the renderer's caveat says they are as of its
     # last heartbeat. A ``stale`` record is excluded outright: the scan above
     # just DELETED its file because the pid is gone, so it is not a runtime.
-    live_lines = [line for line in lines if line.state in ("live", "wedged")]
+    live_lines = [line for line in live_only if line.state in ("live", "wedged")]
     reporting = [line for line in live_lines if line.subagents_running is not None]
     fleet_running = sum(line.subagents_running or 0 for line in reporting)
     # Session trajectories and subagent trajectories are DISJOINT by
@@ -401,13 +425,13 @@ def collect_sessions(
     session_trajectories = sum(1 for line in live_lines if line.busy)
     return SessionsInfo(
         lines=tuple(lines),
-        total=len(lines),
-        live=sum(1 for line in lines if line.state == "live"),
-        wedged=sum(1 for line in lines if line.state == "wedged"),
-        stale=sum(1 for line in lines if line.state == "stale"),
-        busy=sum(1 for line in lines if line.busy),
-        pending=sum(1 for line in lines if line.pending),
-        detached=sum(1 for line in lines if line.detached),
+        total=len(live_only),
+        live=sum(1 for line in live_only if line.state == "live"),
+        wedged=sum(1 for line in live_only if line.state == "wedged"),
+        stale=sum(1 for line in live_only if line.state == "stale"),
+        busy=sum(1 for line in live_only if line.busy),
+        pending=sum(1 for line in live_only if line.pending),
+        detached=sum(1 for line in live_only if line.detached),
         build_skew=len(builds) > 1,
         # "Nothing measured at all" is a different fact from "this pid could
         # not be measured", and only the first should suppress the column.
@@ -422,7 +446,64 @@ def collect_sessions(
     )
 
 
-def session_rows(root: Path | None = None) -> list[dict[str, Any]]:
+#: How many stored sessions ``lop sessions --all`` lists when no ``--limit`` is
+#: given. The store grows without bound on a well-used machine, so the listing
+#: caps the rows it shows to the most recent rather than printing a wall; the
+#: flag is an opt-in and the cap is named so a consumer can see where it is
+#: chosen. ``None`` (no cap) is expressible via ``--limit 0``'s absence being a
+#: distinct argument — see ``sessions_command``.
+STORED_SESSIONS_DEFAULT_LIMIT = 50
+
+
+def _stored_lines(root: Path, live_ids: set[str], limit: int | None) -> list[SessionLine]:
+    """One ``SessionLine`` per STORED session: a directory with no live record.
+
+    Read from the same ``resume.recent_session_rows`` scan the ``/resume``
+    picker uses, so a session is named here by the title the picker would show
+    and a directory the picker hides (subagent scratch) is not offered for
+    messaging either. The scan is newest-first on the transcript activity clock
+    (``session.retention.session_activity``) — the recency a human recognises
+    — so the cap truncates the tail of an ordering that is already useful.
+
+    Only the durable identity fields are filled: ``pid``, RSS, uptime and
+    heartbeat age are properties of a RUNNING process and are meaningless for a
+    dead session, so they keep the empty defaults the renderer turns into ``—``.
+    ``last_activity_s`` carries the transcript mtime in their place.
+
+    Best-effort, never a gate: a store that cannot be read yields no stored rows
+    rather than failing a listing whose first job is the LIVE fleet.
+    """
+    from local_operator.resume import recent_session_rows
+
+    try:
+        rows = recent_session_rows(root, limit)
+    except Exception:  # noqa: BLE001 — a listing must not fail on the store
+        return []
+    lines: list[SessionLine] = []
+    for row in rows:
+        # Live wins: a session the registry just published for is not "stored",
+        # and listing it twice would double-count one conversation in the
+        # output the operator reads to decide what to send where.
+        if row.id in live_ids:
+            continue
+        lines.append(
+            SessionLine(
+                pid=0,
+                state="stored",
+                session_id=row.id,
+                conversation_name=row.name,
+                last_activity_s=row.mtime,
+            )
+        )
+    return lines
+
+
+def session_rows(
+    root: Path | None = None,
+    *,
+    include_stored: bool = False,
+    stored_limit: int | None = None,
+) -> list[dict[str, Any]]:
     """``lop sessions --json``'s rows, in its established key order.
 
     The CLI's ``--json`` contract is a published surface, so the key order and
@@ -430,8 +511,17 @@ def session_rows(root: Path | None = None) -> list[dict[str, Any]]:
     compares against the pre-extraction literal) rather than derived from
     ``dataclasses.asdict``, which would leak ``is_self`` — a field the CLI never
     had — into it.
+
+    ``include_stored`` appends ``stored`` rows for sessions with a directory but
+    no live record (the ``--all`` opt-in). The published shape is EXTENDED, not
+    broken: the established keys stay first and in order, and the stored-only
+    ``last_activity_s`` rides at the END so every existing key position is
+    preserved. It is present on every row (``None`` on a live one) because a
+    consumer that must branch on key EXISTENCE per row is a worse contract than
+    a stable shape with one nullable field. The extraction test asserts exactly
+    this order, so the expectation is updated in the same change.
     """
-    info = collect_sessions(root)
+    info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
     return [
         {
             "state": line.state,
@@ -459,6 +549,11 @@ def session_rows(root: Path | None = None) -> list[dict[str, Any]]:
             # unreported-vs-zero distinction the screen makes.
             "subagents_running": line.subagents_running,
             "subagents_queued": line.subagents_queued,
+            # The stored row's only clock (transcript activity mtime); ``None``
+            # on every live/wedged/stale row, which carries ``uptime_s`` and
+            # ``heartbeat_age_s`` instead. Last in the dict so the pinned order
+            # above is untouched.
+            "last_activity_s": line.last_activity_s,
         }
         for line in info.lines
     ]

@@ -23,10 +23,22 @@ import asyncio
 import os
 import subprocess
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
+
+#: How much of a stored session store the send-side fallback scans while
+#: hunting for a substring match. Discovery over the WHOLE store would pay one
+#: bounded name read per directory (hundreds exist on a well-used machine) on
+#: a path whose whole job is to answer quickly; the mtime-ordered scan
+#: underneath (:func:`resume._scan_sessions`) visits every directory anyway,
+#: so this caps the ROW-BUILDING half, not the scan. A target that matches
+#: nothing in the newest window is answered with the no-match error naming
+#: ``--session`` — an exact id always resolves, so no message is made
+#: undeliverable by the cap, only un-findable by NAME.
+STORED_DISCOVERY_LIMIT = 200
 
 #: Peer messaging body cap. Well under the registrant's 1 MB line limit so a huge
 #: paste is rejected with a clear message here rather than becoming a silently
@@ -196,9 +208,10 @@ def resolve_cold_session(session: str) -> "str | None":
     publish, so before this a note to a session whose terminal was closed had
     no target at all — the very case the quiet mailbox mode is for. An exact
     session id is the only accepted form here on purpose: a substring match
-    against on-disk directories has no conversation name to match on and could
-    silently pick the wrong transcript, and picking the wrong recipient is the
-    one failure this whole path must not have.
+    against on-disk directories needs the conversation names that only the
+    picker path reads, which is what :func:`resolve_stored_target` adds.
+    Picking the wrong recipient is the one failure this whole path must not
+    have.
 
     Returns the id when its session directory exists, else None.
     """
@@ -209,6 +222,110 @@ def resolve_cold_session(session: str) -> "str | None":
         return session if directory.is_dir() else None
     except OSError:
         return None
+
+
+class StoredCandidate(NamedTuple):
+    """One stored session a substring target could mean.
+
+    The fields mirror the live :class:`SessionRecord`'s identity fields
+    (``session_id``/``conversation_name``/``cwd``) so the caller's
+    disambiguation code can treat live and stored matches alike. There is no
+    ``pid`` — nothing is running — which is exactly why
+    :func:`stored_candidate_lines` exists rather than the shared
+    :func:`candidate_lines`: a ``pid=`` hint against a stored session is an
+    address that can never resolve.
+    """
+
+    session_id: str
+    conversation_name: str
+    cwd: str = ""
+
+
+#: A stored session's ``cwd`` is deliberately an EMPTY string. There is no
+#: cheap on-disk record of where a session was last opened — the only writer
+#: is the transcript's ``session`` entry, whose head a bounded scan can miss
+#: and whose parse would drag the engine onto an import-guarded path. The
+#: exact-id stored resolution (:func:`resolve_cold_session`) already resolves
+#: with no cwd and delivers correctly; matching by cwd-basename would be a
+#: marginal convenience bought with a fragile scan, so stored candidates match
+#: on name and id only.
+
+
+def resolve_stored_target(
+    needle: str,
+    *,
+    live_ids: "set[str] | None" = None,
+    limit: int = STORED_DISCOVERY_LIMIT,
+    root: "Path | None" = None,
+) -> "tuple[str | None, list[StoredCandidate], str]":
+    """Match a substring against STORED sessions the live scan did not claim.
+
+    The fallback half of send-side discovery: :func:`resolve_peer_target`
+    searches discovery records, which only RUNNING sessions publish, so a note
+    addressed to a session by the name it had before its terminal was closed
+    found nothing at all. This searches the session store the same way the
+    ``/resume`` picker lists it — :func:`resume.recent_session_rows` for the
+    id/name ordering, one bounded read per row, subagent scratch sessions
+    excluded — and applies the same case-insensitive substring rule the live
+    path does, over name and session id (a stored session has no recoverable
+    cwd — see :class:`StoredCandidate`).
+
+    ``live_ids`` excludes sessions that already have a runtime: live wins over
+    stored for the same substring, and without the exclusion a name both a
+    running session and its own stored directory answer to would be reported
+    ambiguous between itself. ``resolve_peer_target`` passes every id its scan
+    saw; the CLI's exact-id path does not consult this function at all.
+
+    Returns ``(session_id, candidates, error)`` with the same contract as
+    :func:`resolve_peer_target`: exactly one of the first or last is
+    meaningful, and ``candidates`` lists the ambiguous matches for the caller
+    to disambiguate. The resolved id feeds the EXISTING
+    :func:`resolve_cold_session` / :func:`deliver_peer_message` path — this
+    function decides WHO, never HOW a message is delivered.
+    """
+    from local_operator.resume import recent_session_rows
+
+    directory = config_dir() if root is None else root
+    try:
+        rows = recent_session_rows(directory, limit)
+    except Exception:  # noqa: BLE001 — discovery must never refuse a send
+        return None, [], ""
+    needle_folded = needle.strip().lower()
+    if not needle_folded:
+        return None, [], ""
+    excluded = live_ids or set()
+    matches: list[StoredCandidate] = []
+    for row in rows:
+        if row.id in excluded:
+            continue
+        candidate = StoredCandidate(session_id=row.id, conversation_name=row.name)
+        haystacks = [candidate.conversation_name, candidate.session_id]
+        if any(needle_folded in field.lower() for field in haystacks):
+            matches.append(candidate)
+    if not matches:
+        return None, [], ""
+    if len(matches) > 1:
+        return None, matches, ""
+    return matches[0].session_id, [], ""
+
+
+def stored_candidate_lines(
+    candidates: "list[StoredCandidate]", *, indent: str = "", prefix: str = "session"
+) -> "list[str]":
+    """One disambiguation line per ambiguous STORED candidate.
+
+    The stored sibling of :func:`candidate_lines`, which prints ``pid=`` hints
+    a stored session can never satisfy — there is no pid. Same layout, same
+    caller-controlled separator convention, but the address shown is the
+    session id: the one form of a stored session's name that always resolves.
+    """
+    lines: list[str] = []
+    gap = "" if prefix.endswith("=") else " "
+    id_w = max(len(c.session_id) for c in candidates)
+    for c in candidates:
+        name = c.conversation_name or "(unnamed)"
+        lines.append(f"{indent}{prefix}{gap}{c.session_id:>{id_w}}  {name}  (not running)")
+    return lines
 
 
 async def deliver_peer_message(

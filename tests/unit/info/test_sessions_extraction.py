@@ -140,6 +140,11 @@ EXPECTED = [
         "source_ref": "4311eb653aa9",
         "subagents_running": 2,
         "subagents_queued": 1,
+        # The stored row's clock (transcript activity); None on a live row,
+        # which reports uptime_s/heartbeat_age_s instead. Present on every row
+        # so the published shape is stable — a consumer never branches on key
+        # existence.
+        "last_activity_s": None,
     },
     {
         "state": "live",
@@ -160,6 +165,7 @@ EXPECTED = [
         "source_ref": "",
         "subagents_running": None,
         "subagents_queued": None,
+        "last_activity_s": None,
     },
     {
         "state": "stale",
@@ -183,6 +189,7 @@ EXPECTED = [
         # whole point of the pair — see ``SessionsInfo.subagents_unreported``.
         "subagents_running": None,
         "subagents_queued": None,
+        "last_activity_s": None,
     },
 ]
 
@@ -233,7 +240,9 @@ def test_cli_sessions_command_uses_the_shared_builder(monkeypatch: Any, capsys: 
     from local_operator import cli
 
     _install_fixture(monkeypatch)
-    code = cli.sessions_command(argparse.Namespace(json=True, sessions_command=None))
+    code = cli.sessions_command(
+        argparse.Namespace(json=True, sessions_command=None, all=False, limit=None)
+    )
     assert code == 0
 
     import json
@@ -248,7 +257,9 @@ def test_cli_table_still_renders_every_row(monkeypatch: Any, capsys: Any) -> Non
     from local_operator import cli
 
     _install_fixture(monkeypatch)
-    code = cli.sessions_command(argparse.Namespace(json=False, sessions_command=None))
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
     assert code == 0
 
     out = capsys.readouterr().out
