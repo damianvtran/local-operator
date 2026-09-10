@@ -2145,6 +2145,23 @@ class OpenAICompatClient:
             body["service_tier"] = fast.value
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
+        if request.model.supports_prompt_cache and request.prompt_cache_key:
+            # OpenRouter provider sticky routing expires after 10 minutes of
+            # inactivity (https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+            # After expiry the next request can land on a different upstream
+            # endpoint where the provider's disk cache is cold. DeepSeek's cache
+            # requires a FULL prefix-unit match from token 0
+            # (https://api-docs.deepseek.com/guides/kv_cache/), which the
+            # harness's append-only history already satisfies. OpenRouter falls
+            # back to the OpenAI-style `prompt_cache_key` request field as the
+            # sticky key when no `session_id` is set, and this is the same wire
+            # field the Responses path already sends. We intentionally do NOT
+            # send `session_id`: unknown top-level fields on strict
+            # OpenAI-compatible endpoints could 400, and `prompt_cache_key`
+            # alone is the safe minimum that OpenRouter honours. Forks
+            # intentionally inherit the parent's key (`cache_lineage_id`) so a
+            # fork replays into the parent's warm prefix.
+            body["prompt_cache_key"] = request.prompt_cache_key
         return body
 
     @staticmethod
