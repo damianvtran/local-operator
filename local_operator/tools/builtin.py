@@ -5624,13 +5624,11 @@ class SendParams(BaseModel):
         default=None,
         description=(
             "Peer to message: case-insensitive substring of the conversation "
-            "name or session id. RUNNING sessions are searched first (`lop "
-            "sessions` lists them), then stored ones a closed session left "
-            "behind (`lop sessions --all`), so a name from a finished session "
-            "still resolves. The cwd basename matches only while the session "
-            "runs. ALTERNATIVE to pid/session, not a companion — pass exactly "
-            "one way of addressing the peer; target together with pid or "
-            "session is refused as an ambiguous recipient."
+            "name, session id, or cwd basename (live only). Live sessions "
+            "match first, then stored ones (`lop sessions --all`); "
+            "disambiguate with pid=/session=. ALTERNATIVE to pid/session, "
+            "not a companion — passing target with either is refused as an "
+            "ambiguous recipient."
         ),
     )
     pid: int | None = Field(
