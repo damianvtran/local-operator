@@ -57,6 +57,7 @@ from local_operator.session.goal_loop import (
     LOOP_REASON_CHARS,
     MAX_LOOP_ITERATIONS,
 )
+from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
@@ -1527,21 +1528,29 @@ async def test_an_oversized_delta_keeps_the_socket_and_the_follower_resyncs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delay", [0.0, 0.05])
 async def test_a_burst_of_degraded_deltas_coalesces_into_one_resync(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, delay: float
 ) -> None:
-    """Recovery must not turn one bad minute into a snapshot storm.
+    """Frames arriving DURING a refresh fold into it rather than each buying one.
 
     The frame that degrades is by definition a frame the session is big enough
     to produce repeatedly — the operator hit this with nine subagents running —
-    so a naive "re-sync on every degraded delta" answers a 1.5 MB frame with a
-    sync RPC per frame and makes the overload worse.
+    so answering a 1.5 MB frame with a sync RPC per frame while a refresh is
+    already running would make the overload worse.
 
-    The bound is the existing refresh task slot plus ``_refresh_display_history``'s
-    own loop, not a timer: frames arriving while a refresh is in flight re-arm
-    the flag and fold into at most ONE further pass. The assertion is on the
-    number of ``frontend_sync`` round trips, and on the state still converging
-    — a coalescing bound that lost the last delta would be a worse bug.
+    THE BOUND IS IN-FLIGHT COALESCING, NOT A RATE LIMIT, and this test says so
+    because an earlier version of it did not: it asserted ``syncs <= 3`` while
+    emitting all 20 mutations without awaiting, which pins only the unpaced
+    regime. QA swept the spacing and found 1 sync back to back but 20 syncs at
+    50 ms apart. That is correct — a frame arriving after a snapshot completed
+    shed state that snapshot did not cover, so it genuinely owes another sync —
+    and the paced case is asserted below so the claim and the code agree.
+
+    What must hold at EVERY spacing is that the invalidation does not exceed the
+    work: ``_display_revision`` is a TUI cache key, so a bump per frame rather
+    than per reload moves the refresh storm from the RPC layer into the
+    presentation layer, where this test would not have seen it.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1566,35 +1575,382 @@ async def test_a_burst_of_degraded_deltas_coalesces_into_one_resync(
             return await original()
 
         monkeypatch.setattr(client, "frontend_sync", counting_sync)
+        assert client.frontend_sync is counting_sync, "the sync counter did not land"
+
+        # ``_load_frontend_history`` is where a reload actually happens, and it
+        # owns the one legitimate ``_display_revision`` bump. Counting it is
+        # what lets the invalidation assertion below mean "per reload" rather
+        # than "a number that looked small in the unpaced case".
+        loads = 0
+        original_load = remote._load_frontend_history
+
+        async def counting_load(frontend: Any) -> None:
+            nonlocal loads
+            loads += 1
+            return await original_load(frontend)
+
+        monkeypatch.setattr(remote, "_load_frontend_history", counting_load)
+        assert remote._load_frontend_history is counting_load, "the load counter did not land"
+
+        revision_before = remote.display_history_revision
 
         # Every delta must be GENUINELY oversized, so the catalogue has to
         # DIFFER each time: re-sending an identical list produces no field diff
         # and a small delta, which would let this pass for free.
         rounds = 20
+        oversized = 0
         for index in range(rounds):
-            handle._frontend.mutate(
+            update = handle._frontend.mutate(
                 model_catalogue=[_catalogue_row(row + index * 10_000) for row in range(5_000)],
                 conversation_title=f"title-{index}",
             )
+            assert update is not None
+            if (
+                _line_bytes({"op": "frontend_update", "data": update.model_dump(mode="json")})
+                > _MAX_LINE_BYTES
+            ):
+                oversized += 1
+            if delay:
+                await asyncio.sleep(delay)
+        # The fixture has to keep producing frames the wire cannot carry, or
+        # every assertion below passes for free against ordinary deltas.
+        assert oversized == rounds, f"only {oversized}/{rounds} frames were oversized"
 
         for _ in range(400):
-            if remote.frontend_state.conversation_title == f"title-{rounds - 1}":
+            if (
+                remote.frontend_state.conversation_title == f"title-{rounds - 1}"
+                and not remote._frontend_resync_pending
+            ):
                 break
             await asyncio.sleep(0.02)
 
         # Converged on the owner's latest, not on some intermediate the
-        # coalescing happened to stop at.
+        # coalescing happened to stop at. True at BOTH spacings.
         owner = handle._frontend.state
         assert remote.frontend_state.conversation_title == owner.conversation_title
         assert remote.frontend_state.sequence == owner.sequence
         assert client.connected
-        # The bound itself. Far below one-per-frame; exact count is scheduling
-        # dependent, so this asserts the ORDER of magnitude the design promises.
-        assert 0 < syncs <= 3, f"{rounds} degraded frames caused {syncs} snapshot round trips"
+
+        # THE INVALIDATION MUST TRACK THE WORK, NOT THE FRAMES. This is the
+        # assertion the previous version lacked: the RPCs coalesced while
+        # ``_display_revision`` was bumped once per degraded frame, so the TUI
+        # dropped its cached sidebar presentation ~20x per burst for a single
+        # reload. Tying it to ``loads`` rather than to a constant keeps it
+        # honest at any spacing, since the sync count itself is legitimately
+        # scheduling dependent.
+        assert remote.display_history_revision - revision_before == loads, (
+            f"{rounds} degraded frames bumped the display revision "
+            f"{remote.display_history_revision - revision_before} times "
+            f"for {loads} history reloads"
+        )
+        assert 0 < syncs <= rounds
+        assert loads == syncs
+        if not delay:
+            # Back to back, the in-flight slot is what does the work: the whole
+            # burst folds into a single pass.
+            assert syncs <= 3, f"{rounds} unpaced degraded frames caused {syncs} round trips"
     finally:
         if remote is not None:
             await remote.dispose()
         registrant.close()
+
+
+class _WindowedHandle(FakeHandle):
+    """A ``FakeHandle`` whose followers negotiate the WINDOWED history path.
+
+    The plain double offers no ``history_page``, so ``RuntimeServer`` never
+    advertises ``display-history-window-v1`` and every follower built on it
+    lands in ``_display_window_supported=False`` — the legacy/full-replay case.
+    That left the MODERN viewer, which is what the TUI actually builds, with no
+    coverage of the degrade path at all, and the two are not interchangeable
+    here: ``_invalidate_display_history`` returns early for the legacy follower
+    while ``_display_invalidated`` latches for the windowed one, so the blast
+    radius of a failed re-sync differs by viewer.
+
+    The window is synthesised rather than captured from a transcript (this
+    handle has none) but it is a REAL ``DisplayHistoryWindow`` that satisfies
+    ``_validate_display_window``: matching conversation/epoch/cursor and a
+    self-consistent range. That is what the follower gates on, so it is what
+    decides which path it takes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # A cursor the window and the snapshot agree on. ``through_id`` must
+        # equal the sync's ``live_cursor`` or the follower refuses the window.
+        self._frontend.mutate(history_cursor="row-0")
+
+    def _window(self, epoch: str, cursor: str | None) -> DisplayHistoryWindow:
+        return DisplayHistoryWindow(
+            status="ok",
+            conversation_id="s1",
+            owner_epoch=epoch,
+            history_generation=1,
+            through_id=cursor,
+            messages=[],
+            total_message_count=0,
+            start=0,
+        )
+
+    def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001, ANN202
+        subscription = self._frontend.subscribe(on_update)
+        if display_window:
+            sync = subscription.sync
+            sync.display_history = self._window(sync.epoch, sync.live_cursor)
+        return subscription
+
+    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+        # Presence of this method is what makes the server advertise the
+        # windowed capability; the follower only calls it when paging older
+        # rows, which these tests do not do.
+        state = self._frontend.state
+        return self._window(state.epoch, state.history_cursor).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_a_windowed_follower_also_resyncs_after_a_degraded_delta(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The modern windowed viewer must recover too, not just the legacy one.
+
+    Every other test here runs against a handle with no ``history_page``, so
+    the follower negotiates full replay. The TUI negotiates the WINDOW, and the
+    two paths differ exactly where this fix lives: ``_invalidate_display_history``
+    is a no-op for the legacy follower and latches ``_display_invalidated`` for
+    the windowed one. A fix proven only on the legacy path is proven on the
+    viewer the operator was least likely to be running.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _WindowedHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        assert "display-history-window-v1" in record.capabilities
+        remote = await RemoteSession.connect(
+            record,
+            "s1",
+            config_dir=tmp_path,
+            takeover_factory=_never,
+            display_window=True,
+        )
+        # The whole point of this test: without this the run silently repeats
+        # the legacy-path coverage the other tests already have.
+        assert remote._display_window_supported, "the follower did not take the windowed path"
+
+        handle._frontend.mutate(
+            model_catalogue=[_catalogue_row(index) for index in range(5_000)],
+            conversation_title="after the degrade",
+        )
+
+        for _ in range(400):
+            if remote.frontend_state.conversation_title == "after the degrade":
+                break
+            await asyncio.sleep(0.02)
+
+        client = remote._client
+        assert client is not None and client.connected, "the degraded delta killed the socket"
+        owner = handle._frontend.state
+        assert remote.frontend_state.conversation_title == owner.conversation_title
+        assert remote.frontend_state.sequence == owner.sequence
+        assert remote.frontend_state.model_catalogue
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("windowed", [False, True])
+async def test_a_failed_resync_is_retried_rather_than_left_permanently_stale(
+    tmp_path: Path, monkeypatch, windowed: bool
+) -> None:
+    """A live socket showing WRONG data is worse than a dead one.
+
+    THE BUG THIS PINS (review round 1, B1). ``_frontend_resync_pending`` is
+    cleared before the capture and ``_refresh_display_history`` re-raises on
+    failure, so the first version of this fix dropped the debt on the floor: one
+    transient ``frontend_sync`` failure left the follower stale FOREVER behind a
+    gap check that agreed with the owner at every later sequence. Measured on
+    that tree: socket alive, sequence 11/11, follower still showing its
+    pre-degrade title through ten subsequent healthy deltas.
+
+    Recovery cannot ride on ``ensure_display_current`` either — that is a TUI
+    navigation hook the CLI, the session factory and the desktop bridge never
+    call — so the retry has to be the transport's own.
+
+    Run on BOTH follower shapes because the failure's blast radius depends on
+    which one the viewer negotiated.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _WindowedHandle() if windowed else FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record,
+            "s1",
+            config_dir=tmp_path,
+            takeover_factory=_never,
+            display_window=windowed,
+        )
+        assert remote._display_window_supported is windowed
+        client = remote._client
+        assert client is not None
+
+        failures = 0
+        original = client.frontend_sync
+
+        async def failing_sync() -> Any:
+            nonlocal failures
+            failures += 1
+            raise ConnectionError("injected sync failure")
+
+        monkeypatch.setattr(client, "frontend_sync", failing_sync)
+        # ASSERT THE INJECTION LANDED. A harness that silently fails to patch
+        # turns this test into a green run of the unmodified path.
+        assert client.frontend_sync is failing_sync
+
+        handle._frontend.mutate(
+            model_catalogue=[_catalogue_row(index) for index in range(5_000)],
+            conversation_title="after the degrade",
+        )
+
+        for _ in range(400):
+            if failures:
+                break
+            await asyncio.sleep(0.02)
+        # The failure must actually have FIRED, or the retry below proves
+        # nothing about the failure path.
+        assert failures >= 1, "the injected sync failure never fired"
+
+        # Restore a working owner: the retry, not another degraded frame, is
+        # what has to repair this. Ordinary deltas on OTHER fields keep flowing
+        # so a follower that merely applies them still fails the assertion.
+        monkeypatch.setattr(client, "frontend_sync", original)
+        for index in range(10):
+            handle._frontend.mutate(cwd=f"/tmp/normal-{index}")
+            await asyncio.sleep(0.02)
+
+        # Wait for the END STATE, never for a clock: the retry is a backoff task
+        # and the last ordinary delta can still be in flight behind it, so a
+        # poll on the title alone reads a moment mid-recovery.
+        for _ in range(600):
+            if (
+                remote.frontend_state.conversation_title == "after the degrade"
+                and remote.frontend_state.sequence == handle._frontend.state.sequence
+                and not remote._frontend_resync_pending
+                and remote._degraded_resync_retry_task is None
+            ):
+                break
+            await asyncio.sleep(0.02)
+
+        owner = handle._frontend.state
+        assert client.connected, "the retry cost the socket"
+        assert remote.frontend_state.conversation_title == owner.conversation_title, (
+            "the follower is permanently stale behind a satisfied gap check: "
+            f"{remote.frontend_state.conversation_title!r} != {owner.conversation_title!r}"
+        )
+        assert remote.frontend_state.sequence == owner.sequence
+        assert remote.frontend_state.cwd == "/tmp/normal-9"
+        # The debt is settled rather than merely quiet, and no backoff timer is
+        # left running behind it.
+        assert not remote._frontend_resync_pending
+        assert remote._degraded_resync_retry_task is None
+
+        # And the stream is still LIVE after the retry, which is what proves the
+        # recovery did not leave the sequence cursor desynced.
+        handle._frontend.mutate(conversation_title="after the retry")
+        for _ in range(400):
+            if remote.frontend_state.conversation_title == "after the retry":
+                break
+            await asyncio.sleep(0.02)
+        assert remote.frontend_state.conversation_title == "after the retry"
+        assert client.connected
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+def test_a_malformed_non_degraded_update_is_refused_rather_than_silently_applied():
+    """Relaxing ``changes`` must not extend past the frame that needs it.
+
+    THE FINDING THIS PINS (review round 1, M2). ``changes`` was made optional
+    for every update, and the model allows extras — so a frame that misspelled
+    the key validated as an empty change set, applied as "nothing moved",
+    consumed a sequence and kept the gap check happy with no log and no
+    ``degraded`` flag. That is the same silent drift the degraded frame causes,
+    reintroduced from a different cause: a loud failure traded for a quiet one.
+
+    Refusing the frame is not the same as tearing down the socket over a
+    degraded one — the degrade path labels its own frames, so what is rejected
+    here is a frame claiming to be a complete delta while carrying no body,
+    which no correct owner emits.
+    """
+    from pydantic import ValidationError
+
+    # The reviewer's exact frame.
+    with pytest.raises(ValidationError, match="only a degraded frame may shed its body"):
+        FrontendUpdate.model_validate(
+            {"epoch": "e1", "sequence": 6, "chnages": {"streaming": True}}
+        )
+
+    # And the same shape with the key simply absent.
+    with pytest.raises(ValidationError, match="only a degraded frame may shed its body"):
+        FrontendUpdate.model_validate({"epoch": "e1", "sequence": 6})
+
+    # A DEGRADED frame may still omit it — the fix must survive its own guard.
+    degraded = FrontendUpdate.model_validate(
+        {"epoch": "e1", "sequence": 6, "degraded": True, "degraded_reason": "too large"}
+    )
+    assert degraded.changes == {}
+
+    # An EXPLICIT empty change set is still legal: "nothing moved" is a
+    # different statement from "the body was shed", which is why the flag
+    # exists rather than being inferred from emptiness.
+    empty = FrontendUpdate.model_validate({"epoch": "e1", "sequence": 6, "changes": {}})
+    assert empty.changes == {}
+    assert empty.degraded is False
+
+    # An ordinary delta is untouched.
+    ordinary = FrontendUpdate.model_validate(
+        {"epoch": "e1", "sequence": 7, "changes": {"conversation_title": "t"}}
+    )
+    assert ordinary.changes == {"conversation_title": "t"}
+    assert ordinary.degraded is False
+
+
+def test_a_refused_update_never_reaches_the_store_or_consumes_a_sequence():
+    """The refusal's POINT is that no sequence is spent on a frame nobody read.
+
+    A silently-applied malformed frame is worse than a rejected one precisely
+    because it advances the cursor: the follower then agrees with the owner
+    about sequencing forever while disagreeing about content. The receiver
+    refuses the frame instead, which the transport already recovers from by
+    re-syncing.
+    """
+    from pydantic import ValidationError
+
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="s1", epoch="e1", conversation_title="before")
+    )
+    start = store.state.sequence
+
+    with pytest.raises(ValidationError):
+        store.apply_update(
+            FrontendUpdate.model_validate(
+                {"epoch": "e1", "sequence": start + 1, "chnages": {"conversation_title": "typo"}}
+            )
+        )
+
+    assert store.state.sequence == start
+    assert store.state.conversation_title == "before"
 
 
 def _oversized_event_frame() -> dict[str, Any]:

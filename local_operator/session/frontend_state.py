@@ -1740,10 +1740,21 @@ class FrontendUpdate(BaseModel):
     them would leave a follower permanently stale with a gap check that stays
     happy forever, since the sequence number was consumed either way.
 
-    ``changes`` therefore defaults to empty instead of carrying a validator that
-    demands it whenever ``degraded`` is false. A stricter model would raise on
-    exactly the transport seam whose raised exception is the bug being fixed;
-    the flag carries the semantics, and the receiver decides.
+    ``changes`` is therefore OPTIONAL ON A DEGRADED FRAME AND REQUIRED ON EVERY
+    OTHER ONE, enforced by ``_changes_required_unless_degraded`` below. Relaxing
+    it unconditionally would have re-created the very defect this class is being
+    fixed for: a frame that misspells the key (``chnages``) — the model allows
+    extras — would validate as an empty change set, apply as "nothing moved",
+    consume a sequence and keep the gap check satisfied forever, with no log and
+    no ``degraded`` flag to ask about. That is silent drift from a different
+    cause, which is a strictly worse failure than the loud one it replaces.
+
+    Refusing a malformed frame is NOT the same as tearing down the socket over
+    a degraded one. The degrade path now labels its own frame, so the frame this
+    validator rejects is one claiming to be a complete delta while carrying no
+    body — which no correct owner emits. The receiver refuses it and re-syncs
+    (``RemoteSession._on_frontend_update``), which is the recovery the transport
+    already has for a gap. Staying loud is what keeps that recovery reachable.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -1764,6 +1775,25 @@ class FrontendUpdate(BaseModel):
     # while duplicating rows in its click-through view.
     job_trajectory_replacements: list[str] = Field(default_factory=list)
     job_todo_updates: dict[str, list[dict[str, Any]] | None] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _changes_required_unless_degraded(cls, data: Any) -> Any:
+        """Only a DEGRADED frame may omit its body.
+
+        Scoped rather than blanket-permissive: ``model_config`` allows extras,
+        so without this a typo'd key silently becomes an empty change set that
+        consumes a sequence and drifts the follower — the same shape as the
+        defect this class is being fixed for. A normal delta always carries
+        ``changes`` (``mutate`` returns ``None`` rather than emitting an empty
+        one), so requiring it here rejects only frames no correct owner sends.
+        """
+        if isinstance(data, dict) and "changes" not in data and not data.get("degraded"):
+            raise ValueError(
+                "frontend update omits 'changes' without the 'degraded' flag; "
+                "only a degraded frame may shed its body"
+            )
+        return data
 
 
 # One watched plan must not take down the 1 MiB control stream. Larger plans

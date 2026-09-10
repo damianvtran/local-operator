@@ -371,6 +371,31 @@ _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
 _BIND_RETRY_DELAY_CAP_S = 0.5
 
+#: Backoff for RETRYING the canonical re-sync a degraded delta owes, when that
+#: re-sync fails against a socket that is still up (the owner busy, a transient
+#: RPC error). Retrying is not optional bookkeeping: the degraded frame consumed
+#: a sequence, so the follower's gap check stays satisfied forever while its
+#: canonical fields are missing whatever that frame carried. Giving up after one
+#: attempt leaves a LIVE connection showing WRONG data with nothing on screen
+#: saying so — strictly worse than a dropped one, which at least re-syncs on
+#: reconnect.
+#:
+#: Retries continue while the socket is alive rather than stopping at a fixed
+#: attempt count, because the debt does not expire: nothing else on a non-TUI
+#: follower (``cli.py``, ``session_factory.py``, the desktop bridge) ever calls
+#: ``ensure_display_current`` to notice. The CAP is what keeps that from being a
+#: storm — a persistently failing owner is retried once per
+#: ``_DEGRADED_RESYNC_RETRY_CAP_S``, not in a tight loop — and a dead or swapped
+#: client ends it outright, since a reconnect re-syncs from scratch.
+#:
+#: The initial delay is deliberately not zero: the common cause of a failed pass
+#: is an owner too busy to answer (the nine-subagent session that produced the
+#: oversized frame in the first place), and an immediate retry asks the same
+#: overloaded loop the same question.
+_DEGRADED_RESYNC_RETRY_INITIAL_S = 0.5
+_DEGRADED_RESYNC_RETRY_FACTOR = 2.0
+_DEGRADED_RESYNC_RETRY_CAP_S = 8.0
+
 #: What a viewer says when its socket is alive, authenticated, and the owner
 #: has still not produced the canonical sync. Deliberately NOT "owner did not
 #: send frontend synchronization": the viewer cannot observe what the owner
@@ -622,6 +647,11 @@ class RemoteSession:
         #: FIELDS and applies to every follower. See
         #: ``_resync_after_degraded_delta``.
         self._frontend_resync_pending = False
+        #: The pending BACKOFF timer for a re-sync that failed against a live
+        #: socket. Held so ``dispose`` can cancel it: the debt outlives one
+        #: attempt, so without a retry a single transient RPC failure leaves the
+        #: follower permanently stale behind a satisfied gap check.
+        self._degraded_resync_retry_task: asyncio.Task[None] | None = None
         self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
         self._display_history: DisplayHistoryWindow | None = None
@@ -2642,35 +2672,123 @@ class RemoteSession:
         canonical state through ``frontend_sync``, which is a superset of what a
         shed body could have carried.
 
-        A BURST OF DEGRADED FRAMES MUST NOT BECOME A REFRESH STORM. Two existing
-        mechanisms already bound it and are reused rather than duplicated: the
-        task slot is only refilled when the previous refresh has finished, and
-        ``_refresh_display_history`` loops on ``_display_invalidated`` under its
-        lock, so frames that arrive mid-refresh fold into at most one further
-        pass instead of one sync each. Deltas arriving during the refresh are
-        buffered and replayed, and the refresh cut discards those the snapshot
-        already covers.
+        DEGRADED FRAMES ARRIVING DURING A REFRESH FOLD INTO ONE FURTHER PASS.
+        Two existing mechanisms provide that and are reused rather than
+        duplicated: the task slot is only refilled when the previous refresh has
+        finished, and ``_refresh_display_history`` loops on
+        ``_display_invalidated`` under its lock. Deltas arriving during the
+        refresh are buffered and replayed, and the refresh cut discards those
+        the snapshot already covers.
+
+        That bound is IN-FLIGHT COALESCING, not a rate limit, and the difference
+        is worth stating because the docstring here used to overclaim it. Frames
+        spaced further apart than one refresh takes each get their own sync:
+        measured over a real socket, 20 oversized frames cost 1 sync back to
+        back and 20 syncs at 50 ms apart. That is the correct behaviour rather
+        than a gap — each of those frames shed state a completed snapshot did
+        not cover, so skipping its sync would leave the follower stale, which is
+        the bug this method exists for. What must never happen is one sync per
+        frame while a refresh is ALREADY running, which is what the slot
+        prevents. Cost is bounded by the refresh round trip (~2 s for the 20
+        paced frames above) on a session already shedding 1.5 MB deltas.
         """
         self._frontend_resync_pending = True
-        self._display_revision += 1
+        # NOT ``_display_revision += 1``. That counter is a TUI cache key
+        # (``app.py`` drops cached sidebar presentations and raises
+        # ``PreparationInvalidated`` on it), and its invariant is that both
+        # terms move only on DURABLE CONTENT. Bumping it per degraded frame
+        # invalidated ~20x per burst while only one history reload happened —
+        # the RPCs coalesced but the invalidation did not, moving the refresh
+        # storm one layer up instead of removing it. ``_load_frontend_history``
+        # already bumps it once per actual reload, which is the event the
+        # counter names.
+        self._cancel_degraded_resync_retry()
         task = self._display_refresh_task
         if task is not None and not task.done():
             # A refresh is already running; it re-reads the flag above under its
             # lock and folds this frame into at most one further pass.
             return
+        self._start_degraded_resync(prior_delay=0.0)
+
+    def _cancel_degraded_resync_retry(self) -> None:
+        """Drop a scheduled retry that a fresh attempt supersedes."""
+        retry = self._degraded_resync_retry_task
+        if retry is not None and not retry.done():
+            retry.cancel()
+        self._degraded_resync_retry_task = None
+
+    def _start_degraded_resync(self, *, prior_delay: float) -> None:
+        """Run one re-sync pass NOW, re-arming and scheduling a retry if it fails.
+
+        The failure path is the whole point. ``_frontend_resync_pending`` is
+        cleared BEFORE the capture inside ``_refresh_display_history`` (so a
+        frame racing the snapshot earns another pass), and that method re-raises
+        on failure — so without re-arming here, a single transient failure
+        leaves the flag false, the debt forgotten, and the follower showing
+        stale fields behind a gap check that agrees with the owner forever.
+        Reproduced: one injected ``ConnectionError`` left a live socket at
+        sequence 11/11 with the follower's title stuck at its pre-degrade value
+        through ten subsequent healthy deltas.
+
+        ``prior_delay`` is the backoff this attempt already waited out. It is
+        bookkeeping for the NEXT delay only — the pass itself never sleeps, so
+        ``_display_refresh_task`` never holds a sleeping task for
+        ``ensure_display_current`` to block a navigating TUI on.
+        """
         task = asyncio.create_task(self._refresh_display_history())
         self._display_refresh_task = task
 
         def finished(done: asyncio.Task[None]) -> None:
-            if not done.cancelled() and done.exception() is not None:
-                # The socket may already be gone (this runs off a frame the pump
-                # delivered). Log rather than raise into the task's context: the
-                # invalidation fence stays closed, so a reconnect re-syncs.
-                logger.warning(
-                    "canonical re-sync after a degraded delta failed: %s", done.exception()
-                )
+            if done.cancelled() or done.exception() is None:
+                return
+            error = done.exception()
+            client = self._client
+            if self._disposed or client is None or not client.connected:
+                # A reconnect re-syncs from scratch, so the debt dies with the
+                # socket. Log rather than raise into the task's context.
+                logger.warning("canonical re-sync after a degraded delta failed: %s", error)
+                return
+            # The socket is still up, so this follower is now the dangerous
+            # case: connected and quietly wrong. Re-arm the debt and retry.
+            self._frontend_resync_pending = True
+            next_delay = (
+                _DEGRADED_RESYNC_RETRY_INITIAL_S
+                if prior_delay <= 0
+                else min(prior_delay * _DEGRADED_RESYNC_RETRY_FACTOR, _DEGRADED_RESYNC_RETRY_CAP_S)
+            )
+            logger.warning(
+                "canonical re-sync after a degraded delta failed: %s; retrying in %.1fs",
+                error,
+                next_delay,
+            )
+            self._degraded_resync_retry_task = asyncio.create_task(
+                self._retry_degraded_resync(next_delay)
+            )
 
         task.add_done_callback(finished)
+
+    async def _retry_degraded_resync(self, delay: float) -> None:
+        """Wait out the backoff, then re-enter the pass if the debt still stands.
+
+        Separate task from the refresh itself so ``_display_refresh_task`` is not
+        left holding a sleeping task: ``ensure_display_current`` awaits that slot,
+        and a navigating TUI must not block on a backoff timer.
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        self._degraded_resync_retry_task = None
+        if self._disposed or not self._frontend_resync_pending:
+            return
+        client = self._client
+        if client is None or not client.connected:
+            return
+        task = self._display_refresh_task
+        if task is not None and not task.done():
+            # A pass is running already and re-reads the flag under its lock.
+            return
+        self._start_degraded_resync(prior_delay=delay)
 
     async def ensure_display_current(self) -> None:
         task = self._display_refresh_task
@@ -5249,6 +5367,9 @@ class RemoteSession:
     async def dispose(self) -> None:
         self._disposed = True
         self._fail_prompt_completion_waiters("viewer disposed while awaiting turn completion")
+        # A sleeping degraded-resync backoff would otherwise outlive the facade
+        # and re-enter a refresh against a client dispose is about to drop.
+        self._cancel_degraded_resync_retry()
         refresh = self._display_refresh_task
         if refresh is not None and refresh is not asyncio.current_task() and not refresh.done():
             refresh.cancel()
