@@ -533,6 +533,62 @@ async def test_esc_returns_focus_to_the_composer_from_a_tool_card() -> None:
 
 
 @pytest.mark.asyncio
+async def test_esc_returns_focus_to_the_composer_after_aborting_a_shell_command() -> None:
+    """The bang-mode abort is the same idle path and must come home the same way.
+
+    ``_abort_shell_command`` sits INSIDE the ``if not (pending or streaming or
+    children)`` block, one line above the sibling return the slice already
+    fixed, and returns on its own when there was a command to stop. So the
+    exact case it covers — a ``!`` command in flight, the user reading a tool
+    card, one press of Esc — left focus on the card while its sibling two lines
+    down restored it.
+
+    Measured before the fix, with a real ``! sleep 30`` in flight and the abort
+    branch traced: ``premise focused=ToolCard claimed=False`` ->
+    ``_abort_shell_command->True`` -> ``after escape focused=ToolCard``. No
+    other branch consumed the press.
+
+    The command is driven through the real keyboard path (``!`` then the text
+    then Enter, as ``test_app_pilot`` does) rather than by assigning
+    ``_shell_signal``: a restoration tested against hand-set attributes is a
+    test of the attributes.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.press("!")
+        for key in "sleep 30":
+            await pilot.press("space" if key == " " else key)
+        await pilot.press("enter")
+        for _ in range(200):
+            await pilot.pause()
+            if app._shell_card is not None:
+                break
+        assert app._shell_card is not None, "premise: a bang-mode command is in flight"
+
+        card = next(iter(app.query(ToolCard).results()))
+        card.focus()
+        await pilot.pause()
+        assert app.focused is card, "premise: the card holds focus before the press"
+        assert app._focus_is_claimed() is False, "premise: nothing legitimately holds the keys"
+        # Held across the press: `execute_bash` clears `_shell_signal` when it
+        # reaps the process, so reading the attribute afterwards races the
+        # teardown and answers None on a run that aborted correctly.
+        signal = app._shell_signal
+        assert signal is not None, "premise: the in-flight command has a signal"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.focused is editor, f"Esc left the user on {type(app.focused).__name__}"
+        # The abort still happened: coming home is in addition to Esc's
+        # meaning, never instead of it.
+        assert signal.aborted, "Esc focused and forgot to abort"
+
+
+@pytest.mark.asyncio
 async def test_esc_returns_focus_to_the_composer_during_a_live_turn() -> None:
     """The live-turn path: Esc stops the turn AND comes home.
 
@@ -613,6 +669,175 @@ async def test_esc_does_not_steal_focus_from_a_live_prompt(tmp_path: Path) -> No
         # the picker's own branch that consumed the key, not a focus grab.
         assert picker.settled, "the picker's own `esc skip` did not consume the press"
         assert not _aborts(app), "Esc aborted the turn instead of skipping"
+
+
+async def _a_live_multi_select(pilot: Any, app: OperatorApp) -> Any:
+    """A live ``multi=True`` question, parked in ``#prompt-host`` and holding focus.
+
+    Multi-select specifically, for the reason
+    ``test_esc_does_not_steal_focus_from_a_live_prompt`` gives: an approval
+    advertises routed keys and does not need the caret, so a multi-select is
+    the only surface that pulls focus on purpose and therefore the only one
+    that can be robbed of it.
+    """
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    question = AskQuestion(
+        id="rows",
+        question="Which rows should be dropped?",
+        options=[
+            AskOption(label="Stale", description="nothing reads them"),
+            AskOption(label="Orphaned", description="no parent row"),
+        ],
+        multi=True,
+    )
+    app.run_worker(app.request_user_choice([question]), thread=False)
+    for _ in range(8):
+        await pilot.pause()
+    picker = app._ask_screen
+    assert picker is not None, "premise: the picker is up"
+    assert app._focus_is_claimed(), "premise: the predicate says the keyboard is claimed"
+    assert not isinstance(app.focused, Editor), "premise: the picker took focus, not the composer"
+    return picker
+
+
+@pytest.mark.asyncio
+async def test_a_dock_click_does_not_steal_focus_from_a_live_prompt() -> None:
+    """THE click-shaped negative: a question the dock hosts keeps its keyboard.
+
+    Every other negative in this file is keyboard-driven, which is exactly why
+    the click route shipped unguarded — the predicate existed and no click path
+    consulted it. ``#prompt-host`` is a CHILD of ``#input-dock`` (``app.py``,
+    ``compose``), so a ``Click`` on the question BUBBLES into the dock's
+    handler. ``ApprovalPrompt.on_click`` calls ``event.stop()``
+    (``approval.py``) and is safe; ``AskPicker.on_click`` returns WITHOUT
+    stopping when ``_index_at`` misses a row (``ask_picker.py``), so the picker
+    alone is exposed and only on the cells that are not option rows.
+
+    Measured before the guard at 120x40, clicking every row of
+    ``Region(x=1, y=16, w=118, h=15)``: rows 0-4 and 11-14 — the question text,
+    the borders and the footer — left ``focused=Editor``, and the following
+    ``space`` landed in the composer (``editor.text == ' '``) with the question
+    still unsettled. Nine of fifteen rows took the answer key away from the
+    thing being answered.
+
+    The click sites are derived from ``host.region`` at test time, per the
+    module's coordinate rule: the prompt host's geometry depends on the
+    question's own height and is not a constant.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        picker = await _a_live_multi_select(pilot, app)
+        editor = app.query_one(Editor)
+        host = app.query_one("#prompt-host")
+
+        # The three non-row cells a reader actually clicks, named and derived.
+        # Row 0 is the card's top border, row 1 the question text, and the last
+        # row its footer — none of them map to an option, so none of them are
+        # stopped by the picker's own handler.
+        region = host.region
+        sites = [
+            ("the top border", (region.x + region.width // 2, region.y)),
+            ("the question text", (region.x + 3, region.y + 1)),
+            ("the footer", (region.x + 3, region.y + region.height - 1)),
+        ]
+        for name, site in sites:
+            picker.focus()
+            await pilot.pause()
+            await pilot.click(offset=_clamped(app, site))
+            await pilot.pause()
+
+            assert app.focused is not editor, (
+                f"clicking {name} of a live question moved the keyboard to the composer"
+            )
+            assert not picker.settled, f"clicking {name} answered the question"
+
+        # And the consequence the user feels: the answer key still reaches the
+        # question rather than the buffer. Asserting on the KEY and not only on
+        # `app.focused` is deliberate — focus is the mechanism, "space toggles
+        # the row instead of typing a space" is the behaviour being protected.
+        picker.focus()
+        await pilot.pause()
+        await pilot.click(offset=_clamped(app, (region.x + 3, region.y + 1)))
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        assert editor.text == "", (
+            f"the answer key landed in the composer: {editor.text!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_typing_at_the_transcript_does_not_steal_focus_from_a_live_prompt() -> None:
+    """The fourth door: a printable key pressed while the TRANSCRIPT holds focus.
+
+    ``TranscriptView.on_key`` forwards a printable key to the composer and
+    focuses it, so the user never learns the transcript had focus. That is
+    right when nothing else wants the keyboard and wrong while a live question
+    does: it moves focus AND replays the key into the buffer, so the keystroke
+    lands somewhere the user was not looking.
+
+    Guarded through the same shared helper as the other three routes. Measured
+    with a live ``multi=True`` picker and the transcript container focused:
+    with ``can_focus`` alone the ``x`` gave ``focused=Editor`` and
+    ``editor.text == 'x'``; with the shared guard, focus stays on the
+    transcript and the buffer stays empty.
+
+    This is the one door QA's file does not cover, which is why it is asserted
+    here rather than left to the gate.
+    """
+    from local_operator.tui.widgets.transcript import TranscriptView
+
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        picker = await _a_live_multi_select(pilot, app)
+        editor = app.query_one(Editor)
+
+        view = app.query_one(TranscriptView)
+        view.focus()
+        await pilot.pause()
+        assert app.focused is view, "premise: the transcript container holds focus"
+        assert app._focus_is_claimed() is True, "premise: the live picker claims the keyboard"
+
+        await pilot.press("x")
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app.focused is not editor, "a printable key moved the keyboard to the composer"
+        assert editor.text == "", f"the key landed in the composer: {editor.text!r}"
+        assert not picker.settled, "the question was answered by a stray key"
+
+
+@pytest.mark.asyncio
+async def test_a_dock_click_still_focuses_the_composer_with_no_prompt_up() -> None:
+    """The guard must not cost the MR its own fix.
+
+    The negative above is only worth having if the positive still holds: with
+    nothing claiming the keyboard, a click on the dock is still "focus me".
+    This is the same gesture as
+    ``test_clicking_the_shell_padding_returns_focus_to_the_composer``, asserted
+    after the guard so a predicate that answered ``True`` too eagerly fails
+    here rather than silently reinstating the dead frame.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        card = await _settled_with_a_card(pilot, app)
+        editor = app.query_one(Editor)
+        dock = app.query_one("#input-dock")
+        assert app._focus_is_claimed() is False, "premise: nothing claims the keyboard"
+
+        shell = app.query_one("#input-shell")
+        await pilot.click(
+            offset=_clamped(app, (shell.region.x + shell.region.width // 2, shell.region.y))
+        )
+        await pilot.pause()
+
+        assert app.focused is editor, f"the guard killed the fix: {app.focused!r}"
+        assert app.focused is not card
+        assert dock.has_class(COMPOSER_FOCUSED_CLASS), "the chevron is still dark"
 
 
 @pytest.mark.asyncio

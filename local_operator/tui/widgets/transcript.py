@@ -64,6 +64,10 @@ from textual.widgets import Static
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.composer_focus import (
+    composer_may_take_focus,
+    return_focus_to_composer,
+)
 
 #: The turn spine (D20): user prompts sit at the gutter; everything else
 #: indents two cells so the gutter column reads at a glance.
@@ -689,17 +693,27 @@ class TranscriptBlock(Static):
         means "I am done reading, put me back in the input", and a row has no
         document position to map a caret onto.
 
-        Guarded on ``can_focus`` because a read-only composer is a real state,
-        not a defensive nicety: the subagent page and the login prompt make it
-        refuse every key (``_set_composer_read_only``). Focusing it there would
-        hand the keyboard to a field that answers nothing, which is the same
-        keystroke-swallowing trap this MR exists to remove — so Tab correctly
-        does nothing and focus stays on the row.
+        Guarded through ``composer_focus.return_focus_to_composer`` because
+        ``can_focus`` alone was not enough. A read-only composer is a real
+        state (the subagent page and the login prompt make it refuse every key
+        via ``_set_composer_read_only``) and focusing it there would hand the
+        keyboard to a field that answers nothing — but ``can_focus`` is TRUE
+        while an approval or an ask picker owns the keyboard, and this binding
+        is inherited by every row.
+
+        ``ApprovalBlock`` and ``KeyPromptBlock`` both descend from this class,
+        so before the shared guard a prompt row had a one-press ``tab`` exit
+        that handed the keyboard away from the question it was asking.
+        Measured with a live ``multi=True`` picker and a focused ToolCard: Tab
+        left ``editor.has_focus`` True, so the picker's Space/Enter answers
+        were unreachable.
+
+        Either way Tab correctly does nothing and focus stays on the row.
         """
         composer = self._composer()
-        if composer is None or not composer.can_focus:
+        if composer is None:
             return
-        composer.focus()
+        return_focus_to_composer(self.app, composer)
 
     def _composer(self):  # type: ignore[no-untyped-def]
         """The app's one text input, or None when there is not one.
@@ -3000,9 +3014,20 @@ class TranscriptView(ScrollableContainer):
             editor = self.app.query_one(Editor)
         except Exception:
             return  # a harness that hosts a transcript and no composer
-        # Refuse rather than steal while the composer is inert: read-only
-        # (subagent page, login prompt) means it answers no key.
-        if not editor.can_focus:
+        # Refuse rather than steal, on BOTH counts: inert while the composer is
+        # read-only (subagent page, login prompt — it answers no key), and
+        # claimed while a live approval or ask picker owns the keyboard.
+        #
+        # The claimed half is what makes a key already in flight safe. A click
+        # and a keypress can land in the same drain, and forwarding the key
+        # after moving focus is exactly how a keystroke ends up somewhere the
+        # user was not looking. Measured with the draft `draft` and a focused
+        # ToolCard: `space` was typed into the composer, leaving `' draft'`
+        # AND losing the row's own expand gesture.
+        #
+        # Returning WITHOUT stopping the event is deliberate: the key was not
+        # ours to take, so it must stay available to whatever does own it.
+        if not composer_may_take_focus(self.app, editor):
             return
         editor.focus()
         editor.post_message(Key(event.key, event.character))
@@ -3151,11 +3176,19 @@ class TranscriptView(ScrollableContainer):
             editor = self.app.query_one(Editor)
         except Exception:
             return  # a harness that hosts a transcript and no composer
-        # Refuse rather than steal while the composer is inert: read-only
-        # (subagent page, login prompt) means it answers no key, so focusing it
-        # would hand the keyboard to a field that swallows every keystroke.
-        if editor.can_focus and not editor.has_focus:
-            editor.focus()
+        # Refuse rather than steal, on BOTH counts: inert while the composer is
+        # read-only (subagent page, login prompt — focusing it would hand the
+        # keyboard to a field that swallows every keystroke), and claimed while
+        # a surface that took focus ON PURPOSE still needs it.
+        #
+        # The claimed half matters here even though the transcript is nowhere
+        # near the prompt: a live question parks in the dock while the user
+        # scrolls the transcript back to find what they need to answer it, so
+        # "click the conversation to re-read it" is the ordinary gesture in the
+        # middle of answering. Measured with a live `multi=True` picker: a
+        # click on blank transcript left `editor.has_focus` True and the
+        # question unanswerable.
+        return_focus_to_composer(self.app, editor)
 
     def set_on_clear(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired after every :meth:`clear_blocks`."""
