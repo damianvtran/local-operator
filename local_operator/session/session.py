@@ -1437,7 +1437,10 @@ _ROSTER_ROW_FIELDS = frozenset(
         "label",
         "queued",
         "agent_id",
-        "owner_id",
+        # Persisted under the NEW name only: ``AsyncJob`` dual-reads legacy
+        # ``owner_id`` rows at restore, but every snapshot this process writes
+        # uses ``registrant_id`` so the old key ages out with the sidecars.
+        "registrant_id",
         "model_label",
         "context_window",
         "usage",

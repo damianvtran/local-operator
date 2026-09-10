@@ -58,13 +58,13 @@ class _StubComms:
 class _StubJobs:
     """Satisfies ``JobManagerProtocol`` so the job-gated tools are built."""
 
-    def get(self, job_id: str, *, owner_id: str | None = None) -> None:
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> None:
         return None
 
-    def list(self, *, owner_id: str | None = None) -> list[object]:
+    def list(self, *, registrant_id: str | None = None) -> list[object]:
         return []
 
-    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
         return True
 
 

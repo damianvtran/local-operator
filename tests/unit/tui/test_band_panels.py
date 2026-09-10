@@ -284,10 +284,10 @@ def _async_factory(session: FakeSession):
 
 def _fake_jobs(*jobs: Any) -> Any:
     class _Manager:
-        def list(self, *, owner_id: str | None = None) -> list[Any]:
+        def list(self, *, registrant_id: str | None = None) -> list[Any]:
             return list(jobs)
 
-        def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
             for job in jobs:
                 if str(getattr(job, "id", "")) == job_id:
                     return job
@@ -1997,10 +1997,10 @@ class _RetentionManager:
         # and a test drives it with ``1000.0`` to pin that (review round 1, m1).
         self.retention_ms = retention_ms
 
-    def list(self, *, owner_id: str | None = None) -> list[Any]:
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
         return list(self._jobs)
 
-    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
         return next((job for job in self._jobs if str(getattr(job, "id", "")) == job_id), None)
 
 
@@ -2335,10 +2335,10 @@ async def test_a_raising_filter_shows_stale_rows_and_says_so(caplog) -> None:
     class _Exploding:
         retention_ms = 1
 
-        def list(self, *, owner_id: str | None = None) -> list[Any]:
+        def list(self, *, registrant_id: str | None = None) -> list[Any]:
             return []
 
-        def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+        def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
             return None
 
     session = FakeSession()

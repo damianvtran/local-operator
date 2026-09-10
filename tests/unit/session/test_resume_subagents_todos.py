@@ -641,6 +641,53 @@ async def test_unchanged_todos_are_not_re_persisted_every_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_legacy_owner_id_roster_row_restores_and_rewrites_new_key(
+    tmp_path, monkeypatch
+) -> None:
+    """A sidecar written before the ``registrant_id`` rename still restores.
+
+    Releases up to the rename persisted the registrant column as
+    ``owner_id``. ``AsyncJob``'s before-validator dual-reads it, the restored
+    row carries the value under ``registrant_id``, and the first rewrite ages
+    the legacy key out of the sidecar — so a resume across the rename loses
+    no child and no scoping.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    transcript = Transcript(tmp_path / "sess")
+    (transcript.directory / SUBAGENT_ROSTER_SIDECAR).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 3,
+                "jobs": [
+                    {
+                        "id": "legacyowner",
+                        "type": "task",
+                        "status": "completed",
+                        "start_time": 1.0,
+                        "label": "legacy child",
+                        "owner_id": "Main",
+                    }
+                ],
+                "records": [],
+            }
+        )
+    )
+    resumed = _session(tmp_path, IdleStream())
+    rows = [row for row in resumed.jobs.list() if row.type == "task"]
+    assert [row.registrant_id for row in rows] == ["Main"]
+    assert rows[0].restored is True
+
+    # The next snapshot writes ONLY the new key: a resumed roster must not
+    # resurrect the legacy column on disk.
+    resumed._subagent_roster_generation += 1
+    await resumed._persist_subagent_roster()
+    details = json.loads((transcript.directory / SUBAGENT_ROSTER_SIDECAR).read_text())
+    assert [row.get("registrant_id") for row in details["jobs"]] == ["Main"]
+    assert all("owner_id" not in row for row in details["jobs"])
+
+
+@pytest.mark.asyncio
 async def test_malformed_v1_sidecar_falls_back_to_legacy_roster(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     transcript = Transcript(tmp_path / "sess")

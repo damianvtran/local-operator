@@ -50,6 +50,44 @@ async def quick_runner(job_id, signal, report_progress):
     return f"done:{job_id}"
 
 
+def test_async_job_dual_reads_legacy_owner_id_key() -> None:
+    """Rows persisted before the ``registrant_id`` rename still restore.
+
+    Roster sidecars written by releases up to the rename carry the registrant
+    column as ``owner_id``, and ``AsyncJob`` forbids extras — the
+    before-validator is the one seam that keeps every such row loadable at
+    resume. Remove it together with the legacy key once no pre-rename
+    sidecar can still be resumed (one release).
+    """
+    legacy = AsyncJob.model_validate(
+        {
+            "id": "legacyrow",
+            "type": "task",
+            "status": "completed",
+            "start_time": 1.0,
+            "label": "legacy child",
+            "owner_id": "Main",
+        }
+    )
+    assert legacy.registrant_id == "Main"
+    # The new key is authoritative when both are present, and a dump never
+    # re-emits the legacy key: the first sidecar rewrite ages it out.
+    modern = AsyncJob.model_validate(
+        {
+            "id": "bothkeys",
+            "type": "task",
+            "status": "completed",
+            "start_time": 1.0,
+            "label": "both keys",
+            "registrant_id": "New",
+            "owner_id": "Old",
+        }
+    )
+    assert modern.registrant_id == "New"
+    assert "owner_id" not in modern.model_dump()
+    assert modern.model_dump()["registrant_id"] == "New"
+
+
 @pytest.mark.asyncio
 async def test_task_notification_callers_classify_transient_and_durable_mutations() -> None:
     """Only fields retained by the resume projection schedule persistence.
@@ -587,11 +625,11 @@ async def test_cancel_owner_mismatch_is_not_found():
     async def blocked(job_id, signal, report_progress):
         await gate.wait()
 
-    job_id = manager.register("task", "parent job", blocked, owner_id="Main")
-    assert await manager.cancel(job_id, owner_id="Sub") is False
-    assert manager.get(job_id, owner_id="Sub") is None  # scoped get too
-    assert manager.get(job_id, owner_id="Main") is not None
-    assert await manager.cancel(job_id, owner_id="Main") is True
+    job_id = manager.register("task", "parent job", blocked, registrant_id="Main")
+    assert await manager.cancel(job_id, registrant_id="Sub") is False
+    assert manager.get(job_id, registrant_id="Sub") is None  # scoped get too
+    assert manager.get(job_id, registrant_id="Main") is not None
+    assert await manager.cancel(job_id, registrant_id="Main") is True
     gate.set()
     await manager.dispose()
 
@@ -610,7 +648,7 @@ async def test_delivery_sink_scoping():
         "Sub", lambda job_id, text, job: sub_inbox.append((job_id, text))
     )
 
-    job_id = manager.register("task", "owned", quick_runner, owner_id="Main")
+    job_id = manager.register("task", "owned", quick_runner, registrant_id="Main")
     await wait_for(lambda: require_job(manager, job_id).status == "completed")
 
     assert main_inbox == [(job_id, f"done:{job_id}")]
@@ -627,7 +665,7 @@ async def test_dead_letter_when_no_sink():
         fallback.append(job_id)
 
     manager = AsyncJobManager(on_job_complete=on_complete)
-    job_id = manager.register("task", "orphan", quick_runner, owner_id="Ghost")
+    job_id = manager.register("task", "orphan", quick_runner, registrant_id="Ghost")
     await wait_for(lambda: require_job(manager, job_id).status == "completed")
     # The row keeps its result for retention, but nothing was delivered.
     assert fallback == []
@@ -659,7 +697,7 @@ async def test_async_sink_is_awaited():
         delivered.append(job_id)
 
     manager.register_delivery_sink("Main", sink)
-    job_id = manager.register("task", "async", quick_runner, owner_id="Main")
+    job_id = manager.register("task", "async", quick_runner, registrant_id="Main")
     await wait_for(lambda: delivered == [job_id])
     await manager.dispose()
 
@@ -670,7 +708,7 @@ async def test_unregister_sink():
     inbox: list[str] = []
     unregister = manager.register_delivery_sink("Main", lambda j, t, job: inbox.append(j))
     unregister()
-    job_id = manager.register("task", "after-unregister", quick_runner, owner_id="Main")
+    job_id = manager.register("task", "after-unregister", quick_runner, registrant_id="Main")
     await wait_for(lambda: require_job(manager, job_id).status == "completed")
     assert inbox == []  # dead-lettered again
     await manager.dispose()
@@ -835,9 +873,9 @@ async def test_list_scoped_by_owner():
     async def blocked(job_id, signal, report_progress):
         await gate.wait()
 
-    manager.register("task", "main job", blocked, owner_id="Main")
-    manager.register("task", "sub job", blocked, owner_id="Sub")
-    assert [j.label for j in manager.list(owner_id="Main")] == ["main job"]
+    manager.register("task", "main job", blocked, registrant_id="Main")
+    manager.register("task", "sub job", blocked, registrant_id="Sub")
+    assert [j.label for j in manager.list(registrant_id="Main")] == ["main job"]
     assert len(manager.list()) == 2
     gate.set()
     await manager.dispose()

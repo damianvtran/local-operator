@@ -48,13 +48,13 @@ class _FakeSchedulerForBlocks:
 class _FakeJobsForBlocks:
     """Minimal job manager so create_tools includes task/wait/jobs."""
 
-    def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
         return None
 
-    def list(self, *, owner_id: str | None = None) -> list[Any]:
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
         return []
 
-    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
         return False
 
 

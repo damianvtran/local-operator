@@ -78,7 +78,7 @@ async def main() -> int:
     manager = AsyncJobManager()
 
     def launcher(label: str, prompt: str, *, agent: str = "task", effort: Any = None) -> str:
-        return manager.register("task", label, _quick, owner_id=None)
+        return manager.register("task", label, _quick, registrant_id=None)
 
     context = ToolContext(cwd="/tmp", session_id="s", subagent_launcher=launcher, jobs=manager)
     tools = {t.name: t for t in create_tools(context)}

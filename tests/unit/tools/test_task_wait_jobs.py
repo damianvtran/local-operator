@@ -52,7 +52,7 @@ def _engine_context(tmp_path, manager: AsyncJobManager) -> ToolContext:
     registering a ``task``-type job on the same manager."""
 
     def launcher(label, prompt, *, agent="task", effort=None):
-        return manager.register("task", label, _quick_runner, owner_id=None)
+        return manager.register("task", label, _quick_runner, registrant_id=None)
 
     return ToolContext(cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=manager)
 
@@ -392,7 +392,7 @@ async def test_jobs_says_unknown_rather_than_zero_for_a_row_with_no_clock(tmp_pa
         label = "embedder row"
 
     class OneRow(AsyncJobManager):
-        def list(self, *, owner_id: str | None = None) -> list[Any]:
+        def list(self, *, registrant_id: str | None = None) -> list[Any]:
             return [NoClock()]
 
     manager = OneRow()
@@ -677,7 +677,7 @@ async def test_peek_and_cancel_reach_jobs_the_listing_shows(tmp_path):
     Regression: scoping these two ops by `context.job_id` (and leaving `list`
     unscoped) made the tool contradict itself inside a child session — it
     listed a grandchild `task` job and then called that same id "unknown job",
-    because `run_subagent` registers those with `owner_id=None`.
+    because `run_subagent` registers those with `registrant_id=None`.
     """
     manager = AsyncJobManager()
     grandchild = manager.register("task", "grandchild", _slow_runner)

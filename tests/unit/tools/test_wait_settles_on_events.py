@@ -140,14 +140,14 @@ async def test_a_manager_without_the_event_hook_still_works() -> None:
             self.register = self._inner.register
             self.mark_consumed = self._inner.mark_consumed
 
-        def get(self, job_id: str, *, owner_id: str | None = None) -> Any:
-            return self._inner.get(job_id, owner_id=owner_id)
+        def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
+            return self._inner.get(job_id, registrant_id=registrant_id)
 
-        def list(self, *, owner_id: str | None = None) -> list[Any]:
-            return self._inner.list(owner_id=owner_id)
+        def list(self, *, registrant_id: str | None = None) -> list[Any]:
+            return self._inner.list(registrant_id=registrant_id)
 
-        async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool:
-            return await self._inner.cancel(job_id, owner_id=owner_id)
+        async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
+            return await self._inner.cancel(job_id, registrant_id=registrant_id)
 
     manager = LegacyManager()
     assert not hasattr(manager, "settled_event")

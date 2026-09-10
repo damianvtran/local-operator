@@ -1698,10 +1698,10 @@ async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
     # failure `_cancel_job_quietly` swallows by design.
     real_cancel = session.jobs.cancel
 
-    async def flaky_cancel(job_id, *, owner_id=None):  # noqa: ANN001, ANN202
+    async def flaky_cancel(job_id, *, registrant_id=None):  # noqa: ANN001, ANN202
         if job_id in (ids[1], ids[2]):
             raise RuntimeError("child refuses to die")
-        return await real_cancel(job_id, owner_id=owner_id)
+        return await real_cancel(job_id, registrant_id=registrant_id)
 
     session.jobs.cancel = flaky_cancel  # type: ignore[assignment]
 
