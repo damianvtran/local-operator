@@ -150,6 +150,14 @@ HB_AGE`:
 - `HB_AGE` — how long since its last heartbeat. A large `HB_AGE` on a `live`
   row is an early sign of a session going wedged.
 
+**Closed sessions are still reachable.** `lop sessions --all` adds `stored`
+rows — sessions that are not running — shown with `—` for RSS/UPTIME, sorted
+newest-first, capped by `--limit` (default 50). `send`'s `target` falls back
+to stored-session names when no live session matches: `wake=True` engages a
+runtime, a quiet mailbox drop spools to the inbox for the next open, and a
+steer on a stored session behaves as wake. A `NEEDS` row is a parked
+question; idle-vs-busy is `--json`'s `busy`, not the table.
+
 **The table does not show a session's `cwd`.** `cwd` and `session_id` are
 `--json`-only fields — which matters because `target` matches against the cwd
 basename, so `--json` is where you look to see what a substring will match:
