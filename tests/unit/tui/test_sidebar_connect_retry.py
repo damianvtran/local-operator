@@ -826,10 +826,20 @@ async def test_guidance_answers_wait_or_act_in_every_disconnected_state(monkeypa
         app.composer_submission_refused()
         assert "Reconnecting" in notices[-1]
         assert "Select this session again" not in notices[-1]
+        # The SLASH-COMMAND refusal carries the same three-state guidance. It is
+        # a second caller of `_unavailable_hint` with eight call sites of its
+        # own, and it reads the hint through a different guard — so the composer
+        # assertions above do not cover it, and the inverted-guidance bug was
+        # fixed here separately.
+        assert app._allow_source_command() is False, "a cold source must refuse the command"
+        assert "Reconnecting" in notices[-1]
+        assert "Select this session again" not in notices[-1]
 
         # Exhausted: the app has stopped, and reselecting is the right advice.
         source.connection_error = "the runtime is not responding"
         app.composer_submission_refused()
+        assert "Select this session again to retry." in notices[-1]
+        assert app._allow_source_command() is False, "a cold source must refuse the command"
         assert "Select this session again to retry." in notices[-1]
 
         # Never-attempted: nothing to say beyond the refusal itself.
@@ -837,6 +847,8 @@ async def test_guidance_answers_wait_or_act_in_every_disconnected_state(monkeypa
         source.connection_error = ""
         app.composer_submission_refused()
         assert notices[-1] == "Send unavailable until connected."
+        assert app._allow_source_command() is False, "a cold source must refuse the command"
+        assert notices[-1] == "Commands unavailable until connected."
 
 
 def test_the_derivation_refuses_a_backoff_it_cannot_solve(monkeypatch):
