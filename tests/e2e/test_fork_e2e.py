@@ -376,11 +376,18 @@ async def test_owner_snapshot_rejects_foreign_or_path_selecting_requests(
     )
     try:
         assert isinstance(viewer._client, AttachClient)
-        for payload in (
+        # Annotated, not inferred: ``_request_payload`` now takes a named
+        # ``deadline_s: float`` beside its ``**fields``, so pyright must prove
+        # no splatted key can land on it. Inferred as ``dict[str, int | str]``
+        # these literals cannot satisfy that, and the call fails the type gate
+        # while remaining perfectly valid at runtime. ``Any`` restores the
+        # pre-deadline behaviour of the splat. Do not remove.
+        payloads: tuple[dict[str, Any], ...] = (
             {"message": 42},
             {"message": "", "parent_id": "someone-else"},
             {"message": "", "config_dir": "/tmp"},
-        ):
+        )
+        for payload in payloads:
             with pytest.raises(RuntimeError):
                 await viewer._client._request_payload("fork_snapshot", **payload)
         with pytest.raises(ValueError, match="session's machine"):
