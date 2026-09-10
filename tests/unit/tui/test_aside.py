@@ -62,6 +62,10 @@ class AsideSession(FakeSession):
         self.forked: list[Message] = []
         self.streaming = False
         self.fail: str | None = None
+        #: An exception INSTANCE to raise from `complete_aside`, for failures
+        #: whose `str()` is empty. `fail` above carries a message; this carries
+        #: the exception itself.
+        self.fail_with: BaseException | None = None
         self._history = [Message.user("port the loop"), Message.assistant("done.")]
 
     @property
@@ -70,6 +74,8 @@ class AsideSession(FakeSession):
 
     async def complete_aside(self, turns, *, on_delta=None, on_usage=None) -> str:  # noqa: ANN001
         self.aside_calls.append(list(turns))
+        if self.fail_with is not None:
+            raise self.fail_with
         if self.fail is not None:
             raise RuntimeError(self.fail)
         if on_delta is not None:
@@ -687,6 +693,34 @@ def test_a_failed_aside_is_never_forkable() -> None:
 
     assert panel.fork_messages() == []
     assert "provider exploded" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_an_error_with_no_message_still_names_itself_on_the_card() -> None:
+    """A failure the user cannot read is a failure the user cannot act on.
+
+    ``asyncio.wait_for`` raises a bare ``TimeoutError()``, whose ``str()`` is
+    ``''``. Painted straight into the card that rendered as a warning glyph
+    followed by nothing — and, upstream, as the dangling ``owner connection
+    lost:`` this fix is named for. Driven through the real worker and asserted
+    on the RENDERED rows rather than on the helper, because the helper being
+    correct proves nothing about whether the card calls it.
+    """
+    assert str(TimeoutError()) == "", "the premise: this exception has no message"
+
+    session = AsideSession()
+    session.fail_with = TimeoutError()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _settle_boot(pilot, app, session)
+        panel = await _open_with_question(pilot, app, "are the subagents stuck?")
+
+        lines = panel.render_lines_for_test()
+        rendered = "\n".join(lines)
+        assert "TimeoutError" in rendered
+        assert not any(line.rstrip().endswith(":") for line in lines)
+        assert panel._turns[-1].state == "error"
+        assert panel.fork_messages() == []
 
 
 def test_a_long_exchange_pins_the_owning_question_and_counts_questions() -> None:
