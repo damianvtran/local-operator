@@ -1619,6 +1619,84 @@ forced your hand.
 Then check the other direction: run the file several times under load
 (`for i in $(seq 1 5)` with a few CPU spinners) and confirm it stays green.
 
+### A dead instrument returns a reading, not an error
+
+"Prove the test can still fail" covers the guard. This is the half underneath
+it: the instrument reading the guard can be dead too, and a dead instrument
+does not raise, warn, or emit garbage — it emits a well-formed answer to a
+question nobody asked. Its null result is indistinguishable from a real
+reading in **both** directions, and care does not defend against that. A
+canary does: before trusting anything an instrument says about the case you
+actually care about, push a **known-positive and a known-negative through the
+same instrument** — the tracer, the log parser, the grep, the render probe —
+and watch it tell them apart.
+
+Every instrument below succeeded, in the sense that none of it errored:
+
+- A syscall tracer blind to `stat`/`lstat` on CPython 3.14, used to verify a
+  gate whose entire purpose was preventing an existence oracle.
+- "Zero network calls", reported from a port collision that meant the request
+  log was never written.
+- A mutation harness that scored every mutant CAUGHT against a suite that
+  never ran — `pytest-timeout` was absent, the run exited `rc=4`, and the
+  harness read the exit code as the mutant dying. Two sessions hit this
+  independently.
+- A mutation that silently no-op'd because a formatter had rewrapped the
+  anchor line it patched, so the score measured an unmutated file.
+- Fifteen planted-violation cells reporting PASS without their mutation ever
+  landing; the one apparent catch was a `SyntaxError`.
+- A containment grep reporting "canary absent, len=2" — the `2` was `[]`,
+  serialised. An empty container greps clean.
+
+The reciprocal is equally real, and just as invisible — the instrument is dead
+*to the thing you changed*, so it fails what should pass:
+
+- A stale regex expecting a symbol a later round had renamed, reporting a
+  correctly-released binary as MISSING ITS OWN FIX — a hunt for a publishing
+  failure that never happened.
+- A `MagicMock(spec=...)` that measured the negative branch, producing a
+  "cheap" figure for an expensive operation.
+- A capture run under an env var that disabled the very effect being measured,
+  showing a defect "reproducing" after it was fixed.
+- A UI frame captured with no factory wired: the command refused, the refusal
+  rendered as an ordinary notice, and the still showed a plausible frame of
+  the feature never opening.
+- A `screen.render_line(y)` probe read outside a paint cycle returns blank
+  strips — 22 non-blank rows read as blank, a false BLOCKER against a correct
+  implementation.
+
+Name the asymmetry, because it decides where your paranoia goes: a false pass
+ships a defect; a false failure sends someone hunting a bug that does not
+exist. The second is cheaper, but it is not free — and the reading itself
+looks identical either way, which is exactly why the canary is the only
+defence.
+
+Two rules sit beside this one, each earned the hard way:
+
+**When you fix something that raises or refuses, verify it still raises where
+it should** — otherwise you have proven only that you removed a check. A
+reauth fix correctly fell through when nothing was stored, but also fired when
+the DELETE itself failed: it logged in over a surviving credential and
+reported success for an account switch that never happened. The reviewer then
+narrowed the fix to break it again, and all 520 tests still passed — the suite
+was structurally blind to the distinction the fix depended on. A separate
+session converged on the same rule from the opposite direction: an integrity
+refusal that survived a heal.
+
+**Quote the query, not just the result.** A `df` against `/` — a sealed,
+read-only APFS system volume whose percentage cannot move — and a
+`dict.get()` against the wrong nesting level both return clean, confident,
+wrong answers. State the basis alongside the number so a reader can check the
+*question*, not just the digit. A disk figure taken against the wrong mount
+propagated through a dozen sessions, each one confirming it back against the
+same wrong basis; every confirmation strengthened a number that was never
+right.
+
+And the corollary, for when the canary finally catches your own earlier
+finding: **withdraw it, do not defer it.** A deferred wrong finding is a
+landmine — the next reader treats it as unresolved-but-real and "corrects" a
+correct value into a wrong one.
+
 ### When a test is already flaking
 
 Reproduce and classify before touching a threshold. A single failure out of
