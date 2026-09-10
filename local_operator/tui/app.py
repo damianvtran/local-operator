@@ -28345,13 +28345,28 @@ class OperatorApp(App[None]):
             Both halves are blocking reads, which is why the screen is pushed
             before either starts: the keypress path must never wait on the disk.
             ``session_name`` is the very helper ``session.catalog`` builds every
-            sidebar row through, at its default ``max_chars``, so the header and
-            the row cannot disagree about the same conversation — the miss this
-            exists to close was ``/session`` saying "Untitled session" beside a
-            sidebar that named it.
+            sidebar row through, at its default ``max_chars``, so on the DISK
+            path the header carries the row's own text — the miss this exists to
+            close was ``/session`` saying "Untitled session" beside a sidebar
+            that named it.
+
+            "Cannot disagree" is true of that path only: a stand-in outranks
+            this label (the band and the tab are what the operator is watching)
+            and is capped harder — ``naming.provisional_title``'s 8 words / 48
+            chars against ``session_name``'s ``NAME_MAX_CHARS`` = 64 — so a
+            conversation with a provisional in force wears a SHORTER label from
+            the same opener, not a different one (design D3).
+
+            The label is decoration on the report, so it is read inside its own
+            guard: a raise here must not cost the ledger half, which is what the
+            screen is actually for, and an empty label simply falls through the
+            existing precedence (stand-in, then "Untitled session").
             """
             report = AnalyticsStore().session_report(runtime.session_id)
-            name = session_name(config_dir() / "sessions" / runtime.session_id)
+            try:
+                name = session_name(config_dir() / "sessions" / runtime.session_id)
+            except Exception:  # noqa: BLE001 — decoration: never cost the report
+                name = ""
             return report, name
 
         report, disk_name = await asyncio.to_thread(_read)

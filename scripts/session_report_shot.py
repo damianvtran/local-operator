@@ -11,6 +11,14 @@ lands, and one a RESUMED conversation that never got one stays in. Each parks th
 ledger read so ``first-frame.svg`` is a fact about the app's ordering — the
 header is painted from memory before any disk result can land — rather than about
 which side of a race the capture won.
+
+``reported-as-is`` regenerates the headline frame of the PR that added these
+scenarios: the reported conversation's state once its generated title had landed.
+The transcript that frame came from is the operator's own live session, so the
+scenario seeds the records the header resolves against — the opener and the
+journalled title — through the same real ``Transcript`` writer, rather than a
+byte copy that would not be committable. The report-time shape (same opener, no
+title yet) is the ``opener-only`` scenario.
 """
 
 from __future__ import annotations
@@ -174,8 +182,14 @@ SESSION_OPENER = "There seems to be a weird issue where on resume certain tools 
 #: The one a naming call (or `/rename`) did store — the case the header already
 #: handled, captured so the pair shows the store of record is still in charge.
 SESSION_TITLE = "Resume keeps stale tool rows"
+#: The title the REPORTED conversation's naming call actually stored, journalled
+#: exactly as the errand writes it. The reported session is the operator's own
+#: live conversation, so its transcript cannot be committed; these are the two
+#: records the header resolves against (see ``seed_transcript``), which is what
+#: makes the headline frame regenerable from the branch by anyone.
+SESSION_REPORTED_TITLE = "Resume Duplicate Tools Frozen Calls"
 #: Scenarios whose store of record is deliberately EMPTY.
-NAMING_SCENARIOS = ("opener-only", "stored-title", "provisional")
+NAMING_SCENARIOS = ("opener-only", "stored-title", "provisional", "reported-as-is")
 
 
 async def seed_transcript(session_id: str, opener: str, *, title: str | None = None) -> None:
@@ -249,6 +263,12 @@ async def main() -> None:
         await seed_transcript(session.session_id, SESSION_OPENER)
     elif scenario == "stored-title":
         await seed_transcript(session.session_id, SESSION_OPENER, title=SESSION_TITLE)
+    elif scenario == "reported-as-is":
+        # The frame the PR body shows for the reported session once its naming
+        # call landed: the same opener the sidebar names the row by, plus the
+        # generated title. Regenerable from the branch because both records are
+        # constants here — the live transcript they were read from is not.
+        await seed_transcript(session.session_id, SESSION_OPENER, title=SESSION_REPORTED_TITLE)
     elif scenario == "provisional":
         # A live conversation naming never returned for: the transcript carries
         # the opener AND the host wears its own stand-in. The header must prefer

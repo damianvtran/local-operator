@@ -777,7 +777,16 @@ def build_session_report(
     # and picker paint from the same transcript. "Untitled session" is the
     # honest answer only when every one of those is empty.
     head.append(runtime.name or fallback_name or "Untitled session", style=fg)
-    head.truncate(width, overflow="crop")
+    # ``ellipsis``, not the ``crop`` this row used when the only reachable string
+    # was ``runtime.name or "Untitled session"`` (17 cells). The label the header
+    # wears now is the sidebar's own — 47-64 cells — so ordinary narrow panes
+    # reach the cut, and ``crop`` deletes the label's OWN trailing "…" along with
+    # what follows it, leaving a mid-word fragment that reads as a string that ran
+    # out of buffer rather than as an excerpt (design D1). ``width`` is the
+    # MEASURED card, not a fitted guess: one cell wider and the row folds onto a
+    # second line, the "one record reads as two" fault these charts exist to
+    # remove (see :meth:`SessionScreen._card_width`).
+    head.truncate(width, overflow="ellipsis")
     body.lines.append(head)
     ident = Text()
     ident.append(f"  {runtime.session_id}", style=dim)
@@ -1572,6 +1581,18 @@ class SessionScreen(ModalScreen[None]):
         #: session, published by the worker. Read here on the paint path it
         #: would be a blocking transcript probe on a keypress; it arrives empty
         #: and ``""`` is also the honest answer for a session with no opener yet.
+        #:
+        #: So a RESUMED conversation with no stored title and no stand-in wears
+        #: "Untitled session" for the ONE worker hop before this lands — design
+        #: D2, accepted: measured 9.2 ms with an empty ledger and 26.3 ms behind
+        #: a 4,000-row one. That is sub-frame at 30 fps, and the hop is shared
+        #: with the ledger read the screen cannot start without. Both
+        #: alternatives cost more than the frames they buy: a read BEFORE the
+        #: push puts a transcript probe on the keypress path (the constraint this
+        #: screen is built around), and a neutral placeholder needs a THIRD
+        #: state — "not yet read" — distinct from "read and empty", so the
+        #: header would have to claim something about a transcript it has not
+        #: looked at rather than fall through the precedence it already has.
         self._disk_name = ""
 
     def compose(self) -> ComposeResult:

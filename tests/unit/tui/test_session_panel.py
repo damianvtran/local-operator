@@ -417,6 +417,40 @@ def test_header_prefers_the_store_over_every_stand_in():
     )
 
 
+def test_a_narrow_card_marks_the_header_as_cropped_rather_than_cut_mid_word():
+    """The header keeps an ellipsis when the card cannot hold the label (D1).
+
+    The string this row wears is now the sidebar's own label (47-64 cells) where
+    the pre-fix header was 17, so widths that were safe before now reach the cut.
+    ``crop`` — the pre-fix overflow — deletes the label's OWN trailing "…" with
+    what precedes it and leaves a mid-word fragment; the width values below are
+    the measured card widths behind the design round's 76/72/60-column frames.
+    """
+    label = "There seems to be a weird issue where on resume certain tools…"
+    unnamed = replace(runtime(), name="")
+
+    def head_at(width: int) -> str:
+        return _head(
+            build_session_report(SessionReport("sess"), unnamed, width, fallback_name=label).plain
+        )
+
+    # Wide enough for the whole label: unchanged, ellipsis included.
+    assert head_at(63) == label
+    # Narrower: the label's own ellipsis goes, ours replaces it — and the row
+    # never exceeds the card, or the record would fold onto a second line.
+    assert head_at(61) == "There seems to be a weird issue where on resume certain tool…"
+    assert head_at(58) == "There seems to be a weird issue where on resume certain t…"
+    assert head_at(47) == "There seems to be a weird issue where on resum…"
+    for width in (63, 61, 58, 47):
+        head = head_at(width)
+        assert head.endswith("…") and len(head) <= width
+        # The id line beneath must not be disturbed by the head's overflow mode.
+        ident = str(
+            build_session_report(SessionReport("sess"), unnamed, width, fallback_name=label).plain
+        ).split("\n", 2)[1]
+        assert ident.strip() == runtime().session_id
+
+
 def test_a_retired_presentation_never_paints_a_late_label():
     """`set_disk_name` obeys the same ownership rule as `set_report`.
 
@@ -471,7 +505,8 @@ async def test_a_session_without_a_stored_title_is_named_from_disk(tmp_path, mon
 
     No stored title and no host stand-in (a resumed conversation has neither),
     so the header is the transcript-derived label the sidebar already paints —
-    same helper, same default length, so the two cannot disagree textually.
+    same helper, same default length, so on the DISK path the two cannot
+    disagree textually.
     """
     from local_operator.paths import CONFIG_DIR_ENV
 
@@ -515,6 +550,62 @@ async def test_a_stored_title_still_wins_on_a_resumed_conversation(tmp_path, mon
         await pilot.pause()
         assert isinstance(app.screen, SessionScreen)
         assert _head(str(app.screen._body.render())) == "Retention Fix"
+
+
+@pytest.mark.asyncio
+async def test_the_provisional_stand_in_outranks_a_different_disk_label(tmp_path, monkeypatch):
+    """The precedence rule, pinned executably (review F1).
+
+    Both candidates are in hand AND readable here, and their text differs — the
+    only arrangement in which the order is observable at all. Every other test
+    and every evidence frame uses one string for both, so transposing
+    ``_fallback_name`` to ``self._disk_name or self._provisional_name`` would
+    change no assertion anywhere in the tree.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    await _session_store(tmp_path, "sess", "a disk label only the transcript knows")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._show_provisional_name("the stand-in the band wears")
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionScreen)
+        # The disk read really landed with its own, different text: the stand-in
+        # wins on precedence, not because the other candidate was unavailable.
+        assert app.screen._disk_name == "a disk label only the transcript knows"
+        assert _head(str(app.screen._body.render())) == "The stand-in the band wears"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_label_read_still_publishes_the_report(monkeypatch):
+    """The label read has its own failure domain (review F2).
+
+    The ledger and the label share one thread hop and the label is read second,
+    so unguarded a raise from it would abort the hop and leave the screen on
+    "Loading usage records" for a report that was already in hand.
+    """
+    import local_operator.resume as resume_module
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("transcript unreadable")
+
+    monkeypatch.setattr(resume_module, "session_name", unreadable)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionScreen)
+        # The report published anyway, and the empty label falls through the
+        # precedence to the honest answer rather than wedging the screen.
+        assert app.screen.report is not None
+        assert app.screen._disk_name == ""
+        assert _head(str(app.screen._body.render())) == "Untitled session"
 
 
 # -- chart rendering ---------------------------------------------------------
