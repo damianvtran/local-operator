@@ -877,6 +877,123 @@ async def generate_retitle(
     return title
 
 
+#: Argument words that mean "work the title out again" rather than "make the
+#: title these words". Several spellings because the command's own vocabulary
+#: does not tell a user which one it wants: ``/title refresh`` is what the help
+#: row and the argument list advertise, and someone who types ``update`` or
+#: ``retitle`` from another tool's habit has expressed the same intention
+#: exactly — answering that with a conversation literally renamed "update" would
+#: be a hostile reading of an unambiguous request. ``rename`` is deliberately
+#: NOT here: it is this command's other spelling, so ``/title rename`` is at
+#: least as likely to be a user starting to type a name as it is a verb.
+#:
+#: The collision is real but not close: a user who genuinely wants a title
+#: spelled "refresh" is asking for a one-word name that is also this command's
+#: only verb, and ``/title "refresh"`` (quoted) is not a syntax this registry
+#: has. They can reach it in one more keystroke with ``/title refresh cache``,
+#: or by naming it anything longer. Weighed against every user who types the
+#: natural word and expects the natural thing, the reserved words win — the same
+#: trade ``/goal clear`` and ``/model default`` already make.
+#:
+#: HERE rather than in ``tui/app.py`` because three surfaces read it — the TUI
+#: handler, the routed ``slash_result`` path, and the detached runtime's own
+#: handler — and the last of those must never import Textual (see the module
+#: note on ``slash_commands.py``). A second copy in a second module is how a
+#: word ends up accepted on a terminal and typed into a title on a phone.
+TITLE_REFRESH_WORDS = frozenset({"refresh", "update", "retitle"})
+
+#: What an on-demand refresh did, for a receipt that has to tell the user
+#: something true. The automatic path collapses all of these onto ``None``
+#: because its only instruction to itself is "leave the title alone", but a
+#: user who typed the command is owed the difference between "the name still
+#: fits" and "there is nothing to title yet" — two outcomes that would
+#: otherwise share one unhelpful line.
+#:
+#: A FAILED provider call is deliberately absent from this vocabulary. It is
+#: not observable here: ``_ask_for_title`` resolves every failure to ``None``
+#: on purpose, which is what keeps a naming call from ever touching the turn
+#: beside it, and unpicking that to report a 429 would trade the isolation for
+#: a distinction that changes nothing the user can act on — the title stands
+#: either way. So a failure reads as :data:`TITLE_UNCHANGED`.
+TITLE_REFRESHED = "refreshed"
+TITLE_UNCHANGED = "unchanged"
+TITLE_NOTHING_YET = "nothing-yet"
+
+
+@dataclass(frozen=True)
+class TitleRefresh:
+    """The outcome of one on-demand refresh: a title, or why there is none."""
+
+    outcome: str
+    title: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.outcome == TITLE_REFRESHED
+
+
+async def refresh_title(
+    current: str,
+    complete_fn,
+    *,
+    turns: Sequence[_Turn] | None = None,
+    newest: str = "",
+    timeout: float = TITLE_TIMEOUT_S,
+) -> TitleRefresh:
+    """Re-read the whole trajectory and title it NOW, because the user asked.
+
+    The on-demand twin of :func:`generate_retitle`, and the differences are all
+    consequences of one fact: a person typed the command. The automatic path
+    exists to spend as few provider calls as it can get away with, so it is
+    gated on transcript growth, on a refresh budget, on a churn floor, and on
+    the newest message being substantive. None of those gates mean anything
+    here — they are guesses about whether a refresh is WANTED, and this caller
+    already knows.
+
+    Three specific gates are therefore dropped rather than relaxed:
+
+    * **A current title is not required.** ``generate_retitle`` returns early
+      without one because it has no anchor to judge drift against, but a
+      session whose opening naming call failed is unnamed and is exactly the
+      one a user reaches for this command on. With no anchor the sampled
+      context simply carries no ``<current-title>``, and the model writes a
+      fresh name from the trajectory.
+    * **The newest message is not consulted for signal.** The automatic path
+      fires at SUBMIT and its trigger IS that message, so "thanks" must not
+      spend a call. This fires on a command, with no message in hand at all;
+      ``newest`` is optional and only rounds out the tail when the caller has
+      something not yet in history.
+    * **"Unchanged" is an answer, not a failure.** The automatic path folds a
+      verbatim restatement of the anchor onto ``None`` because both mean "do
+      not repaint". A user who asked is owed the distinction, so it comes back
+      as :data:`TITLE_UNCHANGED` and the receipt can say the name still fits.
+
+    What is deliberately NOT dropped is the isolation: this is the same single
+    bounded tools-free call through :func:`_ask_for_title`, so a provider
+    failure resolves to :data:`TITLE_UNCHANGED` and can never reach the turn
+    running alongside it.
+    """
+    context = build_theme_context(turns or (), newest, current_title=current)
+    if not context:
+        # Nothing titleable: a session with no user/assistant turns yet. Named
+        # apart from a provider failure because the fix is different — this one
+        # resolves itself as soon as the conversation has content.
+        return TitleRefresh(TITLE_NOTHING_YET)
+    title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
+    if title is None:
+        # Either the model answered with the ``<title/>`` sentinel ("the name
+        # still fits") or the call failed. They are indistinguishable here, and
+        # the difference does not matter to a user who has a title already: the
+        # name stands either way. With NO title, though, the sentinel is the
+        # model declining to name small talk, which is the nothing-yet case
+        # wearing a different hat, so it is reported as such rather than as a
+        # failure the user might retry forever.
+        return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
+    if current and title.casefold() == current.casefold():
+        return TitleRefresh(TITLE_UNCHANGED, current)
+    return TitleRefresh(TITLE_REFRESHED, title)
+
+
 @dataclass
 class ConversationName:
     """Mutable holder for a conversation's title (empty = unnamed).
@@ -922,6 +1039,29 @@ class ConversationName:
         if user_set:
             self.user_set = True
         return self.text
+
+    def release_user_set(self) -> bool:
+        """Withdraw the human's claim on this title; True when one was held.
+
+        The ONE way ``user_set`` goes back to False, and it exists because the
+        flag is otherwise a one-way latch: ``set`` only ever turns it on, so a
+        conversation renamed by hand could never be handed back to automatic
+        naming for the rest of its life. That is right as a PRECEDENCE rule —
+        no generated title may quietly overwrite a name the user typed — but it
+        is wrong as a permanent sentence, because the user who typed the name
+        is also the one entitled to withdraw it.
+
+        So the release is deliberately not reachable from any generated path.
+        Only an explicit ``/title refresh`` calls it, which is the user saying
+        "stop using my words, work it out again" in the same breath as asking
+        for the new title. The text is left alone: the refresh call needs the
+        standing title as its ``<current-title>`` anchor, and a cleared name
+        would blank the band for as long as the call takes and leave the
+        conversation unnamed if it failed.
+        """
+        held = self.user_set
+        self.user_set = False
+        return held
 
     def claim_request(self) -> bool:
         """Reserve the one naming attempt; False when it is already spent."""

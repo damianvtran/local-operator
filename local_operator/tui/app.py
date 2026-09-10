@@ -131,6 +131,7 @@ from local_operator.session.protocol import SessionProtocol, ViewerSessionProtoc
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
+    primary_slash_name,
     slash_command_for,
 )
 from local_operator.tui import images as images_mod
@@ -21695,7 +21696,7 @@ class OperatorApp(App[None]):
         self._status.update(cwd=cwd)
 
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
-        """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
+        """``/title`` — report; ``/title <text>`` — set it; ``/title refresh`` — ask.
 
         The ONE production writer of ``user_set=True``, which is what the
         precedence flag on :class:`ConversationName` is for: a title a human
@@ -21704,8 +21705,10 @@ class OperatorApp(App[None]):
         ``ConversationName.set``) and every later re-title, which
         :meth:`_maybe_retitle_conversation` declines to even spend a call on.
 
-        No provider call on either branch. The words are the user's, so the only
-        work is putting them on the two surfaces that show a conversation's name.
+        No provider call on the report or the set branch. The words are the
+        user's, so the only work is putting them on the two surfaces that show a
+        conversation's name. ``refresh`` is the one branch that spends a call,
+        and it is delegated to :meth:`_cmd_title_refresh`.
         """
         session = self._session
         if session is None:
@@ -21714,10 +21717,13 @@ class OperatorApp(App[None]):
             # `notice` would collapse it. The rule `_cmd_goal` follows.
             self._system_notice("session is still starting…", "warning")
             return
+        if arg.strip().casefold() in naming.TITLE_REFRESH_WORDS:
+            self._cmd_title_refresh(session, notice)
+            return
         if not arg:
             current = session.conversation_name
             if current:
-                notice(f"conversation: {current} — /rename <title> to change it")
+                notice(f"conversation: {current} — /title <words>, or /title refresh")
             elif self._provisional_name:
                 # The band is wearing a stand-in, not a name (see
                 # `_show_provisional_name`). Answering a bare "unnamed" with an
@@ -21725,10 +21731,10 @@ class OperatorApp(App[None]):
                 # what the label actually is.
                 notice(
                     f"unnamed — the label above is a quote of your first message "
-                    f"({self._provisional_name}); /rename <title> names it"
+                    f"({self._provisional_name}); /title <words> names it"
                 )
             else:
-                notice("unnamed — /rename <title> names this conversation")
+                notice("unnamed — /title <words> names this conversation")
             return
         stored = session.set_conversation_name(arg, user_set=True)
         # Superseded, and by the best possible answer: cleared for the reason
@@ -21760,6 +21766,103 @@ class OperatorApp(App[None]):
         # ignored the format, while this is just a long name the user chose, and
         # refusing it outright would lose a title they typed.
         notice(f"renamed: {stored} — auto-naming will not override it")
+
+    def _cmd_title_refresh(self, session: SessionProtocol, notice: NoticeFn) -> None:
+        """``/title refresh`` — re-read the conversation and name it now.
+
+        The on-demand counterpart to :meth:`_maybe_retitle_conversation`, and
+        every difference between them follows from who asked. The automatic path
+        is a guess about whether a refresh is WANTED, so it is gated four ways
+        (``user_set``, low signal, growth, a churn floor) to keep the guessing
+        cheap. This caller is not guessing, so all four gates are dropped:
+        the user has just said the title is wrong, which is better evidence than
+        any schedule.
+
+        ``user_set`` is not merely bypassed but RELEASED
+        (``ConversationName.release_user_set``), and that is the load-bearing
+        half of this command. Asking for a fresh title is withdrawing the name
+        you typed — keeping the flag would mean the refreshed title landed and
+        then automatic naming stayed disabled forever on the strength of a
+        rename the user had just abandoned. Released, the conversation goes back
+        to tracking its own subject, which is what "refresh" means. The release
+        happens in the worker and only once a replacement is actually in hand —
+        see :meth:`_title_refresh_worker`.
+
+        The growth budget is not charged either. It bounds AUTOMATIC calls so an
+        unattended session cannot spend indefinitely; a call the user asked for
+        is not unattended, and charging it would let two deliberate refreshes
+        exhaust the automatic schedule for the rest of the session. A landed
+        refresh instead re-seeds the schedule through ``_store_title``'s
+        first-title branch, which is the honest reading: this conversation's
+        identity was just re-decided, so its drift clock starts again here.
+        """
+        # Generation-stamped like the automatic path so a `/new` or `/resume`
+        # landing while the call is in flight cannot repaint the replacement
+        # conversation with this one's title.
+        self._name_generation += 1
+        generation = self._name_generation
+        # Snapshot on the UI thread, exactly as the automatic path does: the
+        # sampler only reads role/text, so a shallow copy is enough, and taking
+        # it now titles the conversation as it stands rather than as it looks
+        # after a concurrent turn has written more history.
+        turns = (
+            None
+            if hasattr(session, "materialize_history")
+            else (list(session.history()) if hasattr(session, "history") else [])
+        )
+        notice("refreshing the title…")
+        self.run_worker(
+            self._title_refresh_worker(session, generation, turns, notice),
+            thread=False,
+            group=self._interaction.worker_group("naming"),
+        )
+
+    async def _title_refresh_worker(
+        self,
+        session: SessionProtocol,
+        generation: int,
+        turns: list[AgentMessage] | None,
+        notice: NoticeFn,
+    ) -> None:
+        """One isolated refresh call, whose every outcome gets a receipt.
+
+        Unlike :meth:`_retitle_conversation_worker`, silence is not an option on
+        any branch. That worker runs unasked and repaints only on a genuinely
+        new title, so "no change" and "the call failed" can both correctly
+        resolve to doing nothing. Here a user typed a command and is watching
+        for an answer, so each outcome says which one it was — a refresh that
+        quietly changed nothing is indistinguishable from a broken command.
+        """
+        source = self._interaction
+        source.active_workers += 1
+        try:
+            try:
+                if turns is None:
+                    turns = await getattr(session, "materialize_history")()
+                result = await naming.refresh_title(
+                    session.conversation_name, session.complete_once, turns=turns
+                )
+            except asyncio.CancelledError:
+                return
+            # Superseded (a reload) or belonging to a session no longer on
+            # screen: touch neither the title nor the transcript.
+            if generation != source.naming.generation or source.retired:
+                return
+            if not result.changed:
+                if result.outcome == naming.TITLE_NOTHING_YET:
+                    notice("nothing to title yet — /title <words> names it by hand")
+                else:
+                    notice(f"title unchanged: {session.conversation_name}")
+                return
+            # Released only once a replacement is actually in hand. Released
+            # before the call instead, a refresh that came back "unchanged"
+            # would still have silently re-armed automatic naming over a name
+            # the user typed and is keeping.
+            session.conversation_name_state.release_user_set()
+            stored = self._store_title(session, result.title)
+            notice(f"title refreshed: {stored}")
+        finally:
+            source.active_workers -= 1
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
@@ -29981,6 +30084,34 @@ class OperatorApp(App[None]):
             )
             picker.set_notice("")
             return
+        if message.command in ("rename", "title"):
+            # ONE row, and it is the whole reason this command takes a list. The
+            # other argument is free text — a title cannot be offered from a
+            # list, because the app does not know what the conversation should
+            # be called — so the list exists to teach the one word a user could
+            # not guess. Free typing is unaffected: the editor RANKS what is
+            # typed and never filters what may be submitted, so an arbitrary
+            # title still reaches `_cmd_rename`.
+            #
+            # The description states the release, not just the call. That the
+            # refresh hands the name back to automatic naming is the surprising
+            # half of the command, and this row is the last surface before it
+            # runs.
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name="refresh",
+                        description="Re-read the conversation and name it again",
+                        detail="resumes auto-naming",
+                    )
+                ]
+            )
+            picker.set_notice(
+                f"conversation: {self._session.conversation_name}"
+                if self._session is not None and self._session.conversation_name
+                else "or type a title"
+            )
+            return
         if message.command == "mcp":
             # Clear BEFORE the fill: the builder may set a notice of its own
             # (an unreadable credential store on the logout list), and a
@@ -32177,12 +32308,22 @@ class OperatorApp(App[None]):
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
+        # Resolved to the registry PRIMARY name before any branch reads it, for
+        # the reason `_run_slash_command` does the same: the branches below
+        # match literals, so an ALIAS arriving off the wire (`/title`,
+        # `/models`, `/recall`) would fall past every one of them and be
+        # answered with the "not available from an attached terminal" refusal —
+        # for a command this owner implements and the invoker's own picker
+        # completed. The local path resolves at dispatch and the routed path did
+        # not, which is precisely how one spelling of a command worked in a
+        # terminal and failed on a phone.
+        command = primary_slash_name(command)
         if command == "context":
             return self._context_slash_result(SlashResult)
         if command == "goal":
             return self._goal_slash_result(args, SlashResult)
         if command == "rename":
-            return self._rename_slash_result(args, SlashResult)
+            return await self._rename_slash_result(args, SlashResult)
         if command == "effort":
             return self._effort_slash_result(args, SlashResult)
         if command == "fast":
@@ -32279,22 +32420,77 @@ class OperatorApp(App[None]):
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
-    def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """``/title`` over the remote/mobile control path.
+
+        Async solely for the refresh branch, which spends a provider call. The
+        report and set branches are the same synchronous work they have always
+        been — awaiting a coroutine that never suspends costs nothing, and the
+        alternative (a sync entry that spawns a detached task) would answer the
+        phone with a receipt for a title that had not been decided yet.
+
+        The refresh is AWAITED rather than run on a worker for the same reason:
+        this path's whole contract is that the returned ``SlashResult`` is the
+        answer the invoker renders. A follower has no naming worker of its own
+        and no second chance to paint, so a result produced before the call
+        finished would be a receipt for work that had not happened.
+        """
         session = self._session
         if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        if arg.strip().casefold() in naming.TITLE_REFRESH_WORDS:
+            return await self._title_refresh_slash_result(session, SlashResult)
         if not arg:
             current = session.conversation_name
             text = (
-                f"conversation: {current} — /rename <title> to change it"
+                f"conversation: {current} — /title <words>, or /title refresh"
                 if current
-                else "unnamed — /rename <title> names this conversation"
+                else "unnamed — /title <words> names this conversation"
             )
             return SlashResult(kind="notice", text=text, style="info")
         stored = session.set_conversation_name(arg, user_set=True)
         return SlashResult(
             kind="notice",
             text=f"renamed: {stored} — auto-naming will not override it",
+            style="info",
+            data={"stored": stored},
+        )
+
+    async def _title_refresh_slash_result(self, session: Any, SlashResult: Any) -> Any:
+        """``/title refresh`` over the control path — same policy as the TUI's.
+
+        Shares :func:`naming.refresh_title` and the release-on-success rule with
+        :meth:`_title_refresh_worker` rather than reimplementing either, so a
+        phone and a terminal cannot drift on what a refresh does to the
+        ``user_set`` flag. What differs is only the delivery: a receipt returned
+        as data instead of painted through ``notice``.
+        """
+        turns = None
+        if not hasattr(session, "materialize_history"):
+            turns = list(session.history()) if hasattr(session, "history") else []
+        try:
+            if turns is None:
+                turns = await getattr(session, "materialize_history")()
+            result = await naming.refresh_title(
+                session.conversation_name, session.complete_once, turns=turns
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
+            logger.debug("routed title refresh failed", exc_info=True)
+            result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
+        if not result.changed:
+            text = (
+                "nothing to title yet — /title <words> names it by hand"
+                if result.outcome == naming.TITLE_NOTHING_YET
+                else f"title unchanged: {session.conversation_name}"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+        session.conversation_name_state.release_user_set()
+        stored = self._store_title(session, result.title)
+        return SlashResult(
+            kind="notice",
+            text=f"title refreshed: {stored}",
             style="info",
             data={"stored": stored},
         )

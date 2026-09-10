@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     SteeringDeliveredEvent,
 )
+from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -834,6 +836,68 @@ async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     await handle.ask_answer(second.request_id, "yes")
     assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_title_refresh_retitles_a_detached_session_and_republishes() -> None:
+    """``/title refresh`` on a runtime nobody is attached to.
+
+    The receipt is the RETURN VALUE here, not a painted notice, so the call is
+    awaited rather than detached: a handle that answered before the naming call
+    settled would report a title that had not been decided. The republish is
+    what keeps ``lop sessions`` and the resume picker from listing the session
+    under the name it just stopped having.
+    """
+    from local_operator.session.naming import ConversationName
+
+    handle, session = make_handle()
+    session.conversation_name = "Fix the login flow"
+    session._name_state = ConversationName(text="Fix the login flow", user_set=True)
+    session.conversation_name_state = session._name_state
+    session.history = lambda: [  # type: ignore[attr-defined]
+        SimpleNamespace(role="user", text="fix the login redirect loop"),
+        SimpleNamespace(role="assistant", text="done"),
+        SimpleNamespace(role="user", text="now rewrite the billing importer"),
+    ]
+    session.title_reply = "<title>Billing importer rewrite</title>"
+    republished: list[bool] = []
+    handle._registrant = SimpleNamespace(  # type: ignore[attr-defined]
+        _republish=lambda: republished.append(True)
+    )
+
+    result = await handle._rename_slash(session, "refresh", _SlashResult)
+
+    assert result.text == "title refreshed: Billing importer rewrite"
+    assert session.conversation_name == "Billing importer rewrite"
+    # Stored as a GENERATED title, and the human latch released with it: asking
+    # for a fresh name withdraws the one you typed.
+    assert session._named[-1] == ("Billing importer rewrite", False)
+    assert not session._name_state.user_set
+    assert republished == [True], "a renamed session was left stale in the registry"
+
+
+@pytest.mark.asyncio
+async def test_title_refresh_that_changes_nothing_keeps_the_name_and_the_latch() -> None:
+    """A refresh is not a rename: "the name still fits" must leave both the
+    title and the user's claim on it exactly as they were."""
+    from local_operator.session.naming import ConversationName
+
+    handle, session = make_handle()
+    session.conversation_name = "Ledger reconciliation"
+    session._name_state = ConversationName(text="Ledger reconciliation", user_set=True)
+    session.conversation_name_state = session._name_state
+    session.history = lambda: [  # type: ignore[attr-defined]
+        SimpleNamespace(role="user", text="reconcile the ledger"),
+        SimpleNamespace(role="assistant", text="done"),
+    ]
+    session.title_reply = "<title/>"  # the model says: unchanged
+
+    result = await handle._rename_slash(session, "refresh", _SlashResult)
+
+    assert result.text == "title unchanged: Ledger reconciliation"
+    assert session.conversation_name == "Ledger reconciliation"
+    assert session._name_state.user_set, "the rename was quietly revoked"
+    assert session._named == []
 
 
 @pytest.mark.asyncio

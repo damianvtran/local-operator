@@ -995,6 +995,120 @@ async def test_generate_retitle_swallows_a_provider_failure_as_no_change() -> No
     assert await naming.generate_retitle("Fix the login flow", "rewrite the importer", boom) is None
 
 
+# -- refresh_title: the same call, with the guessing removed ------------------
+
+
+def _turns(*texts: str) -> list[Any]:
+    """A trajectory of alternating user/assistant turns carrying ``texts``."""
+    return [
+        SimpleNamespace(role="user" if index % 2 == 0 else "assistant", text=text)
+        for index, text in enumerate(texts)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_title_reports_a_replacement_distinctly_from_no_change() -> None:
+    """``generate_retitle`` collapses both onto ``None`` because its only
+    instruction to itself is "leave the title alone". A user who typed the
+    command is owed the difference."""
+
+    async def moved(system: str, prompt: str) -> str:
+        return "<title>Billing importer rewrite</title>"
+
+    async def same(system: str, prompt: str) -> str:
+        return "<title/>"
+
+    turns = _turns("fix the login redirect loop", "done", "now the importer")
+    changed = await naming.refresh_title("Fix the login flow", moved, turns=turns)
+    assert changed == naming.TitleRefresh(naming.TITLE_REFRESHED, "Billing importer rewrite")
+    assert changed.changed
+
+    unchanged = await naming.refresh_title("Fix the login flow", same, turns=turns)
+    assert unchanged.outcome == naming.TITLE_UNCHANGED
+    assert not unchanged.changed
+
+
+@pytest.mark.asyncio
+async def test_refresh_title_titles_a_conversation_that_has_no_title_yet() -> None:
+    """The anchor gate is dropped: ``generate_retitle`` returns early without a
+    current title, but an unnamed session is exactly the one a user asks."""
+    seen: list[str] = []
+
+    async def answer(system: str, prompt: str) -> str:
+        seen.append(prompt)
+        return "<title>Login redirect loop</title>"
+
+    result = await naming.refresh_title("", answer, turns=_turns("fix the login redirect loop"))
+    assert result == naming.TitleRefresh(naming.TITLE_REFRESHED, "Login redirect loop")
+    assert "<current-title>" not in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_refresh_title_spends_no_call_when_there_is_nothing_to_title() -> None:
+    """Named apart from a failure because the fix differs: this one resolves
+    itself as soon as the conversation has content."""
+    calls: list[str] = []
+
+    async def answer(system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return "<title>Never reached</title>"
+
+    result = await naming.refresh_title("Fix the login flow", answer, turns=[])
+    assert result.outcome == naming.TITLE_NOTHING_YET
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_title_never_lets_a_provider_failure_escape() -> None:
+    """The isolation is NOT relaxed along with the gates: this call runs beside
+    a live turn and a 429 must never reach it."""
+
+    async def boom(system: str, prompt: str) -> str:
+        raise RuntimeError("429 rate limited")
+
+    result = await naming.refresh_title(
+        "Fix the login flow", boom, turns=_turns("fix the login redirect loop")
+    )
+    assert result.outcome == naming.TITLE_UNCHANGED
+
+
+@pytest.mark.asyncio
+async def test_refresh_title_asks_even_about_a_low_signal_newest_message() -> None:
+    """The signal gate belongs to the AUTOMATIC path, whose trigger IS the
+    message. This one is triggered by a command, so "thanks" in the tail is
+    just a turn — declining here would refuse the command outright."""
+
+    async def answer(system: str, prompt: str) -> str:
+        return "<title>Billing importer rewrite</title>"
+
+    result = await naming.refresh_title(
+        "Fix the login flow",
+        answer,
+        turns=_turns("fix the login redirect loop", "done"),
+        newest="thanks!",
+    )
+    assert result.changed
+
+
+def test_release_user_set_is_the_only_way_the_latch_reopens() -> None:
+    """``set`` only ever turns the flag ON, which is right as precedence and
+    wrong as a life sentence. One caller reopens it, and only on request."""
+    name = naming.ConversationName()
+    name.set("Ledger reconciliation", user_set=True)
+    assert name.set("Generated", user_set=False) == "Ledger reconciliation"
+
+    assert name.release_user_set() is True
+    assert not name.user_set
+    # The TEXT is deliberately untouched: the refresh call needs it as the
+    # anchor, and clearing it would blank the band for the length of the call.
+    assert name.text == "Ledger reconciliation"
+    assert name.set("Generated", user_set=False) == "Generated"
+
+    # Idempotent: a second release on an already-open latch reports that it
+    # held nothing rather than raising.
+    assert name.release_user_set() is False
+
+
 # -- the theme sampler and the drift regression it fixes ----------------------
 
 
@@ -1268,3 +1382,186 @@ async def test_the_apps_provisional_mirror_cannot_displace_a_stored_title() -> N
             assert row == ("Reliable session naming", SESSION_NAME_RANK_TITLE)
             session.gate.set()
         recorder.close()
+
+
+# -- /title refresh: the on-demand path -------------------------------------
+#
+# The automatic re-title above is a GUESS about whether a refresh is wanted,
+# and every gate on it exists to keep that guessing cheap. `/title refresh` is
+# the same call with the guessing removed, so what these tests pin is mostly
+# the absence of those gates — plus the one thing the automatic path never has
+# to do, which is tell the user what happened.
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_retitles_a_session_the_growth_gate_would_decline() -> None:
+    """The reason the command exists: the schedule says no, the user says yes.
+
+    A settled session that has grown but not doubled is exactly where
+    ``should_refresh_theme`` declines — pinned one test up. The same session,
+    asked directly, re-titles.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        now = await _named(app, session, "fix the login redirect loop")
+        # Deliberately INSIDE the churn floor and short of the growth gate: if
+        # either gate were consulted, no call would be spent at all.
+        now[0] += 1
+        session.grow_transcript(3)
+
+        session.title = "<title>Billing importer rewrite</title>"
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert len(session.completions) == 2, "the refresh spent no call"
+        system, data = session.completions[1]
+        assert system == naming.THEME_SYSTEM_PROMPT
+        assert "<current-title>\nFix the login flow\n</current-title>" in data
+        assert session.conversation_name == "Billing importer rewrite"
+        assert app._status is not None
+        assert app._status._conversation_name == "Billing importer rewrite"
+        assert "title refreshed: Billing importer rewrite" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_releases_a_human_rename_only_when_a_title_lands() -> None:
+    """``user_set`` is a one-way latch everywhere else; this is the exception.
+
+    Asking for a fresh title withdraws the name you typed — otherwise the
+    refreshed title would land and automatic naming would stay disabled forever
+    on the strength of a rename the user had just abandoned.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        # The trajectory the refresh samples: without it there is nothing to
+        # title and the call is never spent, which is a different test.
+        session.grow_transcript(4)
+        session.set_conversation_name("Ledger reconciliation", user_set=True)
+        assert session.conversation_name_state.user_set
+
+        session.title = "<title>Billing importer rewrite</title>"
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert session.conversation_name == "Billing importer rewrite"
+        assert (
+            not session.conversation_name_state.user_set
+        ), "a refreshed conversation must go back to naming itself"
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_refresh_keeps_the_human_rename_latched() -> None:
+    """The other half of the release rule, and the reason it is not done up front.
+
+    Released before the call, a refresh that came back "the name still fits"
+    would have silently re-armed automatic naming over a name the user typed and
+    is keeping — a rename quietly revoked by a command that reported no change.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+        session.set_conversation_name("Ledger reconciliation", user_set=True)
+
+        session.title = "<title/>"  # the model says: unchanged
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert session.conversation_name_state.user_set, "the rename was quietly revoked"
+        assert "title unchanged: Ledger reconciliation" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_session_can_be_titled_on_demand() -> None:
+    """``generate_retitle`` returns early without an anchor; the refresh does not.
+
+    A session whose opening naming call failed is unnamed, and is precisely the
+    one a user reaches for this command on. With no anchor the sampled context
+    simply carries no ``<current-title>`` and the model writes a fresh name.
+    """
+    app, session = await _boot(title="")  # the opening naming call yields nothing
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._submit_prompt("fix the login redirect loop")
+        session.gate.set()
+        await _settle()
+        assert not session.conversation_name
+        session.grow_transcript(4)
+
+        session.title = "<title>Login redirect loop</title>"
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        _, data = session.completions[-1]
+        assert "<current-title>" not in data, "an unnamed session anchored on nothing"
+        assert session.conversation_name == "Login redirect loop"
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_with_nothing_to_title_says_so() -> None:
+    """Three outcomes, three receipts. A refresh that changed nothing and said
+    nothing is indistinguishable from a broken command, which is the failure
+    the automatic path is allowed to have and this one is not."""
+    app, session = await _boot(title="")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert session.completions == [], "an empty conversation spent a call"
+        assert "nothing to title yet" in _transcript_text(app)
+        session.gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_leaves_the_title_standing() -> None:
+    """Naming is decoration: a provider failure costs the refresh, never the
+    title and never the turn beside it."""
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+
+        async def boom(system: str, prompt: str) -> str:
+            raise RuntimeError("429 from the provider")
+
+        session.complete_once = boom  # type: ignore[method-assign]
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        assert session.conversation_name == "Fix the login flow"
+        assert "title unchanged: Fix the login flow" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_word_is_never_mistaken_for_a_title() -> None:
+    """`/title refresh` asks; `/title <anything else>` names. The dividing line
+    is a small reserved vocabulary, so a user typing the natural word from
+    another tool's habit is not answered with a conversation called "update"."""
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+        session.title = "<title>Billing importer rewrite</title>"
+
+        for word in sorted(naming.TITLE_REFRESH_WORDS):
+            session.set_conversation_name("Fix the login flow", user_set=False)
+            app._run_slash_command(f"/title {word}")
+            await _settle()
+            assert session.conversation_name == "Billing importer rewrite", word
+
+        # And the near-miss goes the other way: a title that merely CONTAINS a
+        # reserved word is a title, or the command would eat legitimate names.
+        app._run_slash_command("/title refresh the billing importer")
+        await _settle()
+        # Stored VERBATIM, not sentence-cased: this branch is `/rename`'s, and
+        # the words are the user's to capitalise.
+        assert session.conversation_name == "refresh the billing importer"
+        assert session.conversation_name_state.user_set

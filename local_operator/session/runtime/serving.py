@@ -2650,7 +2650,16 @@ class ServingSessionHandle(SessionHandle):
         viewer. Anything not handled falls through to an honest notice rather
         than the transport's ``unknown op``, because a user typing a command
         this runtime does not implement needs to know what to do instead.
+
+        The word is resolved to its registry PRIMARY name first, exactly as the
+        app-hosted twin does: the branches below match literals, so an ALIAS off
+        the wire (``/title``, ``/models``, ``/recall``) would otherwise fall
+        past every one of them and collect the terminal-only refusal for a
+        command this runtime implements.
         """
+        from local_operator.slash_commands import primary_slash_name
+
+        command = primary_slash_name(command)
         session = self._session
         if command == "desktop_mcp":
             from local_operator.mcp.config import MCPConfigWriteError
@@ -2705,7 +2714,7 @@ class ServingSessionHandle(SessionHandle):
         if command == "goal":
             return self._goal_slash(session, args, SlashResult)
         if command == "rename":
-            return self._rename_slash(session, args, SlashResult)
+            return await self._rename_slash(session, args, SlashResult)
         if command == "effort":
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
@@ -2777,19 +2786,92 @@ class ServingSessionHandle(SessionHandle):
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
-    def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+    async def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """``/title`` on a detached runtime: report, set, or refresh.
+
+        Async only for the refresh branch, which spends a provider call and is
+        awaited rather than detached: this method's return value IS the receipt
+        the invoking terminal or phone renders, so answering before the call
+        settled would report a title that had not been decided.
+        """
+        from local_operator.session import naming
+
         name = (arg or "").strip()
+        if name.casefold() in naming.TITLE_REFRESH_WORDS:
+            return await self._title_refresh_slash(session, SlashResult)
         if not name:
             current = getattr(session, "conversation_name", "") or ""
-            text = f"name: {current}" if current else "no name set — /rename <text> to set one"
+            text = (
+                f"name: {current} — /title <words>, or /title refresh"
+                if current
+                else "no name set — /title <words> to set one"
+            )
             return SlashResult(kind="notice", text=text, style="info")
         setter = getattr(session, "set_conversation_name", None)
         if not callable(setter):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         stored = setter(name)
-        # The name is on the discovery record, so `lop sessions` and the
-        # picker must see the rename without waiting for the next heartbeat.
-        # `_notify` refreshes the projection; the registrant owns the record.
+        self._publish_name()
+        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
+
+    async def _title_refresh_slash(self, session: Any, SlashResult: Any) -> Any:
+        """``/title refresh`` on a detached runtime.
+
+        Shares :func:`naming.refresh_title` and the release-on-success rule with
+        the TUI's own handler, so a session owned by a runtime and one owned by
+        an app cannot disagree about what a refresh does to ``user_set``.
+        """
+        from local_operator.session import naming
+
+        setter = getattr(session, "set_conversation_name", None)
+        complete_once = getattr(session, "complete_once", None)
+        if not callable(setter) or not callable(complete_once):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        current = getattr(session, "conversation_name", "") or ""
+        try:
+            materialize = getattr(session, "materialize_history", None)
+            if callable(materialize):
+                # A duck-typed handle: `session` is `Any` here (this runtime
+                # hosts real sessions and test doubles alike), so the awaitable
+                # is cast rather than assumed — the same probe-then-cast the
+                # server's optional ops use.
+                turns = await cast("Awaitable[list[Any]]", materialize())
+            else:
+                turns = list(session.history()) if hasattr(session, "history") else []
+            result = await naming.refresh_title(current, complete_once, turns=turns)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
+            logger.debug("routed title refresh failed", exc_info=True)
+            result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
+        if not result.changed:
+            text = (
+                "nothing to title yet — /title <words> names it by hand"
+                if result.outcome == naming.TITLE_NOTHING_YET
+                else f"title unchanged: {current}"
+            )
+            return SlashResult(kind="notice", text=text, style="info")
+        state = getattr(session, "conversation_name_state", None)
+        release = getattr(state, "release_user_set", None)
+        if callable(release):
+            # Released only on success, and only here: a refresh that changed
+            # nothing must leave a name the user typed exactly as they left it.
+            release()
+        stored = setter(result.title, user_set=False)
+        self._publish_name()
+        return SlashResult(kind="notice", text=f"title refreshed: {stored}", style="info")
+
+    def _publish_name(self) -> None:
+        """Push a changed conversation name onto every surface that shows it.
+
+        The name is on the discovery record, so ``lop sessions`` and the picker
+        must see it without waiting for the next heartbeat. ``_notify``
+        refreshes the projection; the registrant owns the record.
+
+        Extracted from ``_rename_slash`` when the refresh branch became a second
+        writer: two copies of this would be two chances for one of them to skip
+        the republish and leave a session listed under a name it no longer has.
+        """
         self._notify()
         republish = getattr(self._registrant, "_republish", None)
         if callable(republish):
@@ -2797,7 +2879,6 @@ class ServingSessionHandle(SessionHandle):
                 republish()
             except Exception:  # noqa: BLE001 — a stale name is not worth a failure
                 logger.debug("could not republish the renamed record", exc_info=True)
-        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
 
     def _context_slash(self, session: Any, SlashResult: Any) -> Any:
         """The routed ``/context``: the token breakdown, computed HERE.
