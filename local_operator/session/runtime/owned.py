@@ -149,6 +149,30 @@ def _already_bounded(images: Any) -> bool:
     return not isinstance(images[0], Mapping)
 
 
+def _question_prose(question: Any) -> str:
+    """The human-readable prose of an ask, for surfaces that ANNOUNCE it.
+
+    One function rather than two ``getattr`` calls because the two call sites
+    below drifted together: both read a ``text`` attribute
+    :class:`~local_operator.harness.types.AskQuestion` does not have and, with
+    ``extra="forbid"``, cannot ever be given. Naming the read once means a
+    future rename of the model's field breaks in one place instead of silently
+    degrading to the fallback in several.
+
+    ``getattr`` rather than ``question.question`` is DEFENSIVE, not a caller
+    requirement: every current call site receives ``list[AskQuestion]`` straight
+    from ``AskUserFn``, and no path hands this a duck-typed object (the phone's
+    decode runs the other way, through ``ask_pending_request``). It is written
+    this way to match the sibling read in ``mobile/types.py`` and because a gate
+    announcement must degrade to a readable sentence rather than raise — an
+    ``AttributeError`` here would escape into the gate path and take down a
+    question a human was about to answer. The fallback is deliberately a
+    sentence a human can read on a notification banner, matching
+    ``ask_pending_request``'s.
+    """
+    return str(getattr(question, "question", "") or "the agent is asking")
+
+
 @dataclass
 class _PromptCommand:
     command_id: str
@@ -451,13 +475,41 @@ class OwnedSessionHandle(SessionHandle):
                     )
                 )
                 self._notify()
-                self._announce_pending("ask", getattr(question, "text", "") or "question", "")
+                prose = _question_prose(question)
+                # ``question``, not ``text``: :class:`AskQuestion` has no ``text``
+                # field and sets ``extra="forbid"``, so it can never grow one, and
+                # the old read always fell through to the literal "question". What
+                # that actually degraded is narrower than it looks: the projection
+                # card reads the field directly through ``ask_pending_request`` and
+                # was always right, and ``lop sessions`` publishes the KIND
+                # (``set_record_pending``) so prose never travelled there at all.
+                # The reads it did break are ``_parked_announcement`` /
+                # ``reannounce_pending`` and the timeout row REPLAYED TO THE MODEL.
+                # It survived because this whole gate was unreachable until #868:
+                # both its hosts build ``has_ui=False``, which the removed
+                # ``build_ask_tool`` clause vetoed, so the body never ran.
+                #
+                # The prose is passed as DETAIL as well as title because the
+                # notification body is composed from ``detail`` alone — a banner
+                # built from the title is unreachable when detail is empty, so an
+                # ask toast read the static "Waiting for your answer" while the
+                # approval toast beside it named its action ("write: /etc/hosts").
+                # A user who walked away could see that a decision was owed but
+                # not which one.
+                #
+                # EXCEPT for a secret question, which stays terse deliberately. Its
+                # prose names the credential being requested ("Paste your OpenAI
+                # key"), and a lock-screen banner is exactly the surface that must
+                # not enumerate which of the user's keys a session is missing. The
+                # VALUE was never at risk here — the gate announces before any
+                # answer exists — so this guards the QUESTION, and the shared
+                # ``BODIES["ask"]`` vocabulary is the right fallback for it.
+                announced = "" if getattr(question, "secret", False) else prose
+                self._announce_pending("ask", prose, announced)
                 try:
                     answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
                 except TimeoutError:
-                    await self._record_gate_timeout(
-                        "ask", getattr(question, "text", "") or "question", kind="ask"
-                    )
+                    await self._record_gate_timeout("ask", prose, kind="ask")
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.

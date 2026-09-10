@@ -538,9 +538,10 @@ def test_inventory_block_matches_default_tool_order() -> None:
             subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
-            # `ask` is createIf-gated on a UI that can draw its picker AND on the
-            # hook that answers it, so the fully-capable context this test needs
-            # has to carry both or the tool drops out of the inventory.
+            # `ask` is createIf-gated on the HOOK that answers it, and on that
+            # alone (#868) — so `ask_user` below is what keeps the tool in this
+            # fully-capable inventory. `has_ui` is set only to describe a host
+            # that drives a frontend state store; it no longer gates any tool.
             has_ui=True,
             ask_user=_fake_ask_for_blocks,
             # `agent` is createIf-gated on a registry to persist roles into;
