@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import ToolExecutionStartEvent
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import (
     CompactionStarted,
@@ -118,6 +119,11 @@ class HangingFollowerSession(JobsSession):
     #: than "the turn succeeded". A follower fake without it models the wire
     #: ORDER while claiming the authority of an in-process session.
     is_remote = True
+    # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+    # viewer, so the predicates must agree with `is_remote` above.
+    owns_runtime = False
+    outcome_is_synchronous = False
+    runtime_locality: RuntimeLocality = "this-machine"
 
     async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
         self.streaming = True
@@ -147,6 +153,11 @@ class OwnerEndRacingFollowerSession(JobsSession):
     #: this fallback decline to announce an outcome it was never told, so the
     #: owner's real end behind it is what speaks.
     is_remote = True
+    # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+    # viewer, so the predicates must agree with `is_remote` above.
+    owns_runtime = False
+    outcome_is_synchronous = False
+    runtime_locality: RuntimeLocality = "this-machine"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -1488,6 +1499,11 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
 
     class RefusingFollowerSession(JobsSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
         async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
             raise RuntimeError("session owner is reconnecting")
@@ -1567,6 +1583,11 @@ async def test_a_followers_loop_turn_holds_working_between_iterations() -> None:
         """A follower whose owner advertised nothing — every cold viewer."""
 
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
 
         def __init__(self) -> None:
             super().__init__()

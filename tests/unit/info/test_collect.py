@@ -33,6 +33,7 @@ from local_operator.info.collect import (
     collect_snapshot,
 )
 from local_operator.info.model import InfoSnapshot, SessionsInfo
+from local_operator.session.protocol import RuntimeLocality
 
 #: Frozen stamp for fixtures whose durations must be constants.
 NOW_FIXTURE = 1_788_602_400.0
@@ -803,6 +804,13 @@ def test_nested_subagents_are_counted_once() -> None:
             ]
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         subagent_comms = _Comms()
 
     live = collect_live(_Session())
@@ -879,6 +887,13 @@ def test_a_comms_object_without_nodes_degrades_instead_of_raising() -> None:
         pass
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         subagent_comms = _NoNodes()
 
     live = collect_live(_Session())  # must not raise

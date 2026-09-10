@@ -47,7 +47,7 @@ from local_operator.harness.types import (
     ImageContent,
 )
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_CARD_CLASS,
@@ -89,6 +89,13 @@ PLACEHOLDER_HEAD = "Message Local Operator"
 
 class FakeSession:
     """Minimal SessionProtocol stand-in: enough to boot and take one prompt."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []

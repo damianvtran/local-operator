@@ -46,13 +46,20 @@ from local_operator.headless_print import PrintRenderer, printable_event, run_pr
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 
 # --- Fakes ---------------------------------------------------------------------
 
 
 class FakeSession:
     """Scripted SessionProtocol: emits a fixed event list per prompt call."""
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self, scripts: list[list[AgentEvent]]) -> None:
         self.scripts = scripts
