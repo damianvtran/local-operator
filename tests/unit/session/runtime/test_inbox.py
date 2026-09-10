@@ -168,6 +168,47 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
     )
 
 
+def test_a_message_spooled_to_an_unstarted_session_drains_on_start(tmp_path: Path) -> None:
+    """The receive half of the cold-session spool: a message that
+    ``deliver_peer_message`` wrote to the inbox (a session with NO live
+    record) is consumed by the ordinary drain the next time the session
+    opens. A live-but-unstarted target is no longer spooled at all — it is
+    quietly dialled — but rows written by an older sender, or before a
+    record existed, still land here, and this pins that the boot drain is
+    what serves them."""
+    import asyncio
+
+    from local_operator.session.runtime.process import _drain_inbox_into
+
+    session_dir = tmp_path / "sessions" / "freshsess"
+    session_dir.mkdir(parents=True)
+    assert append_inbox(session_dir, _line("held until you start"))
+
+    class _Transcript:
+        directory = session_dir
+
+    class _Session:
+        transcript = _Transcript()
+
+    class _Handle:
+        def __init__(self) -> None:
+            self._session = _Session()
+            self.received: list[tuple[str, str, bool]] = []
+
+        async def receive_peer_message(self, text, *, mode, wake, sender=None):
+            self.received.append((text, mode, wake))
+            return "ok"
+
+    handle = _Handle()
+    delivered = asyncio.run(_drain_inbox_into(handle))
+
+    assert delivered == 1
+    # Drained as a quiet mailbox note (never a wake), matching the cold path.
+    assert handle.received == [("held until you start", "mailbox", False)]
+    # And the spool is consumed, not peeked.
+    assert drain_inbox(session_dir) == []
+
+
 def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     """Round 2 (U5): the drain read ``session.transcript`` while ``Session``
     only exposed ``_transcript``, so it bailed before calling ``drain_inbox``

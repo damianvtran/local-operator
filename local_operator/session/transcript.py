@@ -75,6 +75,49 @@ CUSTOM_KIND_CUSTOM = "custom"
 #: context. Replay applies it; :meth:`Transcript.compact_file` folds it away.
 ENTRY_PRUNE = "prune"
 
+
+def durable_conversation_path(path: Any) -> bool:
+    """Whether the transcript file at ``path`` holds a REAL conversation turn.
+
+    The seed signal for the record's ``started`` bit: ``RuntimeServer.__init__``
+    (a resumed boot must publish ``started=True`` before any turn runs in the
+    NEW process) and ``TuiSessionHandle.rebind`` (a ``/resume`` mid-flight
+    re-seeds the bit for the swapped identity). A message row alone is NOT the
+    discriminator: a round-1 quiet-dial of a peer note persists a
+    ``peer_message`` CustomMessage as a message row (kind ``custom``) through
+    ``append_messages``, without a turn ever running, so a session whose only
+    durable rows are quiet-dial notes would seed ``started=True`` — and a
+    peer's ``--wake`` or a broadcast would then drive an assistant turn into a
+    session the owner never typed in (QA Q4). Only a plain ``Message`` row
+    (kind ``message`` — a real user/assistant/tool turn) counts. Read from the
+    FILE rather than the in-memory index — the index is built by replay and is
+    not guaranteed populated at the moment either call site asks — and
+    defensively: no readable file answers False, the conservative "unstarted"
+    direction a first real turn immediately corrects.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for row in handle:
+                try:
+                    entry = json.loads(row)
+                except ValueError:
+                    continue  # a torn line says nothing about history
+                if not isinstance(entry, dict) or entry.get("type") != ENTRY_MESSAGE:
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                # ``kind`` arrived with producer admission; a legacy row
+                # predating it IS a plain Message — the custom writer always
+                # tagged its rows.
+                if payload.get("kind", CUSTOM_KIND_MESSAGE) != CUSTOM_KIND_MESSAGE:
+                    continue
+                return True
+    except OSError:
+        return False
+    return False
+
+
 #: Rewrite the file only once this many bytes are provably reclaimable. A
 #: prune pass runs on most turns, and rewriting a multi-megabyte transcript
 #: every turn would cost far more I/O than the blanking saves. 256 KiB makes

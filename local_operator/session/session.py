@@ -2162,6 +2162,13 @@ class Session:
         #: result deliveries, resume catch-ups (design-runtime-autorefresh §1.2).
         #: Sync, non-raising by contract (the pipeline guards it anyway).
         self.on_turn_settled: Callable[[], None] | None = None
+        #: Flips the discovery record's ``started`` bit; wired by the runtime
+        #: handle (``OwnedSessionHandle._publish_session_started``) and probed
+        #: so a reduced host without it is a no-op.
+        self._publish_session_started: Callable[[], None] | None = None
+        #: Guards the once-per-lifetime peer-inbox drain at the top of
+        #: ``_run_turn_pipeline`` — see ``_drain_spooled_peer_inbox``.
+        self._peer_inbox_drained = False
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
         # by any turn that actually runs, so the honest "I am dropping these"
@@ -3188,6 +3195,23 @@ class Session:
         stable and nothing outside the session rebinds it.
         """
         return self._transcript
+
+    @property
+    def transcript_path(self) -> Any:
+        """The transcript FILE path, or None on an in-memory store.
+
+        The ``started``-bit seeds answer one question — has this session run a
+        real turn — and only the durable file can answer it at construction
+        (the replayed index is not populated yet). Exposed so the seed reads
+        the session's declared contract instead of reaching two privates deep
+        (``session.transcript.path``) — and because a session whose transcript
+        attribute is None (a reduced host) must read as unstarted, not probe
+        an attribute that is not there.
+        """
+        transcript = self._transcript
+        if transcript is None:
+            return None
+        return getattr(transcript, "path", None)
 
     @property
     def agent_id(self) -> str:
@@ -5201,6 +5225,50 @@ class Session:
             details={"text": wrapped, "body": text, "sender": sender},
         )
 
+    async def _drain_spooled_peer_inbox(self) -> None:
+        """Deliver any inbox rows spooled for this session. Once per lifetime.
+
+        Called at the top of ``_run_turn_pipeline`` (see the call site for
+        why the first real turn is the right moment). The session usually
+        never has spool: the runtime child's boot drain consumed it before
+        the socket even listened, and live deliveries dial instead of
+        spooling. This drain exists for the rows that bypass both — a sender
+        on an older binary, or a race that left the record unreadable — so
+        the flag is what keeps it off the steady-state turn path: after the
+        first attempt it is never tried again, and the cold-open drain
+        remains the owner of anything written later.
+
+        Best-effort per row, mirroring ``process._drain_inbox_into``: one
+        malformed or rejected row must not stop the rest, and none of it may
+        fail the turn it precedes.
+        """
+        if self._peer_inbox_drained:
+            return
+        self._peer_inbox_drained = True
+        # Imported in-function: the runtime inbox lives behind the mobile
+        # package's config-path machinery, and this module does not carry a
+        # module-level dependency on it for a once-per-session path.
+        from local_operator.session.runtime.inbox import drain_inbox
+
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        try:
+            lines = await asyncio.to_thread(drain_inbox, directory)
+        except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
+            logger.warning("peer inbox drain failed", exc_info=True)
+            return
+        for line in lines:
+            try:
+                # The quiet mailbox shape, never a wake: these were spooled
+                # as quiet notes, and a drain that opened a turn per row
+                # would turn "read this when you run" into "start work now".
+                await self.receive_peer_message(
+                    line.text, mode="mailbox", wake=False, sender=line.sender
+                )
+            except Exception:  # noqa: BLE001 — one bad row is not the others' problem
+                logger.warning("spooled peer message could not be delivered", exc_info=True)
+
     async def receive_peer_message(
         self,
         text: str,
@@ -6359,6 +6427,34 @@ class Session:
         opened the run, so the TUI's supersede guard still pairs them.
         """
         await self._refresh_context_metadata()
+        # Belt-and-braces for peer delivery: consume any inbox rows spooled
+        # for this session BEFORE the first real turn runs. The primary inbox
+        # consumer is the runtime child's boot drain (``process.amain``),
+        # which a session that opened some other way — or that was sent a
+        # spool by an older sender that had no live record for it — never
+        # passes through; without this drain those rows would sit unread
+        # until some future process cold-opens the session. Delivered in the
+        # quiet mailbox shape so the drain itself can never drive a turn.
+        # Runs BEFORE the started-flip below so the spooled notes are durable
+        # and visible even if this turn then fails; under the already-held
+        # ``_turn_lock`` their live-context append parks and rejoins at this
+        # very turn's first injection boundary (``_drain_steering``).
+        await self._drain_spooled_peer_inbox()
+        # Flip the discovery record's ``started`` bit the first time a REAL
+        # turn runs. This is the single choke point every spawn path funnels
+        # through — the user's ``prompt()``, wake deliveries
+        # (``_prompt_messages``), and the resume catch-up — so one hook covers
+        # them all and a fresh ``/new`` session that has only had a peer
+        # message spooled into its mailbox stays ``started=False`` until its
+        # owner actually sends a prompt. One-way and idempotent: the
+        # registrant's ``set_record_started`` de-duplicates, so the per-turn
+        # cost is one attribute probe on every turn after the first.
+        mark_started = getattr(self, "_publish_session_started", None)
+        if callable(mark_started):
+            try:
+                mark_started()
+            except Exception:  # noqa: BLE001 — a stale flag is not a turn failure
+                logger.debug("could not publish the started state", exc_info=True)
         # Re-arm the todo guardrail: a fresh user message may well be the answer
         # a stalled list was waiting for, so the latch must not carry over. It is
         # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs
