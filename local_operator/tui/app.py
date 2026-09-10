@@ -2436,14 +2436,18 @@ class OperatorApp(App[None]):
         #: one that announces OTHER sessions finishing (see
         #: `_notify_background_completions`). The latch keeps one off-loop scan
         #: in flight at a time; the revision is the attention store's own cheap
-        #: `(max_sequence, sum_acknowledged)` detector, so the 1 s poll does a
-        #: catalog scan only when something actually changed. ``None`` rather
-        #: than ``(0, 0)`` so the FIRST tick always scans: an empty store
-        #: genuinely reads ``(0, 0)``, and seeding with it would make a
+        #: `(max_sequence, sum_acknowledged, supersedes)` detector, so the 1 s
+        #: poll does a catalog scan only when something actually changed. The
+        #: third term is what makes a record HEALED in place visible here at
+        #: all: a supersede deliberately holds `sequence` so an acknowledged
+        #: turn is not resurrected as unread, so without it the scan is skipped
+        #: for exactly the row that changed. ``None`` rather
+        #: than ``(0, 0, 0)`` so the FIRST tick always scans: an empty store
+        #: genuinely reads ``(0, 0, 0)``, and seeding with it would make a
         #: completion published before this app started invisible until the
         #: next unrelated change.
         self._background_notify_pending = False
-        self._background_notify_revision: tuple[int, int] | None = None
+        self._background_notify_revision: tuple[int, int, int] | None = None
         #: Retry backoff for a delivery that failed: how many ticks to wait
         #: before the next attempt, and how many of those are still owed. The
         #: interval doubles per barren attempt so the revision-forgetting retry
@@ -2458,7 +2462,7 @@ class OperatorApp(App[None]):
         #: publish or acknowledgement apart from the observer's own retry coming
         #: back round — without it, a real completion arriving mid-backoff would
         #: be made to wait out the backoff it had nothing to do with.
-        self._background_notify_seen_revision: tuple[int, int] | None = None
+        self._background_notify_seen_revision: tuple[int, int, int] | None = None
         #: Desktop notifications for the user who is looking at another app —
         #: the surface one step beyond the window title (see `tui/notify.py`).
         #: Held by the app rather than by the band because, unlike the title,

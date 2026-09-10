@@ -145,7 +145,9 @@ async def test_first_publication_is_safe_for_batch_revision_and_authenticated_li
         try:
             assert created.wait(10)
             assert store.state_many([f"session/{sid}"])[f"session/{sid}"]["unseen"] is False
-            assert store.revision() == (0, 0)
+            # Three terms since supersession became detectable: the third is a
+            # heal counter that a store this empty has never bumped.
+            assert store.revision() == (0, 0, 0)
             response = client.get("/api/sessions")
             assert response.status_code == 200
             assert response.json()["sessions"][0]["unseen"] is False

@@ -85,7 +85,7 @@ class DesktopSessionBridge:
         self.watch_task: asyncio.Task[None] | None = None
         self.attention_task: asyncio.Task[None] | None = None
         self.attention: dict[str, Any] = {}
-        self.attention_poll_key: tuple[tuple[int, int], bool] | None = None
+        self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
 
     async def acquire(self) -> RemoteSession:
         async with self.lock:
