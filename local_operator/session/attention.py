@@ -18,6 +18,7 @@ forever, which is correct — the sidebar's checkmark stays until it is opened.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.paths import config_dir
+
+logger = logging.getLogger(__name__)
 
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
@@ -62,7 +65,65 @@ def conversation_identity(directory: Path) -> str:
     return f"{namespace}/{directory.name}"
 
 
+def provisional_anchor(token: str) -> str:
+    """The anchor a run wears before it has a viewable result entry.
+
+    A failed or interrupted run may have no assistant message to point at, so
+    its outcome marker anchors to the run itself. The synthetic shape is what
+    lets :meth:`AttentionStore.publish` recognise a record as provisional and
+    therefore safe to replace once the real outcome lands.
+    """
+    return f"completion-{token}"
+
+
+def _supersedes_provisional(
+    existing: Any,
+    conversation: str,
+    token: str,
+) -> bool:
+    """May the incoming outcome overwrite the stored one for this token?
+
+    Only for the SAME conversation, and only over a record still wearing the
+    provisional shape. Cross-conversation reuse and overwrites of an already
+    authoritative record both stay refusals — see :meth:`AttentionStore.publish`
+    for why each half of that is load-bearing.
+    """
+    stored_conversation, stored_anchor, stored_kind = tuple(existing)
+    return (
+        stored_conversation == conversation
+        and stored_kind == "interrupted"
+        and stored_anchor == provisional_anchor(token)
+    )
+
+
 def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -> None:
+    """Import a conversation's durable outcome; NEVER fatal to the caller.
+
+    Both call sites are boot paths that must survive a bad conversation:
+    ``Session.__init__`` constructs the runtime process, and the mobile daemon
+    sweeps up to 100 session directories in one loop. A raise here used to be
+    unrecoverable rather than transient — the runtime failed to spawn on EVERY
+    attach, so the session could never be opened again and the TUI showed only
+    "Saved excerpt · Connection unavailable". An attention record is an
+    observability nicety (who has an unread result); it may never outrank the
+    ability to READ the conversation, and one poisoned session may never take
+    the daemon's remaining 99 down with it.
+
+    The failure is logged with the identity and the exception so a swallowed
+    problem is still diagnosable from the log rather than silently invisible.
+    """
+    try:
+        _import_transcript_outcome(transcript, store)
+    except Exception as exc:  # noqa: BLE001 — attention must never block a boot
+        directory = getattr(transcript, "directory", None)
+        logger.warning(
+            "attention: skipping outcome import for %s (%r)",
+            getattr(directory, "name", directory),
+            exc,
+        )
+
+
+def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = None) -> None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
 
     Old baselines were memory-only. Unknown historical work keeps that no-flood
@@ -79,7 +140,10 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
         and (not isinstance(saved, dict) or saved.get("token") != started.get("token"))
     ):
         token = started["token"]
-        store.publish(identity, token, f"completion-{token}", "interrupted")
+        # Provisional by construction: the turn may still be in flight, so this
+        # marker is explicitly the kind `publish` will let the real outcome
+        # supersede once the journal proves how the run actually ended.
+        store.publish(identity, token, provisional_anchor(token), "interrupted")
         return
     if isinstance(saved, dict) and saved.get("conversation_id") == identity:
         if saved.get("eligible", True):
@@ -282,7 +346,46 @@ class AttentionStore:
         *,
         baseline_seen: bool | None = None,
     ) -> dict[str, Any]:
-        """Import a durable outcome idempotently, including after owner restart."""
+        """Import a durable outcome idempotently, including after owner restart.
+
+        A TOKEN MAY LEGITIMATELY ADVANCE OUT OF ITS PROVISIONAL RECORD, and
+        refusing that used to brick a session permanently. One turn writes
+        ``attention_started`` with token T and, on completion, writes the SAME T
+        with the real anchor and kind. Anything that bootstraps while that turn
+        is in flight — a mobile daemon sweep, a resume attempt, a killed owner —
+        publishes the provisional ``(completion-T, interrupted)`` marker first.
+        When the turn then finishes and the conversation is next opened, the
+        journal's authoritative ``(<entry id>, complete)`` arrives for the same
+        T: not a conflict, just the same turn described exactly. Rejecting it
+        raised out of ``bootstrap_transcript`` on every single spawn, so the
+        runtime could never start and the conversation was unopenable forever.
+
+        Supersession is deliberately narrow: same conversation, and the stored
+        record must still wear the provisional shape — anchor
+        ``completion-<token>`` with kind ``interrupted``. Two refusals it does
+        NOT relax. A token appearing under a DIFFERENT conversation stays an
+        error, which is the integrity property this check exists for: a forked
+        transcript carrying its parent's journal must not capture the parent's
+        receipt. And a record already anchored to a real entry is never
+        replaced, so a late bootstrap racing a finished turn cannot drag a real
+        outcome back to a synthetic one.
+
+        A genuinely interrupted turn is stored in that same provisional shape,
+        and that is intended rather than an ambiguity to resolve: the only
+        writer that can present a different outcome for an existing token is
+        this conversation's own journal replaying that same run, so the record
+        it supersedes is by construction a description of the run that the
+        journal now describes better. An unrelated turn always carries its own
+        freshly minted token.
+
+        The supersede is an UPDATE IN PLACE, which is what keeps it idempotent
+        and flood-free: ``sequence`` is the receipt watermark, so minting a new
+        row would resurrect an ALREADY-ACKNOWLEDGED turn as unread and re-fire
+        a notification for a result the human has read. Correcting a record is
+        not a new completion. Holding the sequence also means a corrected old
+        turn stays where it belongs in the order instead of jumping ahead of
+        newer ones.
+        """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
         if str(uuid.UUID(token)) != token:
@@ -300,7 +403,12 @@ class AttentionStore:
                 "SELECT conversation, anchor, kind FROM completions WHERE token=?", (token,)
             ).fetchone()
             if existing and tuple(existing) != (conversation, anchor, kind):
-                raise ValueError("completion token belongs to another outcome")
+                if not _supersedes_provisional(existing, conversation, token):
+                    raise ValueError("completion token belongs to another outcome")
+                conn.execute(
+                    "UPDATE completions SET anchor=?, kind=? WHERE token=?",
+                    (anchor, kind, token),
+                )
             conn.execute(
                 "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
                 (conversation, token, anchor, kind),

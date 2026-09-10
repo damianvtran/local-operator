@@ -358,3 +358,178 @@ def test_a_missing_deliveries_table_is_not_read_as_corruption(tmp_path: Path) ->
         conn.execute("DROP TABLE receipts")
     with pytest.raises(sqlite3.DatabaseError):
         AttentionStore(path).publish("session/a", str(uuid.uuid4()), "result", "complete")
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_supersedes_its_own_interrupted_marker(tmp_path: Path) -> None:
+    """The permanent-brick regression: a session that could never be opened again.
+
+    The operator lost a 65 MB, 14,905-entry conversation to this. A turn writes
+    `attention_started` with token T; anything that bootstraps while that turn
+    is still in flight publishes the provisional `(completion-T, interrupted)`
+    marker. The turn then finishes and journals the SAME T with its real anchor
+    and kind `complete`, so the next open published a second outcome for T,
+    `publish` called it a conflict, and the raise propagated out of
+    `Session.__init__` — killing the runtime process on EVERY spawn attempt.
+    Not a timeout and not corruption: the normal turn lifecycle, unopenable
+    forever. A long-running session is the one that gets hit, because it has
+    the most turns and the widest window to be observed mid-turn.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.attention import (
+        ATTENTION_CUSTOM_TYPE,
+        bootstrap_transcript,
+        provisional_anchor,
+    )
+    from local_operator.session.transcript import Transcript
+
+    directory = tmp_path / "sessions" / "long-running"
+    transcript = Transcript(directory)
+    identity = conversation_identity(directory)
+    token = str(uuid.uuid4())
+    await transcript.append_custom(
+        "attention_started", {"conversation_id": identity, "token": token}
+    )
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="the finished answer")])
+    )
+    anchor = transcript.entries()[-1].id
+    await transcript.append_custom(
+        ATTENTION_CUSTOM_TYPE,
+        {"conversation_id": identity, "token": token, "anchor": anchor, "kind": "complete"},
+    )
+
+    store = AttentionStore(tmp_path / "attention.db")
+    # What a bootstrap observing the turn in flight leaves behind.
+    store.publish(identity, token, provisional_anchor(token), "interrupted")
+    assert store.state(identity)["kind"] == "interrupted"
+
+    # SELF-HEALING: an already-poisoned store reconciles on next load, with no
+    # manual SQL. Users bricked by an older release are repaired by opening.
+    bootstrap_transcript(transcript, AttentionStore(store.path))
+    state = store.state(identity)
+    assert state["kind"] == "complete"
+    assert state["anchor_id"] == anchor
+    assert state["completion_token"] == token
+    # Corrected in place, never minted: a second row would re-fire a
+    # notification for a result the human may already have read.
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT count(*) FROM completions").fetchone()[0] == 1
+    # Still idempotent once healed.
+    bootstrap_transcript(transcript, AttentionStore(store.path))
+    assert store.state(identity)["anchor_id"] == anchor
+
+
+def test_supersession_never_relaxes_the_cross_conversation_refusal(tmp_path: Path) -> None:
+    """The integrity property the conflict check exists for, unchanged.
+
+    A forked transcript carries its parent's journal, so a token presented
+    under a DIFFERENT conversation must stay an error however provisional the
+    stored record looks. Nor may an authoritative record be dragged back to a
+    synthetic anchor by a late bootstrap racing a finished turn.
+    """
+    from local_operator.session.attention import provisional_anchor
+
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/owner", token, provisional_anchor(token), "interrupted")
+    # Same provisional shape, different conversation: still a hard error.
+    with pytest.raises(ValueError):
+        store.publish("session/fork", token, "message-1", "complete")
+    assert store.state("session/fork")["completion_token"] is None
+    assert store.state("session/owner")["kind"] == "interrupted"
+
+    store.publish("session/owner", token, "message-1", "complete")
+    # No downgrade: a real outcome is not replaced by a provisional one.
+    with pytest.raises(ValueError):
+        store.publish("session/owner", token, provisional_anchor(token), "interrupted")
+    assert store.state("session/owner")["anchor_id"] == "message-1"
+    # Nor by a different real outcome under the same token.
+    with pytest.raises(ValueError):
+        store.publish("session/owner", token, "message-2", "complete")
+
+
+def test_superseding_does_not_resurrect_an_acknowledged_turn_as_unread(
+    tmp_path: Path,
+) -> None:
+    """Correcting a record is not a new completion.
+
+    `sequence` is the receipt watermark, so healing must update in place. A new
+    row would sort above the acknowledgement and re-announce a result the human
+    has already read — the exact flood `_BASELINE_DELIVERIES` exists to prevent.
+    """
+    from local_operator.session.attention import provisional_anchor
+
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, provisional_anchor(token), "interrupted")
+    before = store.state("session/a")["revision"][0]
+    store.acknowledge("session/a", token)
+    assert store.state("session/a")["unseen"] is False
+    # Somebody already announced this run, per the no-flood rule.
+    assert store.claim_delivery("session/a", token, "test") is True
+
+    store.publish("session/a", token, "message-1", "complete")
+    healed = store.state("session/a")
+    assert healed["kind"] == "complete"
+    assert healed["revision"][0] == before
+    assert healed["unseen"] is False
+    # And the delivery watermark is likewise not rewound into a second toast.
+    assert store.claim_delivery("session/a", token, "test") is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_attention_bootstrap_cannot_stop_a_session_from_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Attention bookkeeping is an observability nicety; boot outranks it.
+
+    The severity of the brick came from `Session.__init__` calling the
+    bootstrap unguarded: a raise there kills the runtime process before it can
+    serve, on every attach, so no retry ever helps. Whatever else goes wrong in
+    attention, the conversation must still open.
+    """
+    import local_operator.session.attention as attention_module
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    calls: list[str] = []
+
+    def exploding(transcript, store=None):  # type: ignore[no-untyped-def]
+        calls.append(transcript.directory.name)
+        raise RuntimeError("attention store is unreachable")
+
+    monkeypatch.setattr(attention_module, "bootstrap_transcript", exploding)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        assert calls, "the guard must not skip the import, only survive it"
+        # The session is fully constructed and usable.
+        assert session._transcript.directory.name == "sess"
+        assert session.session_id
+    finally:
+        await session.dispose()
+
+
+def test_bootstrap_swallows_and_logs_a_broken_conversation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One poisoned session may not take the mobile daemon's other 99 with it.
+
+    The daemon sweeps up to 100 session directories in one loop, so the guard
+    lives in `bootstrap_transcript` itself rather than only at its callers. The
+    failure is logged with the conversation and the exception: swallowed is not
+    the same as invisible.
+    """
+    import logging
+
+    from local_operator.session.attention import bootstrap_transcript
+
+    class Unreadable:
+        directory = tmp_path / "sessions" / "broken"
+
+        def latest_custom(self, _type: str) -> dict[str, object]:
+            raise OSError("transcript is unreadable")
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.attention"):
+        bootstrap_transcript(Unreadable(), AttentionStore(tmp_path / "attention.db"))
+    assert "broken" in caplog.text
+    assert "transcript is unreadable" in caplog.text

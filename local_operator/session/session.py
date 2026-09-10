@@ -1766,9 +1766,24 @@ class Session:
         # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
         self._transcript = transcript
-        from local_operator.session.attention import bootstrap_transcript
+        # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
+        # this guard is the outer half of a pair (`bootstrap_transcript` holds
+        # its own). Anything raising here kills the runtime process before it
+        # can serve, on every spawn — so the session is not merely slow to
+        # attach, it is permanently unopenable and the TUI reports only
+        # "Connection unavailable". Knowing whether a result is unread can
+        # never be worth losing the conversation, so the import is attempted
+        # and its failure is logged rather than propagated.
+        try:
+            from local_operator.session.attention import bootstrap_transcript
 
-        bootstrap_transcript(transcript)
+            bootstrap_transcript(transcript)
+        except Exception as exc:  # noqa: BLE001 — must not break session boot
+            logger.warning(
+                "attention bootstrap failed for %s (%r); continuing without it",
+                transcript.directory.name,
+                exc,
+            )
         self._session_id = session_id or transcript.directory.name
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
@@ -5742,6 +5757,7 @@ class Session:
             ATTENTION_CUSTOM_TYPE,
             AttentionStore,
             conversation_identity,
+            provisional_anchor,
         )
 
         outcome = self._attention_outcome
@@ -5771,7 +5787,7 @@ class Session:
             return
         # Failure may precede the first assistant message. Its durable outcome
         # marker, not an unrelated previous answer, is the viewable anchor.
-        anchor = messages[-1].id if kind == "complete" else f"completion-{token}"
+        anchor = messages[-1].id if kind == "complete" else provisional_anchor(token)
         # The journal precedes publication: owner death between these writes is
         # repaired idempotently on resume, without fabricating a new token.
         await self._transcript.append_custom(
