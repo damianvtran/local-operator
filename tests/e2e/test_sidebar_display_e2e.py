@@ -16,7 +16,12 @@ import pytest
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.tui.app import ASIDE_PLACEHOLDER, OperatorApp, ToolCard
+from local_operator.tui.app import (
+    ASIDE_PLACEHOLDER,
+    SIDEBAR_CONNECT_ATTEMPTS,
+    OperatorApp,
+    ToolCard,
+)
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from tests.e2e.harness import (
@@ -201,12 +206,32 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                     await asyncio.wait_for(app._sidebar_navigation.select("neighbour"), 10)
                 if fail_sync:
                     assert source.connection_task is not None
-                    await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
+                    # DRAINED TO EXHAUSTION, not awaited once. A failed connect
+                    # is no longer terminal on its first attempt: a momentarily
+                    # unreachable owner is retried up to
+                    # `SIDEBAR_CONNECT_ATTEMPTS` times, each round a NEW task
+                    # re-armed from the previous one's `finally`, and only a
+                    # spent budget reaches the user. `fail_sync` holds the sync
+                    # broken for every one of those attempts, so the chain runs
+                    # the full budget and then latches — which is exactly the
+                    # terminal state this block goes on to assert, reached the
+                    # way the user now reaches it.
+                    for _ in range(SIDEBAR_CONNECT_ATTEMPTS + 2):
+                        task = source.connection_task
+                        if task is None:
+                            break
+                        await asyncio.wait_for(asyncio.shield(task), 10)
+                        await pilot.pause()
+                        if source.connection_error or source.connection_task is task:
+                            break
                     assert source.connection_error == "the runtime is not responding"
                     assert source.display_only and app.composer_submission_blocked()
                     assert initial_content in visible_text(app)
                     assert editor.text == "Keep this unsent draft"
-                    assert "Connection unavailable" in app._status.render_text(80).plain
+                    # "Reconnect failed", not "Connection unavailable": the
+                    # terminal copy now says the app already tried, since by the
+                    # time it is shown a whole retry budget has been spent.
+                    assert "Reconnect failed" in app._status.render_text(80).plain
                     assert "retry" in app._status.render_text(80).plain
                     fail_sync = False
                     released.set()

@@ -1032,6 +1032,11 @@ class StatusLine:
         #: True while a runtime is being started for a cold viewer; see
         #: :meth:`set_starting`.
         self._starting: bool = False
+        #: True while a sidebar source is RE-dialling an owner it lost, which is
+        #: the one state in this family that occupies the connection segment
+        #: instead of the segment ladder. Animated for the same reason
+        #: ``_starting`` is: see :meth:`set_connecting`.
+        self._connecting: bool = False
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
         #: against it to decide whether the timer must be replaced.
@@ -1121,6 +1126,35 @@ class StatusLine:
         if self._starting == starting:
             return
         self._starting = starting
+        self._sync_spinner_timer()
+        self.refresh()
+
+    def set_connecting(self, connecting: bool) -> None:
+        """Animate the connection segment while a lost owner is being re-dialled.
+
+        The SAME glyph and cadence as :meth:`set_starting` and the working
+        indicator, for the reason that method's docstring already gives: all
+        three mean "busy with something you are waiting for", and the caption is
+        what distinguishes them. A reconnect in flight is exactly that, and was
+        the one member of the family rendering without the glyph.
+
+        WHY IT IS NOT `set_starting(True)`. That flag renders its own
+        ``starting…`` rung in the segment ladder, which alongside the connection
+        segment's own caption would put two captions on one fact
+        (``Saved · Connecting… · ⠙ starting…``). The connection segment carries
+        the glyph itself instead, reusing the existing frames and the existing
+        timer rather than introducing a second animation vocabulary.
+
+        WHY IT MATTERS HERE AND DID NOT BEFORE. Until the reconnect retry landed,
+        ``Saved · Connecting…`` was a sub-frame flicker — measured at 1 sample in
+        6 at 20 Hz on a healthy switch. The retry turns it into a ~12.75 s dwell,
+        and a design round measured six frames spanning t=0.5 s to t=12.0 s
+        hashing to ONE byte-identical file: seven attempts behind a surface that
+        acknowledged none of them, which reads as a hang rather than as work.
+        """
+        if self._connecting == connecting:
+            return
+        self._connecting = connecting
         self._sync_spinner_timer()
         self.refresh()
 
@@ -1568,7 +1602,33 @@ class StatusLine:
             # Connection authority outranks live cost/model details from a saved
             # checkpoint. Reuse the existing row so reconnect never moves the
             # transcript or steals the reader's scroll anchor.
-            left = Text(connection, style=muted)
+            #
+            # IN-PROGRESS AND FAILED MUST NOT LOOK ALIKE. Both states rendered in
+            # `muted` until a design round measured it: `Saved · Connecting…` and
+            # `Saved · Connection unavailable · …` came out the identical
+            # `#b5afa2`, so two messages with opposite instructions ("keep
+            # waiting" / "act now") were distinguishable only by reading them —
+            # which the retry made a real task rather than a theoretical one, by
+            # putting the two seconds apart on one surface. The failed state
+            # takes `danger`; the working state keeps `muted` and gains the
+            # glyph below, so the eye has a non-textual cue either way and the
+            # accent budget is untouched (no green for a session that is not
+            # live).
+            connecting = getattr(self, "_connecting", False)
+            left = Text()
+            if connecting:
+                from local_operator.tui.shimmer import shimmer_enabled
+
+                # Same gate the working indicator uses: with animation off the
+                # glyph would be a frozen decoration, and the caption is already
+                # a complete statement without it.
+                if shimmer_enabled():
+                    left.append(_SPINNER_FRAMES[self._spinner_index], style=muted)
+                    left.append(" ", style=dim)
+            left.append(
+                connection,
+                style=muted if connecting else Style(color=theme_mod.semantic_color("danger")),
+            )
             left.truncate(max(0, width), overflow="ellipsis")
             right = Text(self._conversation_name, style=dim)
             right.truncate(max(0, width - left.cell_len - 3), overflow="ellipsis")
@@ -2159,10 +2219,11 @@ class StatusLine:
         return _SPINNER_INTERVAL_S if animation_focused() else BLURRED_SPINNER_INTERVAL_S
 
     def _sync_spinner_timer(self) -> None:
-        # One timer for both animated states: a runtime starting and a turn
-        # streaming are never usefully distinguished by cadence, and a second
-        # timer would be a second thing to leak.
-        animating = self._streaming or self._starting
+        # One timer for every animated state: a runtime starting, a turn
+        # streaming and an owner being re-dialled are never usefully
+        # distinguished by cadence, and a second timer would be a second thing
+        # to leak.
+        animating = self._streaming or self._starting or getattr(self, "_connecting", False)
         if animating and self._spinner_timer is None:
             self._spinner_rate = self._spinner_interval()
             self._spinner_timer = self._dock.set_interval(self._spinner_rate, self._advance_spinner)
