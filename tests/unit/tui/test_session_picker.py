@@ -31,6 +31,7 @@ from local_operator.tui.widgets.session_picker import (
     BODY_MATCH_MARKER,
     CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
+    EXEC_MARKER,
     GUTTER_CELLS,
     NAME_MIN_CELLS,
     PAGE_ROWS_MAX,
@@ -289,6 +290,58 @@ def test_the_cursor_marks_exactly_one_row() -> None:
     rows = [_row("a1", "one"), _row("b2", "two"), _row("c3", "three")]
     lines = [line.plain for line in render_rows(rows, 1, 74, NOW)]
     assert [line.startswith("❯") for line in lines] == [False, True, False]
+
+
+def test_a_live_exec_run_is_named_as_one_rather_than_passing_as_a_conversation() -> None:
+    """The discoverability gap this tag closes.
+
+    Since #804 every ``lop exec`` publishes an ordinary attachable record, and
+    ``decorate_rows(include_live=True)`` has been folding those into this list
+    ever since — rendered identically to a conversation the user started. An
+    idle one-shot and a session they were sitting in both read as a bare ``●``.
+    """
+    rows = [
+        _row("aaaaaaaaaaaa", "my own conversation")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "nightly audit")._replace(live_state="idle", kind="exec"),
+    ]
+    mine, execrun = (line.plain for line in render_rows(rows, 0, 74, NOW))
+    assert EXEC_MARKER.strip() in execrun
+    assert EXEC_MARKER.strip() not in mine
+
+
+def test_the_exec_column_is_reserved_for_every_row_so_names_stay_flush() -> None:
+    """The same fixed-chrome rule ``FORK_MARKER`` follows, and for its reason.
+
+    Painting the tag only on tagged rows moves the start of the name between
+    rows, ragging the left edge of the one field the user reads down the list.
+    Asserted as a column position rather than as a substring because that is
+    the property the eye actually reads.
+    """
+    rows = [
+        _row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle"),
+        _row("bbbbbbbbbbbb", "beta")._replace(live_state="idle", kind="exec"),
+    ]
+    plain = [line.plain for line in render_rows(rows, 0, 74, NOW)]
+    assert plain[0].index("alpha") == plain[1].index("beta")
+
+
+def test_a_list_with_no_exec_run_reserves_no_exec_column() -> None:
+    """A column nobody needs costs the name its cells on every row."""
+    rows = [_row("aaaaaaaaaaaa", "alpha")._replace(live_state="idle")]
+    with_exec = plan_columns(rows, 74, ["1m ago"], False, False, True, True)
+    without = plan_columns(rows, 74, ["1m ago"], False, False, True, False)
+    assert without[0] == with_exec[0] + cell_len(EXEC_MARKER)
+
+
+def test_a_cold_row_carries_no_kind_so_a_reaped_exec_run_stops_claiming_to_be_one() -> None:
+    """``kind`` comes off the LIVE record, so it must vanish with the record.
+
+    An exec record is deliberately ephemeral. If the tag outlived it the picker
+    would keep labelling a plain cold transcript as a running headless job.
+    """
+    cold = _row("bbbbbbbbbbbb", "nightly audit")
+    assert cold.kind == ""
+    assert EXEC_MARKER.strip() not in render_rows([cold], 0, 74, NOW)[0].plain
 
 
 def test_an_unnamed_session_says_so_rather_than_rendering_a_blank() -> None:

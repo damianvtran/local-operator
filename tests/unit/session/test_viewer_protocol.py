@@ -317,7 +317,6 @@ _UNDECLARED_ON_BOTH_CLASSES = frozenset(
         "context_breakdown",
         "epoch",
         "fork_snapshot",
-        "frontend_state",
         "jobs",
         "mcp_manager",
         "mcp_startup",
@@ -356,7 +355,32 @@ _UNDECLARED_ON_BOTH_CLASSES = frozenset(
 #: and gets promoted rather than lingering as a false claim.
 _KNOWN_MISSING_ON_BOTH_CLASSES = frozenset({"cwd"})
 
-#: Removed by Stage 3; declaring it would entrench the flag this work retires.
+#: Names that MUST NOT come back — neither read by a host nor defined on a class.
+#:
+#: This set changed meaning in Stage 3 and the inversion is the point. While
+#: ``is_remote`` still existed it was an EXCLUSION: the guard skipped it so the
+#: flag's own call sites did not read as undeclared members. The flag is now
+#: deleted, so the same name in the same set now means the opposite — reading it
+#: or defining it is a FAILURE, enforced by
+#: ``test_a_retired_session_flag_cannot_be_reintroduced`` below.
+#:
+#: Why a set rather than one assertion about one name. The defect is a SHAPE,
+#: not a spelling: an undeclared boolean on one session class, duck-probed
+#: through ``getattr(session, "...", False)`` at every call site, whose default
+#: silently means the common case. That shape was fixed site-locally five times
+#: (#576, #609, #624, #625, and the ``_cmd_model`` guard) before anyone removed
+#: the flag, because each fix addressed a call site and none addressed the
+#: attribute. A named set is what makes "this axis is closed" checkable instead
+#: of remembered — the next agent who reaches for a transport boolean adds a
+#: line here to argue for it, rather than reintroducing it silently.
+#:
+#: Three things are asserted for every name, because catching only one of them
+#: leaves the other two routes open: it is absent from BOTH classes (so it
+#: cannot be re-added to ``RemoteSession`` and duck-probed), absent from BOTH
+#: protocols (so it cannot be laundered by declaring it), and read by NO scanned
+#: host (so a probe against a name that exists nowhere cannot sit there
+#: returning its default forever, which is the ``cwd`` defect in
+#: ``_KNOWN_MISSING_ON_BOTH_CLASSES``).
 _RETIRED = frozenset({"is_remote"})
 
 
@@ -480,12 +504,18 @@ def test_every_session_member_a_host_touches_is_declared() -> None:
     """
     touched = _all_touched()
     declared = _declared()
+    # ``_RETIRED`` is deliberately NOT in this union. It was, while the flag it
+    # names still existed and its call sites had to be tolerated; now that the
+    # flag is deleted, tolerating a read of it here is exactly the laundering
+    # route this guard exists to close — a host could reintroduce the probe and
+    # this test would pass. Reads of a retired name are failed by
+    # ``test_a_retired_session_flag_cannot_be_reintroduced`` instead, with a
+    # message that says why the name is gone rather than "declare it".
     known = (
         declared
         | _OWNER_ONLY_CAPABILITY_PROBES
         | _UNDECLARED_ON_BOTH_CLASSES
         | _KNOWN_MISSING_ON_BOTH_CLASSES
-        | _RETIRED
     )
 
     offenders = {
@@ -775,6 +805,78 @@ def test_owner_only_probes_are_all_optional_capability_probes() -> None:
         f"a default: {hard_accesses}. Absence is an AttributeError at that site, "
         "not a supported state, so the name must be declared on a protocol "
         "rather than excluded here."
+    )
+
+
+def test_a_retired_session_flag_cannot_be_reintroduced() -> None:
+    """A retired name may not come back as an attribute, a declaration, or a probe.
+
+    The anti-regression half of Stage 3, and the reason the deletion is worth
+    more than the seventeen substitutions that preceded it. ``is_remote`` was
+    fixed site-locally FIVE times over four PRs (#576, #609, #624, #625, plus
+    the ``_cmd_model`` guard in ``tests/unit/tui/test_noop_consumers.py``) and
+    survived every one of them, because each fix corrected a call site while the
+    attribute stayed on the class — free for the next author to read.
+
+    So this asserts the axis is closed rather than that one call site is
+    correct, and it closes all three routes back in. Any one left open makes the
+    other two decorative:
+
+    * **On a class.** ``RemoteSession.is_remote = True`` reappearing is enough
+      on its own — every historical read was ``getattr(session, "...", False)``
+      against an attribute no protocol declared, so nothing else has to change
+      for the defect to be back.
+    * **On a protocol.** Declaring it would satisfy
+      ``test_every_session_member_a_host_touches_is_declared`` and make the
+      probes legitimate, which is the laundering route that test's ``known``
+      union no longer offers.
+    * **In a host.** A probe against a name that exists nowhere does not raise:
+      it returns the ``False`` default forever, silently, which is the exact
+      shape of the ``cwd`` defect recorded in
+      ``_KNOWN_MISSING_ON_BOTH_CLASSES``. A green suite is what that failure
+      looks like.
+
+    This is deliberately an extension of the existing derivation rather than a
+    parallel mechanism: it reuses ``_all_touched``/``_members``/``_declared``,
+    so widening ``_SCANNED`` or ``_SESSION_EXPRS`` widens this too, and a future
+    retirement is one entry in ``_RETIRED`` rather than a new test.
+    """
+    owner_members = _members(Session, "session.py", "Session")
+    viewer_members = _members(RemoteSession, "remote.py", "RemoteSession")
+    declared = _declared()
+    touched = _all_touched()
+
+    on_classes = sorted(
+        f"{name} (on {klass})"
+        for name in _RETIRED
+        for klass, members in (("Session", owner_members), ("RemoteSession", viewer_members))
+        if name in members
+    )
+    assert not on_classes, (
+        f"a retired session flag is back on a class: {on_classes}. The attribute "
+        "is what made the defect recur — five site-local fixes did not stop it "
+        "because the flag stayed readable. If a genuine need for this axis has "
+        "appeared, argue it in the PR and remove the name from _RETIRED "
+        "deliberately; do not re-add the attribute and leave the set stale."
+    )
+
+    on_protocols = sorted(name for name in _RETIRED if name in declared)
+    assert not on_protocols, (
+        f"a retired session flag is declared on a protocol: {on_protocols}. "
+        "Declaring it would make every duck-probe legitimate and silently "
+        "reopen the conflation — the four questions it merged are answered by "
+        "owns_runtime, outcome_is_synchronous, runtime_locality and the "
+        "registry scan in app.py::_session_runs_elsewhere."
+    )
+
+    read_by_hosts = sorted(
+        f"{name} ({', '.join(touched[name])})" for name in _RETIRED if name in touched
+    )
+    assert not read_by_hosts, (
+        f"a host reads a retired session flag: {read_by_hosts}. The name exists "
+        "on no class, so this probe does not raise — it returns its default "
+        "forever, which is a silent wrong answer rather than a failure. Ask the "
+        "predicate that names the question actually being asked."
     )
 
 

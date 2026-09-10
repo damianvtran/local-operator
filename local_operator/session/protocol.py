@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_checkable
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
@@ -30,6 +30,14 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.naming import ConversationName
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Deferred: ``frontend_state`` imports ``tui.costs``, whose package
+    # ``__init__`` imports THIS module, so a runtime import here is a cycle.
+    # The annotation is all that is needed — ``from __future__ import
+    # annotations`` above makes every annotation in this file a string, and a
+    # Protocol member's type is never evaluated at runtime.
+    from local_operator.session.frontend_state import FrontendSessionState
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,22 +103,23 @@ class SessionProtocol(Protocol):
     # --- runtime role -----------------------------------------------------
     # Three predicates that name what hosts actually need to know about the
     # relationship between this process and the session's runtime. They exist
-    # because the undeclared ``is_remote`` attribute conflated them: it is
+    # because an undeclared ``is_remote`` attribute conflated them: it was
     # written in exactly one place (``remote.py``), was never declared on this
-    # protocol, and is read through ``getattr(session, "is_remote", False)`` at
-    # every call site, where the default silently means "in-process" and a typo
-    # in the string is invisible to pyright.
+    # protocol, and was read through ``getattr(session, "is_remote", False)`` at
+    # every call site, where the default silently meant "in-process" and a typo
+    # in the string was invisible to pyright.
     #
-    # Since 0.46.0 `lop` builds a viewer for every local user, so that flag is
+    # Since 0.46.0 `lop` builds a viewer for every local user, so that flag was
     # constant-True for every TUI session and the transport question it named
-    # is dead. The same conflation has been fixed site-locally four times
+    # was dead. The same conflation was fixed site-locally four times
     # (#576, #609, #624, #625) and guarded a fifth
     # (``tests/unit/tui/test_noop_consumers.py``). A predicate that has been
     # wrong five times is a missing type, not a naming problem — so the three
     # surviving questions are declared here, separately, and checked.
     #
-    # Stage 2 declares and implements them; no call site reads them yet. The
-    # substitutions and the deletion of ``is_remote`` are Stage 3.
+    # The flag itself is GONE. Every host now asks one of these three by name,
+    # and ``tests/unit/session/test_viewer_protocol.py`` fails if a new
+    # undeclared session flag of that shape is introduced.
 
     @property
     def owns_runtime(self) -> bool:
@@ -486,11 +495,46 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     than an absent attribute, because the caller cannot tell "nothing to show"
     from "not this kind of session".
 
-    **Why the TUI is not migrated onto it here.** The probes have graceful
-    fallbacks that also cover an owner too OLD to have a member (see
-    ``_leave_runtime_running``, which keeps a session running when
-    ``request_stop`` is absent). Substituting the type for the probes is
-    Stage 3; this declaration is what makes those substitutions checkable.
+    **How the TUI reaches it.** Through ``tui/app.py::_is_viewer``, a
+    ``TypeGuard[ViewerSessionProtocol]`` over the declared ``owns_runtime``
+    predicate — NOT through ``isinstance`` against this class. The sixteen
+    ``isinstance(session, RemoteSession)`` checks that preceded it became one
+    predicate, and pyright narrows to this type inside every true branch, so
+    the members below are statically checked at each of those call sites.
+
+    **Why ``runtime_checkable`` is still on this class**, even though no
+    production path performs an ``isinstance`` against it. The decorator is not
+    here to be used at runtime by the app; it is what lets
+    ``tests/unit/session/test_viewer_protocol.py`` assert conformance
+    STRUCTURALLY — that ``RemoteSession`` satisfies this protocol and that
+    ``Session`` does not, which is the property making the split meaningful
+    rather than decorative. Those assertions run once per test, never on a
+    paint path.
+
+    It is deliberately not used for dispatch, and the reason is measured rather
+    than stylistic. This protocol carries 79 public members and a POSITIVE
+    ``isinstance`` walks every one of them; measured on an arm64 host, CPython
+    3.12.13, best-of-five per run:
+
+    ====================================================  ==================
+    ``isinstance(viewer, RemoteSession)`` (what it was)    0.027-0.029 us
+    ``isinstance(viewer, ViewerSessionProtocol)``            60-136 us
+    ``not session.owns_runtime`` (what it is now)          0.044-0.058 us
+    ====================================================  ==================
+
+    The protocol figure is quoted as a RANGE because it genuinely varies that
+    much run to run — a single number here would be a lucky sample presented as
+    a constant. The ratio is stable at ~1,300-3,000x against the predicate and
+    the conclusion does not depend on where in the range it lands. (The negative
+    case is cheap, ~1.3 us: it fails on the first missing member. Only the
+    positive path pays, and the sites below are overwhelmingly positive.)
+
+    Three of the converted sites are hot — the sidebar release sweep runs per
+    source per pass, ``_relaunch_refusal`` loops every interaction — so
+    dispatching on the type would put three orders of magnitude on a paint path
+    to buy a guarantee the ``TypeGuard`` already provides statically. If you
+    reach for ``isinstance`` against this protocol, these are the numbers to
+    weigh, and re-measure rather than inheriting them.
 
     Headless hosts need this surface too, which is why it lives here rather
     than in the TUI: ``server/utils/desktop_sessions.py`` already imports,
@@ -584,6 +628,31 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Desktop-surface viewers only; the host recomputes visibility and
         notifiability from its live subscribers and pushes the result so a
         bare proxy socket is not mistaken for a watching human.
+        """
+        ...
+
+    @property
+    def frontend_state(self) -> "FrontendSessionState":
+        """The canonical snapshot this viewer renders from.
+
+        Declared HERE rather than on :class:`SessionProtocol`, even though both
+        session classes implement it, and the reason is measured rather than
+        stylistic: ``SessionProtocol`` is what every test double and reduced
+        host is checked against, so adding a member there made **1,871** pyright
+        errors across the suite for doubles that legitimately do not carry
+        canonical state. The viewer protocol is narrower — only the real facade
+        and the desktop bridge satisfy it — so the declaration lands exactly
+        where the hard accesses are.
+
+        Undeclared debt (``_UNDECLARED_ON_BOTH_CLASSES``) until Stage 3's
+        type-narrowing made pyright ask for it at three TUI sites. That is the
+        guard working: the member was always reachable and always unchecked.
+
+        **Raises until the first sync.** ``RemoteSession.frontend_state`` raises
+        ``RuntimeError`` while ``_frontend_store`` is None, so a caller on a
+        paint path that cannot tolerate a raise probes defensively instead —
+        several in ``app.py`` deliberately do, and ``_session_subject`` records
+        what a raise there costs.
         """
         ...
 

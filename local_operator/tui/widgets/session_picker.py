@@ -203,6 +203,43 @@ BODY_MATCH_MARKER = "” "
 #: and for the identical reason — see ``plan_columns``.
 FORK_MARKER = "[fork] "
 
+#: A live ``lop exec`` run: a machine-driven session, not a terminal someone is
+#: sitting at.
+#:
+#: These rows are not new — since #804 every ``lop exec`` publishes an ordinary
+#: attachable record, and ``decorate_rows(include_live=True)`` has been folding
+#: them into this list ever since. What was missing is that they rendered
+#: IDENTICALLY to a conversation the user started: same glyph, same "Ready".
+#: Two facts make that worth a tag rather than leaving it implicit.
+#:
+#: * **They are somebody else's work**, in the same sense a subagent directory
+#:   is — a supervisor composed the prompt. Resuming one is legitimate (that is
+#:   what an attachable record IS) but it is a deliberate reach, not the row a
+#:   user means when scanning for the conversation they had this morning.
+#: * **They are ephemeral by design.** ``exec_control`` calls its records
+#:   "deliberately ephemeral": a fast one-shot can be published and reaped
+#:   between the paint and the Enter. A row vanishing under the cursor reads as
+#:   a bug unless the row said what it was.
+#:
+#: Follows :data:`FORK_MARKER`'s form exactly — a bracketed word before the
+#: name, reserved as fixed chrome for the whole result set, painted `dim` as
+#: metadata about the row rather than part of the title — because it makes the
+#: same kind of statement about the same column, and a second visual vocabulary
+#: for "this row is qualified" would be the defect that pattern exists to avoid.
+#:
+#: Deliberately NOT a state glyph: the state column answers "what is it doing",
+#: which an exec run answers exactly like any other session (busy, idle, needs
+#: you). This answers "what KIND of thing is it", which is orthogonal, and
+#: folding it into the glyph would make the two unaskable at once.
+EXEC_MARKER = "[exec] "
+
+#: The record kinds this picker TAGS. ``"tui"`` is the unmarked default — the
+#: overwhelming majority, and tagging it would put a badge on every row to say
+#: "normal" — and ``"daemon"`` is deliberately absent for now: the phone daemon
+#: does not publish per-session records this list reads, so a tag for it would
+#: be untested chrome. Adding a kind here is one entry plus its marker.
+TAGGED_KINDS = frozenset({"exec"})
+
 #: The needs-you mark: this session has parked a question and is holding a
 #: runtime resident until somebody answers it. The one marker here that is
 #: about the USER's attention rather than the session's state, which is why it
@@ -560,6 +597,7 @@ def plan_columns(
     marked: bool = False,
     forked: bool = False,
     stated: bool = False,
+    tagged: bool = False,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -589,6 +627,11 @@ def plan_columns(
     appears as a forked row scrolls into view and disappears as it scrolls out
     makes every name on the list jump sideways on one arrow press.
 
+    ``tagged`` reserves :data:`EXEC_MARKER`'s cells identically. It is a
+    SEPARATE budget from ``forked`` rather than one shared "qualifier" column
+    because the two facts are independent — a forked session can be running
+    under exec — and sharing the cells would make one tag hide the other.
+
     Reserved as FIXED CHROME rather than subtracted from the name afterwards,
     which is what keeps the drop ladder honest — the id surrenders its cells
     before the age, and the age before the name, and a marker that helped
@@ -597,6 +640,7 @@ def plan_columns(
     """
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     marker_col += cell_len(FORK_MARKER) if forked else 0
+    marker_col += cell_len(EXEC_MARKER) if tagged else 0
     # The live-state column follows the same reserve-for-the-RESULT-SET rule as
     # the two above, and for the same reason: a column that appears as a
     # running row scrolls into view makes every name jump sideways on one
@@ -660,10 +704,19 @@ def render_rows(
         getattr(row, "live_state", "") or getattr(row, "pending", None) or getattr(row, "wakes", 0)
         for row in rows
     )
-    name_col, age_col, id_col = plan_columns(rows, width, ages, marked, any_forked, any_stated)
+    # And again for the kind tag. Asked of the result set, not the page, for the
+    # third time and the same reason — but it matters MORE here than for a fork:
+    # an exec record is ephemeral, so this column would otherwise appear and
+    # vanish on its own as a one-shot is reaped, moving every name sideways
+    # without the user touching anything.
+    any_tagged = any(getattr(row, "kind", "") in TAGGED_KINDS for row in rows)
+    name_col, age_col, id_col = plan_columns(
+        rows, width, ages, marked, any_forked, any_stated, any_tagged
+    )
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
     state_col = STATE_COL_CELLS if any_stated else 0
+    exec_col = cell_len(EXEC_MARKER) if any_tagged else 0
 
     lines: list[Text] = []
     for index, (row, age) in enumerate(zip(rows, ages)):
@@ -748,6 +801,16 @@ def render_rows(
         if fork_col:
             line.append(
                 _pad_cells(FORK_MARKER if getattr(row, "forked", False) else "", fork_col),
+                style=row_bg + Style(color=dim),
+            )
+        # Beside the fork tag and painted the same `dim`, for the reason given
+        # there: this is metadata ABOUT the row, and at name weight it would
+        # read as part of the conversation's title.
+        if exec_col:
+            line.append(
+                _pad_cells(
+                    EXEC_MARKER if getattr(row, "kind", "") in TAGGED_KINDS else "", exec_col
+                ),
                 style=row_bg + Style(color=dim),
             )
         # The live-state mark sits immediately before the name, where the eye

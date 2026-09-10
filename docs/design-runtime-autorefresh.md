@@ -375,7 +375,8 @@ that in the test) and calls a new `_refresh_callback` instead of
 `_went_cold_callback`. `set_refresh_callback` follows the
 `set_went_cold_callback` shape (`remote.py:2011-2017`).
 
-`tui/app.py`: in `_adopt_session`'s `is_remote` block (`:2812-2830`) install
+`tui/app.py`: in `_adopt_session`'s viewer block (the `_is_viewer(session)`
+branch that installs the takeover/stopped callbacks) install
 `set_refresh(self._on_runtime_refreshed)`:
 
 ```python

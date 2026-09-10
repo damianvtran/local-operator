@@ -1678,6 +1678,23 @@ class SessionRow(NamedTuple):
     #: session was deliberately stopped.
     wakes: int = 0
     wakes_dormant: bool = False
+    #: The live record's ``kind`` — ``"tui"``, ``"exec"``, ``"daemon"`` — or
+    #: ``""`` for a cold session with no record.
+    #:
+    #: Carried so the picker can SAY what is behind a row rather than implying
+    #: it. Since #804 every ``lop exec`` publishes an ordinary attachable
+    #: record, so exec runs have been appearing in this list (via
+    #: ``decorate_rows(include_live=True)``) rendered identically to a terminal
+    #: conversation — an idle one-shot and a session the user was sitting in
+    #: both read as "Ready". They are not interchangeable: an exec record is
+    #: deliberately ephemeral and can vanish between the paint and the Enter,
+    #: which is a row the user picked disappearing rather than a session they
+    #: lost. Naming the kind is what makes that predictable instead of a
+    #: glitch.
+    #:
+    #: Empty for every construction site but the live-decorating one, exactly
+    #: like the live-state fields above.
+    kind: str = ""
     #: Immutable conversation birth, not transcript activity or runtime start.
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0

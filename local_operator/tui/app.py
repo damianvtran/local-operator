@@ -127,7 +127,7 @@ from local_operator.session.goal_loop import (
     _parse_loop_verdict,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.session.protocol import SessionProtocol
+from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -4218,7 +4218,14 @@ class OperatorApp(App[None]):
             source.turn.epoch,
             aborted=aborted,
             error=error,
-            outcome_known=not bool(getattr(source.session, "is_remote", False)),
+            # The caller holds an outcome only where ``prompt()`` returned
+            # after the turn's terminal state. A viewer's returns on the
+            # owner's admission ACK, mid-turn, so there is nothing to report.
+            #
+            # No session keeps the True the absent flag used to default to:
+            # there is no viewer to withhold an outcome on, and the message's
+            # own default for this field is True.
+            outcome_known=source.session is None or source.session.outcome_is_synchronous,
         )
         message.origin = source.controller
         message.operation = operation
@@ -4393,7 +4400,7 @@ class OperatorApp(App[None]):
                 takeover_factory=no_takeover,
                 display_window=True,
             )
-        if not isinstance(remote, RemoteSession):
+        if not _is_viewer(remote):
             raise RuntimeError("Sidebar navigation requires an owner-backed session")
         try:
             if remote.session_id != session_id:
@@ -4443,7 +4450,6 @@ class OperatorApp(App[None]):
     async def _prepare_sidebar_session(
         self, session_id: str, *, speculative: bool = False, refresh: bool = False
     ) -> tuple[SessionInteraction, SessionPresentation]:
-        from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_catalog import session_directory_name
 
         if not session_directory_name(session_id):
@@ -4457,7 +4463,7 @@ class OperatorApp(App[None]):
         succeeded = False
         try:
             session = source.session
-            if not isinstance(session, RemoteSession):
+            if not _is_viewer(session):
                 raise RuntimeError("Sidebar navigation requires an owner-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
@@ -4676,10 +4682,9 @@ class OperatorApp(App[None]):
             card.restore_state(saved[1])
 
     def _suspend_sidebar_gates(self, source: SessionInteraction) -> None:
-        from local_operator.session.remote import RemoteSession
 
         session = source.session
-        if not isinstance(session, RemoteSession):
+        if not _is_viewer(session):
             return
         view_generation = source.gate_view_generation
         source.gate_view_generation += 1
@@ -4931,12 +4936,11 @@ class OperatorApp(App[None]):
             self.screen.refresh(layout=True)
 
     def _sidebar_navigation_pending(self, session_id: str) -> None:
-        from local_operator.session.remote import RemoteSession
 
         current = self._session
         if session_id:
             self._sidebar_displayed_frame = None
-        if isinstance(current, RemoteSession):
+        if _is_viewer(current):
             if session_id:
                 self._suspend_sidebar_gates(self._interaction)
             elif not self._interaction.display_only:
@@ -5125,13 +5129,11 @@ class OperatorApp(App[None]):
         clauses below exist for the opposite concern: not "is the RUNTIME
         busy", but "is this VIEWER still doing something for the user".
         """
-        from local_operator.session.remote import RemoteSession
-
         retained = source.retained_for_local_work or (
             reason != "closed" and source.retained_for_auto_work
         )
         return (
-            isinstance(source.session, RemoteSession)
+            _is_viewer(source.session)
             and source is not self._interaction
             and not source.retired
             and not retained
@@ -5459,7 +5461,6 @@ class OperatorApp(App[None]):
         prepared: tuple[SessionInteraction, SessionPresentation],
         generation: int,
     ) -> asyncio.Future[None] | None:
-        from local_operator.session.remote import RemoteSession
 
         source, incoming = prepared
         session = source.session
@@ -5467,7 +5468,7 @@ class OperatorApp(App[None]):
             raise RuntimeError("The prepared conversation identity changed")
         if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
-        if not isinstance(session, RemoteSession):
+        if not _is_viewer(session):
             raise RuntimeError("The conversation is not owner-backed")
         if not source.display_only and (
             not session.display_history_current
@@ -5480,7 +5481,7 @@ class OperatorApp(App[None]):
         refreshing = outgoing is source
         focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
-        if previous is not None and not isinstance(previous, RemoteSession):
+        if previous is not None and not _is_viewer(previous):
             raise RuntimeError("Sidebar navigation requires an owner-backed current session")
         if not refreshing:
             self._close_subagent_view()
@@ -5533,7 +5534,7 @@ class OperatorApp(App[None]):
         outgoing.parked_at = time.monotonic()
         source.parked_at = None
         self._park_sidebar_aside(outgoing)
-        if isinstance(previous, RemoteSession):
+        if _is_viewer(previous):
             self._suspend_sidebar_gates(outgoing)
         # Detach the old projection without fabricating a deny/empty answer or
         # poisoning the source's turn-scoped denial latch for its next visit.
@@ -5933,7 +5934,6 @@ class OperatorApp(App[None]):
         released before each backoff and why `command_frame_pending` is
         published false around the wait instead of only in `finally`.
         """
-        from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_navigation import (
             PreparationInvalidated,
             SurfaceNotReady,
@@ -5944,12 +5944,17 @@ class OperatorApp(App[None]):
         cancelled = False
         try:
             session = source.session
-            if not isinstance(session, RemoteSession):
+            if not _is_viewer(session):
                 return
-            await session._ensure_bound()
+            # ``bind_runtime`` rather than the private ``_ensure_bound`` it
+            # forwards to: this is a sidebar source being connected on the
+            # user's behalf, which is exactly the "explicitly requested owner
+            # operation" the declared member exists for, and reaching past it
+            # into a private one is what kept this call invisible to pyright.
+            await session.bind_runtime()
             if session.is_cold:
-                # A BIND THAT DID NOT BIND IS A FAILURE. `_ensure_bound` has
-                # two silent returns that look identical here — "already bound,
+                # A BIND THAT DID NOT BIND IS A FAILURE. The bind has two
+                # silent returns that look identical here — "already bound,
                 # nothing to do" and "cannot bind right now" (the facade is
                 # `_recovering`, remote.py) — and only the second leaves the
                 # session cold. Committing on that second one publishes a COLD
@@ -5961,10 +5966,13 @@ class OperatorApp(App[None]):
                 # requesting a full relayout, under a transcript the user had
                 # every reason to believe was live.
                 #
-                # Checked here rather than by giving `_ensure_bound` a
+                # Checked here rather than by giving the bind a
                 # `require_bound=True`: its other callers deliberately tolerate
                 # the silent return (a prompt waits on `_owner_ready` instead),
                 # so the postcondition is this call site's, not the method's.
+                # `is_cold` is a declared `ViewerSessionProtocol` member, so
+                # this postcondition reads through the same declared surface as
+                # the bind above and stays statically checked under `_is_viewer`.
                 #
                 # The message is the sentence the sync-failure path already
                 # uses, so the two ways a connect can fail read identically to
@@ -6914,7 +6922,7 @@ class OperatorApp(App[None]):
         # the lease-winning real Session after owner death. The callback uses
         # the preserving swap below: ownership is backend plumbing, so takeover
         # cannot clear/replay the transcript or flash a different screen.
-        if bool(getattr(session, "is_remote", False)):
+        if _is_viewer(session):
             set_takeover = getattr(session, "set_takeover_callback", None)
             if callable(set_takeover):
                 set_takeover(partial(self._adopt_takeover_session, source=source))
@@ -8674,9 +8682,8 @@ class OperatorApp(App[None]):
             return self._paging_leases.get(lease.source_token) is lease
 
         try:
-            from local_operator.session.remote import RemoteSession
 
-            if not isinstance(session, RemoteSession):
+            if not _is_viewer(session):
                 return
             rows = await session.load_older_display_page()
             completed = True
@@ -10002,8 +10009,6 @@ class OperatorApp(App[None]):
 
     def _relaunch_refusal(self) -> str:
         """Only out-of-process work survives replacing the terminal image."""
-        from local_operator.session.remote import RemoteSession
-
         for source in self._interactions.values():
             worker = source.shell.worker
             if worker is not None and not worker.is_finished:
@@ -10012,7 +10017,7 @@ class OperatorApp(App[None]):
             if (
                 session is not None
                 and session is not self._session
-                and (not isinstance(session, RemoteSession) or not session.can_detach_runtime)
+                and (not _is_viewer(session) or not session.can_detach_runtime)
                 and (
                     getattr(session, "is_streaming", False)
                     or source.loop.running
@@ -10023,7 +10028,7 @@ class OperatorApp(App[None]):
         if not self._turn_is_live():
             return ""
         session = self._session
-        if not isinstance(session, RemoteSession) or not session.can_detach_runtime:
+        if not _is_viewer(session) or not session.can_detach_runtime:
             return self._live_turn_refuse_copy()
         if not self._resumable_session_id():
             return "wait for this conversation to be saved before relaunching"
@@ -10053,9 +10058,8 @@ class OperatorApp(App[None]):
         # carries no ``--resume`` and comes back as a cold launch. The
         # completed-upgrade path already painted ``restarting…`` on the
         # same tick, so it does not get a second line.
-        from local_operator.session.remote import RemoteSession
 
-        if isinstance(self._session, RemoteSession) and self._session.can_detach_runtime:
+        if _is_viewer(self._session) and self._session.can_detach_runtime:
             self._system_notice(
                 "relaunching terminal; runtime work continues. "
                 "New runtime code waits until all work is safely idle."
@@ -10400,8 +10404,9 @@ class OperatorApp(App[None]):
         user actually asked for.
         """
         session = self._session
-        if session is None or not bool(getattr(session, "is_remote", False)):
-            # Nothing was left running: there was no runtime to leave.
+        if session is None or session.owns_runtime:
+            # Nothing was left running: there was no runtime to leave. An
+            # owner IS the runtime, so leaving it leaves nothing behind.
             return False
         try:
             from local_operator.session.runtime.control import (
@@ -10439,17 +10444,23 @@ class OperatorApp(App[None]):
         return False
 
     def _session_runs_elsewhere(self) -> bool:
-        """Whether this session's runtime is on another machine.
+        """Whether this session's runtime is somewhere a config write misses.
 
-        Under the viewer model a local session is ALSO reached over a socket,
-        so ``is_remote`` no longer distinguishes "someone else's session" from
-        "my own session, one process away". The question that still matters for
-        a config write is narrower: would writing this machine's config govern
-        the runtime? A runtime whose record this machine published is local,
-        whatever transport reaches it.
+        The question a config write actually asks. Transport does not answer
+        it: under the viewer model a local session is ALSO reached over a
+        socket, so "is there a socket" stopped distinguishing "someone else's
+        session" from "my own session, one process away". A runtime whose
+        record this machine published is local, whatever transport reaches it.
+
+        Reads ``runtime_locality`` rather than deriving locality itself for the
+        cases the session can answer, and keeps the registry scan below for the
+        one it cannot: a facade reports where it is BOUND, not whether a record
+        for this id exists on this machine.
         """
         session = self._session
-        if session is None or not bool(getattr(session, "is_remote", False)):
+        if session is None or session.runtime_locality == "this-process":
+            # The loop runs on this event loop, so this machine's config is
+            # unambiguously the one that governs it.
             return False
         # A local runtime publishes a discovery record here; a genuinely
         # foreign one does not.
@@ -16420,9 +16431,8 @@ class OperatorApp(App[None]):
 
     @staticmethod
     def _preserve_source_gate_reply(source: SessionInteraction) -> None:
-        from local_operator.session.remote import RemoteSession
 
-        if isinstance(source.session, RemoteSession):
+        if _is_viewer(source.session):
             source.session.preserve_viewer_gate_reply()
 
     def _latch_approval_answer(self, answer: str) -> None:
@@ -18800,7 +18810,9 @@ class OperatorApp(App[None]):
         # that is the whole point of it being process-scoped, and it is what the
         # teardown below would otherwise take away in the normal sidebar state.
         self._viewer_adopted(session)
-        if bool(getattr(session, "is_remote", False)):
+        # Publication rights follow OWNERSHIP, not transport: the process that
+        # runs the loop is the one whose registrant may speak for the session.
+        if not session.owns_runtime:
             self._mobile_teardown()
             return
         if self._mobile_handle is None:
@@ -18918,18 +18930,12 @@ class OperatorApp(App[None]):
         the next viewer receives the unanswered gate from canonical state.
         Sidebar sources can hold gates too, not just the visible conversation.
         """
-        from local_operator.session.remote import RemoteSession
-
         sessions = [source.session for source in self._interactions.values()]
         sessions.append(self._session)
         seen: set[int] = set()
         pending = []
         for session in sessions:
-            if (
-                isinstance(session, RemoteSession)
-                and session.can_detach_runtime
-                and id(session) not in seen
-            ):
+            if _is_viewer(session) and session.can_detach_runtime and id(session) not in seen:
                 seen.add(id(session))
                 pending.append(session.detach_viewer_gates(preserve_answers=True))
         # Suspend every source before waiting on any one reply, so a background
@@ -18965,14 +18971,13 @@ class OperatorApp(App[None]):
         await self._sidebar_drafts.close()
         if self._sidebar_timer is not None:
             self._sidebar_timer.stop()
-        from local_operator.session.remote import RemoteSession
 
         for source in tuple(self._interactions.values()):
             source.gate_draft = None
             if source.unsubscribe_frontend is not None:
                 source.unsubscribe_frontend()
                 source.unsubscribe_frontend = None
-            if source.session is not self._session and isinstance(source.session, RemoteSession):
+            if source.session is not self._session and _is_viewer(source.session):
                 if source.controller is not None:
                     source.controller.dispose()
                 await source.session.dispose()
@@ -19672,7 +19677,7 @@ class OperatorApp(App[None]):
                 # `is_streaming` False and clears the band — a working→idle→
                 # working blip bounded by the owner's prompt preparation, not by
                 # the relay of the OUTCOME. That is not the flash this closes.
-                knows_outcome = not bool(getattr(session, "is_remote", False))
+                knows_outcome = session.outcome_is_synchronous
                 if self._is_current(source):
                     self._retire_turn_band(
                         session,
@@ -19717,17 +19722,15 @@ class OperatorApp(App[None]):
         resolves the title to `idle` — "finished cleanly" — for a turn whose
         outcome this viewer has not been told. The band is released by the
         relayed `agent_end` through `_finalize_turn`, or by a locally
-        synthesised one (owner death, `/stop`, go-cold). In-process
-        (`is_remote` False) the write is unconditional and unchanged.
+        synthesised one (owner death, `/stop`, go-cold). Where the outcome IS
+        synchronous the write is unconditional and unchanged.
 
         ``failed`` carries the outcome where the caller HAS it (the composer's
         worker does, in-process); `None` means "leave the mark alone".
         """
         if self._status is None:
             return
-        if bool(getattr(session, "is_remote", False)) and bool(
-            getattr(session, "is_streaming", False)
-        ):
+        if not session.outcome_is_synchronous and bool(getattr(session, "is_streaming", False)):
             return
         self._status.update(streaming=False, failed=failed)
 
@@ -19798,7 +19801,7 @@ class OperatorApp(App[None]):
             # that is the re-title path, which has its own throttle.
             self._maybe_retitle_conversation(text)
             return
-        if bool(getattr(session, "is_remote", False)):
+        if not session.owns_runtime:
             # NAMING BELONGS TO THE RUNTIME NOW.
             # ``OwnedSessionHandle.prompt`` calls its own
             # ``_maybe_name_conversation``, so the title is generated beside
@@ -22581,8 +22584,13 @@ class OperatorApp(App[None]):
         round 1, D1). This app's own ``_approve_all`` still tracks the mode —
         it governs this process's widgets and the band — but it is not the
         thing the engine consults, so it is not the thing that gets to speak.
+
+        The gate follows the LOOP: whichever process runs the turn is the one
+        whose gate the engine asks, so this is the ownership question rather
+        than a transport one.
         """
-        return bool(getattr(self._session, "is_remote", False))
+        session = self._session
+        return session is not None and not session.owns_runtime
 
     def _note_approvals_on_parked_prompt(self) -> None:
         """Tell a card already on screen why it still asks (UX round 1, U6).
@@ -22744,7 +22752,9 @@ class OperatorApp(App[None]):
 
         # --- C: is the bound runtime a different build than this terminal? --
         session = self._session
-        if session is None or not bool(getattr(session, "is_remote", False)):
+        # An owner IS this process, so there is no second build to compare
+        # against: the skew this announces is viewer-versus-runtime.
+        if not _is_viewer(session):
             return
         # Only a BOUND follower has an owner to compare against. A cold viewer
         # has not dialled anything yet, and reading its empty stamp would
@@ -23765,7 +23775,7 @@ class OperatorApp(App[None]):
                 body, kind = self._no_session_notice()
                 self._system_notice(body, kind)
                 return
-            if bool(getattr(session, "is_remote", False)):
+            if not session.owns_runtime:
                 # A follower does not own its session; the owner ends it.
                 # Routed rather than run locally, the way every
                 # authoritative-scope command on a follower is.
@@ -23789,7 +23799,7 @@ class OperatorApp(App[None]):
         session's schedules never fire while nobody is driving it.
         """
         session = self._session
-        if session is None or bool(getattr(session, "is_remote", False)):
+        if session is None or not session.owns_runtime:
             return
         # Detach the session FIRST, before any await: this coroutine can be
         # entered twice for one session (a peer's ``stop`` op through
@@ -24219,8 +24229,17 @@ class OperatorApp(App[None]):
         # a test host), and the listing must promise exactly what the second
         # press will do — every other session through the ladder, then this
         # one in-process, last.
+        #
+        # ``own_local`` is FALSE for every `lop` TUI, and the row below is
+        # therefore never appended there. That is correct rather than a gap:
+        # the TUI's runtime is a separate spawned process which publishes its
+        # own record, so this session already reaches the listing through
+        # ``_stop_targets``, and adding it here would list it twice. The
+        # branch survives for a host that genuinely owns its session in
+        # process — the headless REPL and the server build a real ``Session``
+        # — which is why it is a predicate rather than a deletion.
         own = self._session
-        own_local = own is not None and not bool(getattr(own, "is_remote", False))
+        own_local = own is not None and own.owns_runtime
         total = len(targets) + (1 if own_local else 0)
         if not total:
             self._stop_all_armed_at = None
@@ -24286,9 +24305,14 @@ class OperatorApp(App[None]):
         # Own session LAST, through the in-process branch, which paints its
         # own receipt naming the way back; the report folds it into the
         # total so the numbers reconcile with the listing's promise.
+        #
+        # Not taken by the `lop` TUI, for the reason the listing above states:
+        # its runtime is a separate pid already stopped through the ladder.
+        # This mirrors that listing exactly — both ask ``owns_runtime`` — so
+        # the count the user was shown is the count that gets acted on.
         own_outcome: control.StopOutcome | None = None
         session = self._session
-        if session is not None and not bool(getattr(session, "is_remote", False)):
+        if session is not None and session.owns_runtime:
             own_outcome = control.StopOutcome(
                 pid=os.getpid(),
                 session_id=getattr(session, "session_id", "") or "",
@@ -24428,13 +24452,15 @@ class OperatorApp(App[None]):
             # Persisting writes THIS machine's config, so it only makes sense
             # where the launches it governs happen.
             #
-            # The test was `is_remote` until the viewer model landed, and that
-            # became wrong the moment EVERY session became remote: a user on
-            # their own machine, whose runtime is a child process on that same
-            # machine, was told to "run it on the terminal whose launches it
-            # should govern" — which is the terminal they were already sitting
-            # at. The refusal now asks the question it always meant: is the
-            # runtime somewhere this config write would not reach?
+            # The test was a transport flag until the viewer model landed, and
+            # that became wrong the moment EVERY session was reached over a
+            # socket: a user on their own machine, whose runtime is a child
+            # process on that same machine, was told to "run it on the terminal
+            # whose launches it should govern" — which is the terminal they
+            # were already sitting at. The refusal now asks the question it
+            # always meant: is the runtime somewhere this config write would
+            # not reach? That flag is gone; ``runtime_locality`` is the type
+            # that replaced it.
             self._system_notice(
                 "/model default persists to the local machine's config — run it "
                 "on the terminal whose launches it should govern; /model <p>/<id> "
@@ -34395,6 +34421,57 @@ def slot_rows(slot: Any) -> int:
     # slot, so the larger is the safe one: it can only ever withhold the inset,
     # which costs a blank row, where the smaller costs a scrollable screen.
     return max(measured, predicted, 1)
+
+
+def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
+    """Whether this session is a VIEWER, and narrow it to the viewer surface.
+
+    The one place the TUI decides "may I reach the viewer members on this
+    object". Sixteen sites asked it as ``isinstance(session, RemoteSession)``,
+    which coupled the front end to a concrete class, and a further seventeen
+    asked ``getattr(session, "is_remote", False)`` — an undeclared attribute
+    whose ``False`` default silently meant "in-process".
+
+    **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
+    The obvious conversion is the honest-looking one and it is ~1,300-3,000x
+    slower: that protocol is ``runtime_checkable`` with 79 public members, and a
+    positive ``isinstance`` walks every one of them. Measured on an arm64 host,
+    CPython 3.12.13, best-of-five per run:
+
+    ==============================================  ===============
+    ``isinstance(viewer, RemoteSession)``            0.027-0.029 us
+    ``isinstance(viewer, ViewerSessionProtocol)``      60-136 us
+    ``not session.owns_runtime``                     0.044-0.058 us
+    ==============================================  ===============
+
+    The middle row is a RANGE because it varies that much between runs; the
+    ratio is stable and the conclusion does not turn on where it lands. See
+    ``ViewerSessionProtocol`` for the full note, including why the decorator
+    stays even though nothing dispatches on it.
+
+    Three of the converted sites are hot — the sidebar release sweep runs this
+    per source per pass, ``_relaunch_refusal`` loops every interaction, and the
+    gate-answer path runs it per reply — so the protocol form would have put
+    tens of microseconds per source per sweep on a paint path to buy a type the
+    ``TypeGuard`` already supplies statically. AGENTS.md's "prefer a structural
+    invariant to a numeric one" is about assertions, not about paying three
+    orders of magnitude at runtime for one.
+
+    **What makes it sound.** ``owns_runtime`` is DECLARED on ``SessionProtocol``
+    and implemented as a constant on both classes (``Session`` True,
+    ``RemoteSession`` False), so pyright checks the read and the two classes
+    partition exactly — asserted as a pair by
+    ``tests/unit/session/test_viewer_protocol.py``. The ``TypeGuard`` return is
+    what keeps the viewer members statically checked at all sixteen call sites:
+    inside the true branch pyright sees ``ViewerSessionProtocol``, so a renamed
+    or deleted viewer member is an error here exactly as it would be under
+    ``isinstance``.
+
+    ``None`` is False rather than an error: every call site already handles a
+    session-less app, and a helper that raised would push a null check into
+    sixteen places to say the same thing.
+    """
+    return session is not None and not session.owns_runtime
 
 
 def _canonical_frontend(session: Any) -> bool:
