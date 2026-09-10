@@ -1811,6 +1811,254 @@ class TestAuthRequiredHandling:
             server.server_close()
 
     @pytest.mark.asyncio
+    async def test_transient_refresh_failure_does_not_block_on_auth(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contention is NOT an auth failure, and the manager must retry it.
+
+        The decisive property of the coordination contract, measured through the
+        REAL ``streamable_http_client``: when the in-flight coordinator cannot
+        refresh under the lock, it refuses to let the SDK POST the in-memory
+        refresh token unlocked. That refusal does not survive the transport as
+        an exception — the transport runs the request inside anyio cancel
+        scopes, so it arrives as a bare
+        ``CancelledError('Cancelled via cancel scope …')`` — so the provider arms
+        ``REFRESH_CONTENTION`` and ``_connect_server`` re-voices the
+        cancellation from that record.
+
+        Two outcomes are asserted, and they are the difference between "a
+        healthy server on a login prompt" and "a healthy server that retries":
+        the reconnect is re-scheduled with backoff and the server does NOT take
+        an auth block. ``token_posts`` is the same claim measured at the wire —
+        ZERO POSTs to the token endpoint, locked or unlocked.
+        """
+        import json
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from local_operator.mcp import auth as auth_mod
+        from local_operator.mcp.auth import (
+            McpAuthRequiredError,
+            McpRefreshContendedError,
+            McpTokenStorage,
+        )
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+        from tests.unit.mcp.test_auth import FakeAuthStore
+
+        token_posts: list[dict[str, Any]] = []
+
+        class StubServer(BaseHTTPRequestHandler):
+            """Just enough OAuth metadata and MCP endpoint to reach the flow."""
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                return
+
+            def _json(self, payload: dict[str, Any], status: int = 200) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            @property
+            def _base(self) -> str:
+                assert isinstance(self.server, ThreadingHTTPServer)
+                return f"http://127.0.0.1:{self.server.server_port}"
+
+            def do_GET(self) -> None:
+                if self.path.startswith("/.well-known/oauth-protected-resource"):
+                    self._json(
+                        {"resource": self._base + "/mcp", "authorization_servers": [self._base]}
+                    )
+                elif self.path.startswith("/.well-known/oauth-authorization-server"):
+                    self._json(
+                        {
+                            "issuer": self._base,
+                            "authorization_endpoint": self._base + "/authorize",
+                            "token_endpoint": self._base + "/token",
+                            "registration_endpoint": self._base + "/register",
+                        }
+                    )
+                else:
+                    self._json({"error": "not found"}, status=404)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                if self.path == "/token":
+                    # Every POST here — locked or unlocked — is a failure of the
+                    # claim under test, so record it and answer dead.
+                    token_posts.append(
+                        dict(
+                            __import__("urllib.parse", fromlist=["parse_qsl"]).parse_qsl(
+                                body.decode()
+                            )
+                        )
+                    )
+                    self._json({"error": "invalid_grant"}, status=400)
+                else:
+                    self._json({"error": "unauthorized"}, status=401)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), StubServer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/mcp"
+            cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+            store = FakeAuthStore()
+            manager = McpManager(str(tmp_path))
+            manager.auth_store = cast(Any, store)
+            manager._configs["dd"] = cfg
+
+            # An EXPIRED, refreshable stored grant: exactly the state the
+            # coordinator exists to act on. Without an expiry the coordinator
+            # would return early and nothing would be proven.
+            from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+            storage = McpTokenStorage(url, store)
+            await storage.set_client_info(OAuthClientInformationFull(client_id="stub-client"))
+            await storage.set_tokens(
+                OAuthToken(access_token="stale", refresh_token="r-old", expires_in=60)
+            )
+            store.rows[0].data["tokens_obtained_at"] = time.time() - 600
+
+            # A peer process holds the refresh lock: the bounded acquire gives
+            # up, which is the contention this contract is about. Patched on the
+            # module the provider looks the name up on, so the REAL provider
+            # runs — only the lock's outcome is forced.
+            import contextlib as _contextlib
+
+            @_contextlib.asynccontextmanager
+            async def _foreign_held_lock(server_url: str):
+                yield False
+
+            monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", _foreign_held_lock)
+
+            def _leaves(exc: BaseException) -> list[BaseException]:
+                if isinstance(exc, BaseExceptionGroup):
+                    out: list[BaseException] = []
+                    for child in exc.exceptions:
+                        out.extend(_leaves(child))
+                    return out
+                return [exc]
+
+            with pytest.raises(BaseException) as excinfo:
+                await manager._connect_server("dd", cfg)
+            leaves = _leaves(excinfo.value)
+            assert any(isinstance(leaf, McpRefreshContendedError) for leaf in leaves), (
+                "the refused unlocked refresh was not re-voiced from the ledger: "
+                f"{excinfo.value!r}"
+            )
+            assert not any(
+                isinstance(leaf, McpAuthRequiredError) for leaf in leaves
+            ), "contention was flattened into an auth requirement"
+            # And it cost ZERO token POSTs: the SDK's unlocked refresh never ran.
+            assert token_posts == [], f"a refresh POST reached the wire: {token_posts}"
+
+            # The manager arm: a generic failure re-schedules with backoff and
+            # does NOT block on auth (the whole point of a non-auth raise).
+            scheduled = {"called": False}
+            monkeypatch.setattr(
+                manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+            )
+            await manager._reconnect("dd", 0.0, manager._epoch)
+            assert scheduled["called"] is True
+            assert manager.auth_blocked("dd") is False
+            assert manager.reconnect_suspended("dd") is False
+            assert manager.get_connection_status("dd") != "auth-required"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_dispose_cancellation_is_not_re_voiced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real teardown must stay a teardown, even with a record armed.
+
+        The guard that keeps the re-voice safe: a cancellation the TASK ITSELF
+        was asked for (``cancelling() > 0`` — a dispose, a reload, an epoch
+        change, the user leaving) keeps its priority, and the contention record
+        is discarded rather than believed. Without this, a refusal armed a moment
+        before a disposal would convert the disposal into a reconnect attempt —
+        the retry storm the abandoned-grant arm already guards against.
+
+        Also asserts the record is CONSUMED on that path, so it cannot be
+        attributed to an unrelated cancellation of the same server later.
+        """
+        from local_operator.mcp.auth import REFRESH_CONTENTION
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        parked = asyncio.Event()
+
+        async def park(*_a: Any, **_kw: Any) -> Any:
+            await parked.wait()
+            raise AssertionError("released without being cancelled")
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", park)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        scheduled = {"called": False}
+        monkeypatch.setattr(
+            manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+        )
+
+        # Fresh ledger entries are cleared around every test by the fixture
+        # below; arm one here to prove the guard beats the record.
+        REFRESH_CONTENTION.record(url)
+        task = asyncio.ensure_future(manager._connect_server("dd", cfg))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert scheduled["called"] is False
+        assert manager.auth_blocked("dd") is False
+        assert REFRESH_CONTENTION.pop(url) is False, "the record leaked past the disposal"
+
+    @pytest.mark.asyncio
+    async def test_the_contention_record_is_single_use(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One refusal re-voices ONE cancellation, never two.
+
+        The transport's rewrite of an auth-flow failure is a bare CancelledError
+        with no cancelling count, which is exactly what the abandoned-grant arm
+        sees too — so the record is what distinguishes them, and a record that
+        outlived its own cancellation would turn the NEXT unrelated one into a
+        retry.
+        """
+        from local_operator.mcp.auth import REFRESH_CONTENTION, McpRefreshContendedError
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        async def bare_cancel(*_a: Any, **_kw: Any) -> Any:
+            # What the transport delivers: a CancelledError with NO cancelling
+            # count on the task, i.e. not an external cancellation.
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", bare_cancel)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        REFRESH_CONTENTION.record(url)
+        with pytest.raises(McpRefreshContendedError):
+            await manager._connect_server("dd", cfg)
+        # Second attempt, same server, nothing armed: the cancellation stays a
+        # cancellation (the abandoned-grant arm finds no flow either).
+        with pytest.raises(asyncio.CancelledError):
+            await manager._connect_server("dd", cfg)
+
+    @pytest.mark.asyncio
     async def test_login_resets_the_breaker_and_scopes_the_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
