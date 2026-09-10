@@ -134,6 +134,18 @@ class SessionInteraction:
     command_frame_pending: bool = False
     connection_task: asyncio.Task[None] | None = field(default=None, repr=False)
     connection_error: str = ""
+    #: Consecutive failed connect attempts for this source, counted so
+    #: `_connect_sidebar_source` can retry a transient owner loss instead of
+    #: latching it, and still surrender to the user once the budget is spent.
+    #:
+    #: Lives on the SOURCE rather than in the connect task because the retry is
+    #: re-armed as a NEW task each round (`_start_sidebar_connection` via the
+    #: `finally` block), so a task-local counter would restart at zero every
+    #: time and never exhaust. Reset on a successful commit, which is what makes
+    #: the next disruption start from a full budget; a manual reselect also
+    #: starts fresh, since `_start_sidebar_connection` clears the error on entry
+    #: and a source that connected has already zeroed this.
+    connect_attempts: int = 0
     scroll_revision: int = 0
     preview_scroll_revision: int = 0
     # A gate draft can contain a secret. It stays only in this live context,

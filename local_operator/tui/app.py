@@ -1439,6 +1439,100 @@ SIDEBAR_IDLE_SWEEP_S = 15.0
 #: `mobile/daemon.py` bounds the identical call at the same 3 s.
 RETIRE_OFFER_TIMEOUT_S = 3.0
 
+#: First backoff between sidebar connect attempts, and the ceiling one attempt
+#: may wait. The pair only sets the SHAPE of the wait (exponential, capped);
+#: what the wait has to be long enough for is `SIDEBAR_CONNECT_ATTEMPTS`.
+SIDEBAR_CONNECT_BACKOFF_S = 0.25
+SIDEBAR_CONNECT_BACKOFF_CEILING_S = 3.0
+
+
+def sidebar_connect_backoff_s(attempt: int) -> float:
+    """Seconds to wait before re-dialling, for a 1-based `attempt` number.
+
+    Exponential from `SIDEBAR_CONNECT_BACKOFF_S`, capped at
+    `SIDEBAR_CONNECT_BACKOFF_CEILING_S`. Shared by the retry loop and by the
+    derivation of `SIDEBAR_CONNECT_ATTEMPTS` below, so the budget can never
+    describe a schedule the loop does not actually follow.
+    """
+    return min(SIDEBAR_CONNECT_BACKOFF_S * (2 ** (attempt - 1)), SIDEBAR_CONNECT_BACKOFF_CEILING_S)
+
+
+def _attempts_outlasting(span_s: float) -> int:
+    """The fewest attempts whose cumulative backoff exceeds `span_s`.
+
+    Solved rather than tabulated so the arithmetic — not a comment — is what
+    tracks `COLD_FALLBACK_S`. `session.remote` is imported inside the caller
+    rather than at module scope: `app.py` defers every other reference to that
+    module (~6 ms and five extra modules at boot), and this one derivation is
+    not a reason to change the TUI's import surface.
+    """
+    total = 0.0
+    attempts = 0
+    while total <= span_s:
+        attempts += 1
+        total += sidebar_connect_backoff_s(attempts)
+    return attempts
+
+
+def _sidebar_connect_attempts() -> int:
+    from local_operator.session.remote import COLD_FALLBACK_S
+
+    # 50% margin over the recovery bound: the last attempt must land clearly
+    # after `_go_cold`, not in a photo finish with it on a loaded machine.
+    return _attempts_outlasting(COLD_FALLBACK_S * 1.5)
+
+
+#: How many times `_connect_sidebar_source` re-dials a session whose connect
+#: failed, before surrendering the retry to the user.
+#:
+#: DERIVED from `COLD_FALLBACK_S` rather than written as a literal, because the
+#: quantity this budget has to outlast is the VIEWER RECOVERY LOOP'S OWN GIVE-UP
+#: BOUND, not a round number of attempts. A viewer that loses its owner — an
+#: attach-cap eviction, a socket blip, a runtime restart — sets `_recovering`
+#: and stays cold for up to `COLD_FALLBACK_S` before `_go_cold` releases it. For
+#: the whole of that window `_ensure_bound` refuses to bind, and says so by
+#: returning silently rather than by raising (see `_connect_sidebar_source`), so
+#: EVERY attempt inside the window fails for the same reason and healing is only
+#: possible on an attempt that lands after it. A budget that expires first
+#: reports "Connection unavailable" for a condition that was about to clear on
+#: its own — which is the defect this constant exists to close.
+#:
+#: Measured, not guessed: a ~4 s total span did NOT self-heal an evicted viewer
+#: (the facade was still `_recovering` when the last attempt ran); widening the
+#: span past `COLD_FALLBACK_S` healed it on the first post-give-up attempt, at
+#: t=9.9 s. Deriving keeps that relationship true when either constant moves. A
+#: bare literal would silently stop healing the moment `COLD_FALLBACK_S` grew,
+#: with no failing test and no symptom except the original bug returning — so
+#: `tests/unit/tui/test_sidebar_connect_retry.py` pins the RELATIONSHIP (total
+#: span > `COLD_FALLBACK_S`) rather than either number. Same shape as #849's
+#: `RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S`, for the same reason.
+#:
+#: DERIVED FROM `COLD_FALLBACK_S` AND NOT FROM `RECOVERY_GIVE_UP_S`, which is
+#: the other bound in the same neighbourhood and the wrong one to track here.
+#: The two apply to different facades, selected by `_can_go_cold`, and the
+#: sidebar's own two lease branches land on opposite sides of that split —
+#: verified by execution, because the natural assumption ("a parked source can
+#: never go cold") is false:
+#:
+#:   click / `saved_preview`  -> `_can_go_cold=True`  -> `COLD_FALLBACK_S` (8 s)
+#:   prewarm / `connect`      -> `_can_go_cold=False` -> `RECOVERY_GIVE_UP_S` (90 s)
+#:
+#: The CLICK path is what this budget is for, and measurement matches the
+#: derivation: `_recovering` cleared at t=8.3 s against a `COLD_FALLBACK_S` of
+#: 8.0. Sizing to 90 s instead would make the user watch "Connecting…" for a
+#: minute and a half on the common path, which is worse than the honest failure
+#: it replaced.
+#:
+#: On a source the PREWARM branch created, the budget deliberately expires
+#: inside the 90 s window and the user gets the terminal message. That is a
+#: smaller, honest failure rather than a regression: `_ensure_bound`'s first
+#: guard is `if not self._can_go_cold ... return`, so it is a NO-OP on that
+#: facade — no retry count can make it bind, and a measured such facade did not
+#: self-heal within 20 s either. The fix still converts that case from 15 s of
+#: false-connected transcript into a prompt failure. Widening the budget to
+#: cover it would buy nothing and cost every click path a longer wait.
+SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
+
 #: The chord that lifts the aside's full text to the clipboard.
 #:
 #: `omp`, the reference implementation this surface is modelled on, ships copy
@@ -5605,6 +5699,21 @@ class OperatorApp(App[None]):
         and a cancellation-resistant attach cannot hold the latest-wins lock.
         Reuse prepared widgets and the final generation fence for canonical
         replacement, rather than inventing a second replay/event reducer.
+
+        TWO POSTCONDITIONS THIS BODY IS RESPONSIBLE FOR, both learned the hard
+        way from a live reconnect defect:
+
+        1. It never commits a session that is not actually bound. A cold
+           session published as connected produces a transcript that looks live
+           and is not, for the full 15 s the readiness gate takes to give up.
+        2. A failure that is transient is retried rather than latched, so the
+           user is not asked to reselect a session that was going to come back
+           on its own. Only exhaustion of the budget reaches them.
+
+        The task therefore lives for up to ~`COLD_FALLBACK_S` + margin rather
+        than the fraction of a second it used to, which is why `prepared` is
+        released before each backoff and why `command_frame_pending` is
+        published false around the wait instead of only in `finally`.
         """
         from local_operator.session.remote import RemoteSession
         from local_operator.tui.session_navigation import PreparationInvalidated
@@ -5617,6 +5726,29 @@ class OperatorApp(App[None]):
             if not isinstance(session, RemoteSession):
                 return
             await session._ensure_bound()
+            if session.is_cold:
+                # A BIND THAT DID NOT BIND IS A FAILURE. `_ensure_bound` has
+                # two silent returns that look identical here — "already bound,
+                # nothing to do" and "cannot bind right now" (the facade is
+                # `_recovering`, remote.py) — and only the second leaves the
+                # session cold. Committing on that second one publishes a COLD
+                # session as connected: `display_only` goes False, the saved
+                # transcript is swapped in live, and then
+                # `_sidebar_gate_surface_ready` — whose FIRST check is
+                # `is_cold` — refuses every frame until `_await_sidebar_frame`'s
+                # 15 s timer gives up. Measured: 1,799 refused frames, each one
+                # requesting a full relayout, under a transcript the user had
+                # every reason to believe was live.
+                #
+                # Checked here rather than by giving `_ensure_bound` a
+                # `require_bound=True`: its other callers deliberately tolerate
+                # the silent return (a prompt waits on `_owner_ready` instead),
+                # so the postcondition is this call site's, not the method's.
+                #
+                # The message is the sentence the sync-failure path already
+                # uses, so the two ways a connect can fail read identically to
+                # the user and no new copy is introduced.
+                raise ConnectionError("the runtime is not responding")
             await session.ensure_display_current()
             if source.retired or not self._is_current(source):
                 return
@@ -5647,6 +5779,18 @@ class OperatorApp(App[None]):
             prepared = None
             if ready is not None:
                 await ready
+            # REFILL THE BUDGET ONLY ON A COMPLETED CONNECT, and only here at
+            # the very end of the success path. Resetting earlier — beside
+            # `display_only = False`, before the commit and the readiness gate
+            # can still raise — makes the budget UNEXHAUSTIBLE: every round
+            # would zero the counter, the `except` would raise it back to 1,
+            # and a permanently failing session would retry forever instead of
+            # ever reaching the user. Observed while building this, not
+            # theorised. Nor in `finally`: a task that returned early (retired,
+            # superseded, navigated away) never proved the owner is reachable,
+            # and crediting it would hand the next real failure a budget it did
+            # not earn.
+            source.connect_attempts = 0
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -5655,7 +5799,65 @@ class OperatorApp(App[None]):
             retry = True
         except Exception as error:
             source.display_only = True
-            source.connection_error = str(error) or "Connection unavailable"
+            source.connect_attempts += 1
+            # A TRANSIENT GETS RETRIED; ONLY EXHAUSTION LATCHES. Everything
+            # that lands here is a momentarily unreachable owner — an evicted
+            # attach slot, a socket blip, a runtime mid-restart, a facade still
+            # `_recovering` — and every one of them clears on its own within
+            # `COLD_FALLBACK_S`. Latching the first one made a self-healing
+            # condition into a dead session that only a manual reselect could
+            # revive, while the neighbouring `PreparationInvalidated` arm
+            # retried a purely LOCAL staleness race. That asymmetry was
+            # backwards; both are transient, and what stays terminal is the
+            # budget running out. See `SIDEBAR_CONNECT_ATTEMPTS` for why the
+            # budget is derived from `COLD_FALLBACK_S` and not written down.
+            #
+            # Not retried when this source is no longer on screen: the backoff
+            # keeps the connection task alive for ~10 s, and a task counts as
+            # `retained_for_local_work`, so retrying a source the user has
+            # navigated away from would strand an evicted hidden viewer for the
+            # whole budget instead of releasing it.
+            if (
+                source.connect_attempts <= SIDEBAR_CONNECT_ATTEMPTS
+                and not source.retired
+                and self._is_current(source)
+            ):
+                retry = True
+                # Empty, so the status renders "Connecting…" rather than
+                # "Connection unavailable · Reselect to retry": the app has not
+                # given up, and telling the user to act while it is still
+                # working asks them to fix something that is fixing itself.
+                source.connection_error = ""
+                if prepared is not None:
+                    # Released BEFORE the backoff rather than in `finally`. The
+                    # task now lives ~10 s instead of ~0.3 s, and holding a
+                    # preparation (and its widget/attach accounting) across a
+                    # wait nothing is watching is a leak in all but name.
+                    await self._release_sidebar_preparation(prepared)
+                    prepared = None
+                # Both are the "connecting" state, and the next round may take
+                # seconds to arrive. Publish it now so the surface is honest
+                # for the whole window, including a failure that arrived AFTER
+                # the commit had already flipped these.
+                source.command_frame_pending = False
+                self._show_sidebar_connection(source)
+                try:
+                    await asyncio.sleep(sidebar_connect_backoff_s(source.connect_attempts))
+                except asyncio.CancelledError:
+                    # A cancellation during the backoff is a cancellation of the
+                    # connect, not a failed attempt: mark it so `finally` skips
+                    # the status write and the re-arm, exactly as the outer
+                    # handler does. Re-raised, never swallowed by this branch.
+                    cancelled = True
+                    raise
+            else:
+                source.connection_error = str(error) or "Connection unavailable"
+                # Surrendered, so the counter goes back to zero: the status now
+                # reads "Reselect to retry", and that affordance has to mean a
+                # FULL budget, not one last single-shot attempt. Nothing re-arms
+                # automatically from here (`retry` stays False), so the only
+                # reader of a fresh count is the user's own next selection.
+                source.connect_attempts = 0
         finally:
             if prepared is not None:
                 await self._release_sidebar_preparation(prepared)
