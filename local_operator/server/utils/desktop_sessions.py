@@ -506,9 +506,24 @@ class DesktopSessions:
         store's own contract is that a miss is ordinary (an interrupted write,
         a hand-pruned store) and callers degrade to a placeholder rather than
         treating it as a fault.
+
+        The session id is an EXISTENCE check, not a binding: it proves *a* user
+        conversation by that name is on this machine, never that this digest
+        belongs to it. The store is content-addressed and shared across
+        conversations by design, so any valid user session id resolves any
+        digest in it. The bearer already authorises the whole desktop surface,
+        so this is not an escalation — but it is not per-session scoping
+        either, and the URL shape reads as though it were.
         """
 
         def read() -> tuple[bytes, str]:
+            # Both halves of this gate carry weight and neither is redundant.
+            # The shape check keeps a crafted id from escaping the sessions
+            # namespace through ``..`` before a path is ever built; the origin
+            # check keeps this route out of SUBAGENT conversations, which are a
+            # machine's delegated runs the user never opened and which the
+            # desktop surface does not list. Dropping either is a one-token
+            # edit, so each has a named test standing on it.
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id

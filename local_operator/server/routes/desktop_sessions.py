@@ -22,6 +22,7 @@ from pydantic import (
 )
 from starlette.background import BackgroundTask
 
+from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
@@ -58,6 +59,22 @@ RequestID = Annotated[
 #: handler cannot route around a declaration. 32 hex characters is
 #: ``attachments._DIGEST_CHARS``.
 AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
+#: What a stored attachment may claim to be on the wire. The store records the
+#: mime its CALLER supplied — ``transcript._externalize_attachments`` copies
+#: ``block["mime_type"]`` verbatim with no allowlist — and the sidecar carrying
+#: it is not digest-verified, so neither the value's shape nor its meaning is
+#: guaranteed at this boundary. Two failures follow from trusting it, and both
+#: were measured on this route: a mime containing CRLF makes h11 reject the
+#: header and the client gets NO response at all, contradicting the docstring's
+#: "404, never 500"; and ``text/html``/``image/svg+xml`` round-trip out of here
+#: as active content served from an authenticated local port. Today no live
+#: ingress stores a non-image mime, but that is a property of callers upstream
+#: that nothing HERE enforces, and this is the boundary that pays for it
+#: changing. ``routes/static.py`` already establishes the allowlist convention
+#: for image bytes over HTTP; the narrower ``media`` set is used because it is
+#: exactly what the ingress can produce (``sniff_image`` returns these four)
+#: and it excludes ``image/svg+xml``, which is script-bearing.
+ATTACHMENT_FALLBACK_MIME = "application/octet-stream"
 
 
 class Input(BaseModel):
@@ -305,11 +322,41 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
 
     A missing attachment is 404, never 500: the store's contract is that an
     unresolvable reference is ordinary (interrupted write, hand-pruned store)
-    and the reader degrades to a placeholder.
+    and the reader degrades to a placeholder. A corrupt-but-parseable sidecar
+    is the same class of ordinary, which is why the mime is allowlisted rather
+    than trusted (see :data:`ATTACHMENT_FALLBACK_MIME`).
+
+    Two scopes this route does NOT have, stated because the URL shape implies
+    otherwise:
+
+    - ``session_id`` is an EXISTENCE check, not a binding. It proves *a* user
+      conversation by that name is on this machine; it does not prove this
+      attachment belongs to it. The store is content-addressed and shared
+      across conversations by design, so any valid user session id resolves
+      any digest in it. That is not an escalation — the bearer already
+      authorises the whole desktop surface, ``/history`` included — but a
+      future reader must not mistake the path segment for authorization.
+    - The served ``Content-Type`` is not guaranteed to equal the ``mime_type``
+      on the history row. The store dedups by content digest and the FIRST
+      sidecar wins, so identical bytes stored once as ``image/png`` and later
+      as ``image/gif`` keep the original sidecar while the newer row reports
+      ``image/gif``. Harmless for real images (the bytes decide what renders),
+      but the two values are not a matched pair.
     """
     async with errors():
         data, mime_type = await host(request).attachment(session_id, digest)
-    return Response(content=data, media_type=mime_type)
+    return Response(
+        content=data,
+        media_type=(
+            mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
+        ),
+        # Defence in depth on the one response here that can carry a type the
+        # caller did not choose: with the allowlist above, an unexpected mime
+        # is served as opaque bytes, and nosniff stops a browser from
+        # re-deciding that for itself. `tunnels/gateway.py` sets the same
+        # header on this repo's other byte-serving surface.
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post(
