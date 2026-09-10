@@ -362,6 +362,28 @@ def test_live_capture_of_none_is_a_full_default_state() -> None:
     assert live.running == 0 and live.tree == () and live.max_running is None
 
 
+def test_live_capture_of_a_snapshot_jobs_facade_records_no_capacity_errors() -> None:
+    """A follower's ``jobs`` is ``SnapshotJobs`` — roster only, no
+    ``max_running``/``at_capacity``. The probes must SKIP the capacity row and
+    record NOTHING in ``errors``, rather than two AttributeError entries that
+    render as "Could not read" on a healthy screen."""
+    from local_operator.session.frontend_state import SnapshotJobs
+
+    class _Follower:
+        jobs = SnapshotJobs()
+        subagent_comms = None
+        mcp_startup = None
+        session_id = "s"
+        conversation_name = ""
+        model_label = ""
+        effective_model_label = ""
+
+    live = collect_live(_Follower())
+    assert live.max_running is None and live.at_capacity is False
+    # No capacity probe name may appear among the recorded probe failures.
+    assert not any("max_running" in name or "at_capacity" in name for name, _ in live.errors)
+
+
 @pytest.mark.parametrize("failing", ["sessions", "agents", "env", "install"])
 def test_each_block_degrades_independently(failing: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make exactly ONE collector raise; every other block must still populate.

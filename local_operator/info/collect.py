@@ -941,8 +941,18 @@ def collect_live(
 
     jobs = _attr(session, "jobs", None) if session is not None else None
     if jobs is not None:
-        max_running = _safe("live.max_running", lambda: int(jobs.max_running), None, errors)
-        at_capacity = _safe("live.at_capacity", lambda: bool(jobs.at_capacity()), False, errors)
+        # A follower's ``jobs`` is ``SnapshotJobs`` — a minimal facade that only
+        # knows the roster, NOT the capacity fields the owner's
+        # ``AsyncJobManager`` carries. Probing them unconditionally on a follower
+        # surfaced two "Could not read: AttributeError" rows on a HEALTHY
+        # screen, which is exactly the false alarm this collector exists to
+        # prevent. Leaving both at their defaults instead keeps the panel
+        # honest: ``max_running=None`` hides the "Subagent capacity" row rather
+        # than asserting the built-in cap the owner may have overridden, and
+        # ``at_capacity=False`` simply declines to warn.
+        if hasattr(jobs, "max_running"):
+            max_running = _safe("live.max_running", lambda: int(jobs.max_running), None, errors)
+            at_capacity = _safe("live.at_capacity", lambda: bool(jobs.at_capacity()), False, errors)
 
     startup = _attr(session, "mcp_startup", None) if session is not None else None
     failures: dict[str, str] = dict(_attr(startup, "failures", {}) or {})
