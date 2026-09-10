@@ -479,3 +479,361 @@ async def test_the_boot_layout_gutter_returns_focus() -> None:
 
         assert app.focused is editor, f"the boot gutter is dead: {app.focused!r}"
         assert dock.has_class(COMPOSER_FOCUSED_CLASS)
+
+
+# -- Esc comes home ---------------------------------------------------------
+#
+# `action_stop` is the app's one "get me out of here" key, and its docstring is
+# explicit that Esc means one thing wherever focus happens to be. Landing back
+# in the composer is the rest of that promise: measured before this change, Esc
+# from a focused ToolCard left `focused=ToolCard` with `_focus_is_claimed()`
+# False — the key that means "stop" left the user stranded in the ledger with
+# no way back to the input except the mouse.
+#
+# The restoration has TWO call sites in `action_stop` and both are tested
+# separately below, because the idle path and the live-turn path leave the
+# method through different returns and a single test would pass with half the
+# fix missing.
+
+
+def _aborts(app: OperatorApp) -> list[str]:
+    """The abort reasons the session recorded, for "Esc did not stop the turn".
+
+    A narrowed accessor rather than ``app._session.aborts`` at each call site:
+    ``_session`` is optional on the app, and six inline ``type: ignore``
+    comments for the same known-attached fake is noise the reader has to
+    re-check every time.
+    """
+    session = app._session
+    assert session is not None, "premise: the session is attached"
+    return session.aborts
+
+
+@pytest.mark.asyncio
+async def test_esc_returns_focus_to_the_composer_from_a_tool_card() -> None:
+    """The idle path: nothing running, so Esc leaves at the nothing-to-stop return.
+
+    This is the reported defect and the fail-first test for the slice. The case
+    measures ``pending=False streaming=False children=0``, so it exits partway
+    down ``action_stop`` and never reaches the end of the method — a
+    restoration placed only at the tail does not fix it.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        card = await _settled_with_a_card(pilot, app)
+        editor = app.query_one(Editor)
+        assert app._focus_is_claimed() is False, "premise: nothing legitimately holds the keys"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.focused is editor, f"Esc left the user on {type(app.focused).__name__}"
+        assert app.focused is not card
+        assert app.query_one("#input-dock").has_class(COMPOSER_FOCUSED_CLASS)
+
+
+@pytest.mark.asyncio
+async def test_esc_returns_focus_to_the_composer_during_a_live_turn() -> None:
+    """The live-turn path: Esc stops the turn AND comes home.
+
+    Separated from the idle case deliberately. A live turn runs past the
+    nothing-to-stop return to the end of ``action_stop``, so this exercises the
+    second call site; the two are not interchangeable.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        card = await _settled_with_a_card(pilot, app)
+        editor = app.query_one(Editor)
+        session = app._session
+        assert session is not None, "premise: the session is attached"
+        session.streaming = True
+        await pilot.pause()
+        assert session.is_streaming, "premise: a turn is running"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert app.focused is editor, f"Esc left the user on {type(app.focused).__name__}"
+        assert app.focused is not card
+        # The stop still happened: coming home is in addition to Esc's meaning,
+        # never instead of it.
+        assert session.aborts, "Esc stopped focusing and forgot to stop the turn"
+
+
+@pytest.mark.asyncio
+async def test_esc_does_not_steal_focus_from_a_live_prompt(tmp_path: Path) -> None:
+    """THE critical negative: a prompt that legitimately holds focus keeps it.
+
+    A multi-select approval is answered by Space and Enter, which the composer
+    would swallow, so ``_prompt_wants_the_keyboard`` pulls focus to the card on
+    purpose. If Esc's restoration took that focus back, the one question the
+    routed keys cannot reach would become unanswerable.
+
+    This is the test that says the restoration is guarded rather than
+    unconditional; ``_focus_is_claimed`` is the mechanism and weakening it to
+    make something else pass is the failure mode the design exists to avoid.
+    """
+    from local_operator.harness.types import AskOption, AskQuestion
+
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        # MULTI-SELECT specifically, and it has to be this rather than an
+        # approval: an approval advertises `y`/`n`/`A`, which the composer
+        # routes, so it does not need the caret and does not take it
+        # (`_prompt_wants_the_keyboard` measured False for one). A multi-select
+        # is answered by Space and Enter, which the composer would swallow, so
+        # it is the one surface that pulls focus on purpose — and therefore the
+        # only one that can be robbed of it.
+        question = AskQuestion(
+            id="rows",
+            question="Which rows should be dropped?",
+            options=[
+                AskOption(label="Stale", description="nothing reads them"),
+                AskOption(label="Orphaned", description="no parent row"),
+            ],
+            multi=True,
+        )
+        app.run_worker(app.request_user_choice([question]), thread=False)
+        for _ in range(6):
+            await pilot.pause()
+        picker = app._ask_screen
+        assert picker is not None, "premise: the picker is up"
+        assert app._prompt_wants_the_keyboard(picker), (
+            "premise: a multi-select has no routed keys, so it holds the caret"
+        )
+        before = app.focused
+        assert not isinstance(before, Editor), "premise: the picker took focus, not the composer"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Esc settles the picker (`esc skip`) and returns BEFORE the stop
+        # ladder, so the restoration never runs; what matters is that it was
+        # the picker's own branch that consumed the key, not a focus grab.
+        assert picker.settled, "the picker's own `esc skip` did not consume the press"
+        assert not _aborts(app), "Esc aborted the turn instead of skipping"
+
+
+@pytest.mark.asyncio
+async def test_the_sidebars_own_escape_still_owns_the_key() -> None:
+    """The sidebar leaves on its OWN binding, and the restoration must not change that.
+
+    ``SessionSidebar`` binds ``escape`` to ``leave``
+    (``session_sidebar.py:185``), which returns to the composer itself, so the
+    key never reaches ``action_stop`` at all. Measured identically before and
+    after this change: focus goes ``SessionSidebar`` -> ``Editor`` either way.
+
+    Written as "the sidebar's binding consumed it" rather than "focus ended on
+    the composer", because the composer is where BOTH the sidebar's own exit
+    and a wrongly-unguarded restoration would land — an assertion on the
+    landing place alone would pass whichever mechanism ran, and would quietly
+    stop testing the sidebar the day the binding was removed. The guard itself
+    is pinned by the multi-select above, where the two outcomes differ.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await pilot.press("f9")
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        assert sidebar.has_focus, "premise: f9 focused the sidebar"
+        assert app._focus_is_claimed() is True, "premise: a focused sidebar claims the keyboard"
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not sidebar.has_focus, "the sidebar's own `escape` binding did not fire"
+        assert app.focused is app.query_one(Editor)
+        # The sidebar's exit is not a stop: the key was consumed on the way.
+        assert not _aborts(app), "Esc aborted the turn on the way out of the sidebar"
+
+
+#: Every overlay, with the real route in and the real route out. Closing is
+#: driven through the app's own close method rather than a key, so the assertion
+#: is about the close PATH and not about which key happens to reach it.
+CLOSE_PATHS = [
+    ("aside", _claim_aside, "_close_aside"),
+    ("subagent-view", _claim_subagent_view, "_close_subagent_view"),
+    ("org-chart", _claim_org_chart, "_close_org_chart_view"),
+    ("settings", _claim_settings, "_close_settings_view"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,opener,closer", CLOSE_PATHS, ids=[n for n, _, _ in CLOSE_PATHS])
+async def test_closing_each_overlay_lands_on_the_composer(
+    name: str, opener: Any, closer: str, tmp_path: Path
+) -> None:
+    """Every mode hands the keyboard back when it goes away."""
+    session = FakeSession()
+    session.team_registry = _chart_registry()  # type: ignore[attr-defined]
+    app = OperatorApp(lambda: _factory(session), provider_controller=_controller(tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+
+        await opener(pilot, app)
+        assert app._focus_is_claimed() is True, f"premise: {name} is open"
+
+        assert getattr(app, closer)() is True, f"{name} reported it was not open"
+        for _ in range(4):
+            await pilot.pause()
+
+        assert app.focused is editor, f"{name} closed onto {type(app.focused).__name__}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,opener,closer,attr",
+    [
+        ("org-chart", _claim_org_chart, "_close_org_chart_view", "_org_chart_focus_restore"),
+        ("settings", _claim_settings, "_close_settings_view", "_settings_focus_restore"),
+    ],
+    ids=["org-chart", "settings"],
+)
+async def test_closing_an_overlay_whose_restore_target_is_gone_lands_on_the_composer(
+    name: str, opener: Any, closer: str, attr: str, tmp_path: Path
+) -> None:
+    """The stale-restore hole, and it was a real one rather than a theoretical one.
+
+    Both paths restored with ``(restore or self._editor()).focus()`` inside a
+    ``try/except Exception: pass``. Neither guard fired for a widget that was
+    REMOVED while the mode was up: it is not ``None``, so ``or`` does not
+    reach the editor, and ``.focus()`` on a detached widget is a silent NO-OP
+    rather than a raise, so the ``except`` caught nothing. Measured on a stale
+    card: ``is_attached=False display=False``, ``.focus()`` raised nothing and
+    left focus exactly where it was.
+
+    That silence is why this test is written against the restore target rather
+    than against an exception — a test asserting "no raise" passes either way
+    and guards nothing.
+    """
+    session = FakeSession()
+    session.team_registry = _chart_registry()  # type: ignore[attr-defined]
+    app = OperatorApp(lambda: _factory(session), provider_controller=_controller(tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        app._append_block(ToolCard("t1", "bash", {"command": "ls"}))
+        await pilot.pause()
+        card = next(iter(app.query(ToolCard).results()))
+        card.focus()
+        await pilot.pause()
+
+        await opener(pilot, app)
+        # The mode is up and the card is what it would restore to. Set through
+        # the attribute the close path actually reads, then take the widget away
+        # underneath it — the state a `/clear` or a session swap produces.
+        setattr(app, attr, card)
+        card.remove()
+        await pilot.pause()
+        assert not card.is_attached, "premise: the restore target is stale"
+
+        assert getattr(app, closer)() is True
+        for _ in range(4):
+            await pilot.pause()
+
+        assert app.focused is editor, (
+            f"{name} restored to a detached widget and left focus on "
+            f"{type(app.focused).__name__}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_esc_still_closes_each_overlay_before_it_means_stop() -> None:
+    """Regression guard on the ladder's ordering: the restoration did not jump the queue.
+
+    Each of these surfaces advertises Esc as its own exit, so the FIRST press
+    must be consumed by the surface and not by the stop below it. The
+    restoration is placed after every one of these branches for exactly this
+    reason.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+
+        # The aside: its footer says `esc close`, and it is holding the user's
+        # main draft hostage until the key is honoured.
+        await _claim_aside(pilot, app)
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert not app._aside_is_open(), "the aside did not take the first press"
+        assert not _aborts(app), "Esc aborted the turn while the aside was up"
+
+        # The subagent page: leaving is the one thing its own hint promises.
+        await _claim_subagent_view(pilot, app)
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert app._subagent_view is None, "the subagent page did not take the first press"
+        assert not _aborts(app), "Esc aborted the turn while the page was up"
+
+        # The ask picker: `esc skip` is a real answer to a question the agent
+        # asked, not an abort of the turn.
+        await _claim_ask(pilot, app)
+        await pilot.press("escape")
+        for _ in range(4):
+            await pilot.pause()
+        assert app._ask_screen is None or app._ask_screen.settled, "the picker ignored esc"
+        assert not _aborts(app), "Esc aborted the turn instead of skipping"
+
+
+@pytest.mark.asyncio
+async def test_the_composer_is_focused_after_any_ordinary_gesture() -> None:
+    """The cross-slice integration test: click anywhere sane and the composer has the keys.
+
+    Slice A made the dock's dead cells clickable, Slice B made the transcript
+    hand focus back, and this slice made Esc come home. They meet at exactly one
+    place — a click on blank transcript — and the point of this test is that the
+    three compose into one rule rather than three special cases.
+
+    A focused row is the deliberate exception: clicking a card focuses it, which
+    is what click-to-expand is for. Everything else lands on the composer.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        card = await _settled_with_a_card(pilot, app)
+        editor = app.query_one(Editor)
+        dock = app.query_one("#input-dock")
+
+        def home(gesture: str) -> None:
+            assert app.focused is editor, f"after {gesture}: {type(app.focused).__name__}"
+            assert dock.has_class(COMPOSER_FOCUSED_CLASS), f"after {gesture}: chevron dark"
+
+        # 1. A click on the card focuses it — the one place focus legitimately
+        # leaves the composer, and the premise for every gesture below.
+        await pilot.click(card)
+        await pilot.pause()
+        assert app.focused is card, "premise: clicking a row focuses it"
+
+        # 2. Tab from the row comes back (Slice B).
+        await pilot.press("tab")
+        await pilot.pause()
+        home("tab from a row")
+
+        # 3. The dock padding (Slice A).
+        card.focus()
+        await pilot.pause()
+        shell = app.query_one("#input-shell")
+        await pilot.click(
+            offset=_clamped(app, (shell.region.x + shell.region.width // 2, shell.region.y))
+        )
+        await pilot.pause()
+        home("a click on the dock padding")
+
+        # 4. The chevron — the affordance that means "focused" (Slice A).
+        card.focus()
+        await pilot.pause()
+        await pilot.click(offset=_clamped(app, (app.query_one("#input-shell").region.x + 1,
+                                                app.query_one("#input-shell").region.y + 1)))
+        await pilot.pause()
+        home("a click on the chevron")
+
+        # 5. Esc from a focused row (this slice).
+        card.focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        home("escape from a focused row")

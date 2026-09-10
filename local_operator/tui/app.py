@@ -14983,6 +14983,36 @@ class OperatorApp(App[None]):
             return True
         return False
 
+    def _return_focus_to_composer(self) -> None:
+        """Put the keyboard back in the composer unless something claims it.
+
+        The guard is :meth:`_focus_is_claimed`, and it is the whole safety
+        mechanism: a live approval or ask picker that pulled focus deliberately
+        keeps it, or the one question the routed keys cannot reach becomes
+        unanswerable. Never unconditional.
+
+        TWO call sites in :meth:`action_stop`, deliberately, and they are not
+        collapsible into one. The reported defect is Esc from a focused tool
+        card on an IDLE app, and that case measures ``pending=False
+        streaming=False children=0`` — it leaves through the nothing-to-stop
+        return partway down the method and never reaches the tail. A single
+        call at the end of ``action_stop`` would therefore fix nothing for the
+        case the fix exists for, while a single call at the nothing-to-stop
+        return would miss Esc during a live turn. Both, or half the fix.
+
+        Not called at the method's other early returns: those either restore
+        focus themselves (the aside and the three close paths all end on the
+        editor) or hand the key to a surface that is supposed to keep it (the
+        ``SubagentRow`` navigation exit, the ask picker's ``esc skip``).
+        """
+        if self._focus_is_claimed():
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        editor.focus()
+
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
 
@@ -15778,6 +15808,15 @@ class OperatorApp(App[None]):
             if self._abort_shell_command():
                 return
             # Nothing to stop. Explicitly NOT clearing the composer.
+            #
+            # But DO come home: this is the return the reported defect leaves
+            # through. Esc from a focused tool card on an idle app measures
+            # `pending=False streaming=False children=0`, so it exits here and
+            # never reaches the call at the end of this method. Measured before
+            # the fix: Esc from a focused card left `focused=ToolCard` with
+            # `_focus_is_claimed()` False — the app's one "get me out of here"
+            # key left the user stranded in the ledger.
+            self._return_focus_to_composer()
             return
 
         if pending or streaming:
@@ -15828,6 +15867,13 @@ class OperatorApp(App[None]):
         else:
             self._stop_offered_at = None
             self._stop_offer_count = 0
+
+        # The live-turn half of the same behaviour: Esc that actually stopped
+        # something also brings the keyboard home. Last, so every branch above
+        # that legitimately owns the key has already returned — the docstring's
+        # rule is that Esc means one thing wherever focus happens to be, and
+        # landing back in the composer is the rest of that promise.
+        self._return_focus_to_composer()
 
     def _expire_stop_offer(self, armed_at: float) -> None:
         """Drop the escalation promise from a standing offer once it lapses.
@@ -21702,7 +21748,20 @@ class OperatorApp(App[None]):
         restore = self._org_chart_focus_restore
         self._org_chart_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # The `or` alone was not enough, and the `except` was not catching
+            # what it looked like it caught: a widget removed while the mode was
+            # up is not None, so `or` does not fire, and `.focus()` on a DETACHED
+            # widget is a silent NO-OP rather than a raise (measured: stale card
+            # is_attached=False display=False, .focus() raised nothing and left
+            # focus exactly where it was). The close path therefore left focus
+            # stranded on whatever held it. Same guard as
+            # `_close_subagent_view`, which already had this right.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
@@ -21913,7 +21972,16 @@ class OperatorApp(App[None]):
         restore = self._settings_focus_restore
         self._settings_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # Stale-target guard, for the reason `_close_org_chart_view` records:
+            # `.focus()` on a detached widget is a silent no-op, so neither the
+            # `or` nor the `except` below caught a restore target that had been
+            # removed while the page was up.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
