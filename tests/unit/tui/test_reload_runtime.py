@@ -5,14 +5,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
 def remote(tmp_path):
-    return RemoteSession(config_dir=tmp_path, session_id="reload001", takeover_factory=AsyncMock())
+    return AttachedSession(
+        config_dir=tmp_path, session_id="reload001", takeover_factory=AsyncMock()
+    )
 
 
 @pytest.mark.parametrize("state", ["streaming", "compacting", "loop"])
@@ -22,7 +24,7 @@ def test_relaunch_admission(tmp_path, monkeypatch, state, ownership):
     app = OperatorApp(lambda: _factory(FakeSession()))
     app._session = session
     if state == "streaming":
-        if isinstance(session, RemoteSession):
+        if isinstance(session, AttachedSession):
             session._streaming = True
         else:
             session.streaming = True
@@ -31,7 +33,7 @@ def test_relaunch_admission(tmp_path, monkeypatch, state, ownership):
     else:
         app._loop_running = True
     if ownership == "takeover":
-        assert isinstance(session, RemoteSession)
+        assert isinstance(session, AttachedSession)
         session._takeover_target = FakeSession()
     monkeypatch.setattr(
         app, "_resumable_session_id", lambda: "" if ownership == "unsaved" else "reload001"

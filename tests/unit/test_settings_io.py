@@ -57,7 +57,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_REMOVE_EMPTY,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
-    from local_operator.session.runtime.owned import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
+    from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,

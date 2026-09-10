@@ -42,7 +42,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
@@ -60,10 +60,10 @@ _PNG_1X1 = (
 )
 
 
-def _remote_factory(remote: RemoteSession) -> Any:
-    """An app factory over the production RemoteSession (not a FakeSession)."""
+def _remote_factory(remote: AttachedSession) -> Any:
+    """An app factory over the production AttachedSession (not a FakeSession)."""
 
-    async def factory() -> RemoteSession:
+    async def factory() -> AttachedSession:
         return remote
 
     return factory
@@ -190,7 +190,7 @@ async def _fresh_boot_signature(tmp_path: Path) -> list[str]:
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         app = OperatorApp(_remote_factory(remote))
@@ -214,7 +214,7 @@ async def _fresh_boot_durations(tmp_path: Path) -> list[float | None]:
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         app = OperatorApp(_remote_factory(remote))
@@ -245,7 +245,7 @@ async def test_reconnect_paints_gap_rows_with_fresh_boot_block_parity(
     reconnect_signature: list[str] = []
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         app = OperatorApp(_remote_factory(remote))
@@ -339,7 +339,7 @@ async def test_a_settled_painted_card_restores_the_same_duration_a_cold_boot_sho
     settled_durations: list[float | None] = []
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         app = OperatorApp(_remote_factory(remote))

@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.runtime.owned import (
+from local_operator.session.runtime.serving import (
     DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
     GATE_TIMEOUT_CUSTOM_TYPE,
     PENDING_REQUEST_TIMEOUT_S,
@@ -50,14 +50,14 @@ class _Server:
 def _handle(
     monkeypatch, *, attached: int, hours: int | None = None, notify: bool = True
 ):  # noqa: ANN001
-    """An OwnedSessionHandle with just enough wired to exercise the policy."""
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    """An ServingSessionHandle with just enough wired to exercise the policy."""
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
-    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
     handle._registrant = _Server(attached)  # type: ignore[attr-defined]
     if hours is not None:
         monkeypatch.setattr(
-            OwnedSessionHandle, "_unattended_gate_hours", lambda self: hours, raising=False
+            ServingSessionHandle, "_unattended_gate_hours", lambda self: hours, raising=False
         )
     monkeypatch.setattr(
         "local_operator.tui.notify.notifications_enabled", lambda: notify, raising=False
@@ -103,7 +103,7 @@ def test_a_host_with_no_control_socket_keeps_the_ordinary_cap(monkeypatch) -> No
     """An embedded or reduced host cannot ever attach a front end.
 
     Found by a HANG, not by reading: the first cut keyed only on attach count
-    and notifications, so `test_owned.py`'s reduced handle — no registrant,
+    and notifications, so `test_serving.py`'s reduced handle — no registrant,
     notifications enabled on the dev box — took the parked branch and waited
     the configured 24 hours. The suite stopped dead. A gate that no socket can
     reach is exactly what `PENDING_REQUEST_TIMEOUT_S` is for, and keying on the
@@ -123,7 +123,7 @@ def test_the_parked_wait_is_never_shorter_than_the_ordinary_cap(monkeypatch) -> 
     quickly.
     """
     handle = _handle(monkeypatch, attached=1, hours=1)
-    monkeypatch.setattr("local_operator.session.runtime.owned.PENDING_REQUEST_TIMEOUT_S", 7200.0)
+    monkeypatch.setattr("local_operator.session.runtime.serving.PENDING_REQUEST_TIMEOUT_S", 7200.0)
 
     assert handle._gate_timeout_s() == 7200.0
 
@@ -357,7 +357,7 @@ def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
     like an attached viewer, rather than falling back to the short cap that
     exists for a question nobody can ever see.
     """
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     class _KindAware:
         def watching_surfaces(self):
@@ -366,10 +366,10 @@ def test_a_phone_watching_parks_for_the_configured_day(monkeypatch) -> None:
         def set_record_pending(self, pending):
             return None
 
-    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
     handle._registrant = _KindAware()  # type: ignore[attr-defined]
     monkeypatch.setattr(
-        OwnedSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+        ServingSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
     )
     # Notifications OFF: proves the park comes from the watching phone and not
     # from an out-of-band toast being available.

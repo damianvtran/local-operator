@@ -588,17 +588,17 @@ async def test_speculative_prepare_does_not_ensure_bound_on_a_cold_owner():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.session_interaction import SessionInteraction
 
     bound = AsyncMock()
-    remote = MagicMock(spec=RemoteSession)
+    remote = MagicMock(spec=AttachedSession)
     # STATED, not inherited from the spec. ``owns_runtime`` is a property, and
     # ``spec=`` only constrains which names exist — it does not run them, so a
     # spec'd mock auto-fabricates a truthy ``Mock`` for it and therefore claims
     # to OWN its runtime, which is the exact opposite of the viewer this stands
     # in for. That was invisible while the sidebar tested ``isinstance(...,
-    # RemoteSession)`` (a spec'd mock passes that) and became visible the moment
+    # AttachedSession)`` (a spec'd mock passes that) and became visible the moment
     # it started asking the declared predicate. The fake must answer the
     # question the production object answers.
     remote.owns_runtime = False
@@ -688,14 +688,14 @@ async def test_closing_the_sidebar_drains_leased_sources_but_keeps_local_work():
     """
     from unittest.mock import MagicMock
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.session_interaction import SessionInteraction
 
     disposed: list[str] = []
     unsubscribed: list[str] = []
 
     def lease(app, session_id: str, *, kind: str) -> SessionInteraction:
-        remote = MagicMock(spec=RemoteSession)
+        remote = MagicMock(spec=AttachedSession)
         # See the note in ``test_speculative_prepare_does_not_ensure_bound_on_a
         # _cold_owner``: a spec'd mock fabricates a TRUTHY ``owns_runtime``, so
         # without this the drain treats every leased viewer as an owner and
@@ -2445,7 +2445,7 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
     Two halves, and BOTH are load-bearing:
 
     * the controller must be PARKED, so per-token traffic is declined; and
-    * it must still be SUBSCRIBED, because `RemoteSession._emit_or_buffer`
+    * it must still be SUBSCRIBED, because `AttachedSession._emit_or_buffer`
       buffers rather than drops when no handler is registered -- an
       unsubscribed parked source silently accumulates its owner's entire
       stream (measured: 8,169 events across 12 sources in 25 s) and dumps it
@@ -2455,9 +2455,9 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
-    remote = MagicMock(spec=RemoteSession)
+    remote = MagicMock(spec=AttachedSession)
     # ``owns_runtime`` is a property: ``spec=`` constrains which names exist but
     # does not run them, so a spec'd mock auto-fabricates a TRUTHY ``Mock`` —
     # the exact opposite of the viewer this stands in for. Same pattern as
@@ -2477,7 +2477,7 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
             return remote
 
         with (
-            patch("local_operator.session.remote.RemoteSession.connect", side_effect=connect),
+            patch("local_operator.session.attached.AttachedSession.connect", side_effect=connect),
             patch(
                 "local_operator.mobile.attach_client.find_runtime_record",
                 return_value=(SimpleNamespace(pid=1), SimpleNamespace()),

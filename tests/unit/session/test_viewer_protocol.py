@@ -12,7 +12,7 @@ against attributes that no protocol declares. A probe string is data, so:
 
 That is not hypothetical. ``/info`` reported zero subagents for a session that
 had several because ``subagent_comms`` was private on the facade and the probe
-returned ``None`` (see ``RemoteSession.subagent_comms``), and the
+returned ``None`` (see ``AttachedSession.subagent_comms``), and the
 ``is_remote``-conflation half of the same problem has been fixed site-locally
 four times (#576, #609, #624, #625) with a fifth guarded in
 ``tests/unit/tui/test_noop_consumers.py``.
@@ -67,8 +67,8 @@ import ast
 from pathlib import Path
 
 import local_operator
+from local_operator.session.attached import AttachedSession
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
-from local_operator.session.remote import RemoteSession
 from local_operator.session.session import Session
 
 _ROOT = Path(local_operator.__file__).resolve().parent
@@ -171,14 +171,14 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: than in ``tui/`` precisely because the viewer facade has more than one
 #: consumer, and the desktop host is the other one: it duck-probed
 #: ``supports_completion_ack`` (``desktop_sessions.py:223``/``262``) — on
-#: ``RemoteSession``, absent from ``Session``, declared on neither protocol —
+#: ``AttachedSession``, absent from ``Session``, declared on neither protocol —
 #: which is exactly the escape this guard exists to close, one file outside
 #: its original scope. A rename there made the phone portal report
 #: completion-attention as unsupported, silently and with no error.
 #:
 #: ``info/collect.py`` is here because it is the host of the MOTIVATING bug —
 #: the ``/info`` screen that reported zero subagents — and round 2 found the
-#: guard did not observe it. The reviewer renamed ``RemoteSession.
+#: guard did not observe it. The reviewer renamed ``AttachedSession.
 #: subagent_comms``, i.e. re-shipped that exact regression, and got a green
 #: guard and zero pyright errors; only a site-local test in
 #: ``tests/unit/info/`` objected, which is precisely the kind of coverage this
@@ -376,7 +376,7 @@ _KNOWN_MISSING_ON_BOTH_CLASSES = frozenset({"cwd"})
 #:
 #: Three things are asserted for every name, because catching only one of them
 #: leaves the other two routes open: it is absent from BOTH classes (so it
-#: cannot be re-added to ``RemoteSession`` and duck-probed), absent from BOTH
+#: cannot be re-added to ``AttachedSession`` and duck-probed), absent from BOTH
 #: protocols (so it cannot be laundered by declaring it), and read by NO scanned
 #: host (so a probe against a name that exists nowhere cannot sit there
 #: returning its default forever, which is the ``cwd`` defect in
@@ -470,9 +470,9 @@ def _members(klass: type, module: str, name: str) -> set[str]:
 
     ``dir(klass)`` sees only class-level members, so attributes assigned as
     ``self.x = ...`` in ``__init__`` are missing from it. That is not a corner
-    case here: ``RemoteSession`` sets ``runtime_version``, ``degraded_reason``,
+    case here: ``AttachedSession`` sets ``runtime_version``, ``degraded_reason``,
     ``jobs`` and others that way, and ``Session`` sets ``agent_registry`` and
-    ``team_registry`` that way while ``RemoteSession`` exposes them as
+    ``team_registry`` that way while ``AttachedSession`` exposes them as
     properties. Comparing ``dir()`` to ``dir()`` therefore reported
     ``agent_registry`` as viewer-ONLY, which is false — both classes have it.
 
@@ -539,7 +539,7 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
 
     ``isinstance`` against a ``runtime_checkable`` Protocol checks member
     PRESENCE only, not signatures — so it catches a rename or a deletion of a
-    CLASS-level member (a method or property removed from ``RemoteSession``),
+    CLASS-level member (a method or property removed from ``AttachedSession``),
     which is this guard's job, and pyright catches the signatures.
 
     What it does NOT catch, contrary to what this docstring claimed for two
@@ -552,7 +552,7 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     structurally blind.** Stated here because a test believed to cover a case it
     cannot is worse than an uncovered case.
     """
-    session = RemoteSession.__new__(RemoteSession)
+    session = AttachedSession.__new__(AttachedSession)
     # The instance attributes are assigned in ``__init__``, which dials a
     # socket. Set them directly: presence is what the protocol requires, and
     # constructing a real facade would make this a network test. See the
@@ -584,7 +584,7 @@ def test_the_runtime_role_predicates_disagree_between_the_two_classes() -> None:
     (``is_remote`` is constant-True for every `lop` TUI session).
     """
     owner = Session.__new__(Session)
-    viewer = RemoteSession.__new__(RemoteSession)
+    viewer = AttachedSession.__new__(AttachedSession)
 
     assert owner.owns_runtime is True
     assert viewer.owns_runtime is False
@@ -599,7 +599,7 @@ def test_the_runtime_role_predicates_disagree_between_the_two_classes() -> None:
 def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     """The viewer surface is DERIVED, not curated.
 
-    Recomputes "members ``app.py`` touches that exist on ``RemoteSession`` and
+    Recomputes "members ``app.py`` touches that exist on ``AttachedSession`` and
     not on ``Session``" and asserts every one is declared. Without this, the
     guard above could be satisfied forever by appending names to the exclusion
     sets instead of declaring them.
@@ -608,7 +608,7 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     declared = _declared()
 
     owner_members = _members(Session, "session.py", "Session")
-    viewer_members = _members(RemoteSession, "remote.py", "RemoteSession")
+    viewer_members = _members(AttachedSession, "attached.py", "AttachedSession")
 
     viewer_only = {
         name
@@ -670,7 +670,7 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     undeclared = sorted(viewer_only - declared)
     assert not undeclared, (
         f"viewer-only members the TUI uses but no protocol declares: {undeclared}. "
-        "These exist on RemoteSession and not on Session, so they belong on "
+        "These exist on AttachedSession and not on Session, so they belong on "
         "ViewerSessionProtocol."
     )
 
@@ -746,7 +746,7 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     )
 
     owner = _members(Session, "session.py", "Session")
-    viewer = _members(RemoteSession, "remote.py", "RemoteSession")
+    viewer = _members(AttachedSession, "attached.py", "AttachedSession")
     viewer_only = {
         name for name in sites if name not in _RETIRED and name in viewer and name not in owner
     }
@@ -835,7 +835,7 @@ def test_a_retired_session_flag_cannot_be_reintroduced() -> None:
     correct, and it closes all three routes back in. Any one left open makes the
     other two decorative:
 
-    * **On a class.** ``RemoteSession.is_remote = True`` reappearing is enough
+    * **On a class.** ``AttachedSession.is_remote = True`` reappearing is enough
       on its own — every historical read was ``getattr(session, "...", False)``
       against an attribute no protocol declared, so nothing else has to change
       for the defect to be back.
@@ -855,14 +855,14 @@ def test_a_retired_session_flag_cannot_be_reintroduced() -> None:
     retirement is one entry in ``_RETIRED`` rather than a new test.
     """
     owner_members = _members(Session, "session.py", "Session")
-    viewer_members = _members(RemoteSession, "remote.py", "RemoteSession")
+    viewer_members = _members(AttachedSession, "attached.py", "AttachedSession")
     declared = _declared()
     touched = _all_touched()
 
     on_classes = sorted(
         f"{name} (on {klass})"
         for name in _RETIRED
-        for klass, members in (("Session", owner_members), ("RemoteSession", viewer_members))
+        for klass, members in (("Session", owner_members), ("AttachedSession", viewer_members))
         if name in members
     )
     assert not on_classes, (
@@ -903,7 +903,7 @@ def test_the_exclusion_sets_state_true_facts() -> None:
     silenced debt (review M2). Each set now has to be true.
     """
     owner_members = _members(Session, "session.py", "Session")
-    viewer_members = _members(RemoteSession, "remote.py", "RemoteSession")
+    viewer_members = _members(AttachedSession, "attached.py", "AttachedSession")
 
     missing = sorted(
         n for n in _UNDECLARED_ON_BOTH_CLASSES if n not in owner_members or n not in viewer_members
@@ -927,7 +927,7 @@ def test_the_exclusion_sets_state_true_facts() -> None:
     not_owner_only = sorted(n for n in _OWNER_ONLY_CAPABILITY_PROBES if n in viewer_members)
     assert not not_owner_only, (
         "_OWNER_ONLY_CAPABILITY_PROBES claims these are absent from the viewer "
-        f"facade: {not_owner_only}. They exist on RemoteSession, so they are "
+        f"facade: {not_owner_only}. They exist on AttachedSession, so they are "
         "viewer surface and belong on ViewerSessionProtocol."
     )
 
@@ -980,9 +980,9 @@ def _static_conformance_is_checked_by_pyright() -> None:
       ``test_the_static_conformance_anchor_still_exists`` below now does object,
       which is what turned that disclosure into detection (QA round 2, Q6).
     """
-    viewer: ViewerSessionProtocol = RemoteSession.__new__(RemoteSession)
+    viewer: ViewerSessionProtocol = AttachedSession.__new__(AttachedSession)
     owner: SessionProtocol = Session.__new__(Session)
-    attached: SessionProtocol = RemoteSession.__new__(RemoteSession)
+    attached: SessionProtocol = AttachedSession.__new__(AttachedSession)
     _ = (viewer, owner, attached)
 
 

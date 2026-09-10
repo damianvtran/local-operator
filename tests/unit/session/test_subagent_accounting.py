@@ -107,7 +107,7 @@ def test_known_unknown_and_free_survive_wire_folding(monkeypatch):
             usage=Usage(cost_components=folded),
         )
     )
-    # RemoteSession's daemonless sidecar overlay uses this exact validation
+    # AttachedSession's daemonless sidecar overlay uses this exact validation
     # path, without an owner or any permission to discover model prices.
     cold = JobState.model_validate(durable)
     assert cold.usage is not None
@@ -248,8 +248,8 @@ async def test_cold_facade_restores_sidecar_ledger_without_parent_checkpoint(
 ):
     import json
 
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
-    from local_operator.session.remote import RemoteSession
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
     from local_operator.session.transcript import Transcript
 
@@ -299,7 +299,7 @@ async def test_cold_facade_restores_sidecar_ledger_without_parent_checkpoint(
     async def never():
         pytest.fail("cold restore started owner")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "coldledger01", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=never
     )
     try:

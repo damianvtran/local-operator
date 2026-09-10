@@ -13,7 +13,7 @@ one settled row, not a streaming beat). So the hidden viewer's
 ``history_message_count`` stayed frozen — which meant neither
 ``_sidebar_presentation_current``'s count guard rejected the stale cached
 presentation, nor ``_commit_sidebar_session``'s ``total > history_size`` delta
-projection fired. The fix (``RemoteSession._remember_live``) files the settled
+projection fired. The fix (``AttachedSession._remember_live``) files the settled
 row keyed by its persisted id so the count advances.
 
 This drives the full assembled path — a real owner behind a real socket, the
@@ -36,9 +36,9 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import PeerMessageBlock
 from tests.e2e.harness import (
@@ -71,7 +71,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @asynccontextmanager
 async def live_owners(
     config: Path, ids: list[str], monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[Callable[[str | None], Awaitable[RemoteSession]]]:
+) -> AsyncIterator[Callable[[str | None], Awaitable[AttachedSession]]]:
     """Real ``RuntimeServer`` owners behind one sidebar, one per id.
 
     Mirrors ``test_sidebar_live_tool_card.live_owners`` minus the parking tool
@@ -94,7 +94,7 @@ async def live_owners(
     monkeypatch.setattr(registry, "unpublish", lambda pid, root=None: None)
 
     servers: dict[str, RuntimeServer] = {}
-    handles: list[OwnedSessionHandle] = []
+    handles: list[ServingSessionHandle] = []
     try:
         for session_id in ids:
             directory = config / "sessions" / session_id
@@ -106,7 +106,7 @@ async def live_owners(
                 ],
             )
             owner = build_session(directory, ScriptedStream([text_turn("idle")]), cwd=config)
-            handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+            handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
             handles.append(handle)
             server = RuntimeServer(handle, kind="daemon")
             await server.start_in_process()
@@ -119,9 +119,9 @@ async def live_owners(
         async def never() -> Any:
             raise AssertionError("view navigation must never take execution ownership")
 
-        async def resume(session_id: str | None) -> RemoteSession:
+        async def resume(session_id: str | None) -> AttachedSession:
             assert session_id is not None
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 servers[session_id]._record,
                 session_id,
                 config_dir=config,

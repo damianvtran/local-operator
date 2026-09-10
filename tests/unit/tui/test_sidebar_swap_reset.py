@@ -57,7 +57,7 @@ def isolated_swap(tmp_path, monkeypatch):
 class SidebarRemote(FakeSession):
     """A ``FakeSession`` wearing the owner-backed surface the sidebar requires.
 
-    A ``MagicMock(spec=RemoteSession)`` cannot stand in here: the commit path
+    A ``MagicMock(spec=AttachedSession)`` cannot stand in here: the commit path
     renders the band and the splash from this object, and a mock's auto-created
     attributes reach Rich as non-string values. Extending the suite's existing
     fake keeps every protocol method real and adds only the navigation surface.
@@ -86,7 +86,7 @@ class SidebarRemote(FakeSession):
         self._id = session_id
         #: Opt-in, because `has_pending_fork` is the fact the band's `forking`
         #: segment reads and only ONE test wants it true. A `/fork` issued on a
-        #: streaming session defers to a turn boundary (`owned.py:2208`), so the
+        #: streaming session defers to a turn boundary (`serving.py:2208`), so the
         #: request stays live — and cancellable — across a park.
         self._pending_fork = pending_fork
         self._history = list(history)
@@ -214,7 +214,7 @@ async def test_new_after_a_sidebar_switch_still_shows_the_splash():
         return fresh
 
     app = OperatorApp(lambda: _factory(home), resume_factory=resume_factory)
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -269,7 +269,7 @@ async def test_sidebar_commit_clears_the_previous_conversations_cost_and_context
         return fresh
 
     app = OperatorApp(lambda: _factory(home), resume_factory=resume_factory)
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -314,7 +314,7 @@ async def test_a_parked_conversation_keeps_its_splash_notice():
     )
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -359,7 +359,7 @@ async def test_a_parked_conversation_keeps_its_dock_density():
     )
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -406,7 +406,7 @@ async def test_returning_to_an_empty_conversation_shows_the_splash_under_a_notic
         return fresh
 
     app = OperatorApp(lambda: _factory(home), resume_factory=resume_factory)
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -478,7 +478,7 @@ async def test_a_parked_conversation_keeps_its_pending_fork_indicator():
     )
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -539,7 +539,7 @@ async def test_the_fork_indicator_describes_the_session_the_user_is_looking_at()
     )
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -603,7 +603,7 @@ async def test_a_park_withdraws_the_splash_toast_but_keeps_the_notice():
     )
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()

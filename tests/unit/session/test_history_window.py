@@ -16,6 +16,7 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
+from local_operator.session.attached import AttachedSession
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
     DisplayHistoryWindow,
@@ -25,9 +26,8 @@ from local_operator.session.history_window import (
     wire_payload,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import (
     ENTRY_COMPACTION,
     Transcript,
@@ -255,7 +255,7 @@ async def test_real_attach_pages_without_viewer_journal_parse_and_records_shell_
     messages = [Message.user(f"canonical {index}") for index in range(250)]
     await seed_transcript(directory, messages)
     session = build_session(directory, ScriptedStream([text_turn("owner reply")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     remote = None
     await server.start_in_process()
@@ -264,8 +264,8 @@ async def test_real_attach_pages_without_viewer_journal_parse_and_records_shell_
         async def forbidden(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
             raise AssertionError("window attach must not parse the viewer journal")
 
-        monkeypatch.setattr(RemoteSession, "_read_transcript", forbidden)
-        remote = await RemoteSession.connect(
+        monkeypatch.setattr(AttachedSession, "_read_transcript", forbidden)
+        remote = await AttachedSession.connect(
             server._record,
             "window-test",
             config_dir=config,
@@ -328,13 +328,13 @@ async def test_live_replay_mutations_refresh_without_replacing_the_connection(
     messages = [Message.user(f"canonical {index}") for index in range(250)]
     await seed_transcript(directory, messages)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     assert server._record is not None
     remote = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             server._record,
             "window-live",
             config_dir=config,
@@ -406,12 +406,12 @@ async def test_peer_row_received_while_hidden_advances_the_viewer_count(
     messages = [Message.user("initial"), Message.assistant("seeded answer")]
     await seed_transcript(directory, messages)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     remote = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             server._record,
             "peer-count",
             config_dir=config,
@@ -479,14 +479,14 @@ async def test_prompt_and_wait_does_not_complete_on_admission(tmp_path, monkeypa
             yield event
 
     session = build_session(directory, stream, cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     assert server._record is not None
     remote = None
     task = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             server._record,
             "window-loop",
             config_dir=config,
@@ -855,7 +855,7 @@ async def test_full_required_hands_back_an_audit_cursor_and_the_reader_adopts_it
     assert page.before_token, "the escalation dropped the audit cursor"
 
     # The reader's half: adopting that cursor must leave the chain live.
-    remote = RemoteSession.__new__(RemoteSession)
+    remote = AttachedSession.__new__(AttachedSession)
     remote._display_history = page
     # The state a reader is REALLY in at this moment, not a convenient one:
     # ``materialize_history`` has just replayed the model's history in full, so

@@ -10,7 +10,7 @@ branch, with no ``interrupted_by`` anywhere in the transcript.
 So the tool was fine and the PRESENTATION was wrong, and the mechanism is
 structural rather than a race:
 
-* the viewer files each completed live row into ``RemoteSession._live_history``
+* the viewer files each completed live row into ``AttachedSession._live_history``
   (``_remember_live``), and ``display_history_window()`` hands those rows to
   the next prepared replay;
 * a conversation sitting in the sidebar therefore replays an assistant message
@@ -56,9 +56,9 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, ToolCard
 from tests.e2e.harness import (
     ScriptedStream,
@@ -129,7 +129,7 @@ def _parking_tool(released: asyncio.Event) -> AgentTool:
 @asynccontextmanager
 async def live_owners(
     config: Path, ids: list[str], tool: AgentTool, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[Callable[[str | None], Awaitable[RemoteSession]]]:
+) -> AsyncIterator[Callable[[str | None], Awaitable[AttachedSession]]]:
     """Real ``RuntimeServer`` owners behind one sidebar, one per id.
 
     Re-keyed discovery records, for the reason ``test_sidebar_longrun`` states
@@ -153,7 +153,7 @@ async def live_owners(
     monkeypatch.setattr(registry, "unpublish", lambda pid, root=None: None)
 
     servers: dict[str, RuntimeServer] = {}
-    handles: list[OwnedSessionHandle] = []
+    handles: list[ServingSessionHandle] = []
     try:
         for session_id in ids:
             directory = config / "sessions" / session_id
@@ -176,7 +176,7 @@ async def live_owners(
                 ]
             )
             owner = build_session(directory, stream, tools=[tool], cwd=config)
-            handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+            handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
             handles.append(handle)
             server = RuntimeServer(handle, kind="daemon")
             await server.start_in_process()
@@ -189,9 +189,9 @@ async def live_owners(
         async def never() -> Any:
             raise AssertionError("view navigation must never take execution ownership")
 
-        async def resume(session_id: str | None) -> RemoteSession:
+        async def resume(session_id: str | None) -> AttachedSession:
             assert session_id is not None
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 servers[session_id]._record,
                 session_id,
                 config_dir=config,
@@ -288,7 +288,7 @@ async def test_switching_to_a_session_parked_in_a_tool_paints_a_live_row(
                 # `cast`, because the protocol the app types its sources and
                 # `_session` against does not declare the viewer-only display
                 # surface these preconditions read. The object IS a
-                # `RemoteSession`, which is exactly why the bug reaches here.
+                # `AttachedSession`, which is exactly why the bug reaches here.
                 viewer = cast(Any, app._sidebar_sources["busy01"].session)
                 rows = viewer.display_history_window()
                 unanswered = {

@@ -57,7 +57,7 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 def _error(mode: str) -> BaseException:
     """The exception each mode's branch is selected by."""
-    from local_operator.session.remote import (
+    from local_operator.session.attached import (
         _SYNC_UNRESPONSIVE_REASON,
         RuntimeUnresponsiveError,
     )

@@ -41,7 +41,7 @@ Twelve of the operator's sessions exceed 80% unreachable. This is the defect.
 
 `_reconcile_head_notice` (`app.py:7267-7269`) computes
 `more = bool(self._resume_pending_head) or bool(session.history_before_token)`,
-and `RemoteSession.history_before_token` (`remote.py:2603-2606`) returns the
+and `AttachedSession.history_before_token` (`remote.py:2603-2606`) returns the
 window's `before_token` — `None` once the truncated replay is drained. So
 `RESUME_START_NOTICE` (`app.py:1077`) is the honest rendering of a history layer
 that already discarded the older rows. **Do not fix the copy.** Fix the layer.
@@ -321,7 +321,7 @@ should see the vocabulary change with it.
 - `history_page` (`:5797-5809`): pass the token's phase through. The token
   already carries it; this is a thread-through, not a new parameter.
 
-**`local_operator/session/remote.py`**
+**`local_operator/session/attached.py`**
 - `history_before_token` (`:2603-2606`): return the audit token once context is
   drained. Today it is gated on `not self._history_hydrated`; that flag means
   "the context replay is fully loaded" and must **not** be repurposed. Add a

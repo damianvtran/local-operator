@@ -341,8 +341,8 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: ``display.*``/``tui.theme``; covered in the TUI suite).
 #:
 #: ``approvals`` is here because the approval MODE lives in the host's gate,
-#: not in the ``Session``: the runtime's ``OwnedSessionHandle._auto_approve``
-#: (``tests/unit/session/runtime/test_owned_approvals_live.py``) and the
+#: not in the ``Session``: the runtime's ``ServingSessionHandle._auto_approve``
+#: (``tests/unit/session/runtime/test_serving_approvals_live.py``) and the
 #: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
 #: The session only holds whatever gate closure the host installed.
 #:

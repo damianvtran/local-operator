@@ -1063,7 +1063,7 @@ async def test_the_fill_pages_a_remote_session_through_its_fetch_worker() -> Non
 
     The fetch itself is stubbed — the point is the fill's control flow around
     it (does it terminate, does it re-enter, does it leave the gate closed),
-    not ``RemoteSession``'s wire format.
+    not ``AttachedSession``'s wire format.
     """
     session = FakeSession()
     session._history = _agentic_history(200, followups=1)

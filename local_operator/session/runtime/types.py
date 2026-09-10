@@ -162,7 +162,7 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #:
 #: Lives here, beside the record fields it defines the meaning of, because two
 #: modules must agree on it and a divergence is invisible: the runtime publishes
-#: ``subagents_running`` from this set (``owned.OwnedSessionHandle``) and
+#: ``subagents_running`` from this set (``serving.ServingSessionHandle``) and
 #: ``/info`` tallies this session's own tree from it (``info.collect``). If they
 #: drifted, the fleet total and the tree drawn directly beneath it on the same
 #: card would disagree, which is the one error that section must never make.
