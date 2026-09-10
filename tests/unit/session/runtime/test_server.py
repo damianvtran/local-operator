@@ -74,7 +74,16 @@ class FakeHandle:
     def frontend_state_seed(self):  # noqa: ANN202
         return self._frontend.state
 
-    def subscribe_frontend(self, on_update):  # noqa: ANN001, ANN202
+    def subscribe_frontend(self, on_update, *, display_window=False):  # noqa: ANN001, ANN202
+        # `display_window` mirrors the real `Session.subscribe_frontend`, which
+        # the server calls with it both at connect time and on the
+        # `frontend_sync` RPC. This double accepted only the positional form, so
+        # every server path taking the RPC raised TypeError against it and no
+        # test could reach the canonical re-snapshot at all. Capturing a durable
+        # window needs a transcript this handle does not have, so the flag is
+        # accepted and ignored: the sync carries canonical state without a
+        # display window, which is exactly the `window is None` branch
+        # `_load_frontend_history` already handles.
         return self._frontend.subscribe(on_update)
 
     def subscribe_events(self, on_event):  # noqa: ANN001, ANN202

@@ -1723,13 +1723,50 @@ class FrontendUpdate(BaseModel):
     consumed only when canonical fields actually change, so any missing number
     is a real transport gap and forces a fresh snapshot rather than being
     mistaken for intentional coalescing.
+
+    A DEGRADED delta is the one case where the body is absent by design. The
+    runtime's ``relay_frame_or_degraded`` sheds an oversized payload and keeps
+    only the sequencing fields, because killing the socket over one delta costs
+    the session while dropping the delta costs one animation step. That frame
+    still has to VALIDATE here: ``changes`` was required, so the follower's
+    ``model_validate`` raised and ``AttachClient._pump``'s catch-all tore the
+    connection down anyway — the guard defeated one layer below itself.
+
+    ``degraded`` is an explicit field rather than an inference from an empty
+    ``changes`` because downstream code must be able to ASK whether a body was
+    shed. The two are NOT equivalent: an empty change set means "nothing moved"
+    and is safe to apply, while a shed body means canonical state has genuinely
+    drifted and the follower owes itself a fresh ``frontend_sync``. Collapsing
+    them would leave a follower permanently stale with a gap check that stays
+    happy forever, since the sequence number was consumed either way.
+
+    ``changes`` is therefore OPTIONAL ON A DEGRADED FRAME AND REQUIRED ON EVERY
+    OTHER ONE, enforced by ``_changes_required_unless_degraded`` below. Relaxing
+    it unconditionally would have re-created the very defect this class is being
+    fixed for: a frame that misspells the key (``chnages``) — the model allows
+    extras — would validate as an empty change set, apply as "nothing moved",
+    consume a sequence and keep the gap check satisfied forever, with no log and
+    no ``degraded`` flag to ask about. That is silent drift from a different
+    cause, which is a strictly worse failure than the loud one it replaces.
+
+    Refusing a malformed frame is NOT the same as tearing down the socket over
+    a degraded one. The degrade path now labels its own frame, so the frame this
+    validator rejects is one claiming to be a complete delta while carrying no
+    body — which no correct owner emits. The receiver refuses it and re-syncs
+    (``RemoteSession._on_frontend_update``), which is the recovery the transport
+    already has for a gap. Staying loud is what keeps that recovery reachable.
     """
 
     model_config = ConfigDict(extra="allow")
 
     epoch: str
     sequence: int
-    changes: dict[str, Any]
+    changes: dict[str, Any] = Field(default_factory=dict)
+    #: The owner shed this delta's body to keep the line under the socket limit.
+    #: Sequencing is still authoritative; the FIELDS are not, so a receiver must
+    #: re-snapshot rather than treat the empty body as "nothing changed".
+    degraded: bool = False
+    degraded_reason: str = ""
     job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     # Jobs whose appended events are a REPLACEMENT, not a suffix. The owner's
     # ``AsyncJob.trajectory`` evicts oldest past ``subagent.TRAJECTORY_CAP``, so
@@ -1738,6 +1775,25 @@ class FrontendUpdate(BaseModel):
     # while duplicating rows in its click-through view.
     job_trajectory_replacements: list[str] = Field(default_factory=list)
     job_todo_updates: dict[str, list[dict[str, Any]] | None] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _changes_required_unless_degraded(cls, data: Any) -> Any:
+        """Only a DEGRADED frame may omit its body.
+
+        Scoped rather than blanket-permissive: ``model_config`` allows extras,
+        so without this a typo'd key silently becomes an empty change set that
+        consumes a sequence and drifts the follower — the same shape as the
+        defect this class is being fixed for. A normal delta always carries
+        ``changes`` (``mutate`` returns ``None`` rather than emitting an empty
+        one), so requiring it here rejects only frames no correct owner sends.
+        """
+        if isinstance(data, dict) and "changes" not in data and not data.get("degraded"):
+            raise ValueError(
+                "frontend update omits 'changes' without the 'degraded' flag; "
+                "only a degraded frame may shed its body"
+            )
+        return data
 
 
 # One watched plan must not take down the 1 MiB control stream. Larger plans
@@ -2798,9 +2854,31 @@ class FrontendStateStore:
             subscriber(update.model_copy(deep=True))
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
-        """Apply one already-validated ordered delta from an owner."""
+        """Apply one already-validated ordered delta from an owner.
+
+        A DEGRADED delta advances the sequence and touches nothing else. The
+        owner shed the body to keep the line under the socket limit, so the
+        fields it carried are unknown here — not unchanged. Rebuilding the
+        payload from an empty ``changes`` would be indistinguishable from a
+        no-op delta and would leave the store quietly wrong, so the only honest
+        local action is to keep what we have and let the sequence advance in
+        step with the owner's.
+
+        The sequence MUST still advance: the owner consumed that number, and
+        refusing it here would desynchronise this store from the transport's
+        gap check and refuse every later delta. Recovering the shed fields is
+        the SUBSCRIBER's job — ``RemoteSession`` forces a fresh ``frontend_sync``
+        off the same flag — which is why the delta is still published below: an
+        in-process subscriber and the resync path must see the same event, or
+        the two disagree about whether state is trustworthy.
+        """
         if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
             raise ValueError("frontend update is not the next state sequence")
+        if update.degraded:
+            self._state = self._state.model_copy(update={"sequence": update.sequence})
+            for subscriber in list(self._subscribers):
+                subscriber(update.model_copy(deep=True))
+            return self.state
         changes = copy.deepcopy(update.changes)
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}

@@ -1,0 +1,9 @@
+attached; viewer title='fake'
+session runtime: frontend_update frame is 1528063 bytes, over the 1048576-byte socket line limit; relaying a degraded placeholder instead of killing the connection (the viewer recovers this state through frontend_sync + durable history)
+session s1: owner degraded canonical delta fake-owner/1 (A live update was too large to send and was dropped; the view refreshes from the session's own history.); re-syncing canonical state from the owner's snapshot
+connection alive        : True
+owner  title/seq        : 'post-degrade title' / 1
+viewer title/seq        : 'post-degrade title' / 1
+viewer catalogue rows   : 3426
+state matches owner     : True
+stream still live after : 'still streaming'
