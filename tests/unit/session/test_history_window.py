@@ -24,6 +24,7 @@ from local_operator.session.history_window import (
     display_window,
     wire_payload,
 )
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
@@ -375,6 +376,78 @@ async def test_live_replay_mutations_refresh_without_replacing_the_connection(
         ]
         assert remote._display_history.history_generation == session._transcript._history_generation
         assert len(server._clients) == 1
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        server.close()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_peer_row_received_while_hidden_advances_the_viewer_count(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A `lop send` landing on a HIDDEN session must move the freshness count.
+
+    Regression for the missing-receipt resume: a peer CustomMessage is persisted
+    by the owner BEFORE it emits the ``PeerMessageDeliveredEvent``, and it bumps
+    neither ``history_generation`` (compaction/prune only) nor any
+    ``_MESSAGE_PHASE`` lifecycle (a settled row, not a streaming beat). Without
+    the ``_remember_live`` branch the hidden viewer's ``history_message_count``
+    stays frozen — so on reveal neither the stale-presentation guard rejects the
+    cache nor the ``total > history_size`` delta fires, and the inbound row is
+    never projected until a full reload. This drives a real owner + viewer over
+    the production socket and asserts the count advances exactly once and the
+    settled row is surfaced to the next display window.
+    """
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    directory = config / "sessions" / "peer-count"
+    messages = [Message.user("initial"), Message.assistant("seeded answer")]
+    await seed_transcript(directory, messages)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    remote = None
+    try:
+        remote = await RemoteSession.connect(
+            server._record,
+            "peer-count",
+            config_dir=config,
+            takeover_factory=_never_take_over,
+            display_window=True,
+        )
+        baseline = remote.history_message_count
+        await session.receive_peer_message(
+            "gates are green",
+            sender={"pid": 4242, "conversation_name": "peer-send"},
+        )
+        # The receipt crosses the socket asynchronously; wait for the settled
+        # row to land in the viewer's live history, then assert the count moved.
+        peer_row = None
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            peer_row = next(
+                (
+                    row
+                    for row in remote._live_history.values()
+                    if getattr(row, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+                ),
+                None,
+            )
+            if peer_row is not None:
+                break
+        assert peer_row is not None, "the hidden viewer never filed the settled peer row"
+        assert remote.history_message_count == baseline + 1
+        # The marker carries the PERSISTED entry id, so the next display window
+        # (and the TUI's replay dedup) match on it — and the viewer hands the
+        # row to the next prepared replay.
+        assert peer_row.id in remote._durable_seed_ids
+        assert any(
+            getattr(row, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+            for row in remote.display_history_window()
+        )
     finally:
         if remote is not None:
             await remote.dispose()
