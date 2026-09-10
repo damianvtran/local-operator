@@ -625,6 +625,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     @property
+    def history_is_audit(self) -> bool:
+        """Whether the rows still above the reader are PRE-COMPACTION history.
+
+        The head notice branches its copy on this: rows behind the compaction
+        cut are real history the model can no longer see, which is a different
+        kind of row from "older messages" rather than merely an earlier one.
+        ``False`` on an owner too old to page them, so that viewer keeps the
+        copy it always had.
+        """
+        ...
+
+    @property
     def history_opener_text(self) -> str:
         """The first user message's text, for the session's title row."""
         ...

@@ -43,7 +43,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 from local_operator.harness.types import (
     AgentMessage,
@@ -536,6 +536,11 @@ class Transcript:
         self._history_generation = 0
         self._history_page_key = os.urandom(32)
         self._display_window_cache: _DisplayWindowCache | None = None
+        #: Memo for the audit pager's hoisted-turn lookup, keyed by
+        #: ``_history_generation``. See ``history_window._hoisted_turn_ids``:
+        #: the answer costs a filtered whole-journal scan and is asked once per
+        #: audit page, so it is cached rather than recomputed per scroll.
+        self._audit_hoisted_cache: tuple[int, frozenset[str]] | None = None
         # Derived indexes only describe durable rows. They are updated after
         # fsync, rebuilt after a file fold, and never published from a worker.
         self._entry_ids: set[str] = set()
@@ -1319,11 +1324,258 @@ def _journal_injection_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
     }
 
 
+def _compaction_marker(entry: TranscriptEntry) -> CustomMessage:
+    """The in-band row that says a compaction happened here.
+
+    Shared by both replay modes so the marker a reader sees mid-transcript in
+    audit mode is the same object shape the model's replay puts at its head —
+    one renderer, one payload contract, no second definition to drift.
+    """
+    details: dict[str, Any] = {"summary": entry.payload.get("summary", "")}
+    preserve_data = entry.payload.get("preserve_data")
+    if preserve_data is not None:
+        details["preserve_data"] = preserve_data
+    return CustomMessage(
+        id=entry.id,
+        custom_type="compaction_summary",
+        attribution="system",
+        details=details,
+    )
+
+
+def collect_prunes(entries: Sequence[TranscriptEntry]) -> dict[str, str]:
+    """Map pruned message id -> notice, over the WHOLE journal.
+
+    Exported because :func:`audit_slice` must not re-derive this from its own
+    window. A prune is always appended AFTER the row it targets (see
+    :meth:`Transcript.append_prune`), so a prune for a row inside the slice can
+    sit arbitrarily far past its end — deriving the map from the slice would
+    silently replay pruned tool output the compaction pass already decided was
+    dead weight, which is a privacy and a size regression at once. The scan is
+    a ``type ==`` test over already-parsed objects, so it costs no rehydration.
+    """
+    return {
+        str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
+        for entry in entries
+        if entry.type == ENTRY_PRUNE and entry.payload.get("target")
+    }
+
+
+def context_cut_index(entries: Sequence[TranscriptEntry], *, quiet: bool = False) -> int:
+    """Journal index where the CONTEXT replay begins — the compaction cut.
+
+    Extracted so the audit phase starts exactly where the context phase starts,
+    from ONE implementation of the rule. The audit chain hands this index to
+    :func:`audit_slice` as its first ``end_index``: rows below it are what the
+    context replay dropped, rows at and above it are what the model still sees,
+    and the two phases therefore tile the journal with no gap and no overlap.
+    A second copy of this scan would put a hole or a duplicate at that seam the
+    first time either side was edited.
+
+    ``quiet`` suppresses the unresolved-cut error, because the audit pager asks
+    this question once per page and a corrupt journal would otherwise log on
+    every scroll; the context replay still reports it once per replay.
+
+    COMPACTION ROWS AT OR ABOVE THE CUT ARE DELIBERATELY NOT RENDERED, and the
+    asymmetry is not a gap in the tiling. Review round 1 (R2) read the omission
+    as unreachable markers; measured in RENDERED order on ``2f95e374dd22`` (61
+    compaction rows, cut 1626) it is the opposite. Repeated compaction leaves
+    several *superseded* compaction rows inside the kept suffix: each describes
+    a boundary the latest compaction has already moved, so the seam it names no
+    longer exists in the transcript the reader is looking at. Every compaction
+    row BELOW the cut is emitted in place by the audit phase (55 of 55 there),
+    and the latest one is emitted at the context head as the live seam — 56
+    markers for 56 boundaries that still exist.
+
+    Emitting the remaining 5 would make the marker copy FALSE at each of them.
+    ``COMPACTION_MARKER_NOTICE`` claims the history above it is outside the
+    model's context; those rows land 3-15 LIVE context rows below the seam, so
+    each would sit above rows the agent can still see and assert the reverse —
+    reintroducing the inversion D1 was raised to fix. The two suggested routes
+    are worse than the symptom: emitting them from the CONTEXT phase breaks
+    this PR's central regression guard (``mode="context"`` byte-identical to
+    ``build_llm_history`` on 8/8 journals) and pushes the markers' 680 KB
+    ``preserve_data`` blocks into the model's own context — measured at
+    +3,380,677 bytes, roughly 845k tokens, on this one journal — while
+    extending the audit window's first ``end_index`` past the cut re-delivers
+    15 message rows the context page already sent.
+    """
+    compaction_index: int | None = None
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].type == ENTRY_COMPACTION:
+            compaction_index = i
+            break
+    if compaction_index is None:
+        return 0
+    first_kept_id = entries[compaction_index].payload.get("first_kept_entry_id")
+    if first_kept_id is None:
+        return compaction_index + 1
+    for i in range(len(entries)):
+        if entries[i].id == first_kept_id:
+            return i
+    if not quiet:
+        logger.error(
+            "first_kept_entry_id %s not found in transcript; replaying full history",
+            first_kept_id,
+        )
+    return 0
+
+
+def context_preserved_turn_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
+    """Ids the CONTEXT replay re-emits at its head from the latest compaction.
+
+    Only the latest compaction's, because only that one's ``preserved_user_turns``
+    are hoisted into the model's replay (see :func:`replay_entries`). They carry
+    the ORIGINAL row ids, so a two-phase reading chain would deliver each of
+    them twice: once hoisted by the context page, once in place by the audit
+    page that replays the row it was copied from.
+
+    Used by the audit PAGER to suppress its copy, and deliberately not by
+    :func:`replay_entries` in audit mode \u2014 a standalone audit replay is not
+    chained with a context replay, so suppressing there would drop a real row
+    rather than de-duplicate one.
+    """
+    for i in range(len(entries) - 1, -1, -1):
+        if entries[i].type == ENTRY_COMPACTION:
+            if not entries[i].payload.get("preserved_user_turns"):
+                return set()
+            # Resolved through the SAME shed/cap filter the context replay
+            # applies, never off the raw payload. The stored block is not what
+            # gets emitted: ``replay_preserved_turns`` drops journalled
+            # injections and enforces the cap, so on the reference journal
+            # (``bda7b76d34e0``) the payload held 295 turns while the replay
+            # emitted 149 rows — which dedupe to the 105 DISTINCT ids this
+            # function returns. Those last two are different quantities and
+            # are worth keeping apart: the emitted count is what the reader
+            # sees, the id set is what suppression is matched against, and one
+            # turn can be emitted under more than one row. Suppressing off the
+            # raw payload instead would have matched 295 ids against those
+            # 105, hiding 190 that no phase then delivered — measured, and
+            # exactly the class of silent loss this whole change exists to
+            # end. All of these figures track a live journal that keeps
+            # growing, so treat them as an order-of-magnitude illustration of
+            # the gap rather than a pin; what is invariant is that the payload
+            # count EXCEEDS both the emitted count and the id set, which is
+            # the whole reason this filter cannot be skipped.
+            from local_operator.compaction.cutpoint import replay_preserved_turns
+
+            return {
+                str(turn.get("id"))
+                for turn in replay_preserved_turns(
+                    entries[i].payload,
+                    injection_ids=_journal_injection_ids(entries),
+                )
+                if turn.get("id")
+            }
+    return set()
+
+
+def first_message_index(entries: Sequence[TranscriptEntry]) -> int | None:
+    """Index of the journal's first message row, or ``None`` if it has none.
+
+    The audit chain's termination test. Paging stops when a page's window
+    reaches this index and NOT before — that is the whole point of the audit
+    phase, so the test lives in one named function rather than as an inline
+    ``start == 0`` that a later edit can quietly redefine.
+    """
+    for index, entry in enumerate(entries):
+        if entry.type == ENTRY_MESSAGE:
+            return index
+    return None
+
+
+def audit_slice(
+    entries: Sequence[TranscriptEntry],
+    attachments: AttachmentStore | None,
+    *,
+    end_index: int,
+    limit: int,
+    prunes: dict[str, str] | None = None,
+) -> tuple[list[AgentMessage], list[int], int]:
+    """Replay a bounded backward window of the FULL journal, for audit reading.
+
+    Returns ``(messages, journal_indices, start_index)``. The per-row journal
+    indices are returned rather than recomputed by the caller because the pager
+    mints its next backward cursor from the index of the first row it actually
+    KEPT after applying its byte budget — which is not necessarily the start of
+    this window — and that index must be the same one this replay used or the
+    chain skips or repeats rows at the page seam.
+
+    Windowed rather than a full audit replay because the cost difference is the
+    whole design: measured on the operator's 231 MB / 17,345-row journal, a
+    naive full audit replay is 0.29 s and 47 MB of peak allocation per call,
+    while this walks back ``limit`` message rows over the owner's already
+    resident ``_entries`` in under a millisecond. Reading the page off disk
+    instead (``read_transcript_page``) measured ~1.03 s on the same journal.
+    Serve audit pages from RAM the owner already holds.
+
+    ``prunes`` is passed in deliberately; see :func:`collect_prunes`.
+    """
+    entries = list(entries)
+    end_index = max(0, min(end_index, len(entries)))
+    if prunes is None:
+        prunes = collect_prunes(entries)
+    # Walk back over journal rows until ``limit`` MESSAGE rows are in hand.
+    # Non-message rows (customs, prunes, checkpoints) are free to include: they
+    # cost nothing to skip and stopping on them would make the window's size
+    # depend on journal noise rather than on rows the reader sees.
+    start = end_index
+    counted = 0
+    while start > 0 and counted < limit:
+        start -= 1
+        if entries[start].type == ENTRY_MESSAGE:
+            counted += 1
+    # Never BEGIN a window inside a tool group. A tool result row is rendered
+    # on the card of the call above it, so a window whose first row is a result
+    # renders a settled call as interrupted until some unrelated scroll happens
+    # to fetch the call. The context replay avoids this by computing its group
+    # boundaries over the whole history; a bounded window has to extend its own
+    # left edge instead. Cheap: results sit immediately after their call, so
+    # this walks a handful of rows.
+    while start > 0 and start < end_index:
+        row = entries[start]
+        if row.type != ENTRY_MESSAGE or str(row.payload.get("role", "")) != "tool":
+            break
+        start -= 1
+    out: list[AgentMessage] = []
+    indices: list[int] = []
+    for offset in range(start, end_index):
+        message = _replay_row(entries[offset], attachments, prunes)
+        if message is not None:
+            out.append(message)
+            indices.append(offset)
+    return out, indices, start
+
+
+def _replay_row(
+    entry: TranscriptEntry,
+    attachments: AttachmentStore | None,
+    prunes: dict[str, str],
+) -> AgentMessage | None:
+    """Rehydrate one journal row for either replay mode.
+
+    Compaction rows become an in-place marker; message rows rehydrate and pick
+    up their prune notice. Everything else is not conversation content.
+    """
+    if entry.type == ENTRY_COMPACTION:
+        return _compaction_marker(entry)
+    if entry.type != ENTRY_MESSAGE:
+        return None
+    message = _entry_to_message(entry, attachments)
+    if message is None:
+        return None
+    notice = prunes.get(entry.id)
+    if notice is not None and isinstance(message, Message):
+        _apply_prune(message, notice)
+    return message
+
+
 def replay_entries(
     entries: Sequence[TranscriptEntry],
     attachments: AttachmentStore | None,
     *,
     through_id: str | None = None,
+    mode: Literal["context", "audit"] = "context",
 ) -> list[AgentMessage]:
     """The replay semantics behind :meth:`Transcript.build_llm_history`.
 
@@ -1332,6 +1584,36 @@ def replay_entries(
     same code path as the whole-file parse, and equivalence between the two is
     a property of one function applied to two inputs rather than two
     implementations kept in step by hand.
+
+    Two MODES, and the separation is load-bearing rather than tidy:
+
+    * ``"context"`` answers *what may the model see* — the latest compaction
+      wins and replay starts at its ``first_kept_entry_id``. This is the
+      default and it is byte-for-byte what this function has always done;
+      every existing caller keeps it, and compaction keeps bounding the model's
+      context exactly as before.
+    * ``"audit"`` answers *what did the conversation contain* — every message
+      row from the journal's start, with a marker in place at each compaction.
+
+    They were ONE function once, and that is precisely the defect this mode
+    exists to fix: the display window built its pages from the context replay,
+    so on a compacted session the reader could not address rows that were still
+    on disk (measured: 97% of a 17,345-row journal unreachable). Do not
+    re-merge them, and do not make either one call the other. A future change
+    to what the model sees must not become a change to what the audit reader
+    can reach, and the reverse would silently grow the model's context.
+
+    Audit mode is strictly simpler than context mode, in two ways worth stating
+    because both look like omissions:
+
+    * ``preserved_user_turns`` are NOT re-injected. They are verbatim copies of
+      user rows that already sit before the cut, and audit mode replays those
+      rows — re-injecting would double every preserved turn AND do so under the
+      original ids, which the TUI's mount-time id dedupe would then swallow,
+      hiding a real row rather than showing a duplicate.
+    * the ``first_kept_entry_id`` fallback is irrelevant: audit mode starts at
+      index 0 unconditionally, so the silent-amnesia hazard that fallback
+      guards against cannot arise here.
     """
     entries = list(entries)
     if through_id is not None:
@@ -1344,6 +1626,14 @@ def replay_entries(
                 break
         else:
             raise ValueError("history cursor is no longer retained")
+    if mode == "audit":
+        prunes = collect_prunes(entries)
+        audited: list[AgentMessage] = []
+        for entry in entries:
+            message = _replay_row(entry, attachments, prunes)
+            if message is not None:
+                audited.append(message)
+        return audited
     compaction_index: int | None = None
     for i in range(len(entries) - 1, -1, -1):
         if entries[i].type == ENTRY_COMPACTION:
@@ -1354,18 +1644,7 @@ def replay_entries(
     prefix: list[AgentMessage] = []
     if compaction_index is not None:
         compaction = entries[compaction_index]
-        details: dict[str, Any] = {"summary": compaction.payload.get("summary", "")}
-        preserve_data = compaction.payload.get("preserve_data")
-        if preserve_data is not None:
-            details["preserve_data"] = preserve_data
-        prefix.append(
-            CustomMessage(
-                id=compaction.id,
-                custom_type="compaction_summary",
-                attribution="system",
-                details=details,
-            )
-        )
+        prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
         # re-injected VERBATIM right after the marker, so the user's own
         # words survive the pass byte for byte instead of being paraphrased
@@ -1417,34 +1696,18 @@ def replay_entries(
                     message.id = turn_id
                 message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
-        first_kept_id = compaction.payload.get("first_kept_entry_id")
         # The first kept entry normally sits BEFORE the compaction marker
         # (messages are persisted as they happen; the marker comes last),
-        # so scan the whole transcript. If the id no longer resolves (a
-        # dropped malformed line, a converter-minted id), replaying from
-        # compaction_index + 1 would point PAST the kept window and lose
-        # every message compaction promised to preserve. Replaying too
-        # much is recoverable at the next compaction; silent amnesia is
-        # not, so fall back to the full history with an error.
-        start = 0
-        if first_kept_id is None:
-            start = compaction_index + 1
-        else:
-            for i in range(len(entries)):
-                if entries[i].id == first_kept_id:
-                    start = i
-                    break
-            else:
-                logger.error(
-                    "first_kept_entry_id %s not found in transcript; " "replaying full history",
-                    first_kept_id,
-                )
+        # so the scan covers the whole transcript. If the id no longer
+        # resolves (a dropped malformed line, a converter-minted id),
+        # replaying from compaction_index + 1 would point PAST the kept
+        # window and lose every message compaction promised to preserve.
+        # Replaying too much is recoverable at the next compaction; silent
+        # amnesia is not, so that case falls back to the full history with
+        # an error. See :func:`context_cut_index`, which owns that rule.
+        start = context_cut_index(entries)
 
-    prunes = {
-        str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
-        for entry in entries
-        if entry.type == ENTRY_PRUNE and entry.payload.get("target")
-    }
+    prunes = collect_prunes(entries)
     out: list[AgentMessage] = list(prefix)
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:

@@ -19,11 +19,30 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentMessage, Message
+from local_operator.session.transcript import (
+    audit_slice,
+    collect_prunes,
+    context_cut_index,
+    context_preserved_turn_ids,
+    first_message_index,
+)
 
 if TYPE_CHECKING:
     from local_operator.session.transcript import Transcript
 
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
+
+#: Separate from the capability above, and it MUST stay separate. That one is a
+#: presence flag with no version handshake, so it cannot express "this owner
+#: also pages pre-compaction history". :class:`DisplayHistoryWindow` forbids
+#: extra fields, so an owner that emitted ``audit``/``audit_available`` to a
+#: viewer built before those fields existed would fail that viewer's validation
+#: and turn into a FAILED ATTACH — not a degraded one. Mixed builds against one
+#: sessions directory are routine here (the global uv-tool runtime is updated
+#: independently of a repo checkout's venv), so this is a live rollout hazard
+#: rather than a theoretical one. The owner emits the new fields only to a
+#: viewer that negotiated this string.
+DISPLAY_HISTORY_AUDIT_CAPABILITY = "display-history-audit-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
 
@@ -55,6 +74,52 @@ class DisplayHistoryWindow(BaseModel):
     # IDs: older unseen messages must remain pageable without being suppressed.
     durable_seed_ids: list[str] = Field(default_factory=list)
     durable_seed_tool_ids: list[str] = Field(default_factory=list)
+    #: This page carries PRE-COMPACTION rows: real history the model can no
+    #: longer see. Its ``start`` is a journal coordinate, not a position in the
+    #: context replay, so a consumer must not compare the two (see
+    #: ``RemoteSession.load_older_display_page``, whose contiguity check is a
+    #: context-coordinate assertion and is skipped for these pages).
+    audit: bool = False
+    #: Older rows exist behind the context cut and are reachable by paging.
+    #: Lets the viewer say "earlier history above" at the moment the context
+    #: phase drains, rather than claiming the conversation starts there.
+    audit_available: bool = False
+
+
+#: Fields the audit capability introduced. Stripped for a viewer that did not
+#: negotiate :data:`DISPLAY_HISTORY_AUDIT_CAPABILITY`; see its comment for why
+#: emitting them unconditionally is an attach failure rather than noise.
+AUDIT_WIRE_FIELDS = ("audit", "audit_available")
+
+
+def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[str, Any]:
+    """Drop the audit fields from a serialized page for an older viewer.
+
+    THE one place that decision is implemented, mutating in place and returning
+    the same dict so it composes with either kind of caller. A page reaches the
+    wire by THREE routes, and every one of them must strip:
+
+    * the attach sync push frame (``server.py``, ``_handle_auth``),
+    * the ``history_page`` RPC (``_dispatch_payload``),
+    * the ``frontend_sync`` RPC (``_dispatch_payload``), which an older viewer
+      calls on every history refresh.
+
+    Stripping in only some of them yields a viewer that attaches cleanly and
+    then fails later — on its first scroll up, or on the first refresh after
+    the owner appends a row — which is a worse failure than any single route
+    breaking on its own. Round 1 review found the third route unstripped after
+    this docstring had asserted there were two: if a fourth is ever added,
+    update this list in the same commit.
+    """
+    if not audit_capable:
+        for name in AUDIT_WIRE_FIELDS:
+            payload.pop(name, None)
+    return payload
+
+
+def wire_payload(window: DisplayHistoryWindow, *, audit_capable: bool) -> dict[str, Any]:
+    """Serialize a page for one viewer, honouring what that viewer negotiated."""
+    return strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable)
 
 
 def _sign(payload: dict[str, Any], key: bytes) -> str:
@@ -190,6 +255,12 @@ def display_window(
         transcript._history_generation,
         transcript._history_page_key,
         None if before is not None else through_id,
+        # The paging PHASE needs no key term of its own: it is carried inside
+        # the signed ``before`` token, which is already keyed here, and the two
+        # phases mint structurally different token payloads. So a context page
+        # and an audit page can never collide on one key, and — because the
+        # phase is only ever read from a signature this owner minted — a viewer
+        # cannot ask for audit rows without having been handed a cursor to them.
         before,
         anchor,
         max_messages,
@@ -218,6 +289,194 @@ def display_window(
     if page.status != "reset":
         cache.put(key, page)
     return page
+
+
+#: Marks a backward cursor as belonging to the audit phase rather than to the
+#: context replay. Carried inside the SIGNED token, so a viewer cannot ask for
+#: an audit page it was not handed a cursor for.
+_AUDIT_PHASE = "audit"
+
+
+def _audit_entry_cursor(transcript: Transcript) -> str | None:
+    """Entry id the audit phase resumes from, or ``None`` if nothing precedes.
+
+    Returns an ENTRY ID, never a journal index, and the token signs that id for
+    the same reason ``TranscriptPage`` addresses rows by id: ``compact_file``
+    rewrites the journal in place, so an integer offset minted before a
+    compaction points at a different row afterwards \u2014 it does not fail, it
+    silently lies. An id that no longer resolves is detectable, and the resolve
+    failure is answered with ``status="reset"`` so the viewer re-syncs.
+    """
+    entries = transcript._entries
+    cut = context_cut_index(entries, quiet=True)
+    first = first_message_index(entries)
+    # Nothing precedes the context replay: this conversation really does begin
+    # where the context phase ends, and the chain terminates there as before.
+    if first is None or first >= cut:
+        return None
+    return entries[cut].id if cut < len(entries) else _AUDIT_TAIL_CURSOR
+
+
+#: The audit window's first cursor when the context cut sits past the last
+#: journal row (an empty kept suffix). Distinct from an entry id so it cannot
+#: collide with one.
+_AUDIT_TAIL_CURSOR = "\x00audit-tail"
+
+
+def _hoisted_turn_ids(transcript: Transcript) -> frozenset[str]:
+    """Cached :func:`context_preserved_turn_ids` for the current journal state.
+
+    Cached because it is asked once per audit page and is not cheap: it runs the
+    same shed/cap filter the context replay does, over a scan of the whole entry
+    list, and measured 88 ms on the 231 MB reference journal — which would have
+    dominated a page that otherwise costs ~8 ms and put this feature outside its
+    budget on exactly the sessions it exists for.
+
+    Keyed on ``_history_generation``, which the transcript already bumps on
+    every compaction and prune — the only events that can change which turns are
+    hoisted. An append cannot, because only the LATEST compaction's payload is
+    read and appending does not create one.
+    """
+    generation = transcript._history_generation
+    cached = transcript._audit_hoisted_cache
+    if cached is not None and cached[0] == generation:
+        return cached[1]
+    resolved = frozenset(context_preserved_turn_ids(transcript._entries))
+    transcript._audit_hoisted_cache = (generation, resolved)
+    return resolved
+
+
+def _capture_audit_window(
+    transcript: Transcript,
+    *,
+    envelope: dict[str, Any],
+    claims: dict[str, Any],
+    max_messages: int,
+    max_wire_bytes: int,
+) -> DisplayHistoryWindow:
+    """One backward page of PRE-COMPACTION history.
+
+    Deliberately a separate function from :func:`_capture_display_window`
+    rather than a branch inside it, mirroring the split in
+    :func:`~local_operator.session.transcript.replay_entries`: the two phases
+    answer different questions ("what may the model see" vs "what did the
+    conversation contain") and share no coordinate space. This one's ``start``
+    is a JOURNAL index; that one's is a position in the context replay. Fusing
+    them would make every later edit have to remember which coordinate it is
+    holding, and the first one to forget reintroduces the unreachable-history
+    defect from the other side.
+
+    The counts this page does NOT touch are as load-bearing as the rows it
+    returns. ``total_message_count``, ``theme_turn_count`` and ``opener_text``
+    stay CONTEXT-derived and are left at their defaults here, because the TUI
+    reads the first as a monotonic context-growth signal for its presentation
+    cache and the second as the growth gate for conversation retitling.
+    Inflating them by an audit depth of 17,000 rows would invalidate every
+    cached presentation and re-fire the retitle gate across every session on
+    the machine.
+    """
+    entries = transcript._entries
+    cursor = str(claims.get("end_entry_id") or "")
+    if cursor == _AUDIT_TAIL_CURSOR:
+        end_index = len(entries)
+    else:
+        end_index = next((i for i, entry in enumerate(entries) if entry.id == cursor), -1)
+        # The signed id no longer resolves: ``compact_file`` replaced the file
+        # under an outstanding cursor. Reset is the honest answer — the viewer
+        # re-syncs and re-pages rather than being handed rows from a coordinate
+        # space that no longer exists.
+        if end_index < 0:
+            return DisplayHistoryWindow(status="reset", **envelope)
+    first = first_message_index(entries)
+    if first is None or end_index <= first:
+        return DisplayHistoryWindow(
+            **envelope,
+            messages=[],
+            before_token=None,
+            has_more=False,
+            start=end_index,
+            audit=True,
+            audit_available=False,
+        )
+    prunes = collect_prunes(entries)
+    # The one place the two phases can OVERLAP. The context page re-emits the
+    # latest compaction's ``preserved_user_turns`` at its head, under the
+    # ORIGINAL row ids — and those same rows sit below the cut, where this
+    # phase replays them in place. Delivered twice, the TUI's mount-time id
+    # dedupe drops the second, so the visible symptom is a row that is silently
+    # MISSING from the audit page rather than one shown twice. Suppress the
+    # audit copy: the reader has already been shown that row by the context
+    # page it scrolled through to get here.
+    hoisted = _hoisted_turn_ids(transcript)
+    messages, indices, window_start = audit_slice(
+        entries,
+        transcript._attachments,
+        end_index=end_index,
+        limit=max_messages,
+        prunes=prunes,
+    )
+    if hoisted:
+        kept = [
+            (message, index)
+            for message, index in zip(messages, indices)
+            if message.id not in hoisted
+        ]
+        messages = [message for message, _ in kept]
+        indices = [index for _, index in kept]
+    # Trim from the LEFT to fit the frame budget, so the page stays contiguous
+    # with the cursor it was fetched for and the next cursor is simply the row
+    # this page begins at. Matches the context phase, which also drops whole
+    # groups off its left edge rather than truncating prose.
+    used = 0
+    keep = 0
+    for offset in range(len(messages) - 1, -1, -1):
+        cost = len(json.dumps(messages[offset].model_dump(mode="json")).encode()) + 1
+        if used + cost > max_wire_bytes - 8192 and keep:
+            break
+        used += cost
+        keep += 1
+    if not keep and messages:
+        # A single row exceeds the whole frame budget. The context phase
+        # answers this with ``full_required``, which escalates to a local
+        # replay; that escalation is meaningless here (it would rebuild the
+        # model's history, which does not contain this row at all). Return the
+        # oversized row alone instead — one row over budget is a frame the
+        # transport will refuse, but returning nothing strands the chain.
+        keep = 1
+    trimmed = bool(keep) and keep < len(messages)
+    if keep:
+        messages = messages[len(messages) - keep :]
+        indices = indices[len(indices) - keep :]
+    # Where the NEXT page resumes. Normally the window's own left edge, so the
+    # chain advances by a whole window even when this page delivered nothing —
+    # which happens for real, when every row in the window was a hoisted
+    # preserved turn the context phase already showed. Minting the cursor from
+    # the surviving rows instead would re-mint the cursor this page was fetched
+    # with, and the chain would spin on one window forever: a hang, not a wrong
+    # answer.
+    #
+    # The exception is a page the BYTE budget trimmed. There the rows below the
+    # kept ones were dropped for size, not because they were already shown, so
+    # the next page must resume at the first row kept or they are skipped.
+    start = indices[0] if (trimmed and indices) else window_start
+    more = start > first
+    before_token = (
+        _sign(
+            dict(envelope, phase=_AUDIT_PHASE, end_entry_id=entries[start].id),
+            transcript._history_page_key,
+        )
+        if more
+        else None
+    )
+    return DisplayHistoryWindow(
+        **envelope,
+        messages=messages,
+        before_token=before_token,
+        has_more=more,
+        start=start,
+        audit=True,
+        audit_available=more,
+    )
 
 
 def _capture_display_window(
@@ -257,6 +516,14 @@ def _capture_display_window(
             return DisplayHistoryWindow(status="reset", **envelope)
         through_id = claims.get("through_id")
         envelope["through_id"] = through_id
+        if claims.get("phase") == _AUDIT_PHASE:
+            return _capture_audit_window(
+                transcript,
+                envelope=envelope,
+                claims=claims,
+                max_messages=max_messages,
+                max_wire_bytes=max_wire_bytes,
+            )
     try:
         history = transcript.build_llm_history(through_id=through_id) if through_id else []
     except ValueError:
@@ -327,8 +594,28 @@ def _capture_display_window(
                     for m in selected
                 )
             ):
+                # One group is larger than the whole frame budget, so the
+                # reader escalates to a local replay of the model's history.
+                # That replay reaches the start of the CONTEXT phase and stops
+                # there — so hand it the audit cursor on the way out, or the
+                # pre-compaction rows become unreachable for exactly the
+                # sessions most likely to contain an oversized group. The
+                # cursor stays valid across the escalation because it names an
+                # entry id, not a position in the chain being abandoned.
+                audit_entry = _audit_entry_cursor(transcript)
                 return DisplayHistoryWindow(
-                    status="full_required", durable_seed_tool_ids=seed_tool_ids, **envelope
+                    status="full_required",
+                    durable_seed_tool_ids=seed_tool_ids,
+                    before_token=(
+                        _sign(
+                            dict(envelope, phase=_AUDIT_PHASE, end_entry_id=audit_entry),
+                            transcript._history_page_key,
+                        )
+                        if audit_entry is not None
+                        else None
+                    ),
+                    audit_available=audit_entry is not None,
+                    **envelope,
                 )
             break
         selected[0:0] = group
@@ -338,18 +625,32 @@ def _capture_display_window(
             break
     token_fields = dict(envelope)
     snapshot_token = _sign(dict(token_fields, position=total), transcript._history_page_key)
-    before_token = (
-        _sign(dict(token_fields, position=start), transcript._history_page_key) if start else None
-    )
+    # The audit handoff. When the context replay is drained, the conversation
+    # does NOT necessarily begin here: everything before the compaction cut is
+    # still on disk, and before this it was simply unaddressable (measured on
+    # the reference journal: 327 of 17,349 rows reachable). Mint a cursor into
+    # the audit phase instead of terminating the chain.
+    audit_entry = _audit_entry_cursor(transcript) if not start else None
+    audit_available = audit_entry is not None
+    if start:
+        before_token = _sign(dict(token_fields, position=start), transcript._history_page_key)
+    elif audit_entry is not None:
+        before_token = _sign(
+            dict(token_fields, phase=_AUDIT_PHASE, end_entry_id=audit_entry),
+            transcript._history_page_key,
+        )
+    else:
+        before_token = None
     return DisplayHistoryWindow(
         **envelope,
         messages=selected,
         durable_seed_tool_ids=seed_tool_ids,
         before_token=before_token,
         snapshot_token=snapshot_token,
-        has_more=start > 0,
+        has_more=before_token is not None,
         total_message_count=total,
         start=start,
+        audit_available=audit_available,
         theme_turn_count=sum(getattr(m, "role", "") in ("user", "assistant") for m in history),
         opener_text=next(
             (m.text[:256] for m in history if isinstance(m, Message) and m.role == "user"), ""
