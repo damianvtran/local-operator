@@ -58,6 +58,8 @@ from local_operator.tui.widgets.tool_card import (
     LIVE_HEADER_RUNNING,
     LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
+    ROW_INDENT,
+    ROW_INDENT_MIN_WIDTH,
     RUNNING_NOTICE,
     TERSE_NO_OUTPUT_NOTICE,
     ToolCard,
@@ -1181,18 +1183,39 @@ def test_a_degenerate_mcp_name_keeps_whatever_it_has() -> None:
 
 
 def test_the_icon_leads_the_row_and_displaces_neither_name_nor_summary() -> None:
-    """The icon is added TO the row, not instead of part of it."""
+    """The icon is added TO the row, not instead of part of it.
+
+    Led after the row's left inset (``ROW_INDENT``), not from column 0: the
+    summary is drawn on the card's own fill, and the icon sitting flush
+    against that fill's left wall is what the inset exists to stop.
+    """
     card = ToolCard("t", "grep", {"pattern": "needle"})
     row = card._build_row(80).plain
-    assert row.startswith(tool_icon("grep") + " ")
+    assert row.startswith(" " * ROW_INDENT + tool_icon("grep") + " ")
     assert "grep" in row and "needle" in row
     _assert_fits(card)
+
+
+def test_the_row_indent_is_given_up_before_the_answer_slot() -> None:
+    """The inset is breathing room, and breathing room goes first.
+
+    At the narrow end the builder is already shedding the tool name a
+    character at a time; one more cell spent on aesthetics pushes the row past
+    the rung where the inert-row answer survives. So the indent is present at
+    the threshold and gone below it — asserted at the boundary rather than at
+    a comfortable width, because the boundary is the part that can regress.
+    """
+    icon = tool_icon("grep")
+    at_threshold = ToolCard("t", "grep", {"pattern": "needle"})
+    assert at_threshold._build_row(ROW_INDENT_MIN_WIDTH).plain.startswith(" " * ROW_INDENT + icon)
+    below = ToolCard("t", "grep", {"pattern": "needle"})
+    assert below._build_row(ROW_INDENT_MIN_WIDTH - 1).plain.startswith(icon)
 
 
 def test_two_different_tools_do_not_share_a_row_prefix() -> None:
     """The whole point of the icon: a run of rows is told apart by shape."""
     prefixes = {
-        name: ToolCard("t", name, {})._build_row(80).plain[0]
+        name: ToolCard("t", name, {})._build_row(80).plain[ROW_INDENT]
         for name in ("bash", "read", "write", "grep", "browser")
     }
     assert len(set(prefixes.values())) == len(prefixes), prefixes
@@ -1908,7 +1931,7 @@ def test_a_running_row_names_its_command_not_its_argument_bytes() -> None:
     card.begin_running("bash", {"command": command}, None)
     running = card._build_row(80).plain
     assert "199 B" not in running
-    assert running.startswith(f"{tool_icon('bash')} bash")
+    assert running.startswith(f"{' ' * ROW_INDENT}{tool_icon('bash')} bash")
     assert "cd ~/local-operator && git remote" in running
 
     card.mark_done("exit code: 0\nok")

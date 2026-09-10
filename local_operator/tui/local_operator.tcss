@@ -365,6 +365,12 @@ Screen > .screen--selection {
 ToolCard, WakeBlock, PeerMessageBlock {
     height: 1;
     background: $lo-surface;
+    /* NOTE: the one-cell LEFT inset these cards carry is drawn by the row
+     * builder (`ToolCard.ROW_INDENT`), not declared here. It has to yield at
+     * narrow widths — see that constant — and the sheet has no width to
+     * branch on; a `padding-left` here would also have to be restated by
+     * every `.comfortable-rows` rule below, because Textual resolves
+     * `padding` as one declaration per rule. */
     /* The hand pointer, not just the hover tint: the whole row is the click
      * target for expand/collapse (ExpandableActionBlock.on_click is shared by
      * all three widgets),
@@ -451,12 +457,16 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
  * and the payload gives the pointer plenty to hit. */
 .comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock {
     height: 3;
+    /* Restates the base rule's left inset rather than adding to it: Textual
+     * resolves `padding` as ONE declaration, so writing only the vertical
+     * values here would win the whole property and drop the inset. */
     padding: 1 0 1 0;
 }
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded {
     height: auto;
+    /* Left value restated for the same reason as the collapsed rule above. */
     padding: 1 0 1 0;
 }
 
