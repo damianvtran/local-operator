@@ -1,6 +1,7 @@
 """Canonical display pages never substitute a truncated context for history."""
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 
@@ -15,8 +16,11 @@ from local_operator.harness.types import (
 )
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
+    DisplayHistoryWindow,
     _audit_entry_cursor,
+    _sign,
     display_window,
+    wire_payload,
 )
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
@@ -138,6 +142,59 @@ async def test_signed_page_scope_and_anchor_validation(tmp_path: Path) -> None:
         == "reset"
     )
     assert window(transcript, before=first.snapshot_token, anchor="missing-id").status == "reset"
+
+
+@pytest.mark.asyncio
+async def test_an_older_runtime_page_still_validates_and_reads_by_epoch(
+    tmp_path: Path,
+) -> None:
+    """The ``owner_epoch`` → ``runtime_epoch`` rename must not strand a runtime.
+
+    The DTO is ``extra="forbid"`` and crosses the socket, so a viewer that
+    stopped accepting the old key would fail ``model_validate`` on every page
+    an older runtime mints — sidebar history unavailable, a degrade not an
+    error. Reads accept both keys; the wire emits only the new one.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    page = window(transcript)
+    legacy = wire_payload(page, audit_capable=True)
+    legacy["owner_epoch"] = legacy.pop("runtime_epoch")
+    restored = DisplayHistoryWindow.model_validate(legacy)
+    assert restored.runtime_epoch == "synthetic-epoch"
+    # ``remote.py`` reconciles pages through this attribute and is owned by
+    # the viewer-identifier rename in flight, so the old name must keep
+    # reading one release past the field rename.
+    assert restored.owner_epoch == "synthetic-epoch"
+    fresh = wire_payload(page, audit_capable=True)
+    assert "owner_epoch" not in fresh
+    assert fresh["runtime_epoch"] == "synthetic-epoch"
+
+
+@pytest.mark.asyncio
+async def test_a_before_token_minted_with_the_old_claims_key_still_verifies(
+    tmp_path: Path,
+) -> None:
+    """HMAC page tokens outlive the claims-key rename.
+
+    A token whose claims carry ``owner_epoch`` must keep verifying as ``ok``:
+    a mismatch here reads as ``status="reset"`` — a silent window reset plus
+    a full-replay refetch, never an error.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_messages([Message.user(str(i)) for i in range(130)])
+    first = window(transcript)
+    assert first.before_token
+    header = first.before_token.split(".")[0]
+    claims = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+    assert claims["runtime_epoch"] == "synthetic-epoch"
+    legacy_claims = {**claims, "owner_epoch": claims.pop("runtime_epoch")}
+    legacy_token = _sign(legacy_claims, transcript._history_page_key)
+    assert window(transcript, before=legacy_token).status == "ok"
+    # The dual read must not swallow a genuine mismatch: a stale epoch still
+    # resets, so this compat read cannot mask a cross-epoch replay.
+    stale = _sign({**legacy_claims, "owner_epoch": "gone"}, transcript._history_page_key)
+    assert window(transcript, before=stale).status == "reset"
 
 
 @pytest.mark.asyncio

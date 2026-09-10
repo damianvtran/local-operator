@@ -16,7 +16,7 @@ import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.transcript import (
@@ -59,7 +59,13 @@ class DisplayHistoryWindow(BaseModel):
 
     status: Literal["ok", "reset", "full_required"] = "ok"
     conversation_id: str
-    owner_epoch: str
+    # Wire compat for the ``owner_epoch`` → ``runtime_epoch`` rename. This DTO
+    # is ``extra="forbid"`` and crosses the socket, so a viewer that stopped
+    # accepting the old key would fail ``model_validate`` on every page minted
+    # by an older runtime (sidebar history unavailable, a degrade not an
+    # error). Reads accept both keys; ``model_dump`` emits only the new one.
+    # Drop the ``owner_epoch`` choice after the release that follows this PR.
+    runtime_epoch: str = Field(validation_alias=AliasChoices("runtime_epoch", "owner_epoch"))
     history_generation: int
     through_id: str | None
     messages: list[AgentMessage] = Field(default_factory=list)
@@ -84,6 +90,17 @@ class DisplayHistoryWindow(BaseModel):
     #: Lets the viewer say "earlier history above" at the moment the context
     #: phase drains, rather than claiming the conversation starts there.
     audit_available: bool = False
+
+    @property
+    def owner_epoch(self) -> str:
+        """Read-compat alias for the pre-rename viewer facade.
+
+        ``remote.py`` reads ``window.owner_epoch`` to reconcile a page against
+        canonical sync, and that file is owned by the viewer-identifier rename
+        in flight, so the attribute must survive one release beside the renamed
+        field. Drop after the release that follows this PR.
+        """
+        return self.runtime_epoch
 
 
 #: Fields the audit capability introduced. Stripped for a viewer that did not
@@ -231,6 +248,10 @@ def display_window(
     transcript: Transcript,
     *,
     conversation_id: str,
+    # Held at ``owner_epoch`` for one release: the runtime-side callers pass
+    # this by keyword from ``session.py``, whose owner is the remaining
+    # owner→runtime identifier pass, not this wire-compat PR. The value flows
+    # into the ``runtime_epoch`` DTO field and token claims below.
     owner_epoch: str,
     through_id: str | None,
     before: str | None = None,
@@ -273,7 +294,7 @@ def display_window(
     page = _capture_display_window(
         transcript,
         conversation_id=conversation_id,
-        owner_epoch=owner_epoch,
+        runtime_epoch=owner_epoch,
         through_id=through_id,
         before=before,
         anchor=anchor,
@@ -483,7 +504,7 @@ def _capture_display_window(
     transcript: Transcript,
     *,
     conversation_id: str,
-    owner_epoch: str,
+    runtime_epoch: str,
     through_id: str | None,
     before: str | None = None,
     anchor: str = "",
@@ -500,7 +521,7 @@ def _capture_display_window(
     generation = transcript._history_generation
     envelope: dict[str, Any] = dict(
         conversation_id=conversation_id,
-        owner_epoch=owner_epoch,
+        runtime_epoch=runtime_epoch,
         history_generation=generation,
         through_id=through_id,
     )
@@ -509,10 +530,15 @@ def _capture_display_window(
         claims = _verify(before, transcript._history_page_key)
         if claims.get("conversation_id") != conversation_id:
             raise ValueError("history token belongs to another conversation")
-        if (
-            claims.get("owner_epoch") != owner_epoch
-            or claims.get("history_generation") != generation
-        ):
+        # Wire compat: tokens minted before the ``owner_epoch`` →
+        # ``runtime_epoch`` rename carry the old claims key, and a mismatch
+        # here reads as status="reset" — a silent window reset plus a
+        # full-replay refetch, not an error — so read old-then-new. Drop the
+        # ``owner_epoch`` read after the release that follows this PR.
+        claims_epoch = claims.get("owner_epoch")
+        if claims_epoch is None:
+            claims_epoch = claims.get("runtime_epoch")
+        if claims_epoch != runtime_epoch or claims.get("history_generation") != generation:
             return DisplayHistoryWindow(status="reset", **envelope)
         through_id = claims.get("through_id")
         envelope["through_id"] = through_id
