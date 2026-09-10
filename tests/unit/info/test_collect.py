@@ -813,6 +813,29 @@ def test_nested_subagents_are_counted_once() -> None:
 
         subagent_comms = _Comms()
 
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
+
     live = collect_live(_Session())
     assert live.running == 3, "one per roster entry, not per path through the tree"
     assert len(live.tree) == 3
@@ -895,6 +918,29 @@ def test_a_comms_object_without_nodes_degrades_instead_of_raising() -> None:
         runtime_locality: RuntimeLocality = "this-process"
 
         subagent_comms = _NoNodes()
+
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
 
     live = collect_live(_Session())  # must not raise
     assert live.roster_unread is True
