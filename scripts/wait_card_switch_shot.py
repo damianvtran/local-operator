@@ -123,7 +123,7 @@ async def main() -> None:
                 print(f"tool real age    : {real_age:.1f}s")
                 print(f"band label       : {band._activity!r} (phase {band._phase!r})")
                 print(f"band clock shown : {band._clock!r}")
-                print(f"card dates itself: {cards[0].dates_itself}")
+                print(f"card dates itself: {cards[0].started_at is not None}")
 
                 released.set()
                 for _ in range(MAX_PUMP_TURNS):

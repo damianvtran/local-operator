@@ -17792,7 +17792,7 @@ class OperatorApp(App[None]):
         Asks the SAME deriver the working line and the title use, so the three
         cannot disagree about whether a turn is parked.
         """
-        _, phase, _ = self._current_activity()
+        _, phase, _, _ = self._current_activity()
         if phase != ACTIVITY_APPROVAL:
             return
         asking = self._ask_pending is not None and not self._ask_pending.done()
@@ -32085,8 +32085,8 @@ class OperatorApp(App[None]):
         """
         if self._working_block is not None:
             return
-        label, phase, clock = self._current_activity()
-        self._working_block = WorkingBlock(label, phase, clock=clock)
+        label, phase, clock, clock_from = self._current_activity()
+        self._working_block = WorkingBlock(label, phase, clock=clock, clock_from=clock_from)
         self._append_block(self._working_block, ends_empty_state=ends_empty_state, pin_tail=True)
 
     def _dismiss_working_block(self) -> None:
@@ -32115,9 +32115,9 @@ class OperatorApp(App[None]):
         a stop reaches this hook without either of those paths knowing a title
         exists.
         """
-        label, phase, clock = self._current_activity()
+        label, phase, clock, clock_from = self._current_activity()
         if self._working_block is not None:
-            self._working_block.set_activity(label, phase, clock=clock)
+            self._working_block.set_activity(label, phase, clock=clock, clock_from=clock_from)
         waiting = phase == ACTIVITY_APPROVAL
         if self._status is not None:
             self._status.set_attention(waiting)
@@ -32152,17 +32152,45 @@ class OperatorApp(App[None]):
         elif not waiting:
             self._waiting_kind = None
 
-    def _current_activity(self) -> tuple[str, str, bool]:
-        """What the agent is doing right now: ``(label, phase, clock)``.
+    def _current_activity(self) -> tuple[str, str, bool, float | None]:
+        """What the turn is doing: ``(label, phase, clock, clock_from)``.
 
-        ``clock`` is whether the phase's zero is the WORK's zero, i.e. whether
-        the elapsed number the band draws would be true. It is False only for a
-        ``running`` phase every one of whose cards was adopted mid-execution by
-        a sidebar switch: the phase changes when the viewer arrives, not when
-        the tool started, so the clock would count from the switch while naming
-        a tool that may be half an hour old (design round 2, D6). Derived here
-        rather than latched at the switch for the same reason the label is — one
-        deriver, so the band cannot disagree with the ledger under it.
+        ``clock`` is whether the elapsed number the band draws would be TRUE at
+        all. ``clock_from`` is the instant it should count from when it is:
+        ``None`` means the phase's own zero is correct, which it is for every
+        state but a running tool batch.
+
+        Two fields because the two design findings against this row are
+        different questions, and one bit cannot answer both:
+
+        * ``clock=False`` for a ``running`` phase ANY of whose cards was adopted
+          mid-execution by a sidebar switch. The phase changes when the viewer
+          arrives, not when the tool started, so the number would count from the
+          switch while naming a tool that may be half an hour old (design round
+          2, D6). Round 2 wrote ``any``, arguing one watched card puts a true
+          floor under the number — but a floor is not a measurement, and an
+          adopted sibling may be arbitrarily older than the oldest start the
+          band can see, so the reading is an understatement of unbounded size
+          (design round 3, D9). Withheld is the honest rendering.
+        * ``clock_from`` is the OLDEST of the cards' own starts, because the
+          phase's zero decays even when every card dates itself. A batch that
+          sheds calls keeps the phase at ``running``, so the zero stayed at the
+          switch while the label narrowed to the one survivor: a ``read``
+          printing ``0s`` on its own receipt, one line above a band reading
+          ``running read  14s`` (design round 3, D9). ``all`` alone does not
+          close that — the survivor there dates itself perfectly well; it is
+          the ANCHOR that is wrong. Counting from the cards' own starts makes
+          the number describe the work the label names in every batch shape.
+
+        Shedding a call still does not restart the clock, which is what round 1
+        pinned: a surviving card's start does not move when a sibling settles,
+        so the minimum only ever rises to a survivor that is genuinely younger
+        than the batch it came from — which is the case where holding the old
+        zero was the lie.
+
+        Derived here rather than latched at the switch for the same reason the
+        label is — one deriver, so the band cannot disagree with the ledger
+        under it.
 
         DERIVED from the same state the transcript is drawn from rather than
         latched by each handler, so the line cannot disagree with the ledger
@@ -32187,22 +32215,26 @@ class OperatorApp(App[None]):
             # FIRST, above the approval prompt: the picker is a modal drawn over
             # everything, so it is what the user is looking at even if a card
             # underneath is also waiting.
-            return ("waiting for your answer", ACTIVITY_APPROVAL, True)
+            return ("waiting for your answer", ACTIVITY_APPROVAL, True, None)
         if self._approval is not None and not self._approval.answered:
             # Nothing is running: the turn is parked on the question on screen,
             # and "thinking" under an unanswered prompt blames the model for a
             # wait that belongs to the user.
-            return ("waiting for approval", ACTIVITY_APPROVAL, True)
+            return ("waiting for approval", ACTIVITY_APPROVAL, True, None)
         if self._tool_cards:
             cards = list(self._tool_cards.values())
-            # ANY card that dates itself is enough. The clock measures the phase,
-            # and the phase began when the first of these calls started, so one
-            # card this viewer watched start puts a true floor under the number;
-            # it is only when EVERY card was adopted that the zero is unknown.
+            starts = [card.started_at for card in cards]
+            # EVERY card must date itself, and the zero is then the OLDEST of
+            # their own starts rather than the phase change. One unknown start
+            # poisons the batch's zero, because the call a clock claims to
+            # measure is exactly the oldest one. See the docstring.
+            known = [s for s in starts if s is not None]
+            dateable = len(known) == len(starts)
             return (
                 self._batch_phrase(cards),
                 "running",
-                any(card.dates_itself for card in cards),
+                dateable,
+                min(known) if dateable else None,
             )
         if self._composing_cards:
             # The tool's NAME is deliberately absent. It arrives in fragments —
@@ -32211,10 +32243,10 @@ class OperatorApp(App[None]):
             # and `composing wr` reads as a typo rather than as a state.
             count = len(self._composing_cards)
             noun = "a call" if count == 1 else f"{count} calls"
-            return (f"composing {noun}", "composing", True)
+            return (f"composing {noun}", "composing", True, None)
         if self._streaming_block is not None:
-            return (ACTIVITY_RESPONDING, ACTIVITY_RESPONDING, True)
-        return (self._working_fallback, self._working_fallback, True)
+            return (ACTIVITY_RESPONDING, ACTIVITY_RESPONDING, True, None)
+        return (self._working_fallback, self._working_fallback, True, None)
 
     @staticmethod
     def _batch_phrase(cards: list[ToolCard]) -> str:

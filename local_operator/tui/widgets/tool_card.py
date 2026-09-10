@@ -1191,17 +1191,22 @@ class ToolCard(ExpandableActionBlock):
         return None if self._started is None else time.monotonic() - self._started
 
     @property
-    def dates_itself(self) -> bool:
-        """Whether this card knows when its call actually began.
+    def started_at(self) -> float | None:
+        """When this call began on the monotonic clock, or ``None`` if unknown.
 
-        False for a row this viewer ADOPTED mid-execution: the page painted it
-        after the tool started, so it has no zero and deliberately blanks its
-        own duration (see :meth:`restore`). Exposed because the band above the
-        transcript keys its clock to the phase these cards decide, and a phase
-        derived from a card that cannot date itself must not print a number
-        counted from the moment the phase changed (design round 2, D6).
+        ``None`` for a row this viewer ADOPTED mid-execution: the page painted
+        it after the tool started, so it has no zero and deliberately blanks its
+        own duration (see :meth:`restore`).
+
+        Exposed as the INSTANT rather than as a "does it date itself" boolean
+        because the band above the transcript needs both halves of the answer.
+        It withholds its clock when any card cannot date itself (design round 2,
+        D6) — that is the boolean — but when every card can, it must also count
+        from the oldest of these starts rather than from the moment the phase
+        changed, or a shrinking batch leaves the band naming one tool and
+        reporting an age belonging to another (design round 3, D9).
         """
-        return self._started is not None
+        return self._started
 
     def restore(
         self,
