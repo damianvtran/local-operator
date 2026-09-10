@@ -2194,6 +2194,56 @@ class Band(Chrome):
         self.post_message(self.BoxChanged())
 
 
+class ComposerDock(Container):
+    """The input's two containers, made clickable — a click anywhere is "focus me".
+
+    Textual routes a click to focus by walking UP from the widget under the
+    pointer: ``Screen._forward_event`` calls ``get_focusable_widget_at`` on
+    ``MouseDown`` (``screen.py:1933-1939``), which walks ``ancestors_with_self``
+    for the first node whose ``focusable`` is true (``screen.py:709-712``).
+    ``#input-dock`` and ``#input-shell`` were plain containers, neither
+    focusable, so the walk ran off the top and terminated at the screen with
+    ``None`` — and Textual does NOT call ``set_focus(None)`` on that path (it
+    only does that for ``NoWidget``). The click was swallowed in silence: no
+    focus change, no error, nothing on the frame.
+
+    The dead zone that produced is far wider than the shell's 1-cell padding.
+    Measured at 120x40 settled, dock and shell both ``Region(x=1, y=34, w=118,
+    h=5)`` with the editor body at ``Region(x=4, y=35, w=114, h=1)``: clicking
+    ``x = dock.region.x + 2`` on EVERY dock row left focus on the ToolCard —
+    rows 34, 35, 36 and 37 all dead, rows that focused the editor: NONE.
+    Columns 1..3 are dead on every row because the editor body starts at x=4,
+    and that includes the chevron cell. The chevron is the app's own "you are
+    focused" affordance, so the user clicked the exact glyph that means
+    "focused" and got nothing back. In the boot layout it is worse: the shell
+    is clamped to a centred card and the dock spans full width behind it, so
+    the whole gutter either side hits ``#input-dock`` directly and is dead too.
+
+    One class for both containers, because both are reachable by a click that
+    means the same thing.
+    """
+
+    def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
+        # No `event.stop()`, deliberately. `Click` BUBBLES from the child that
+        # was hit, so by the time it arrives here the editor's own mouse
+        # handling (`editor.py:4391/4405/4438`) has already run for a click on
+        # the body, and stopping it would be stopping an event somebody else
+        # owned. The guard is "focus only if nothing already took it", not
+        # "claim the event" — which is also why a body click is a harmless
+        # no-op below rather than a second, competing focus call.
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        if editor.can_focus and not editor.has_focus:
+            # Focus and nothing else: the caret is left exactly where the user
+            # put it. A click on the padding means "put me back in the input",
+            # not "put the caret here" — there is no document position that a
+            # padding cell maps to, and moving the caret would cost the user
+            # the place they were editing to buy them nothing.
+            editor.focus()
+
+
 class TranscriptScreen(Screen[None]):
     """The default screen, with Textual's Ctrl+C copy taken back out.
 
@@ -6704,7 +6754,7 @@ class OperatorApp(App[None]):
                 # never be overdrawn or pushed off-screen by the editor, and it travels
                 # with the input when the panel becomes a card. One row does double duty
                 # — zero extra height (D3/D17).
-                with Container(id="input-dock"):
+                with ComposerDock(id="input-dock"):
                     # The prompt host: where a question the turn is PARKED ON lives.
                     #
                     # Above the band and inside the dock, and both halves of that are
@@ -6733,7 +6783,7 @@ class OperatorApp(App[None]):
                         yield self._subagent_panel
                         yield self._wake_panel
                         yield self._todo_panel
-                    with Container(id="input-shell"):
+                    with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
                         editor = Editor(commands=SLASH_COMMANDS)
                         with Horizontal(id="input-row"):
@@ -14863,6 +14913,75 @@ class OperatorApp(App[None]):
         if picker is not None and not picker.settled and picker.is_attached:
             return picker
         return None
+
+    def _focus_is_claimed(self) -> bool:
+        """Whether some surface has a claim on the keyboard the composer must not take.
+
+        READ-ONLY, and that is load-bearing: it runs on keystroke and click
+        paths, so it must not move focus, mount, unmount, or mutate anything.
+        Callers ask it before reasserting composer focus; if asking the question
+        changed the answer, the reassertion would be racing itself.
+
+        Every branch is guarded individually and the degrade direction is
+        ``True`` — "something might be claiming it". Refusing to steal focus is
+        always the safe failure: the cost of a wrong ``True`` is the user
+        pressing a key that does nothing, while the cost of a wrong ``False`` is
+        the composer pulling focus off a live surface mid-answer. A stripped
+        harness with no composer therefore reads as claimed rather than raising
+        out of a focus path.
+
+        ``_live_prompt`` is CALLED rather than reimplemented: the
+        approval/ask conditions (answered, settled, attached) are subtle enough
+        that a second copy would drift, and this predicate wants exactly the
+        prompt that method already defines.
+        """
+        # An unanswered approval or an unsettled ask owns the keys the composer
+        # would otherwise swallow.
+        try:
+            if self._live_prompt() is not None:
+                return True
+        except Exception:  # noqa: BLE001 — defensive, see the docstring
+            return True
+        try:
+            if self._aside_is_open():
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The three full-page modes and the login prompt: each hides the
+        # transcript or is the only thing on the frame the user can answer.
+        try:
+            if (
+                self._subagent_view is not None
+                or self._org_chart_view is not None
+                or self._settings_view is not None
+                or self._key_prompt is not None
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        try:
+            if self._session_sidebar.has_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The catch-all, and the reason a future overlay is safe by DEFAULT
+        # rather than by someone remembering to extend the list above: any
+        # pushed Screen is a modal route (`/resume`'s session picker is one —
+        # `conftest.py:352`), and the composer is not even on that frame.
+        try:
+            if len(self.screen_stack) > 1:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # Read-only subsumes `_set_composer_read_only` here rather than at each
+        # call site: that method drops `can_focus` precisely so nothing lands a
+        # caret in a field that refuses every key.
+        try:
+            if not self._editor().can_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        return False
 
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
