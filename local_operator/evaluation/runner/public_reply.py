@@ -24,11 +24,33 @@ _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
 #: diagnostic sent back to the model. The reserved keys are safe to name (they
 #: come from a fixed set), but any other key is model-supplied text: echoing it
 #: whole turns a malformed reply into an unbounded retry prompt and re-opens
-#: the replay channel the reserved-key suppression exists to close. Capped in
-#: both directions so neither one long key nor many short ones can rebuild a
-#: payload.
+#: the replay channel the reserved-key suppression exists to close.
+#:
+#: A key is quoted WHOLE or not at all -- never truncated. Truncation was the
+#: first attempt and it failed closed in neither direction (review round 3):
+#: ``repr`` expands escapes after the cut, so the rendered length depended on
+#: the input's alphabet; and, far worse, cutting a secret that appeared as a
+#: key left a prefix that ``_assert_redacted``'s substring check no longer
+#: matched, converting a loud redaction failure into a silent leak. Quoting
+#: whole-or-nothing means nothing is ever reshaped on the way out.
 _MAX_EXTRA_KEY_CHARS = 40
 _MAX_EXTRA_KEYS_SHOWN = 5
+
+
+def _is_quotable_key(key: str) -> bool:
+    """Whether an unexpected key may be named back to the model verbatim.
+
+    Conservative by construction: the key must be short, and must render to
+    exactly itself under ``repr`` minus the quotes. That second test is what
+    makes the bound independent of the alphabet -- anything carrying escapes,
+    control characters, or quote marks expands when rendered, so it is counted
+    rather than named.
+    """
+    if len(key) > _MAX_EXTRA_KEY_CHARS:
+        return False
+    rendered = repr(key)
+    return rendered[1:-1] == key
+
 
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
 
@@ -140,24 +162,39 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
             if missing:
                 parts.append("omitted " + ", ".join(repr(key) for key in missing))
             if extra:
-                # ``present``/``missing`` are intersections with a fixed set,
-                # so they can only ever name the three reserved keys. ``extra``
-                # is arbitrary MODEL-SUPPLIED text and must never be echoed
-                # whole: a 50,000-character key produced a 50,000-character
-                # retry prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
+                # ``present``/``missing`` are intersections with a fixed set, so
+                # they can only ever name the three reserved keys. ``extra`` is
+                # arbitrary MODEL-SUPPLIED text and must never be echoed whole:
+                # a 50,000-character key produced a 50,000-character retry
+                # prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
                 # ``_diagnostic``'s cap intercepts, and which re-opens the
                 # replay channel the reserved-key suppression below closes.
                 #
-                # Bounded in BOTH directions -- each key truncated, and the
-                # number of keys quoted capped -- because either alone is
-                # enough to reconstruct a payload from many short keys.
-                shown = [
-                    key[:_MAX_EXTRA_KEY_CHARS] + ("…" if len(key) > _MAX_EXTRA_KEY_CHARS else "")
-                    for key in extra[:_MAX_EXTRA_KEYS_SHOWN]
-                ]
-                summary = ", ".join(repr(key) for key in shown)
-                if len(extra) > _MAX_EXTRA_KEYS_SHOWN:
-                    summary += f" and {len(extra) - _MAX_EXTRA_KEYS_SHOWN} more"
+                # A key is quoted only if it is ENTIRELY safe, and is otherwise
+                # counted but not named. Truncating instead was the first
+                # attempt and it failed closed in neither direction (review
+                # round 3):
+                #   - ``repr`` expands escapes AFTER a cut, so 40 characters of
+                #     ``\U000e0001`` still rendered ~700, making the bound
+                #     depend on the input's alphabet.
+                #   - worse, a cut CONVERTS A LOUD FAILURE INTO A SILENT ONE.
+                #     ``_assert_redacted`` is substring-based, so a secret
+                #     longer than the cut survived as a prefix that no longer
+                #     matched the canary: the leak stopped tripping the alarm
+                #     that exists to catch it.
+                # Quoting whole-or-nothing removes both: nothing is ever
+                # reshaped on the way out, so a redaction canary still matches
+                # and the rendered length is bounded by the charset itself.
+                safe = [key for key in extra if _is_quotable_key(key)]
+                summary = ", ".join(repr(key) for key in safe[:_MAX_EXTRA_KEYS_SHOWN])
+                withheld = len(extra) - len(safe[:_MAX_EXTRA_KEYS_SHOWN])
+                if withheld and summary:
+                    summary += f" and {withheld} more"
+                elif withheld:
+                    # Every key was unsafe or over the cap: report only how many
+                    # to drop. The count alone is enough to act on, and is the
+                    # part that carries no model-supplied text at all.
+                    summary = f"{withheld} not shown"
                 parts.append(f"added {len(extra)} unexpected key(s): {summary}")
             raise ValueError(
                 "model reply used the reserved envelope but "

@@ -36,6 +36,8 @@ from local_operator.evaluation.runner.provider_client import (
     parse_decision,
 )
 from local_operator.evaluation.runner.public_reply import (
+    _MAX_EXTRA_KEY_CHARS,
+    _MAX_EXTRA_KEYS_SHOWN,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
     decode_public_reply,
@@ -604,21 +606,42 @@ def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
     [
         {"X" * 50_000: "y"},
         {f"key{index}" * 20: index for index in range(60)},
+        {"\U000e0001" * 40: 1},
+        {"SECRET-" + "z" * 60: 1},
+        # Every key here is individually SAFE to quote, so only the count cap
+        # stands between the model's payload and the prompt. Without a case
+        # like this the cap is unpinned: the other fixtures withhold every key
+        # on safety grounds and never exercise it.
+        {f"k{index}": index for index in range(60)},
     ],
-    ids=["one-enormous-key", "many-long-keys"],
+    ids=[
+        "one-enormous-key",
+        "many-long-keys",
+        "repr-expanding-key",
+        "long-secret-key",
+        "many-short-safe-keys",
+    ],
 )
 def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object]) -> None:
-    """Model-supplied key names are bounded before they reach the model again.
+    """Model-supplied key names never reach the model again reshaped.
 
     ``present`` and ``missing`` intersect a fixed set, so they can only name
     the three reserved keys. ``extra`` is arbitrary model output, and echoing
     it whole turned a 50,000-character key into a 50,000-character retry
     prompt -- intercepted by neither ``MAX_REJECTED_REPLY_CHARS`` nor
-    ``_diagnostic``'s cap, and re-opening the replay channel that the
-    reserved-key suppression exists to close.
+    ``_diagnostic``'s cap.
 
-    Bounded in BOTH directions, so neither one enormous key nor many short
-    ones can rebuild a payload through the diagnostic.
+    Quoted WHOLE or not at all. The two cases beyond mere size are why
+    truncating was not good enough:
+
+    ``repr-expanding-key`` -- ``repr`` expands escapes AFTER a cut, so a bound
+    applied to the raw key does not bound the rendered output, and the limit
+    silently depends on the input's alphabet.
+
+    ``long-secret-key`` -- and this is the one that matters: cutting converts a
+    LOUD failure into a SILENT one. ``_assert_redacted`` is substring-based, so
+    a secret longer than the cut survives as a prefix that no longer matches
+    the canary. The leak stops tripping the alarm that exists to catch it.
     """
 
     payload = json.dumps(
@@ -634,10 +657,44 @@ def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object
         decode_public_reply(payload)
 
     message = str(info.value)
-    assert len(message) < 1_000, f"diagnostic grew to {len(message)} characters"
+    # Tight, and deliberately so. A loose ceiling passes while an unsafe key is
+    # quoted in ESCAPED form -- the raw key is absent from the message, so a
+    # substring assertion alone cannot see it. The diagnostic is a fixed
+    # template plus at most five short plain keys, so anything approaching this
+    # bound means model text is being rendered into it.
+    assert len(message) < 400, f"diagnostic grew to {len(message)} characters"
+    # No fragment of an unsafe key escapes: whole-or-nothing, so a redaction
+    # canary still matches and nothing is rendered in a reshaped form.
+    quoted = sum(1 for key in extra if repr(key) in message)
+    assert quoted <= _MAX_EXTRA_KEYS_SHOWN, f"{quoted} keys quoted"
+    for key in extra:
+        if repr(key) in message:
+            # A quoted key must appear WHOLE and unreshaped, never as a cut.
+            continue
+        assert key not in message
+        assert key[:_MAX_EXTRA_KEY_CHARS] not in message
     # The count is still reported, so the model learns how many keys to drop
-    # even when their names are withheld.
+    # even when their names are withheld entirely.
     assert f"added {len(extra)} unexpected key(s)" in message
+
+
+def test_a_short_plain_unexpected_key_is_still_named() -> None:
+    """Withholding is for unsafe keys only; the useful case stays useful.
+
+    The 9/10 recovery this diagnostic was measured for came from naming keys,
+    so a bound that withheld every name would protect the prompt by making it
+    useless.
+    """
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(
+            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
+            '"public_observations": "", "notes": "x", "extra": 1}'
+        )
+
+    message = str(info.value)
+    assert "'extra'" in message and "'notes'" in message
+    assert "not shown" not in message
 
 
 def test_a_non_object_reply_keeps_the_plain_rule() -> None:
