@@ -238,6 +238,183 @@ IMAGE_JPEG_QUALITY = 85
 #: repaired before it is sent, not after.
 IMAGE_REFUSAL_MAX_B64_BYTES = 4 * 1024 * 1024
 
+#: Long-edge rungs a wire refit walks, tightest last. See
+#: :func:`refit_image_to_budget` for why a refit exists at all and why it
+#: prefers a JPEG re-encode at full resolution before it gives up pixels.
+#:
+#: The first rung is ``None``, meaning "the image's OWN long edge" — keep every
+#: pixel and change only the codec — because that is where the win is.
+#: Measured on this machine's own screenshots, a quality-85 JPEG at unchanged
+#: dimensions is 4-11x smaller than the ingest PNG (331 KB -> 119 KB of base64
+#: for a 2784x1070 UI capture, 1,234 KB -> 200 KB for a 1672x941 render), so an
+#: ordinary paste clears the budget with every pixel intact.
+#:
+#: ``None`` is deliberately NOT passed through to ``bound_image_for_model`` as
+#: its own ``max_edge=None`` default, which would mean
+#: :data:`IMAGE_INGEST_MAX_EDGE` and quietly downscale a 1568px block on a rung
+#: whose whole promise is that it does not resize. The caller resolves it to
+#: the real long edge instead.
+#:
+#: The descending rungs are the fallback for the case a re-encode alone cannot
+#: fix: several large images in ONE message. Two composer-bounded screenshots
+#: already serialize to 1.1 MB, so the frame is over budget before any single
+#: image is unreasonable, and the budget has to be met by the whole set.
+IMAGE_WIRE_REFIT_EDGES: tuple[int | None, ...] = (None, 1024, 768, 512, 384)
+
+
+class ImageUnreadable(ValueError):
+    """The block is not an image this module can decode, whatever its size.
+
+    Distinct from :func:`refit_image_to_budget` returning ``None``, which means
+    "a real image that will not fit". The remedies differ — one says drop the
+    attachment, the other says the file is broken — and a caller that collapsed
+    them told the user to shrink bytes that were never an image.
+    """
+
+
+def refit_image_to_budget(
+    data_b64: str, mime_type: str, budget_bytes: int
+) -> tuple[str, str] | None:
+    """Re-encode one image block to fit ``budget_bytes`` of base64, or ``None``.
+
+    WHY THIS EXISTS. The control socket reads one JSON line per frame with a
+    1 MiB limit (``server._MAX_LINE_BYTES``), and a prompt carries its images
+    base64-encoded INSIDE that line — so the frame, not the file, is what has
+    to fit, and base64 inflates the payload by 4/3 on top of the rest of the
+    op. An over-budget frame is not merely large: the owner's ``readline``
+    raises and the client's write is answered by a dead socket, which is the
+    session death the operator saw as "pasting an image exits lop".
+
+    WHY IT REFITS RATHER THAN REFUSES. A hard refusal on a normal-sized
+    screenshot would be a bad product: pasting screenshots is a routine
+    gesture here, and the sizes that overflow are routine too. Measured on
+    this machine, ONE 1672x941 render is 1.23 MB of base64 after the
+    composer's own ingest bound, and two ordinary screenshots together are
+    1.1 MB — both over budget through no fault of the user. Refusing those
+    would break the feature to protect the transport. So the ladder in
+    :data:`IMAGE_WIRE_REFIT_EDGES` is walked instead, and only an image that
+    will not fit even at its tightest rung is refused, with the caller saying
+    so in words.
+
+    WHY THE CODEC IS SPENT BEFORE THE PIXELS. Fidelity here means "can the
+    model read the text in this screenshot", and pixels carry that while the
+    codec mostly does not: quality-85 is the standard visually-lossless point,
+    and dropping the long edge to 768 is what actually costs small text. So the
+    first rung re-encodes at UNCHANGED dimensions, and measured on this
+    machine's files that alone was enough for every single-image case. This
+    mirrors :func:`bound_image_for_model`'s own ladder, which reaches for JPEG
+    before anything else once a PNG blows :data:`IMAGE_MAX_BYTES`.
+
+    The re-encode is then applied at EVERY rung, not only the first. Doing it
+    only once was measurably wrong: the descending rungs handed back PNGs of
+    continuous-tone content, which PNG cannot compress, so a 1400x1400 frame
+    against a 240 KB budget ran out of rungs and was REFUSED while the real
+    remedy had never been tried below full size. With the re-encode on each
+    rung the same image fits at 512x512.
+
+    LINE ART IS EXEMPT FROM THE JPEG RUNG, for the reason the rest of this
+    module already documents: JPEG's ringing lands on exactly the one-pixel
+    strokes a bilevel rendering exists to preserve. Such an image takes the
+    PNG downscale rungs instead, where NEAREST keeps its strokes crisp.
+
+    Returns ``(data_b64, mime_type)`` — the input unchanged when it already
+    fits, so the common path costs one length check — or ``None`` when no rung
+    fits and the caller must refuse the image by name. Raises
+    :class:`ImageUnreadable` when the block is not a decodable image at all,
+    which is a different message to the user than "too large".
+    """
+    if len(data_b64) <= budget_bytes:
+        return data_b64, mime_type
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception as exc:  # noqa: BLE001 — a malformed block is refused, never resized
+        raise ImageUnreadable("its data is not valid base64") from exc
+    info = sniff_image(raw)
+    if info is None:
+        # Unrecognised header: there is no decoder to refit with, and shipping
+        # it unchanged would put the oversized frame back on the wire.
+        #
+        # RAISED RATHER THAN RETURNED AS None, because the two outcomes need
+        # different words. ``None`` means "this is an image and it is genuinely
+        # too big", which tells the user to drop the attachment; bytes that are
+        # not a readable image at all are a different problem, and telling
+        # someone their 1.8 MB of corrupt data is "too large to send" sends them
+        # off shrinking something that would never have worked at any size.
+        raise ImageUnreadable("it is not a readable image")
+    line_art = _is_line_art_bytes(raw, info)
+    # The source's own long edge, which is what the ``None`` rung resolves to.
+    # Unknown dimensions (a HEIF whose ispe box the sniffer does not walk) fall
+    # back to the correctness ceiling rather than to the ingest bound: this rung
+    # promises not to resize, and guessing small would break that promise on the
+    # one format that cannot answer the question.
+    source_edge = max(info.width or 0, info.height or 0) or IMAGE_MAX_EDGE
+    for edge in IMAGE_WIRE_REFIT_EDGES:
+        try:
+            payload, wire_mime, _summary = bound_image_for_model(
+                raw, info, max_edge=source_edge if edge is None else edge
+            )
+        except ValueError:
+            # Undecodable or a decompression bomb. No later rung can help —
+            # they all run the same decode — so stop rather than retry four
+            # more times on bytes that already failed.
+            return None
+        if not line_art:
+            # ON EVERY RUNG, not just the first, and it is deliberately not left
+            # to ``bound_image_for_model``: that ladder only reaches JPEG when
+            # the PNG blows IMAGE_MAX_BYTES (1 MiB of BYTES), while the
+            # constraint here is the base64 budget for the whole frame — which a
+            # 700 KB PNG breaks while sitting comfortably under that cap.
+            #
+            # Applying it only to the no-resize rung was measurably wrong: a
+            # 1400x1400 continuous-tone frame against a 240 KB budget was
+            # REFUSED, because each downscale rung handed back a PNG of content
+            # PNG cannot compress, and no rung ever got small enough. With the
+            # re-encode on every rung the same image fits. Downscaling into a
+            # codec unsuited to the content is how a ladder runs out of rungs
+            # while the real remedy was never tried.
+            payload, wire_mime = _jpeg_or_original(payload, wire_mime)
+        encoded = base64.b64encode(payload).decode("ascii")
+        if len(encoded) <= budget_bytes:
+            return encoded, wire_mime
+    return None
+
+
+def _jpeg_or_original(payload: bytes, wire_mime: str) -> tuple[bytes, str]:
+    """Re-encode ``payload`` as quality-85 JPEG when that is actually smaller.
+
+    MEASURED, NOT ASSUMED, which is the same rule the JPEG rung of
+    :func:`bound_image_for_model` follows: PNG beats JPEG on flat synthetic
+    images, and handing back a LARGER payload would make the refit worse on
+    both axes at once. A host with no Pillow keeps its bytes unchanged and
+    lets the caller's next rung (or its refusal) decide.
+    """
+    module = pillow_image_module()
+    if module is None:
+        return payload, wire_mime
+    try:
+        with module.open(io.BytesIO(payload)) as image:
+            image.load()
+            if image.mode in ("RGBA", "LA"):
+                # JPEG has no alpha. Composite onto white rather than dropping
+                # the channel, so a transparent-background diagram stays
+                # legible instead of rendering onto black — the same choice
+                # ``bound_image_for_model`` makes at its own JPEG rung.
+                flat_mode = "RGB" if image.mode == "RGBA" else "L"
+                fill = (255, 255, 255) if flat_mode == "RGB" else 255
+                flat = module.new(flat_mode, image.size, fill)
+                flat.paste(image, mask=image.getchannel("A"))
+                image = flat
+            elif image.mode not in ("L", "RGB"):
+                image = image.convert("RGB")
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=IMAGE_JPEG_QUALITY)
+    except Exception:  # noqa: BLE001 — a failed re-encode falls back to the input
+        return payload, wire_mime
+    jpeg = buffer.getvalue()
+    if len(jpeg) < len(payload):
+        return jpeg, "image/jpeg"
+    return payload, wire_mime
+
 
 def _forward_undecoded(data: bytes, info: ImageInfo) -> tuple[bytes, str, str]:
     """Ship image bytes VERBATIM on a host with no usable Pillow.

@@ -212,7 +212,40 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
 
 
 class DraftRecoveryNotice(NoticeBlock, can_focus=True):
+    """The offer to put an undelivered draft back in the composer.
+
+    Reached when the composer is NOT empty at the moment a send fails — the
+    common case for a refusal, whose refit runs ~315 ms on a thread, long
+    enough for the user to have started their next thought. The draft parks in
+    ``source.unsent`` and this row is how it comes back.
+
+    The label has three jobs the bare ``Restore unsent prompt`` did none of
+    (design round 1, D5):
+
+    **It says WHICH prompt.** One row reading the same words whatever it holds
+    cannot be told from another, and the user has no way to know whether the
+    thing on offer is the message they care about or carries their attachment.
+    So the opening words of the draft and its attachment count ride the label.
+
+    **It says it is INTERACTIVE.** The row is focusable with ``enter`` and
+    click bindings, but nothing in the pixels said press or click, so the
+    affordance existed only for a user who tried it. The key is named in the
+    label, which is the same way the app tells the user about every other
+    non-obvious key.
+
+    **It is ``note``, not ``warning``.** It rendered in the same amber as the
+    refusal directly beneath it, so two rows of identical ink said two
+    different kinds of thing — a state to recover from, and a failure to act
+    on. ``note`` is the tier ``NoticeBlock`` documents for "the answer to
+    something the user just did", which is exactly what an offer to restore is.
+    """
+
     BINDINGS = [Binding("enter", "restore", "Restore unsent prompt", show=False)]
+
+    #: Characters of the draft quoted in the label. Long enough to tell two
+    #: drafts apart, short enough that the row stays one line beside the
+    #: attachment clause and the key hint at ordinary widths.
+    _PREVIEW_CHARS = 32
 
     class Requested(Message):
         def __init__(self, notice: DraftRecoveryNotice) -> None:
@@ -220,10 +253,40 @@ class DraftRecoveryNotice(NoticeBlock, can_focus=True):
             self.notice = notice
 
     def __init__(self, source_token: str, draft: SessionDraft) -> None:
-        super().__init__("Restore unsent prompt", "warning")
+        super().__init__(self._label_for(draft), "note")
         self.source_token = source_token
         self.draft = draft
         self.add_class("interactive-notice")
+
+    @staticmethod
+    def _label_for(draft: SessionDraft) -> str:
+        """``↩ restore unsent prompt "…" (1 image) — enter``.
+
+        The glyph is the one the row's action means (put this back), and it
+        leads because the row is an OFFER rather than a report. Degrades
+        cleanly: a draft with no text quotes nothing, one with no attachments
+        says nothing about them, and the key hint is always present because it
+        is the part the user cannot discover any other way.
+        """
+        from local_operator.tui.widgets.editor import ATTACHMENT_MARKER
+
+        parts = ["↩ restore unsent prompt"]
+        # One line of it, whitespace collapsed: a multi-line draft would
+        # otherwise put its second line into this row's own wrap. Attachment
+        # markers come out first — the restored draft carries an `[Image #1]`
+        # citation for every attachment, and quoting them here would spend the
+        # preview's whole budget restating what the count clause says next.
+        preview = " ".join(ATTACHMENT_MARKER.sub("", draft.text).split())
+        if preview:
+            if len(preview) > DraftRecoveryNotice._PREVIEW_CHARS:
+                preview = preview[: DraftRecoveryNotice._PREVIEW_CHARS - 1].rstrip() + "…"
+            parts.append(f'"{preview}"')
+        images = sum(
+            1 for attachment in draft.attachments.values() if getattr(attachment, "image", None)
+        )
+        if images:
+            parts.append(f"({images} image{'s' if images != 1 else ''})")
+        return " ".join(parts) + " — enter"
 
     def action_restore(self) -> None:
         self.post_message(self.Requested(self))

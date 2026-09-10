@@ -1368,9 +1368,124 @@ class RuntimeServer:
             # In-flight transcript state rides the same canonical sync as every
             # other full-TUI field. Raw events begin only after that frame.
             conn.events_ready = True
+        # A FLOOR on the bytes discarded by the CURRENT oversized line, not the
+        # exact figure — see where it is incremented. Doubles as the "already
+        # reported this one" flag, since a run always starts at zero: one
+        # oversized frame raises REPEATEDLY — once per limit-sized chunk,
+        # measured at 7 raises for a 10 MB line — so a log call per raise would
+        # turn one bad message into a burst that buries the fact that they were
+        # all the same frame.
+        overrun_bytes = 0
         try:
             while not self._closed.is_set():
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError:
+                    # AN OVERSIZED INBOUND LINE MUST NOT BE A FATAL ERROR.
+                    # ``start_server(..., limit=_MAX_LINE_BYTES)`` makes
+                    # ``readline`` raise ``ValueError`` (wrapping
+                    # ``LimitOverrunError``) for a line past the limit, and the
+                    # raise happens HERE, outside the ``json.loads`` try below
+                    # that looks like it covers it. Uncaught it escaped the
+                    # ``ConnectionResetError``/``BrokenPipeError`` handler, the
+                    # reader loop died, and the ``finally`` dropped the
+                    # connection — so a client sending one large frame lost its
+                    # whole session and the operator had to ``lop --resume``.
+                    # A pasted screenshot over ~780 KB of source does it, which
+                    # is how this was found.
+                    #
+                    # CONTINUING IS SAFE HERE and is NOT the infinite loop the
+                    # sibling ``viewer_server`` guard warns about. The
+                    # difference is ``readline`` vs ``readuntil``: ``readuntil``
+                    # leaves the offending bytes in the buffer so the next read
+                    # re-raises forever, while ``readline`` catches its own
+                    # ``LimitOverrunError`` and DRAINS — deleting through the
+                    # separator when one was found and clearing the buffer when
+                    # it was not (CPython ``asyncio/streams.py``). So the next
+                    # read starts at the following frame, and the connection
+                    # survives to carry the user's NEXT message, which is the
+                    # behaviour the operator actually missed.
+                    #
+                    # LOUDLY, at error: the frame is gone and whoever sent it
+                    # is owed the reason. ``AttachClient`` now refits images
+                    # before sending (``fit_request_frame``), so a line
+                    # reaching this point means an old client, a non-attach
+                    # peer, or a bug — each of which is worth one greppable
+                    # line rather than a vanished session. (How OFTEN it fires
+                    # is the next paragraph's subject — once per run of
+                    # consecutive discards, not once per frame; an earlier
+                    # version of this paragraph claimed the latter and was
+                    # wrong, review round 3, MINOR-2.)
+                    #
+                    # ONCE PER RUN of consecutive discards, not once per frame,
+                    # and it names the limit rather than the size because it is
+                    # the row that arrives FIRST: a frame only marginally over
+                    # produces a single raise whose separator lands inside the
+                    # discarded chunk, so no read succeeds until the peer sends
+                    # something else and the summary below may not come for a
+                    # while (QA round 1, Q2). The operator learns a frame was
+                    # dropped, and why, from this row alone.
+                    #
+                    # BE PRECISE ABOUT THE GAP, because an earlier version of
+                    # this comment claimed the line "always fires" and it does
+                    # not. The gate is ``overrun_bytes``, which clears only on a
+                    # successful read, so an unbroken run of marginal frames
+                    # logs this row for the FIRST one and nothing for the rest
+                    # — measured at 4 marginal frames with no readable traffic
+                    # between: 1 row, 3 silent. A large frame self-clears the
+                    # latch through its own readable tail, which is why the run
+                    # looks unconditional in testing (QA round 2, Q4).
+                    #
+                    # Kept as a run-level latch rather than made per-frame: the
+                    # two cases are distinguishable only by the wording of
+                    # CPython's own ``LimitOverrunError`` ("Separator is found"
+                    # vs "is not found"), and pinning diagnostics to an
+                    # undocumented message string trades a quiet log for a
+                    # silent breakage on the next CPython. The frames are still
+                    # discarded and the session still survives on every one of
+                    # them — this is a diagnostic gap, not a delivery one — and
+                    # the byte total below still accounts for the whole run.
+                    if overrun_bytes == 0:
+                        logger.error(
+                            "session runtime: dropping an inbound frame from %s client %s "
+                            "over the %d-byte line limit; the frame is discarded and the "
+                            "connection kept — the sender must resize its payload",
+                            conn.kind,
+                            conn.writer.get_extra_info("peername"),
+                            _MAX_LINE_BYTES,
+                        )
+                    # A FLOOR, and the summary below says so in words. CPython's
+                    # ``readline`` clears ``len(self._buffer)`` on the
+                    # no-separator path, and that buffer is ``>= limit`` — in
+                    # practice more, because the overrun is only detected once a
+                    # whole transport chunk has landed. The discarded amount is
+                    # therefore not reachable from here without instrumenting the
+                    # transport, and measured runs put the shortfall at 6.7-18.8%
+                    # (QA round 1, Q1). Reporting a floor AS a floor is honest;
+                    # reporting it as a total is what made the number wrong.
+                    overrun_bytes += _MAX_LINE_BYTES
+                    continue
+                if overrun_bytes:
+                    # ``overrun_bytes`` ALONE, without this line's length. The
+                    # read that succeeds here is usually the tail of the
+                    # oversized frame, but not always: when the separator landed
+                    # inside a discarded chunk there is no tail, and this is the
+                    # peer's next, innocent message — whose bytes were being
+                    # added to the bad frame's total, attributing an unrelated
+                    # message's size to it (QA round 1, Q2).
+                    #
+                    # Naming the size is what makes the log actionable: "over 1
+                    # MiB" does not say whether to trim one screenshot or five.
+                    # "at least" is what makes it TRUE — see the increment above.
+                    logger.error(
+                        "session runtime: discarded at least %d bytes of oversized inbound "
+                        "frame from %s client %s; the connection is still up and the next "
+                        "message will be read normally",
+                        overrun_bytes,
+                        conn.kind,
+                        conn.writer.get_extra_info("peername"),
+                    )
+                    overrun_bytes = 0
                 if not line:
                     self._drop_client(conn, reason="reader eof")
                     return  # client hung up
@@ -1661,6 +1776,41 @@ class RuntimeServer:
         return frozenset(watching)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
+        # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
+        # HERE rather than at the reader's parse because this is the line that
+        # actually dereferences it: `op`/`req` are read BEFORE the `try` below,
+        # so an `AttributeError` from them escapes this method entirely, sails
+        # past the reader loop's `ConnectionResetError`/`BrokenPipeError`
+        # handler, and reaches the `finally` that drops the client — killing the
+        # session for a junk frame, which is the exact death the oversized-line
+        # fix exists to prevent (review round 1, MAJOR-2).
+        #
+        # `json.loads` is the source: it succeeds on any JSON SCALAR, so a
+        # discarded oversized line whose surviving tail happens to read `12345`,
+        # `null`, `true`, `"str"` or `[1,2]` parses cleanly and arrives here as
+        # an int/None/bool/str/list. That tail is now reachable in the ordinary
+        # course of events precisely because the reader loop survives an
+        # oversized frame instead of dying on it.
+        #
+        # Guarding at this seam rather than at the parse also covers the other
+        # callers — a future dispatch route, and the tests that drive this
+        # method directly — so the "discard and keep the connection" promise the
+        # reader loop's log line makes is total rather than route-specific
+        # (review round 1, NIT-2).
+        #
+        # DROPPED, not answered: an error reply is keyed by `req`, and a frame
+        # that is not an object carries no `req` to answer on. One DEBUG line,
+        # because the sender is a broken or ancient peer rather than the
+        # operator, and the reader loop already logged the oversized frame that
+        # produced the tail at `error`.
+        if not isinstance(frame, dict):
+            logger.debug(
+                "session runtime: ignoring a non-object frame (%s) from %s client %s",
+                type(frame).__name__,
+                conn.kind,
+                conn.writer.get_extra_info("peername"),
+            )
+            return
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:

@@ -29,6 +29,19 @@ class TurnInteraction:
     accrued_cost: float = 0.0
     pending_echoes: list[Any] = field(default_factory=list)
     submitted_draft: SessionDraft | None = None
+    #: The transcript rows this surface painted for the prompt currently in
+    #: flight — ``(UserBlock, [ImageBlock, ...])`` — held only until the turn
+    #: is admitted or refused.
+    #:
+    #: The echo is painted at SUBMIT, before the worker runs, because a prompt
+    #: that appears the instant Enter is pressed is what makes the app feel
+    #: answerable. When the send is then REFUSED the row is a lie that outlives
+    #: the failure: styled exactly like a delivered message, and still there
+    #: after the user follows the refusal's advice and resends, so the
+    #: transcript shows the message twice and asserts an image was sent that
+    #: never left the machine (design round 1, D3). Holding the blocks is what
+    #: lets that echo be withdrawn; ``_withdraw_user_echo_for`` is the consumer.
+    submitted_blocks: tuple[Any, list[Any]] | None = None
     completion_deferred: bool = False
     settled_child_ids: set[str] = field(default_factory=set)
     waiting_kind: str | None = None
@@ -60,6 +73,44 @@ class CompactionInteraction:
     held_prompt: str = ""
     held_typed: str = ""
     held_images: dict[int, Any] = field(default_factory=dict)
+    #: The transcript rows painted for a prompt HELD through a compaction —
+    #: the same ``(UserBlock, [ImageBlock, ...])`` tuple ``turn.submitted_blocks``
+    #: carries, parked here for the minutes a pass can take.
+    #:
+    #: A held prompt is dispatched long after the submit that painted it, and
+    #: it can be refused exactly like a direct one. Without this the echo was
+    #: unreachable on that route: ``submitted_blocks`` was set only past the
+    #: compaction branch's ``return``, so the withdrawal found ``None`` and
+    #: D3's symptom survived — ``UserBlocks: 2`` with a phantom attachment
+    #: after the user follows the refusal's advice (review round 2, MAJOR-3).
+    #:
+    #: Held ALONGSIDE the text rather than assigned to ``turn.submitted_blocks``
+    #: at submit, for the reason the other held fields give: the hold's two
+    #: exits are dispatch and hand-back, and both already clear this state in
+    #: one tuple swap. Parking it on the turn instead would leave a reference
+    #: to torn-down rows behind on the hand-back, which is the stale-reference
+    #: hazard ``run_prompt``'s ``finally`` exists to prevent.
+    held_blocks: tuple[Any, list[Any]] | None = None
+    #: The ``queued — sends when compaction finishes`` notice painted when the
+    #: hold took the prompt. Held for the same reason ``held_blocks`` is: the
+    #: notice narrates the QUEUE, and the hold's dispatch exit ends that queue
+    #: — by then the prompt's own echo is painted right under where the notice
+    #: sits, so a row announcing a send that is visibly happening (or, on a
+    #: refusal, a send that will never happen) narrates nothing. Without the
+    #: reference the notice had no owner and outlived both exits (design round
+    #: 3, D15).
+    #:
+    #: Withdrawn at DISPATCH rather than at the refusal's withdrawal: the
+    #: dispatch is the earlier of the two and the notice is wrong from that
+    #: moment on whichever path follows, so one removal point covers both. The
+    #: hand-back clears the reference without removing the block — its
+    #: ``clear_blocks()`` tears the whole view down anyway. (The queued-STEER
+    #: notices are restated to a past-tense receipt instead of removed; that is
+    #: right for them because a steer paints no row of its own and the restated
+    #: notice is its only receipt. A held prompt paints its own ``UserBlock``,
+    #: so the message itself is the receipt and the queued row has nothing
+    #: left to say on either path.)
+    held_notice: Any = None
     accepted_message_id: str = ""
     accepted_draft: SessionDraft | None = None
 

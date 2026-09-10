@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
@@ -406,6 +405,7 @@ class TestReviewRegressions:
         `resolve_markers` directly: the defect was WHICH STRING that call site
         passed, so a test that calls the helper itself cannot catch it.
         """
+        from local_operator.harness.types import ImageContent
         from local_operator.tui.events import CompactionEnded
         from local_operator.tui.widgets.editor import Attachment
 
@@ -426,9 +426,15 @@ class TestReviewRegressions:
                 'lead\n<skill name="research" invocation="x">See [Image #1].</skill>\n' + typed
             )
             app._typed_held_for_compaction = typed
+            # REAL `ImageContent`, not bare strings: `resolve_markers` now
+            # stamps the citing chip number onto each image it resolves
+            # (design round 2, D8), so a stand-in that is not the declared type
+            # no longer survives the walk. The `data` field carries the marker
+            # this assertion keys on, which is what the strings were standing
+            # in for.
             app._images_held_for_compaction = {
-                1: Attachment(cast(Any, "AAA"), "[Image #1]"),
-                2: Attachment(cast(Any, "BBB"), "[Image #2]"),
+                1: Attachment(ImageContent(data="AAA", mime_type="image/png"), "[Image #1]"),
+                2: Attachment(ImageContent(data="BBB", mime_type="image/png"), "[Image #2]"),
             }
             app.on_compaction_ended(CompactionEnded("manual", True, "snapcompact", 10, 5))
             for _ in range(200):
@@ -436,7 +442,7 @@ class TestReviewRegressions:
                 if session.prompts:
                     break
             # Cited #2 first, so #2's image must be sent first.
-            assert session.prompt_images[0] == ["BBB", "AAA"]
+            assert [block.data for block in session.prompt_images[0]] == ["BBB", "AAA"]
 
     @pytest.mark.asyncio
     async def test_replay_repaints_the_typed_line_not_the_body(self, skill_root) -> None:
