@@ -122,13 +122,62 @@ USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK})
 #:   disposed directory still drops out. Measured impact on the reporting
 #:   machine at the time of the change: 0 of 1,986 directories affected
 #:   (agent review round 1, R3).
+#:
+#: Each entry also carries the directory's ``ino``, which is what lets a
+#: known-HIDDEN directory be skipped whole — before its marker is stat'd at all
+#: — for zero syscalls. See :data:`REVALIDATE_EVERY` and the scan loop in
+#: :func:`_recent_sessions_with_origin` for why the inode is load-bearing and
+#: why the skip is not permitted to be permanent.
 ORIGIN_CACHE_NAME = "origin-verdicts.json"
 
 #: Bumped when the cache's shape or key changes, so an older file is discarded
 #: rather than misread. Independent of ``search_index.INDEX_VERSION`` — the two
 #: caches version separately and neither number constrains the other; only the
 #: mechanism is borrowed.
-ORIGIN_CACHE_VERSION = 1
+#:
+#: 2 added the ``ino`` field. An entry without one cannot arm the hidden-skip
+#: fast path, so a v1 file would merely be slow rather than wrong — but the
+#: loader already discards an unknown version and rebuilds
+#: (:func:`_load_origin_cache`), which is the cheaper and more obviously correct
+#: migration than teaching the fast path to reason about a missing field.
+ORIGIN_CACHE_VERSION = 2
+
+#: How many scans pass between full revalidations of the hidden-skip fast path.
+#:
+#: **Counted in POLLS, not seconds.** At the sidebar's 2 s interval
+#: (``app.py``'s ``set_interval(2.0, self._refresh_sidebar)``) 150 polls is
+#: ~5 minutes, which is the ceiling on how long a stale verdict can leave a real
+#: session hidden. If the poll rate ever becomes variable, re-express this as
+#: elapsed time — a faster poll makes revalidation more frequent (safe, but
+#: costlier) while a slower one stretches the staleness window in wall-clock
+#: terms without this number changing.
+#:
+#: Why revalidate at all, given that "once a subagent, always a subagent" holds
+#: for every writer in the tree (``harness/subagent.py``, ``fork.py``, and the
+#: backfill below, which explicitly refuses to re-stamp an existing marker):
+#: because the backfill's refusal exists precisely so that **a marker a human
+#: deleted by hand to un-hide a session is not silently written back**. The
+#: codebase therefore treats deleting ``origin.json`` as a supported gesture,
+#: and a permanent skip would answer that gesture with a session that stays
+#: invisible forever. Three independent repairs bound it: this epoch, a cold
+#: start (the counter begins at 0, so ``0 % REVALIDATE_EVERY == 0`` and a fresh
+#: process always revalidates on its first scan), and the cache being derived
+#: data under ``cache/`` that a user may delete at any time.
+#:
+#: Cost of the epoch, measured at 4,000 directories / 50 users: a fast poll is
+#: 151 syscalls and a revalidating one 4,101, so the AMORTISED figure is 177
+#: against main's 8,052. 177 is the honest number to quote, not 151.
+REVALIDATE_EVERY = 150
+
+#: Scans issued so far, per store, driving :data:`REVALIDATE_EVERY`.
+#:
+#: Process-local on purpose: it is a POLICY counter, not a fact about the store,
+#: and persisting it would let one of the dozen ``lop`` processes on this machine
+#: decide another's staleness window — and would cost a write on a path whose
+#: whole point is to stop touching the disk. In production this holds exactly one
+#: key, the running session's config dir. Keyed by path string rather than
+#: ``Path`` so a test's ``tmp_path`` cannot collide with a live store.
+_SCAN_COUNT: dict[str, int] = {}
 
 #: Journals the session's title (and every name it has ever borne) beside the
 #: transcript, mirroring :data:`ORIGIN_NAME` exactly. A SIDECAR rather than a
@@ -1144,18 +1193,26 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     concurrently) is skipped rather than raising out of an error path whose whole
     job is to be helpful.
 
-    The traversal is ``os.scandir``-based over the store. Within THIS function
-    each directory costs ONE ``stat`` (the origin marker) plus, only for the
-    sessions that survive that gate, the activity stats — see the gate-order
-    note in :func:`_recent_sessions_with_origin`, which is where the
-    per-directory cost is actually decided.
+    The traversal is ``os.scandir``-based over the store, and in the steady
+    state a directory already known to be a subagent session costs NOTHING:
+    it is skipped from the verdict cache before its marker is stat'd, on facts
+    (`name`, `inode`) the ``readdir`` batch already supplied. Only a directory
+    the cache cannot answer for pays the origin stat, and only one that
+    survives that gate pays the activity stats — see the skip and gate-order
+    notes in :func:`_scan_sessions`, which is where the per-directory cost is
+    actually decided.
 
-    That "one stat per directory" is this function's floor, NOT the sidebar
-    poll's: :func:`~local_operator.session.catalog.load_catalog` pays a second
-    unconditional stat per directory probing for the desktop draft marker
-    (measured at 0.99/dir, QA round 1 Q2), so a poll costs ~2.0-2.2 syscalls
-    per directory in total and remains linear in the whole store. Anyone
-    optimising this path next should count both sites, not this one alone.
+    So per-directory cost tracks the USER's own sessions, not the store:
+    measured flat at 266 syscalls per poll while the store grew 100 -> 8,000
+    directories with users held at 50 (``scripts/bench_catalog_scan.py
+    store-axis``), against 366 -> 16,166 before. What is still O(total
+    entries) is the single batched ``scandir`` — the poll has stopped
+    stat-ing the store, not stopped touching it — and the verdict cache's own
+    parse, which at 7,950 markers is 704 KB / 5.6 ms and is now the dominant
+    remaining term. Anyone optimising this path next should start there, and
+    should count :func:`~local_operator.session.catalog.load_catalog`'s
+    desktop probe too — it is the second site, and the hidden set returned by
+    :func:`_scan_sessions` is what removed it.
 
     The store is scanned once rather than each directory
     being scanned individually: the latter is what the origin design proposed,
@@ -1163,16 +1220,15 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     stats every entry in every directory to learn two filenames. Do not "fix"
     it back.
 
-    The cost that matters is the ORIGIN check, which runs once per directory
-    and therefore scales with the SUBAGENT population — ~10.6x the user
-    population on the reporting machine, and the part that actually grows.
-    Because a marker that EXISTS must still be read and parsed (see
-    :data:`ORIGIN_CACHE_NAME`), that is one file read per subagent directory:
-    1127 ms over 31,700 dirs, of which the reads are 639 ms. The verdict cache
-    is what removes it, taking the same scan to ~310 ms warm
-    (``bench/resume-picker-after.json``; independently re-measured at 307 ms in
-    agent review round 1). Quote the committed bench figure here rather than a
-    remembered one — an optimistic number in a docstring is how the next
+    The cost this used to be dominated by was the ORIGIN check, which ran once
+    per directory and therefore scaled with the SUBAGENT population — ~10.6x
+    the user population on the reporting machine. Because a marker that EXISTS
+    must still be read and parsed (see :data:`ORIGIN_CACHE_NAME`), that was one
+    file read per subagent directory: 1127 ms over 31,700 dirs, of which the
+    reads were 639 ms. The verdict cache removed the READS (~310 ms warm,
+    ``bench/resume-picker-after.json``), and the hidden-skip above removed the
+    remaining per-directory STAT. Quote the committed bench figure here rather
+    than a remembered one — an optimistic number in a docstring is how the next
     person's regression looks like an improvement.
 
     ``limit`` truncates the RESULT, never the work: every directory is visited
@@ -1182,6 +1238,22 @@ def recent_sessions(config_dir: Path, limit: int | None = None) -> list[tuple[st
     return [
         (name, mtime) for name, mtime, _origin in _recent_sessions_with_origin(config_dir, limit)
     ]
+
+
+def _is_hidden_origin(origin: str) -> bool:
+    """Whether a parsed ``origin`` value keeps its session OUT of the listing.
+
+    The exact negation of :func:`is_user_session`'s rule, spelled here so the
+    scan loop can ask the question twice — once of a CACHED verdict before any
+    syscall, once of a freshly parsed one — without the two spellings drifting.
+    ``USER_ORIGINS`` remains the single shared fact both consult, so a new
+    user-visible origin is still added in exactly one place.
+
+    Not delegated to :func:`is_user_session` itself because that takes a
+    directory and pays a stat plus a read to obtain the origin the scan already
+    has in hand; this loop must not pay a second stat per directory.
+    """
+    return bool(origin) and origin not in USER_ORIGINS
 
 
 def _recent_sessions_with_origin(
@@ -1196,18 +1268,54 @@ def _recent_sessions_with_origin(
     the value is ``""`` with no syscall added at all.
 
     Private because the public pair is what every other caller wants and the
-    CLI's recovery listing pins its shape.
+    CLI's recovery listing pins its shape. Callers that also want the hidden
+    names — only ``session.catalog.load_catalog``, to skip a second per-directory
+    stat — use :func:`_scan_sessions` directly.
+    """
+    return _scan_sessions(config_dir, limit)[0]
+
+
+def _scan_sessions(
+    config_dir: Path, limit: int | None = None
+) -> tuple[list[tuple[str, float, str]], set[str]]:
+    """The one store scan: ``(rows, hidden_names)``.
+
+    ``hidden_names`` is every directory this scan established is NOT the user's
+    own session — whether it was skipped from cache or re-read. It exists for
+    ``load_catalog``, which otherwise stats a ``desktop.json`` in every
+    directory the listing did not return. That probe is answerable without the
+    filesystem here: ``desktop.json`` has exactly one writer
+    (``server/utils/desktop_sessions.py``'s ``DesktopSessions.create``), which
+    mints a fresh ``uuid4`` directory and never writes an origin marker into it,
+    so a directory carrying an origin marker cannot also carry a desktop one.
+    Skipping the probe for these names is HALF the total saving of this design.
+
+    Split from :func:`_recent_sessions_with_origin` rather than widening its
+    return type because that shape is pinned by the CLI's recovery listing and
+    by every other caller, none of which has any use for the second value.
     """
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
     # module's import, not this function's.
     from local_operator.session.retention import session_activity_path
 
+    # Which scan this is for this store, and therefore whether the fast path is
+    # armed. Read BEFORE the scandir can fail so a store that is not there yet
+    # still advances the counter — otherwise a session started before its
+    # config dir exists would sit at 0 and revalidate on every poll forever.
+    scans_so_far = _SCAN_COUNT.get(str(config_dir), 0)
+    _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
+    revalidate = scans_so_far % REVALIDATE_EVERY == 0
+
     rows: list[tuple[str, float, str]] = []
+    # Every directory this scan established is not the user's own session. See
+    # the docstring: ``load_catalog`` uses it to skip a second per-directory
+    # stat.
+    hidden_names: set[str] = set()
     try:
         scan = os.scandir(config_dir / "sessions")
     except OSError:
-        return []
+        return [], set()
     cache_path = origin_cache_path(config_dir)
     cached = _load_origin_cache(cache_path)
     fresh: dict[str, Any] = {}
@@ -1218,6 +1326,53 @@ def _recent_sessions_with_origin(
     seen: set[str] = set()
     with scan:
         for entry in scan:
+            previous = cached.get(entry.name)
+            # ---- THE ZERO-SYSCALL SKIP -------------------------------------
+            # A directory already known to be hidden is dropped here, before
+            # its marker is stat'd at all. Both facts this needs come FREE from
+            # the ``readdir`` batch ``scandir`` already paid for: measured
+            # structurally, ``DirEntry.inode()`` still answers after the
+            # directory has been deleted, so it cannot be stat-backed (the same
+            # probe makes ``entry.stat()`` raise ENOENT). So a hidden directory
+            # costs exactly zero syscalls, which is what turns the poll's
+            # per-directory cost from O(the whole store) into O(the user's own
+            # sessions).
+            #
+            # WHY THE INODE IS LOAD-BEARING, not a nicety: keyed on the name
+            # alone this is wrong under ID REUSE. Delete a subagent directory,
+            # later create a real session under the same 12-hex id, and the
+            # dead directory's "hidden" verdict is served for the live one —
+            # a real session permanently invisible in the picker, the severe
+            # failure this design exists to avoid. An inode is reallocated on
+            # recreation (measured on APFS: 912841799 -> 912841800), so the
+            # recreated id misses the cache and takes the slow path.
+            #
+            # The inode is a HINT, never truth. Where it is unavailable
+            # (``ino is None``) or a filesystem recycles numbers aggressively,
+            # the worst case is the name-keyed behaviour this qualification
+            # replaced, bounded by :data:`REVALIDATE_EVERY` — never a wrong
+            # answer that outlives the epoch.
+            try:
+                ino: int | None = entry.inode()
+            except OSError:
+                # A DirEntry that cannot report its inode gets the slow path
+                # rather than a guess; this is the safe direction.
+                ino = None
+            if (
+                not revalidate
+                and ino is not None
+                and isinstance(previous, dict)
+                and previous.get("ino") == ino
+                and isinstance(previous.get("origin"), str)
+                and _is_hidden_origin(previous["origin"])
+            ):
+                # The marker is still on disk as far as this scan knows, so the
+                # entry is retained rather than dropped from the rewritten
+                # cache. Skipping it is what makes the next poll free too.
+                seen.add(entry.name)
+                hidden_names.add(entry.name)
+                continue
+
             # ---- ORDER OF THE TWO GATES IS A MEASURED CHOICE ----------------
             # A row must pass BOTH "has activity" and "is user-visible". That
             # is a conjunction, so evaluating the cheaper, more SELECTIVE gate
@@ -1261,13 +1416,26 @@ def _recent_sessions_with_origin(
             if marker_stat is not None:
                 seen.add(entry.name)
                 key = [marker_stat.st_mtime, marker_stat.st_size]
-                previous = cached.get(entry.name)
                 if (
                     isinstance(previous, dict)
                     and previous.get("key") == key
                     and isinstance(previous.get("origin"), str)
                 ):
                     origin = previous["origin"]
+                    # The VERDICT hit deliberately does not require the inode to
+                    # match: the marker's own (mtime, size) is what makes the
+                    # verdict sound, and demanding an inode here would make a
+                    # filesystem that cannot supply one (``ino is None``) re-read
+                    # every marker on every poll — strictly worse than before
+                    # this change. The inode gates only the zero-syscall skip
+                    # above, which is an optimisation that may safely not arm.
+                    #
+                    # Restamped when the inode moved or was missing, so the entry
+                    # can arm that skip on the next poll. Byte-equal entries make
+                    # ``merged == cached`` below, so a steady store still writes
+                    # nothing.
+                    if previous.get("ino") != ino:
+                        fresh[entry.name] = {"key": key, "origin": origin, "ino": ino}
                 else:
                     # Existence gates the READ, never the verdict: the file is
                     # read and PARSED, because ``session_origin`` returns "" for
@@ -1285,7 +1453,7 @@ def _recent_sessions_with_origin(
                     # permanent wrong verdict for the life of that marker. So it
                     # falls through and is re-read on the next scan instead.
                     if readable:
-                        fresh[entry.name] = {"key": key, "origin": origin}
+                        fresh[entry.name] = {"key": key, "origin": origin, "ino": ino}
                     else:
                         # Drop any entry inherited from ``cached``: this scan
                         # could not confirm it, and ``merged`` below is built
@@ -1298,7 +1466,13 @@ def _recent_sessions_with_origin(
                 # that predicate by hand — ``USER_ORIGINS`` is the shared fact
                 # both consult, so a new user-visible origin is added there once
                 # rather than in two places that can drift.
-                if origin and origin not in USER_ORIGINS:
+                if _is_hidden_origin(origin):
+                    # Exported even though this scan re-read the marker: what
+                    # ``load_catalog`` needs is the hidden SET, and a directory
+                    # that took the slow path this poll (a fresh subagent, a
+                    # revalidating poll, a filesystem with no inode) is hidden
+                    # exactly as much as one that was skipped.
+                    hidden_names.add(entry.name)
                     continue
             else:
                 # No marker: the user's own session, and the cheap path this
@@ -1344,7 +1518,11 @@ def _recent_sessions_with_origin(
     # Sliced only when a limit was actually asked for: ``rows[:None]`` would
     # also return everything, but spelling it out keeps "no limit" a decision
     # the code states rather than a property of slice syntax.
-    return rows if limit is None else rows[:limit]
+    #
+    # ``hidden_names`` is NEVER truncated by ``limit``: it describes the store,
+    # not the page, and ``load_catalog`` consults it for directories that by
+    # definition fell outside the listing.
+    return (rows if limit is None else rows[:limit]), hidden_names
 
 
 def format_age(seconds: float) -> str:

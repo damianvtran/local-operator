@@ -9,21 +9,29 @@ directory. On the reporting machine (1,946 directories, 92% of them subagent
 sessions the picker never lists) one poll issued 9,773 syscalls and cost
 126 ms, permanently, per TUI process.
 
-What changed is the CONSTANT, and these tests are named for that. The poll
-went from ~5.8 to ~2.2 syscalls per directory (9,773 -> 4,350 on that store,
-126 ms -> 25 ms), but it is still ``O(every session directory ever created)``
-— two unconditional per-directory stats remain, the origin marker here and the
-desktop marker in ``load_catalog``. The store growing large enough still
-degrades the poll; it re-reaches the old cost at roughly 8,000 directories.
-Reaching ``O(the user's own sessions)`` needs an index or a persistent memo,
-which this change deliberately does not attempt.
+The first fix (#867) reordered the two gates, which improved the CONSTANT —
+~5.8 to ~2.2 syscalls per directory — while leaving the poll
+``O(every session directory ever created)``: two unconditional per-directory
+stats remained, the origin marker in the scan and the desktop marker in
+``load_catalog``.
 
-The fix is entirely a reordering and a call-shape change: no caching, no new
-source of truth, and above all **no second ranking clock**. These tests pin
-both halves — that the answer is unchanged, and that the cost model is the new
-one — because an optimisation here is only worth having if the listing is
-byte-identical, and the failure mode of getting it wrong is the retention
-policy deleting rows the picker is still showing.
+The second fix removed the scaling itself. A directory already known to be
+hidden is now skipped whole, for ZERO syscalls, because both facts that
+decision needs — the name and the inode — come free from the ``readdir`` batch
+``scandir`` already paid for. Per-directory cost therefore tracks the USER's
+own sessions: measured flat at 266 syscalls per poll while the store grew from
+100 to 8,000 directories with users held at 50, against 366 -> 16,166 before.
+What remains O(total entries) is the single batched ``scandir`` — the poll
+still touches the store, it just stops stat-ing it — and the verdict cache's
+own parse (704 KB / 5.6 ms at 7,950 markers), which is now the dominant
+remaining term.
+
+Neither fix is allowed to buy that with a different answer: no second source of
+truth, and above all **no second ranking clock**. These tests pin both halves —
+that the listing is byte-identical, and that the cost model is the new one —
+because the failure mode of getting the first wrong is the retention policy
+deleting rows the picker is still showing, and the failure mode of getting the
+skip wrong is a real session invisible in the picker forever.
 """
 
 from __future__ import annotations
@@ -273,33 +281,38 @@ class TestTheListingIsUnchanged:
 
 
 class TestThePollsPerDirectoryCostIsBounded:
-    """These pin the PER-DIRECTORY cost, which is what this change reduces —
-    not the scaling, which it does not change.
+    """These pin the PER-DIRECTORY cost, which is now O(the user's own
+    sessions) rather than O(the store).
 
-    The poll remains O(total session directories): the origin-marker stat runs
-    for every entry and ``load_catalog``'s desktop-marker probe for every
-    unlisted one. What the reordering buys is the constant — a hidden directory
-    costs one stat where it cost three. Name these tests for that bound, so a
-    later reader does not take a green suite as proof the store no longer
-    matters; measured flat at ~2.0-2.2 syscalls/dir from 150 to 4,050
-    directories in agent review / QA round 1.
+    A directory already known to be hidden is skipped before its marker is
+    stat'd, for zero syscalls. What remains O(total entries) is the single
+    batched ``scandir`` — one call, not a stat each — so these tests assert a
+    FLAT syscall count as the hidden population grows, which is precisely the
+    assertion the previous round lacked and which would have caught #867's
+    original overstatement.
 
     Asserted as syscall counts, not wall-clock: timings on a loaded machine
     measure contention, syscall counts measure the algorithm."""
 
-    def test_a_hidden_session_costs_one_stat_not_three(self, tmp_path: Path) -> None:
-        """The origin gate runs FIRST, so a subagent directory never pays for
-        the two activity stats whose answer would be discarded."""
+    def test_a_hidden_session_costs_no_syscalls_at_all(self, tmp_path: Path) -> None:
+        """The steady-state poll skips a known-hidden directory whole.
+
+        One ``scandir`` for the store and nothing else: ``DirEntry.inode()``
+        and ``is_dir()`` are both answered from the ``readdir`` batch that call
+        already paid for.
+        """
         for index in range(50):
             _session(tmp_path, f"{index:012x}", origin="subagent", stamp=1000.0)
-        _recent_sessions_with_origin(tmp_path)  # warm the verdict cache
+        # Two warm-ups: the first builds the verdict cache AND is the cold-start
+        # revalidating scan, so the second is the first poll able to use it.
+        _recent_sessions_with_origin(tmp_path)
+        _recent_sessions_with_origin(tmp_path)
 
         with _counting() as counter:
             _recent_sessions_with_origin(tmp_path)
-        # One scandir for the store, then exactly one marker stat per hidden
-        # directory. Three per directory was the old shape.
         assert counter.counts["scandir"] == 1
-        assert counter.counts["stat"] <= 50 + 5
+        assert counter.counts["stat"] == 0
+        assert counter.total == 1
 
     def test_the_scan_does_not_open_every_session_directory(self, tmp_path: Path) -> None:
         """``load_catalog`` located ``desktop.json`` with ``glob("*/desktop.json")``,
@@ -317,27 +330,367 @@ class TestThePollsPerDirectoryCostIsBounded:
         # registry and attention stores read. Emphatically not one per session.
         assert counter.counts["scandir"] < 10
 
-    def test_a_hidden_session_adds_one_stat_not_three(self, tmp_path: Path) -> None:
-        """Each added subagent directory costs ONE stat, down from three.
+    def test_the_cost_is_flat_as_the_hidden_population_grows(self, tmp_path: Path) -> None:
+        """THE DECISIVE ASSERTION: users held fixed, hidden directories varied.
 
-        This is deliberately NOT "hidden sessions are free": the bound below is
-        linear in the directories added (200 dirs -> <=200 stats), because that
-        is the property that actually ships. It fails on the previous
-        implementation, which paid three. Asserted as a DELTA against a
-        measured baseline rather than an absolute ceiling, so it pins the
-        per-directory slope instead of encoding one machine's number."""
+        This is the shape of the experiment, run in miniature. A cost that
+        tracks the STORE rises with each batch; a cost that tracks the USER's
+        sessions does not move at all. The previous implementation adds one stat
+        per directory here and fails on the first batch, which is exactly the
+        guard the earlier round lacked — a ladder that grows both populations
+        together cannot tell the two hypotheses apart, and that is how #867
+        shipped a claim bigger than its measurement.
+
+        Asserted as EQUALITY, not a bound: 'flat' is the property, and a
+        tolerance would let the slope creep back in unnoticed.
+        """
         for index in range(10):
-            _session(tmp_path, f"{index:012x}", stamp=1000.0 + index)
-        _recent_sessions_with_origin(tmp_path)
-        with _counting() as small:
-            _recent_sessions_with_origin(tmp_path)
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
 
-        for index in range(200):
-            _session(tmp_path, f"{index + 1000:012x}", origin="subagent", stamp=500.0)
-        _recent_sessions_with_origin(tmp_path)
-        with _counting() as large:
+        measurements = []
+        for batch in range(3):
+            for index in range(200):
+                _session(
+                    tmp_path,
+                    f"sub{batch:03x}{index:06x}",
+                    origin="subagent",
+                    stamp=500.0,
+                )
+            # Two scans: the first discovers the new directories, the second is
+            # the steady state the sidebar actually pays.
             _recent_sessions_with_origin(tmp_path)
+            _recent_sessions_with_origin(tmp_path)
+            with _counting() as counter:
+                rows = _recent_sessions_with_origin(tmp_path)
+            measurements.append(counter.total)
+            assert len(rows) == 10, "the listing must not move while cost is measured"
 
-        # Each added hidden directory costs ONE stat. The old code paid three,
-        # so this bound fails on the previous implementation.
-        assert large.total - small.total <= 200 + 10
+        assert measurements[0] == measurements[1] == measurements[2], measurements
+
+    def test_the_desktop_probe_skips_known_hidden_directories(self, tmp_path: Path) -> None:
+        """``load_catalog``'s SECOND O(store) stat, removed the same way.
+
+        It probed ``desktop.json`` in every directory the listing did not
+        return, which is the ~91% hidden population. A hidden directory cannot
+        carry a desktop marker — ``DesktopSessions.create`` is the only writer
+        and mints a fresh directory it never marks — so the probe asked a
+        question already answered. This is half the total saving, so it gets its
+        own pin.
+        """
+        for index in range(60):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=1000.0)
+        _session(tmp_path, "f" * 12, stamp=2000.0)
+        load_catalog(tmp_path)
+        load_catalog(tmp_path)
+
+        with _counting() as counter:
+            load_catalog(tmp_path)
+        # Well under one per hidden directory. Left as a bound rather than an
+        # equality because ``load_catalog`` also reads the registry and the
+        # attention store, whose constant is not this test's subject.
+        assert counter.counts["stat"] < 60
+
+
+# ---------------------------------------------------------------------------
+# The hidden-skip fast path: what makes skipping a directory safe
+# ---------------------------------------------------------------------------
+
+
+class TestTheHiddenSkipCannotHideRealWork:
+    """The fast path returns an answer WITHOUT looking at the directory, so
+    every way that answer could be wrong is a real session missing from the
+    picker — the severe failure this design exists to avoid.
+
+    Each test here corresponds to one of the repairs the design carries: the
+    inode qualification (id reuse), the revalidation epoch and the cold start
+    (a hand-deleted marker), and the fail-safe that a corrupt marker is never
+    memoised as hidden in the first place."""
+
+    def test_a_recreated_id_is_visible_rather_than_serving_a_dead_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        """ID REUSE — the case that fails a name-keyed cache.
+
+        Delete a subagent directory, then create a REAL session under the same
+        12-hex id. Keyed on the name alone the dead directory's hidden verdict
+        is served for the live session and it never appears. The inode closes
+        it: a recreated directory gets a different inode, so it misses the
+        cache and takes the slow path.
+
+        This is why the inode qualification is load-bearing rather than a
+        nicety, and it is the one assertion that distinguishes the shipped
+        design from the cheaper one.
+        """
+        import shutil
+
+        reused = "a" * 12
+        _session(tmp_path, reused, origin="subagent", stamp=1000.0)
+        _session(tmp_path, "b" * 12, stamp=2000.0)
+        _recent_sessions_with_origin(tmp_path)
+        # Arm the fast path: this is the poll that would serve the stale answer.
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["b" * 12]
+
+        shutil.rmtree(tmp_path / "sessions" / reused)
+        _session(tmp_path, reused, stamp=3000.0)
+
+        listed = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
+        assert reused in listed, "a session recreated under a reused id must be visible"
+        assert listed == [reused, "b" * 12]
+
+    def test_a_missing_inode_degrades_to_the_slow_path_not_to_a_guess(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """Inode behaviour was measured on APFS; a filesystem that cannot
+        supply one must stay CORRECT, merely slower.
+
+        Simulated by making ``DirEntry.inode()`` raise, which is the shape of
+        the failure on a filesystem that does not answer it. The listing must
+        be unchanged and the marker must be re-read — never a cached verdict
+        accepted on a key that could not be qualified.
+        """
+        _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        _session(tmp_path, "b" * 12, stamp=2000.0)
+        with_inode = _recent_sessions_with_origin(tmp_path)
+        _recent_sessions_with_origin(tmp_path)
+
+        real_scandir = os.scandir
+
+        class _NoInode:
+            """A DirEntry whose inode is unavailable, delegating everything else."""
+
+            def __init__(self, entry: Any) -> None:
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def inode(self) -> int:
+                raise OSError("inode unavailable on this filesystem")
+
+            def __getattr__(self, item: str) -> Any:
+                return getattr(self._entry, item)
+
+        class _Scan:
+            """Both a context manager and an iterator, exactly as
+            ``os.scandir`` returns — the scan uses it as both."""
+
+            def __init__(self, inner: Any) -> None:
+                self._inner = inner
+
+            def __iter__(self) -> Any:
+                return (_NoInode(entry) for entry in self._inner)
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *exc: Any) -> None:
+                self._inner.close()
+
+        monkeypatch.setattr(os, "scandir", lambda path: _Scan(real_scandir(path)))
+        assert _recent_sessions_with_origin(tmp_path) == with_inode
+
+    def test_a_hand_deleted_marker_is_repaired_by_revalidation(self, tmp_path: Path) -> None:
+        """Deleting ``origin.json`` is a SUPPORTED un-hide gesture.
+
+        The origin backfill refuses to re-stamp an existing marker precisely so
+        that a marker a human removed is not silently written back, so a
+        permanent skip would answer that gesture with a session hidden forever.
+        The epoch bounds it: while the fast path is armed the session stays
+        hidden, and the revalidating poll finds it.
+        """
+        from local_operator import resume as resume_mod
+
+        directory = _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        _recent_sessions_with_origin(tmp_path)
+        assert _recent_sessions_with_origin(tmp_path) == []
+
+        (directory / "origin.json").unlink()
+        assert _recent_sessions_with_origin(tmp_path) == [], "stale while armed, by design"
+
+        # Drive the counter to the epoch rather than waiting 150 polls: the
+        # arithmetic is the subject, not the wall time.
+        resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+
+    def test_a_cold_start_always_revalidates(self, tmp_path: Path) -> None:
+        """Restarting ``lop`` repairs a stale verdict immediately.
+
+        The counter starts at 0 for a fresh process, so ``0 % REVALIDATE_EVERY``
+        is 0 and the first scan of every process is a revalidating one. That is
+        the second of the three independent repairs, and the one an operator
+        reaches for without being told about epochs.
+        """
+        from local_operator import resume as resume_mod
+
+        directory = _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        _recent_sessions_with_origin(tmp_path)
+        _recent_sessions_with_origin(tmp_path)
+        (directory / "origin.json").unlink()
+        assert _recent_sessions_with_origin(tmp_path) == []
+
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)  # a fresh process
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+
+    def test_a_corrupt_marker_stays_visible_on_every_poll(self, tmp_path: Path) -> None:
+        """The fail-safe the fast path must not invert.
+
+        A truncated or hand-edited marker parses to ``""`` — the user's own
+        session — so it is never a HIDDEN verdict and can never arm the skip.
+        Asserted over five consecutive polls because the bug this guards
+        against is one that appears only once the cache is warm.
+        """
+        corrupt = _session(tmp_path, "a" * 12, stamp=1000.0)
+        (corrupt / "origin.json").write_text('{"origin": "suba', encoding="utf-8")
+        # Cut inside a multi-byte character: the read must not raise either.
+        truncated = _session(tmp_path, "b" * 12, stamp=900.0)
+        (truncated / "origin.json").write_bytes('{"origin": "sübagent'.encode("utf-8")[:-3])
+
+        for poll in range(5):
+            listed = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
+            assert listed == ["a" * 12, "b" * 12], f"vanished on poll {poll}"
+
+    def test_an_unreadable_marker_is_never_memoised_as_a_verdict(self, tmp_path: Path) -> None:
+        """A transient EMFILE describes the MOMENT, not the file.
+
+        The scan creates descriptor pressure itself, so a read failure must
+        fall through and be retried on the next scan rather than being frozen
+        into the cache for the life of the marker. The session stays visible
+        (fail-safe) and the verdict is re-derived once the read succeeds.
+        """
+        from local_operator import resume as resume_mod
+
+        directory = _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        real_read = resume_mod._session_origin_read
+        calls: list[Path] = []
+
+        def failing(path: Path) -> tuple[str, bool]:
+            calls.append(path)
+            return "", False
+
+        resume_mod._session_origin_read = failing  # type: ignore[assignment]
+        try:
+            assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+            assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+            assert len(calls) == 2, "an unreadable marker must be re-read, not memoised"
+        finally:
+            resume_mod._session_origin_read = real_read  # type: ignore[assignment]
+
+        assert directory.is_dir()
+        # Once the read succeeds the verdict is derived normally and the
+        # session hides, proving nothing wrong was cached in the meantime.
+        assert _recent_sessions_with_origin(tmp_path) == []
+
+    def test_a_new_subagent_hides_immediately_while_the_fast_path_is_armed(
+        self, tmp_path: Path
+    ) -> None:
+        """The skip only ever SUPPRESSES work for a directory already known
+        hidden; an unknown directory always takes the slow path, so a subagent
+        created mid-poll-cycle is hidden on the very next poll rather than
+        waiting for an epoch."""
+        _session(tmp_path, "a" * 12, stamp=1000.0)
+        _recent_sessions_with_origin(tmp_path)
+        _recent_sessions_with_origin(tmp_path)
+
+        _session(tmp_path, "b" * 12, origin="subagent", stamp=2000.0)
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+
+    def test_the_skip_does_not_change_the_listing_on_any_awkward_shape(
+        self, tmp_path: Path
+    ) -> None:
+        """Every shape at once, over enough polls that the fast path is armed
+        for all of them. The listing is the contract; the cost is not allowed
+        to buy a different one."""
+        _session(tmp_path, "a" * 12, stamp=5000.0)
+        _session(tmp_path, "b" * 12, origin="fork", stamp=4000.0)
+        _session(tmp_path, "c" * 12, origin="subagent", stamp=9000.0)
+        _session(tmp_path, "d" * 12, transcript=None)
+        _session(tmp_path, "e" * 12, transcript=None, inbox="{}\n", stamp=3000.0)
+        _session(tmp_path, "f" * 12, origin="subagent", transcript=None)
+
+        expected = ["a" * 12, "b" * 12, "e" * 12]
+        for poll in range(4):
+            assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == expected, poll
+
+    def test_a_symlinked_session_directory_agrees_across_polls(self, tmp_path: Path) -> None:
+        """A store may contain a symlink to a session directory. Whatever the
+        first poll decides, the warm polls must decide identically — the point
+        being that the fast path introduces no divergence of its own."""
+        target = _session(tmp_path, "a" * 12, stamp=1000.0)
+        _session(tmp_path, "b" * 12, origin="subagent", stamp=2000.0)
+        link = tmp_path / "sessions" / ("c" * 12)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:  # pragma: no cover - platforms without symlink permission
+            import pytest
+
+            pytest.skip("symlinks unavailable")
+
+        first = _recent_sessions_with_origin(tmp_path)
+        for _ in range(3):
+            assert _recent_sessions_with_origin(tmp_path) == first
+
+    def test_an_unknown_cache_version_rebuilds_rather_than_misreading(self, tmp_path: Path) -> None:
+        """The migration path for the added ``ino`` field.
+
+        A cache written by an older version has no inode to qualify anything
+        with, so it is discarded wholesale — which the loader already did for
+        any unknown version. Asserted end to end: the listing is right and the
+        rewritten file carries the current version.
+        """
+        from local_operator import resume as resume_mod
+
+        _session(tmp_path, "a" * 12, stamp=1000.0)
+        _session(tmp_path, "b" * 12, origin="subagent", stamp=2000.0)
+        _recent_sessions_with_origin(tmp_path)
+
+        cache = resume_mod.origin_cache_path(tmp_path)
+        stale = json.loads(cache.read_text(encoding="utf-8"))
+        stale["version"] = resume_mod.ORIGIN_CACHE_VERSION - 1
+        for entry in stale["entries"].values():
+            entry.pop("ino", None)
+        cache.write_text(json.dumps(stale), encoding="utf-8")
+
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+        rebuilt = json.loads(cache.read_text(encoding="utf-8"))
+        assert rebuilt["version"] == resume_mod.ORIGIN_CACHE_VERSION
+        assert all("ino" in entry for entry in rebuilt["entries"].values())
+
+    def test_a_store_past_the_scan_limit_still_lists_identically(self, tmp_path: Path) -> None:
+        """``CATALOG_SCAN_LIMIT`` caps the PAGE, never the scan.
+
+        With more user sessions than the cap, the scan must still return all of
+        them (``/resume`` shows the whole store) while ``load_catalog`` shows a
+        capped, correctly ordered prefix — and both must be stable once the fast
+        path is armed.
+        """
+        from local_operator.session.catalog import CATALOG_SCAN_LIMIT
+
+        users = CATALOG_SCAN_LIMIT + 50
+        for index in range(users):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(300):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0)
+
+        first = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
+        assert len(first) == users
+        warm = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
+        assert warm == first
+        page = load_catalog(tmp_path)
+        assert len(page) == CATALOG_SCAN_LIMIT
+        assert [entry.id for entry in load_catalog(tmp_path)] == [entry.id for entry in page]
+
+    def test_resume_and_the_sidebar_list_the_same_set_in_the_same_order(
+        self, tmp_path: Path
+    ) -> None:
+        """The invariant the whole change is measured against. Both surfaces
+        share one scan, so they cannot diverge — pinned here so a future
+        'optimisation' that gives the sidebar its own path fails loudly."""
+        for index in range(20):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(40):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0)
+        _recent_sessions_with_origin(tmp_path)
+        _recent_sessions_with_origin(tmp_path)
+
+        picker = [row[0] for row in _recent_sessions_with_origin(tmp_path)]
+        sidebar = [entry.id for entry in load_catalog(tmp_path)]
+        assert sidebar == picker[: len(sidebar)]
