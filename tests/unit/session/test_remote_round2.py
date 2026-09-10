@@ -577,7 +577,7 @@ async def test_prompt_during_recovery_still_queues_and_delivers(
         assert remote._recovering is True
         prompt_task = asyncio.create_task(remote.prompt("queued during gap"))
         await asyncio.sleep(0.2)
-        assert not prompt_task.done()  # waiting on _owner_ready, not failing
+        assert not prompt_task.done()  # waiting on _runtime_ready, not failing
         replacement = RuntimeServer(handle, kind="tui")
         replacement.start()
         try:
@@ -848,7 +848,7 @@ async def test_follower_prompt_carries_a_caller_supplied_message_id() -> None:
     adopts as the Message id and announces back.
     """
     remote = _bare_remote(Path("/tmp/r1-f1-prompt"))
-    remote._owner_ready.set()
+    remote._runtime_ready.set()
     client = _RecordingClient()
     remote._client = client  # type: ignore[assignment]
 
@@ -868,7 +868,7 @@ async def test_follower_prompt_still_mints_an_id_when_none_is_supplied() -> None
     import uuid
 
     remote = _bare_remote(Path("/tmp/r1-f1-mint"))
-    remote._owner_ready.set()
+    remote._runtime_ready.set()
     client = _RecordingClient()
     remote._client = client  # type: ignore[assignment]
 
@@ -898,14 +898,14 @@ async def test_a_takeover_target_without_the_seam_is_not_handed_an_id() -> None:
             calls.append((text, {"message_id": message_id}))
 
     legacy = _bare_remote(Path("/tmp/r1-f1-legacy"))
-    legacy._owner_ready.set()
+    legacy._runtime_ready.set()
     legacy._takeover_target = _LegacyTarget()  # type: ignore[assignment]
     await legacy.prompt("hello", message_id="an-id")
     assert calls == [("hello", {})], "a legacy target must not receive the keyword"
 
     calls.clear()
     modern = _bare_remote(Path("/tmp/r1-f1-modern"))
-    modern._owner_ready.set()
+    modern._runtime_ready.set()
     modern._takeover_target = _ModernTarget()  # type: ignore[assignment]
     await modern.prompt("hello", message_id="an-id")
     assert calls == [("hello", {"message_id": "an-id"})], "the id must reach a capable target"

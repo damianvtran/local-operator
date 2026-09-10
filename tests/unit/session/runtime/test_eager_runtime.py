@@ -487,7 +487,7 @@ async def test_an_engage_that_lands_after_dispose_does_not_bind(
         return None, None
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
-    monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", fake_find)
+    monkeypatch.setattr("local_operator.mobile.attach_client.find_runtime_record", fake_find)
 
     async def _never():
         raise AssertionError

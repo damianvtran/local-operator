@@ -789,7 +789,7 @@ async def run_switches(fixture: Fixture) -> list[dict[str, Any]]:
     profiler_early = cProfile.Profile() if ARGS.profile else None
     profiler_late = cProfile.Profile() if ARGS.profile else None
     with (
-        patch("local_operator.mobile.attach_client.find_owner_record", fixture.find),
+        patch("local_operator.mobile.attach_client.find_runtime_record", fixture.find),
         patch.object(OperatorApp, "_check_for_update", lambda self: None),
     ):
         async with app.run_test(size=(140, 40)) as pilot:
@@ -861,7 +861,7 @@ async def run_uptime(fixture: Fixture) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     app = OperatorApp(lambda: fixture.resume(fixture.ids[0]), resume_factory=fixture.resume)
     with (
-        patch("local_operator.mobile.attach_client.find_owner_record", fixture.find),
+        patch("local_operator.mobile.attach_client.find_runtime_record", fixture.find),
         patch.object(OperatorApp, "_check_for_update", lambda self: None),
     ):
         async with app.run_test(size=(140, 40)) as pilot:

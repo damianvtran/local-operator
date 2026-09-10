@@ -4804,13 +4804,13 @@ def main() -> int:
             # transcript another process owns is the corruption case. The
             # refusal IS the feature; no new flag.
             if getattr(args, "resume", None) is not None:
-                from local_operator.resume import live_session_owner, resolve_resume_id
+                from local_operator.resume import live_runtime_pid, resolve_resume_id
 
                 try:
                     exec_resume_id = resolve_resume_id(config_dir(), str(args.resume))
                 except Exception:
                     exec_resume_id = str(args.resume)
-                exec_owner = live_session_owner(config_dir(), exec_resume_id)
+                exec_owner = live_runtime_pid(config_dir(), exec_resume_id)
                 if exec_owner is not None and exec_owner != os.getpid():
                     print(
                         f"\033[31msession {exec_resume_id} is already open in "
@@ -5094,7 +5094,7 @@ def main() -> int:
                 import uuid as _uuid
 
                 from local_operator.harness.types import ModelSpec
-                from local_operator.mobile.attach_client import find_owner_record
+                from local_operator.mobile.attach_client import find_runtime_record
                 from local_operator.session.remote import RemoteSession
                 from local_operator.session_factory import resolve_hosting_model
 
@@ -5154,7 +5154,7 @@ def main() -> int:
                 record = None
                 if resume_id:
                     record, _owner = await asyncio.to_thread(
-                        find_owner_record, config_directory, session_id
+                        find_runtime_record, config_directory, session_id
                     )
                 degraded_reason = ""
                 if record is not None:

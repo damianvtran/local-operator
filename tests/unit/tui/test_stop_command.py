@@ -703,7 +703,7 @@ async def test_owner_local_stop_announces_to_viewers_before_teardown(
     async with app.run_test(size=(100, 30)) as pilot:
         await _booted(app, pilot, session)
         # `.start()`, not `start_in_process()`: those are the two branches of
-        # `announce_stop`, split on `_on_owner_loop()`, and the TUI hosts its
+        # `announce_stop`, split on `_on_runtime_loop()`, and the TUI hosts its
         # registrant in a THREAD. The in-process branch is a path production
         # never takes (round-4 MINOR-4).
         server = RuntimeServer(FakeHandle(), kind="tui")
@@ -1215,7 +1215,7 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
         monkeypatch.setattr(app, "_reset_ledger_for_swap", explode)
 
         monkeypatch.setattr(
-            "local_operator.mobile.attach_client.find_owner_record",
+            "local_operator.mobile.attach_client.find_runtime_record",
             lambda root, concrete: (remote_record, 90909),
         )
         monkeypatch.setattr("local_operator.session.remote.RemoteSession.connect", fake_connect)

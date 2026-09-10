@@ -2651,11 +2651,11 @@ async def create_session(
     # get the existing refusal: they have no full front end to host the facade.
     resume_id = getattr(args, "resume", None)
     if has_ui and resume_id is not None and not _force_local_takeover:
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.session.remote import RemoteSession
 
         root = Path(agent_registry.config_dir)
-        record, owner = await asyncio.to_thread(find_owner_record, root, str(resume_id))
+        record, owner = await asyncio.to_thread(find_runtime_record, root, str(resume_id))
         if owner is not None and owner != os.getpid():
             if record is None or record.protocol < 4:
                 raise ValueError(

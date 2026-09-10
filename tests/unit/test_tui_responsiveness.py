@@ -468,7 +468,7 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
     """The reconnect path parses the transcript in a thread, like connect.
 
     Round 3 found ``_replay_durable_suffix`` re-parsing the whole file
-    synchronously inside ``_recover_owner`` — a 60 MB transcript blocked the
+    synchronously inside ``_recover_runtime`` — a 60 MB transcript blocked the
     loop ~90 ms, past the 50 ms bar #300's connect fix established. The
     recovery now takes ONE threaded parse and feeds both the gap projection
     and the history bind from it, so this drives the actual production

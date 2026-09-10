@@ -9782,7 +9782,7 @@ async def test_switch_on_a_cold_viewer_says_nothing_switched() -> None:
 
 
 class _GaveUpRecoveryLabelSession(_ColdAsyncLabelSession):
-    """The facade shape ``_recover_owner``'s give-up exit actually produces.
+    """The facade shape ``_recover_runtime``'s give-up exit actually produces.
 
     CARRIES ``_ensure_bound``, and that attribute is the entire point of this
     stub. ``_needs_runtime_first`` routes a cold, non-recovering, non-stopped
@@ -9812,7 +9812,7 @@ class _GaveUpRecoveryLabelSession(_ColdAsyncLabelSession):
 async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> None:
     """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
-    The state ``RemoteSession._recover_owner`` reaches at
+    The state ``RemoteSession._recover_runtime`` reaches at
     ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
     exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
     So the cold ladder in ``_activate_resolved_model`` is never consulted from

@@ -435,7 +435,7 @@ def _claimed(directory: Path, now: float) -> bool:
     return _is_claimed(directory, now)
 
 
-def _lease_owner_alive(directory: Path) -> bool | None:
+def _lease_runtime_alive(directory: Path) -> bool | None:
     """Whether the ``.execution-lease`` names a live pid; ``None`` = no lease."""
     lease = directory / ".execution-lease"
     try:
@@ -484,7 +484,7 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
     try:
         if _claimed(directory, now):
             return "claimed by a live process"
-        if _lease_owner_alive(directory):
+        if _lease_runtime_alive(directory):
             return "leased by a live process"
         if _has_wake(config_dir, directory.name):
             return "has an armed wake"

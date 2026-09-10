@@ -111,7 +111,7 @@ async def test_visited_conversations_do_not_hold_their_runtimes_open(
     app = OperatorApp(lambda: resume("origin"), resume_factory=resume)
     try:
         with (
-            patch("local_operator.mobile.attach_client.find_owner_record", find),
+            patch("local_operator.mobile.attach_client.find_runtime_record", find),
             patch.object(OperatorApp, "_check_for_update", lambda self: None),
         ):
             async with app.run_test(size=(120, 36)) as pilot:
@@ -195,7 +195,7 @@ async def test_an_empty_conversation_visited_and_left_retires_its_runtime(
     app = OperatorApp(lambda: resume("origin"), resume_factory=resume)
     try:
         with (
-            patch("local_operator.mobile.attach_client.find_owner_record", find),
+            patch("local_operator.mobile.attach_client.find_runtime_record", find),
             patch.object(OperatorApp, "_check_for_update", lambda self: None),
         ):
             async with app.run_test(size=(120, 36)) as pilot:

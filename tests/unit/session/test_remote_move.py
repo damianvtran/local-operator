@@ -329,7 +329,7 @@ async def test_a_move_while_the_owner_is_recovering_is_REFUSED(cold_session) -> 
     ``route_shared_slash`` in the same file declines during recovery because a
     request/response command that blocks until a replacement owner arrives
     answers a question the user has stopped asking. A move that reported
-    success here would be worse than slow: ``_recover_owner`` binds the
+    success here would be worse than slow: ``_recover_runtime`` binds the
     successor at whatever cwd the owner's RECORD names, so the "cold move"
     is silently undone and the viewer works somewhere it said it had left
     (review MINOR-1).

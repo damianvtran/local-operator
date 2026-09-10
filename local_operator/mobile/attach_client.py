@@ -17,7 +17,7 @@ Design constraints baked in:
   loop (re-discover the owner, or become it through the normal resume
   factory) instead of showing a decision card, but each loop iteration still
   builds a FRESH client against a freshly discovered record.
-- **Identity over pid trust.** ``live_session_owner`` cannot probe pids on
+- **Identity over pid trust.** ``live_runtime_pid`` cannot probe pids on
   Windows, and a recycled pid anywhere defeats pid trust. After auth the
   registrant sends a full projection unprompted; the client requires that
   projection's ``session_id`` to match the one the user asked for before
@@ -644,7 +644,9 @@ def _decode_quietly(data_b64: str) -> bytes:
         return b""
 
 
-def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
+def find_runtime_record(
+    config_dir: Path, session_id: str
+) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
     Returns ``(record, owner_pid)``. The normal case matches a record whose
@@ -659,9 +661,9 @@ def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord 
     binary, registrant failed to start): the caller degrades gracefully.
     ``(None, None)`` means no owner at all.
     """
-    from local_operator.resume import live_session_owner
+    from local_operator.resume import live_runtime_pid
 
-    owner = live_session_owner(config_dir, session_id)
+    owner = live_runtime_pid(config_dir, session_id)
     if owner is None:
         return None, None
     best: SessionRecord | None = None
@@ -1429,7 +1431,7 @@ async def continue_command(
     # turn it started. A record must exist now (engage_runtime only returns
     # once one answered), so a miss here is a runtime that died in the gap and
     # is reported as the same timeout the caller already handles.
-    record, _ = await asyncio.to_thread(find_owner_record, config_dir, command.session_id)
+    record, _ = await asyncio.to_thread(find_runtime_record, config_dir, command.session_id)
     if record is None:
         raise TimeoutError("Couldn’t continue this conversation. Try again.")
     client = AttachClient(

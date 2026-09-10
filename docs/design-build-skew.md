@@ -280,7 +280,7 @@ incident.
 ### 4.2 C — version exchange over the existing record
 
 The discovery record **is** the version channel: an attach client reads it
-before dial (`find_owner_record`) and holds it at bind
+before dial (`find_runtime_record`) and holds it at bind
 (`RemoteSession._bind_to(record)`, remote.py:1002); the daemon reads records
 the same way. No frame change is needed — the "ready/hello" for a v5 attach
 client effectively arrives with the record. (The task suggested the frontend
