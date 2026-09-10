@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,6 +53,7 @@ from local_operator.harness.types import (
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import AssistantDelta
 from local_operator.tui.session_interaction import SessionInteraction
@@ -574,3 +576,137 @@ async def test_a_refresh_commit_does_not_mute_the_visible_conversation(tmp_path)
             assert (
                 source.parked_at is None
             ), "the visible conversation was given an idle deadline by a refresh"
+
+
+@pytest.mark.asyncio
+async def test_switching_away_stamps_the_deadline_the_idle_sweep_reaps_on(tmp_path) -> None:
+    """The switch-away must STAMP ``parked_at``, or the source leaks forever.
+
+    The mute and the stamp are one act -- both say "nobody is looking at this
+    any more" -- but only the mute was guarded. Deleting
+    ``outgoing.parked_at = time.monotonic()`` left every test in the tree green
+    (review round 3, MINOR-1), and the consequence is silent and delayed: the
+    sweep's first clause is ``parked_at is None -> continue``, so an unstamped
+    source is skipped on EVERY tick forever. That is the original runtime leak
+    this area exists to bound -- one attach socket and one runtime child per
+    conversation the user ever clicked -- and it would not surface for five
+    minutes, with nothing on screen to suggest it.
+
+    So the assertion is the CONSEQUENCE, not just the field. A stamp that is
+    written but never acted on would satisfy ``is not None`` while leaking just
+    as badly, so this drives the real ``_sweep_idle_sidebar_sources`` across the
+    real deadline and asserts the source is actually handed to a release
+    worker. ``time.monotonic`` is patched on the app module rather than slept
+    through, matching ``test_sidebar_idle_reap.py``: the seam reads the module
+    attribute per tick precisely so a test can compress the window.
+    """
+    async with (
+        _remote(tmp_path, "stamp-origin") as origin,
+        _remote(tmp_path, "stamp-first") as first,
+        _remote(tmp_path, "stamp-second") as second,
+    ):
+
+        async def factory():
+            return origin
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is origin:
+                    break
+
+            sources: dict[str, SessionInteraction] = {}
+            for remote in (first, second):
+                source = SessionInteraction(remote)
+                sources[remote.session_id] = source
+                app._sidebar_sources[remote.session_id] = source
+
+            async def lease(session_id, *, speculative=False):
+                source = sources[session_id]
+                source.preparations += 1
+                if source.controller is None:
+                    from local_operator.tui.events import EventController
+
+                    app._interactions[id(source.session)] = source
+                    source.controller = EventController(source.session, app)
+                    app._event_sources[source.controller] = source
+                    source.controller.set_parked(True)
+                    source.controller.subscribe()
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+
+            first_source = sources[first.session_id]
+
+            async def visit(session_id: str) -> None:
+                prepared = await app._prepare_sidebar_session(session_id)
+                ready = app._commit_sidebar_session(
+                    session_id, prepared, app._sidebar_navigation.generation
+                )
+                await _pump(pilot, 12)
+                if ready is not None and not ready.done():
+                    ready.cancel()
+
+            await visit(first.session_id)
+            # PRECONDITION: while it is the visible conversation it must carry
+            # NO deadline, or "was stamped on the way out" cannot be told from
+            # "was stamped all along" and the assertion below passes vacuously.
+            assert app._interaction is first_source, "the first switch did not commit"
+            assert first_source.parked_at is None, (
+                "the VISIBLE conversation already carries an idle deadline; the "
+                "stamp assertion below would not prove the switch-away wrote it"
+            )
+
+            await visit(second.session_id)
+
+            assert first_source.parked_at is not None, (
+                "switching away left `parked_at` unset: the idle sweep skips this "
+                "source on every tick forever, so its socket and runtime child "
+                "leak for the life of the process"
+            )
+
+            # The consequence, not just the field: drive the real sweep across
+            # the real deadline and require an actual release.
+            released: list[Any] = []
+
+            def capture_release(coro: Any, **kwargs: Any) -> Any:
+                # Close the coroutine rather than running it: the assertion is
+                # that the sweep HANDED the source to a release worker, and
+                # actually retiring it would tear down the live RemoteSession
+                # this test still owns. Mirrors `test_sidebar_idle_reap.py`.
+                released.append(coro)
+                coro.close()
+
+            app.run_worker = capture_release  # type: ignore[method-assign,assignment]
+            # `preparations` is decremented by the prepare path's `finally`; the
+            # releasable predicate refuses any source still counted as preparing,
+            # which would make a null result here mean nothing about the stamp.
+            first_source.preparations = 0
+            app._sidebar_presentations.pop(first.session_id, None)
+
+            # COMPRESS THE WINDOW, never move the clock. `test_sidebar_idle_
+            # reap.py` patches `time.monotonic` because it drives a bare app
+            # with no running loop; this test is inside `run_test`, so a live
+            # asyncio/Textual loop is scheduling on that same clock and jumping
+            # it forward by the window would fire every pending timer at once.
+            # The sweep re-reads `SIDEBAR_IDLE_RELEASE_S` per tick precisely so
+            # a test can inject the window instead (see its comment).
+            deadline = app_module.SIDEBAR_IDLE_RELEASE_S
+            try:
+                # Sub-window first: the sweep must SKIP it. Without this arm a
+                # release below would not prove the deadline was read at all.
+                app_module.SIDEBAR_IDLE_RELEASE_S = 10_000.0
+                app._sweep_idle_sidebar_sources()
+                assert not released, "a source parked under the window was released early"
+
+                app_module.SIDEBAR_IDLE_RELEASE_S = 0.0
+                app._sweep_idle_sidebar_sources()
+            finally:
+                app_module.SIDEBAR_IDLE_RELEASE_S = deadline
+
+            assert released, (
+                "the sweep did not release a source parked past the deadline: the "
+                "stamp the switch-away wrote is never acted on, which leaks the "
+                "viewer exactly as an absent stamp would"
+            )

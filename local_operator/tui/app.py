@@ -5496,6 +5496,20 @@ class OperatorApp(App[None]):
         ``try``/``finally`` and cannot be defeated by a future exception
         somewhere in the ~66 lines of widget work the commit does.
 
+        THE POST-SWAP WINDOW IS NOT A LEAK, stated here because it reads like
+        one. A raise after :meth:`_apply_sidebar_presentation` but before this
+        line leaves the INCOMING transcript mounted on screen while
+        ``self._interaction`` still points at the OUTGOING source, and that
+        incoming source is still parked from its birth in
+        :meth:`_lease_sidebar_source`. Both halves are correct. The outgoing
+        source is the one the app considers current, and it is left unmuted and
+        unstamped -- this line never ran -- so the conversation the app is
+        driving still paints. The incoming one stays muted because no commit
+        ever claimed it: the navigation failed, and the retry prepares it again
+        through the same seam that unparks it. Verified by injecting a raise in
+        exactly that window: current source unparked and painting deltas,
+        ``parked_at`` None, incoming still parked.
+
         ``parked_at`` moves with the mute for the same reason. It is the idle
         sweep's deadline (:meth:`_sweep_idle_sidebar_sources`), and stamping it
         on a session that is still current advertises a reapable source that
