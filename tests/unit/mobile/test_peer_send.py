@@ -670,9 +670,12 @@ def test_a_non_dict_sender_cannot_escape_the_handler(monkeypatch) -> None:
 # --- ``started`` gating on the DELIVERY path ---------------------------------
 #
 # ``resolve_peer_target`` excludes an unstarted session from a broadcast, but
-# an exact-address send still resolves to it. The spool-below is the belt-and-
-# braces that makes "no turn is ever driven into an unstarted session" hold even
-# for a caller that bypassed resolution.
+# an exact-address send still resolves to it. The quiet-mailbox dial below is
+# the belt-and-braces that makes "no turn is ever driven into an unstarted
+# session" hold even for a caller that bypassed resolution — a DIAL, not a
+# spool, because a live record means an open session whose only inbox
+# consumer is the runtime child's boot drain (Q1: a spooled note was never
+# read while that session stayed open).
 
 
 def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
@@ -690,20 +693,26 @@ def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
 
 
 @pytest.mark.asyncio
-async def test_an_unstarted_session_is_spooled_not_dialled(monkeypatch, tmp_path) -> None:
-    """mailbox/wake/steer all degrade to a quiet spool for an unstarted session;
-    the socket is never dialled, so no turn can be driven."""
+async def test_an_unstarted_live_session_is_dialled_quietly_never_spooled(
+    monkeypatch, tmp_path
+) -> None:
+    """An exact send to a LIVE unstarted session DIALS in the record-only
+    shape (mailbox + no wake) whatever the sender asked for, so the peer card
+    is painted and the row persisted for the already-open session without
+    driving a turn — and nothing is spooled, because no live session would
+    ever drain it."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     record = _unstarted_record()
-    dialed = False
+    dials: list[tuple[str, bool]] = []
 
-    async def _dial(*_a: Any, **_k: Any) -> str:
-        nonlocal dialed
-        dialed = True
-        return "delivered"
+    async def _dial(
+        rec: Any, *, text: str, mode: str, wake: bool, sender: Any
+    ) -> str:  # noqa: ANN401
+        assert rec is record
+        dials.append((mode, wake))
+        return "delivered to the mailbox (will be read on the next turn)"
 
     monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
-    from local_operator.session.runtime.inbox import drain_inbox
 
     for mode, wake in (("mailbox", False), ("mailbox", True), ("steer", False), ("steer", True)):
         detail = await peer_send.deliver_peer_message(
@@ -714,17 +723,24 @@ async def test_an_unstarted_session_is_spooled_not_dialled(monkeypatch, tmp_path
             wake=wake,
             sender={"pid": 1},
         )
-        assert detail == "spooled (session not started yet; will be read when it next opens)"
-    assert not dialed, "an unstarted session must never be dialled"
-    # Every spooled line is drained by the existing inbox path on first open.
-    directory = tmp_path / "sessions" / record.session_id
-    assert len(drain_inbox(directory)) == 4
+        assert (
+            detail == "delivered to the mailbox (session not started yet; no turn driven)"
+        ), f"mode={mode} wake={wake}"
+
+    # Every requested mode/wake combination degraded to the quiet dial: a
+    # turn-driving shape (wake=True or a steer) must never reach the socket.
+    assert dials == [("mailbox", False)] * 4
+    # And nothing was spooled: a live unstarted session would only drain an
+    # inbox row at a future cold open, which is exactly the invisibility the
+    # dial exists to avoid. The delivery touched the socket, not the file.
+    assert not (tmp_path / "sessions" / record.session_id).exists()
 
 
 @pytest.mark.asyncio
 async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
     """The new branch must not change the normal path: a started session is
-    dialled and its ack detail is returned verbatim."""
+    dialled with the sender's own mode/wake and its ack detail is returned
+    verbatim."""
     record = _unstarted_record()
     record.started = True
 
@@ -744,11 +760,12 @@ async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
     assert detail == "delivered and woke the session"
 
 
-def test_a_record_without_the_started_key_reads_as_unstarted() -> None:
-    """Mixed-version: a record an OLDER binary wrote has no ``started`` key, so
-    the dataclass default ``False`` applies — the safe direction (excluded from
-    broadcasts, spooled on an exact send) rather than risk driving a turn into a
-    fresh ``/new`` session. See ``SessionRecord.from_json``."""
+def test_a_record_without_the_started_key_reads_as_started() -> None:
+    """Mixed-version: a record an OLDER (pre-field) binary wrote has no
+    ``started`` key, and such a session had no composer gate — so the absent
+    key reads True and old-peer behaviour is preserved (broadcasts reach a
+    working old runtime; exact sends dial it). A CONSTRUCTED record keeps the
+    dataclass default False. See ``SessionRecord.from_json``."""
     record = registry.SessionRecord.from_json(
         {
             "pid": 4242,
@@ -761,4 +778,34 @@ def test_a_record_without_the_started_key_reads_as_unstarted() -> None:
             "control_key": "k",
         }
     )
-    assert record.started is False
+    assert record.started is True
+    # The dataclass default is untouched: a fresh this-binary record (the
+    # composer window) is still constructed unstarted.
+    assert (
+        registry.SessionRecord(
+            pid=4242,
+            kind="tui",
+            session_id="new-id",
+            conversation_name="new",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+        ).started
+        is False
+    )
+    # An explicit False on the wire still round-trips as False.
+    explicit = registry.SessionRecord.from_json(
+        {
+            "pid": 4242,
+            "kind": "tui",
+            "session_id": "fresh-wire",
+            "conversation_name": "fresh",
+            "cwd": "/tmp",
+            "model_label": "test/model",
+            "control_port": 1,
+            "control_key": "k",
+            "started": False,
+        }
+    )
+    assert explicit.started is False

@@ -169,11 +169,13 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
 
 
 def test_a_message_spooled_to_an_unstarted_session_drains_on_start(tmp_path: Path) -> None:
-    """The receive half of the unstarted-session spool: a message that
-    ``deliver_peer_message`` wrote to the inbox (because the target had not
-    started) is consumed by the ordinary drain the next time the session opens,
-    exactly like a message spooled to a COLD session. No new drain path is
-    introduced — this pins that the existing one is what serves the spool."""
+    """The receive half of the cold-session spool: a message that
+    ``deliver_peer_message`` wrote to the inbox (a session with NO live
+    record) is consumed by the ordinary drain the next time the session
+    opens. A live-but-unstarted target is no longer spooled at all — it is
+    quietly dialled — but rows written by an older sender, or before a
+    record existed, still land here, and this pins that the boot drain is
+    what serves them."""
     import asyncio
 
     from local_operator.session.runtime.process import _drain_inbox_into

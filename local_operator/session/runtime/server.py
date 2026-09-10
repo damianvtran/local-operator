@@ -1167,6 +1167,14 @@ class RuntimeServer:
                         conversation_name=seed.conversation_name,
                         model_label=seed.model_label,
                         cwd=seed.cwd,
+                        # Carried explicitly rather than trusted to survive on
+                        # the record object: ``self._record is
+                        # publisher.record`` today, so omitting it happens to
+                        # work — but that identity is an implementation
+                        # detail, and one rebuild or copied publish away from
+                        # silently dropping the bit and making a working
+                        # session broadcast-invisible.
+                        started=self._started,
                     )
             except Exception:  # noqa: BLE001 — a missed heartbeat is self-healing
                 logger.debug("runtime heartbeat failed", exc_info=True)
@@ -1647,18 +1655,36 @@ class RuntimeServer:
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
 
-        One-way, like the ``busy`` bit's dual: once a turn has run the flag
-        stays True for the life of the record, so a ``False`` -> ``True``
-        transition is the only change worth republishing for (a no-op when
-        already True, and a second ``True`` writes nothing).
+        One-way, and enforced: once a turn has run, ``False`` is IGNORED —
+        the caller is the per-turn hook in ``_run_turn_pipeline``, for which
+        ``False`` can only ever be a mistake (no code path un-runs a turn).
+        The only legitimate way the bit drops again is a session-identity
+        swap, which goes through :meth:`reset_record_started` instead.
         """
-        if self._started == started:
+        if not started or self._started:
             return
-        self._started = started
+        self._started = True
         # Write through to the record NOW, not only on the next republish: the
         # publisher serializes ``self._record``, and a caller reading the record
         # between here and the republish (or a republish that never comes, e.g.
         # no publisher yet) must already see the flipped bit.
+        self._record.started = True
+        self._republish()
+
+    def reset_record_started(self, started: bool) -> None:
+        """Re-seed the ``started`` bit for a NEW session identity.
+
+        NOT the turn-running signal :meth:`set_record_started` answers: a
+        TUI's registrant outlives ``/new`` and ``/resume``
+        (``TuiSessionHandle.rebind`` re-points it at the new session), so the
+        bit must be re-derived from the NEW session's own durable history
+        instead of inherited from the old one. A ``/new`` after a working
+        conversation must drop back to ``False`` — the composer window this
+        flag exists for — while a ``/resume`` must read ``True``, because that
+        conversation already ran turns and a peer wake could always reach it.
+        Both directions are legal HERE only because the identity changed.
+        """
+        self._started = started
         self._record.started = started
         self._republish()
 

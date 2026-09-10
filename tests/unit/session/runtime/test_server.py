@@ -1183,15 +1183,89 @@ class TestLiveStateReachesTheRecord:
     @pytest.mark.asyncio
     async def test_started_is_one_way_and_deduplicated(self) -> None:
         """The flag flips once and a repeat ``True`` (every turn after the
-        first) publishes nothing."""
+        first) publishes nothing — and a ``False`` after ``True`` is IGNORED:
+        no code path un-runs a turn, so honouring it would let a mistake
+        un-publish a working session. Dropping the bit is reserved for a
+        session-identity swap (``reset_record_started``)."""
         server = RuntimeServer(FakeHandle(), kind="daemon")
         publishes: list[bool] = []
         server._republish = lambda: publishes.append(server._started)  # type: ignore[method-assign]
 
         server.set_record_started(True)
         server.set_record_started(True)  # already started: must not republish
+        server.set_record_started(False)  # one-way: a started record ignores False
 
         assert publishes == [True]
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_reset_record_started_reseeds_for_a_new_identity(self) -> None:
+        """The rebind path: a ``/new`` drops the bit (the composer window
+        returns) and a ``/resume`` raises it without ever having run a turn
+        in THIS process — both legal only because the identity changed."""
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._started)  # type: ignore[method-assign]
+
+        server.set_record_started(True)  # the old conversation ran turns
+        server.reset_record_started(False)  # /new: fresh composer
+        assert server._started is False
+        assert server._record.started is False
+        server.reset_record_started(True)  # /resume of a session with history
+        assert server._started is True
+        assert server._record.started is True
+        # And the reset True is still one-way afterwards.
+        server.set_record_started(False)
+        assert server._started is True
+        assert publishes == [True, False, True]
+
+    @pytest.mark.asyncio
+    async def test_the_periodic_heartbeat_carries_started(self, tmp_path, monkeypatch) -> None:
+        """The timer heartbeat (the one that refreshes the record's IDENTITY
+        fields from the projection seed) must carry ``started`` explicitly.
+        Today the publish happens to survive on ``self._record is
+        publisher.record`` — an object-identity accident this pins away: a
+        rebuilt or copied record must not make a working session
+        broadcast-invisible one heartbeat later."""
+        import local_operator.session.runtime.server as server_module
+
+        monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", 0.05)
+        # Isolated config dir: ``start_in_process`` constructs a real
+        # RecordPublisher before the recorder replaces it, and its writes
+        # must not touch the operator's live registry.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        timer_calls: list[dict[str, object]] = []
+
+        class _Recorder:
+            # Stands in for RecordPublisher on the timer path only; its call
+            # is told apart from ``_republish``'s by the identity fields,
+            # which only the timer passes. ``close`` because teardown joins
+            # the publisher it finds.
+            def heartbeat(self, **kwargs: object) -> None:
+                if "session_id" in kwargs:
+                    timer_calls.append(dict(kwargs))
+
+            def close(self) -> None:
+                pass
+
+        # In-process (the mobile child's own mode) so the heartbeat task
+        # shares THIS loop and the test can observe its ticks directly.
+        await server.start_in_process()
+        try:
+            # Point the loop at the recorder, flip the bit, and let a tick (or
+            # several — the loop is a 50 ms timer) pass.
+            server._publisher = _Recorder()  # type: ignore[assignment]
+            server.set_record_started(True)
+            deadline = asyncio.get_running_loop().time() + 5
+            while not timer_calls and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.02)
+            assert timer_calls, "the periodic heartbeat never fired"
+            assert all(call.get("started") is True for call in timer_calls)
+        finally:
+            server.close()
+            await asyncio.sleep(0)
 
     @pytest.mark.asyncio
     async def test_started_survives_the_republish(self, tmp_path, monkeypatch) -> None:

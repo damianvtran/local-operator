@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import secrets
 from concurrent.futures import Future
@@ -96,12 +97,60 @@ def _decode_attachments(images: list[dict[str, str]] | None) -> dict[int, Any]:
     }
 
 
+def _has_durable_history(session: Any) -> bool:
+    """Whether this session's transcript already holds a conversation.
+
+    The re-seed signal for ``TuiSessionHandle.rebind``: a ``/resume`` lands
+    here with history (the conversation ran turns under an earlier process)
+    while a ``/new`` lands with an empty or not-yet-materialised transcript.
+    A MESSAGE row is the discriminator, not just any row: bookkeeping rows
+    (a persisted ``system_prefix`` epoch, a title) can precede the first
+    turn, and counting those would mark a fresh composer as started — the
+    exact window the flag exists to gate. Read from the FILE rather than
+    the in-memory index — the index is built by replay and is not
+    guaranteed populated at rebind time — and defensively: a session shape
+    with no readable transcript (a reduced host) answers False, the
+    conservative "unstarted" direction a first real turn immediately
+    corrects.
+    """
+    path = getattr(getattr(session, "transcript", None), "path", None)
+    if path is None:
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for row in handle:
+                try:
+                    entry = json.loads(row)
+                except ValueError:
+                    continue  # a torn line says nothing about history
+                if isinstance(entry, dict) and entry.get("type") == "message":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 class TuiSessionHandle(SessionHandle):
     def __init__(self, app: "OperatorApp") -> None:
         self._app = app
         session = app._session
         if session is None:
             raise RuntimeError("TUI session has not finished starting")
+        # Same wiring ``OwnedSessionHandle.__init__`` performs: the session
+        # flips the discovery record's ``started`` bit at the top of every
+        # real turn (``Session._run_turn_pipeline``), and the handle owns the
+        # publish. Without it a TUI-owned ``kind="tui"`` record would stay
+        # ``started=False`` for its whole life — permanently invisible to
+        # broadcasts and quietly mailbox-dialled on exact sends even after
+        # hundreds of turns. Guarded with ``hasattr`` so reduced hosts (test
+        # doubles standing in for a Session) keep constructing; the ignore
+        # matches the house pattern for duck-typed hooks
+        # (``RuntimeServer``'s ``handle._registrant`` assignment) — the
+        # protocol deliberately does not declare per-host hooks.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = (  # type: ignore[attr-defined]
+                self._publish_session_started
+            )
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,
@@ -227,6 +276,44 @@ class TuiSessionHandle(SessionHandle):
             self.subscribe(self._on_projection)
         if self._on_event is not None:
             self.subscribe_events(self._on_event)
+        # The registrant outlives the session object, so two pieces of
+        # per-session state must follow the swap. First, the started hook:
+        # the NEW session object must get it or (on a TUI-owned record) it
+        # would never flip. Second, the registrant's ``started`` bit itself,
+        # which cannot simply carry over — it describes the OLD conversation:
+        # a ``/new`` after a working conversation must drop back to ``False``
+        # (the composer window the flag exists for), while a ``/resume`` must
+        # read ``True`` because that conversation already ran turns and a
+        # peer wake could always reach it. Re-seeded from the NEW session's
+        # own durable history so both directions come out right.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = self._publish_session_started
+        registrant = getattr(self, "_registrant", None)
+        reseed = getattr(registrant, "reset_record_started", None)
+        if callable(reseed):
+            try:
+                reseed(_has_durable_history(session))
+            except Exception:  # noqa: BLE001 — a stale bit must never break /new
+                logger.debug("could not re-seed the started bit on rebind", exc_info=True)
+
+    def _publish_session_started(self) -> None:
+        """Flip the record's ``started`` bit once this session runs a real turn.
+
+        The ``kind="tui"`` twin of ``OwnedSessionHandle``'s hook, called from
+        ``Session._run_turn_pipeline`` at the top of every turn; the
+        registrant's ``set_record_started`` de-duplicates so only the first
+        turn publishes. Defensive in the same shape as the owned hook: a
+        reduced host with no registrant, or one predating the setter, is a
+        no-op rather than a failed turn.
+        """
+        registrant = getattr(self, "_registrant", None)
+        setter = getattr(registrant, "set_record_started", None)
+        if not callable(setter):
+            return
+        try:
+            setter(True)
+        except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
+            logger.debug("could not publish the started state", exc_info=True)
 
     # -- SessionHandle -----------------------------------------------------------
 

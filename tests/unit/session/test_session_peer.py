@@ -591,3 +591,58 @@ async def test_a_wake_peer_message_that_opens_the_first_turn_starts_the_session(
 
     assert len(marks) == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_first_real_turn_consumes_a_leftover_spool(tmp_path):
+    """Q1 belt-and-braces: rows already sitting in the session's inbox (written
+    by an older sender, or before a live record existed) are consumed by the
+    FIRST real turn itself — without anyone calling the boot drain. Before the
+    fix such rows stayed unread for as long as the session stayed open."""
+    from local_operator.session.runtime.inbox import (
+        InboxLine,
+        append_inbox,
+        drain_inbox,
+    )
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    # Two rows spooled for THIS session, written straight to its inbox the way
+    # ``deliver_peer_message``'s cold branch does. Delivery below must come
+    # from the turn pipeline, not from any direct drain call in this test.
+    directory = session._transcript.directory
+    assert append_inbox(
+        directory, InboxLine(text="leftover one", sender={"pid": 7}, mode="mailbox", written_at=0.0)
+    )
+    assert append_inbox(
+        directory, InboxLine(text="leftover two", sender={"pid": 7}, mode="mailbox", written_at=0.1)
+    )
+
+    await session.prompt("first real prompt")
+    await wait_for(lambda: bool(stream.requests))
+
+    # The spool is consumed by the turn, and both notes are durable peer rows
+    # in the transcript — delivered as quiet mailbox notes, no extra turn.
+    assert drain_inbox(directory) == []
+    delivered = sorted(
+        row.payload["details"]["body"] for row in _peer_rows(session) if row.payload["details"]
+    )
+    assert "leftover one" in delivered and "leftover two" in delivered
+    assert len(stream.requests) == 1, "a spool drain must not drive extra turns"
+
+    # Once per lifetime: a second turn does not re-attempt the drain (the
+    # flag short-circuits), and rows spooled LATER are left for the cold-open
+    # drain, exactly as before.
+    assert append_inbox(
+        directory, InboxLine(text="later note", sender={"pid": 7}, mode="mailbox", written_at=0.2)
+    )
+    await session.prompt("second prompt")
+    await wait_for(lambda: len(stream.requests) == 2)
+    assert [line.text for line in drain_inbox(directory)] == ["later note"]
+    await session.dispose()
