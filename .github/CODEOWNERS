@@ -10,17 +10,54 @@
 # that cannot be satisfied is worse than no control: it produces no review
 # while training everyone to override it.
 #
-# Keep this list to people who can actually approve. A handle that is not a
-# collaborator with write access is silently ignored by GitHub -- the line
-# looks correct and matches nobody, which is the same failure this file
-# exists to fix. Verify a new entry against
-# `gh api repos/damianvtran/local-operator/collaborators`; both entries below
-# were confirmed that way (`damianvtran` admin, `bbqben` write) and against
-# GitHub's own CODEOWNERS validator, which reports no errors for this file.
+# Keep this list to people who can actually approve. GitHub's documented rule
+# ("About code owners"): "The people you choose as code owners must have write
+# permissions for the repository." A handle that is not a collaborator with
+# write access is silently ignored -- the line looks correct and matches
+# nobody, which is the same failure this file exists to fix. Verify an entry
+# against `gh api repos/damianvtran/local-operator/collaborators`:
+# `damianvtran` (admin) and `bbqben` (write) were confirmed that way, and the
+# syntax against GitHub's own CODEOWNERS validator
+# (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
+# validates the default branch; the pre-change baseline on `main` returned an
+# empty error list). The three owners added 2026-09-10 were NOT yet in that
+# collaborators list at the time of writing -- see the pending-invite caveat
+# below.
+#
+# PENDING-INVITE CAVEAT -- `SanaKetabchi`, `olafagbemi` and `sherman-tsui`
+# were added as owners on 2026-09-10 by explicit operator decision, and on the
+# same date (15:54 UTC) each was invited as a collaborator with `write`
+# permission: invitation ids 332543898 (SanaKetabchi), 332543900 (olafagbemi),
+# 332543903 (sherman-tsui). The invitations are PENDING as of 2026-09-10.
+# Until each person accepts, they are not collaborators, and per the
+# documented rule above GitHub silently ignores their handles here -- the
+# exact failure mode this file exists to fix, knowingly accepted for a
+# bounded window. It does not
+# recreate the 2026-09-05 unsatisfiable-control state: the `*` rule still
+# resolves through `damianvtran` and `bbqben`, who are active write-access
+# collaborators, and an approval from ANY listed owner satisfies the
+# requirement, so `main`'s code-owner review stays satisfiable throughout.
+# If these three handles ever appear not to resolve, the fix is acceptance of
+# the invite -- or re-invitation, since GitHub invitations expire seven days
+# after creation (2026-09-17 for these) -- NOT editing this file. Re-check
+# state with `gh api repos/damianvtran/local-operator/collaborators` and
+# `gh api repos/damianvtran/local-operator/invitations`.
+#
+# Handle verification for the three additions, in the same evidence-first
+# spirit: all three are listed together in
+# `pergamon-labs/pergamon-infra-services/.github/CODEOWNERS`; the
+# `pergamon-labs/pergamon-developer-platform` Helm chart values.yaml carries
+# their GitHub user-ids (SanaKetabchi=U_kgDOBypusA,
+# olafagbemi=MDQ6VXNlcjU4NDUzMTQy, sherman-tsui=MDQ6VXNlcjgzOTMyMTc4), which
+# pin the accounts behind the handles; and `gh api users/<login>` returns
+# matching display names for SanaKetabchi and olafagbemi.
 #
 # `sebkow` and `jcobhams` also hold write access but are deliberately NOT
 # owners: ownership here means "can approve on behalf of the project", which
-# is a narrower thing than commit access.
+# is a narrower thing than commit access. That principle is unchanged -- the
+# 2026-09-10 additions widen the approving set by explicit operator decision,
+# not as a side effect of commit access; `sebkow` and `jcobhams` remain
+# non-owners because no such decision covers them.
 
 # Default owners for everything in the repository.
-* @damianvtran @bbqben
+* @damianvtran @bbqben @SanaKetabchi @olafagbemi @sherman-tsui
