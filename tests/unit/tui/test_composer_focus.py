@@ -385,9 +385,7 @@ CLAIMANTS = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name,opener,expected", CLAIMANTS, ids=[n for n, _, _ in CLAIMANTS]
-)
+@pytest.mark.parametrize("name,opener,expected", CLAIMANTS, ids=[n for n, _, _ in CLAIMANTS])
 async def test_focus_is_claimed_covers_every_overlay(
     name: str, opener: Any, expected: bool, tmp_path: Path
 ) -> None:
@@ -496,17 +494,34 @@ async def test_the_boot_layout_gutter_returns_focus() -> None:
 # fix missing.
 
 
-def _aborts(app: OperatorApp) -> list[str]:
-    """The abort reasons the session recorded, for "Esc did not stop the turn".
+def _session_of(app: OperatorApp) -> FakeSession:
+    """The attached session, narrowed to the fake these tests actually install.
 
-    A narrowed accessor rather than ``app._session.aborts`` at each call site:
-    ``_session`` is optional on the app, and six inline ``type: ignore``
-    comments for the same known-attached fake is noise the reader has to
-    re-check every time.
+    ``OperatorApp._session`` is typed ``SessionProtocol | None``, and the two
+    attributes these tests read — ``aborts`` and ``streaming`` — are the
+    FAKE's recording surface, not part of that protocol. Reading them off the
+    protocol type is three pyright errors (``reportAttributeAccessIssue``),
+    which is how this file first reached CI red while passing locally in a
+    venv with no pyright installed.
+
+    Narrowed once, here, rather than with an inline ``type: ignore`` at each
+    call site: every app in this module is built by ``_app()`` from a
+    ``FakeSession``, so the cast states a fact the module guarantees instead
+    of suppressing a warning six times. ``assert isinstance`` rather than
+    ``cast`` so a future factory change fails loudly at the premise rather
+    than silently mistyping the rest of the test.
     """
     session = app._session
     assert session is not None, "premise: the session is attached"
-    return session.aborts
+    assert isinstance(
+        session, FakeSession
+    ), f"premise: these tests install a FakeSession, got {type(session).__name__}"
+    return session
+
+
+def _aborts(app: OperatorApp) -> list[str]:
+    """The abort reasons the session recorded, for "Esc did not stop the turn"."""
+    return _session_of(app).aborts
 
 
 @pytest.mark.asyncio
@@ -600,8 +615,7 @@ async def test_esc_returns_focus_to_the_composer_during_a_live_turn() -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         card = await _settled_with_a_card(pilot, app)
         editor = app.query_one(Editor)
-        session = app._session
-        assert session is not None, "premise: the session is attached"
+        session = _session_of(app)
         session.streaming = True
         await pilot.pause()
         assert session.is_streaming, "premise: a turn is running"
@@ -655,9 +669,9 @@ async def test_esc_does_not_steal_focus_from_a_live_prompt(tmp_path: Path) -> No
             await pilot.pause()
         picker = app._ask_screen
         assert picker is not None, "premise: the picker is up"
-        assert app._prompt_wants_the_keyboard(picker), (
-            "premise: a multi-select has no routed keys, so it holds the caret"
-        )
+        assert app._prompt_wants_the_keyboard(
+            picker
+        ), "premise: a multi-select has no routed keys, so it holds the caret"
         before = app.focused
         assert not isinstance(before, Editor), "premise: the picker took focus, not the composer"
 
@@ -748,9 +762,9 @@ async def test_a_dock_click_does_not_steal_focus_from_a_live_prompt() -> None:
             await pilot.click(offset=_clamped(app, site))
             await pilot.pause()
 
-            assert app.focused is not editor, (
-                f"clicking {name} of a live question moved the keyboard to the composer"
-            )
+            assert (
+                app.focused is not editor
+            ), f"clicking {name} of a live question moved the keyboard to the composer"
             assert not picker.settled, f"clicking {name} answered the question"
 
         # And the consequence the user feels: the answer key still reaches the
@@ -764,9 +778,7 @@ async def test_a_dock_click_does_not_steal_focus_from_a_live_prompt() -> None:
         await pilot.press("space")
         await pilot.pause()
 
-        assert editor.text == "", (
-            f"the answer key landed in the composer: {editor.text!r}"
-        )
+        assert editor.text == "", f"the answer key landed in the composer: {editor.text!r}"
 
 
 @pytest.mark.asyncio
@@ -1051,8 +1063,15 @@ async def test_the_composer_is_focused_after_any_ordinary_gesture() -> None:
         # 4. The chevron — the affordance that means "focused" (Slice A).
         card.focus()
         await pilot.pause()
-        await pilot.click(offset=_clamped(app, (app.query_one("#input-shell").region.x + 1,
-                                                app.query_one("#input-shell").region.y + 1)))
+        await pilot.click(
+            offset=_clamped(
+                app,
+                (
+                    app.query_one("#input-shell").region.x + 1,
+                    app.query_one("#input-shell").region.y + 1,
+                ),
+            )
+        )
         await pilot.pause()
         home("a click on the chevron")
 

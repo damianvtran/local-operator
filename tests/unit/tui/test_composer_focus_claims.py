@@ -168,9 +168,9 @@ async def test_clicking_the_approval_card_itself_leaves_it_focused() -> None:
         for _ in range(3):
             await pilot.pause()
 
-        assert not app.query_one(Editor).has_focus, (
-            "clicking ON the approval card moved focus to the composer"
-        )
+        assert not app.query_one(
+            Editor
+        ).has_focus, "clicking ON the approval card moved focus to the composer"
 
 
 @pytest.mark.asyncio
@@ -226,9 +226,9 @@ async def test_a_dock_click_does_not_steal_focus_from_the_sidebar() -> None:
         for _ in range(3):
             await pilot.pause()
 
-        assert app._session_sidebar.has_focus, (
-            "a dock click took the keyboard off the focused sidebar"
-        )
+        assert (
+            app._session_sidebar.has_focus
+        ), "a dock click took the keyboard off the focused sidebar"
 
 
 @pytest.mark.asyncio
@@ -279,9 +279,9 @@ async def test_a_blank_transcript_click_does_not_steal_focus_from_a_live_prompt(
         for _ in range(3):
             await pilot.pause()
 
-        assert not editor.has_focus, (
-            "a click on blank transcript took the keyboard off a live multi-select"
-        )
+        assert (
+            not editor.has_focus
+        ), "a click on blank transcript took the keyboard off a live multi-select"
 
 
 @pytest.mark.asyncio
@@ -390,8 +390,7 @@ async def test_the_guard_holds_when_both_events_land_in_one_drain() -> None:
             "a live multi-select"
         )
         assert editor.text == "", (
-            f"the multi-select's `space` answer was typed into the composer: "
-            f"{editor.text!r}"
+            f"the multi-select's `space` answer was typed into the composer: " f"{editor.text!r}"
         )
 
         # And the reverse order, which exercises the other interleaving.
@@ -403,6 +402,6 @@ async def test_the_guard_holds_when_both_events_land_in_one_drain() -> None:
             "a keypress in the same drain as a dock click took the keyboard off "
             "a live multi-select"
         )
-        assert not picker.settled or picker.is_attached, (
-            "the picker was settled by keys it never received"
-        )
+        assert (
+            not picker.settled or picker.is_attached
+        ), "the picker was settled by keys it never received"

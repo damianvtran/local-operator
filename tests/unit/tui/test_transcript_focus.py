@@ -344,12 +344,10 @@ async def test_a_notice_losing_interactivity_does_not_land_focus_off_screen() ->
 
         landed = app.focused
         assert landed is not None, "focus was dropped entirely"
-        assert landed is app.query_one(TranscriptView), (
-            f"focus landed on {type(landed).__name__}"
-        )
-        assert app.screen.region.contains_region(landed.region), (
-            f"{type(landed).__name__} at {landed.region} is outside {app.screen.region}"
-        )
+        assert landed is app.query_one(TranscriptView), f"focus landed on {type(landed).__name__}"
+        assert app.screen.region.contains_region(
+            landed.region
+        ), f"{type(landed).__name__} at {landed.region} is outside {app.screen.region}"
 
         # And the landing place is not a keystroke sink: the reader's next
         # character reaches the composer instead of vanishing into the
