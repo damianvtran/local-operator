@@ -338,8 +338,15 @@ def register_group(
     grp_leader_start = _owner_start_token(pgid)
     entry = {
         "pgid": pgid,
-        "owner_pid": pid,
-        "owner_start": owner_start,
+        # Stage-4 rename of the ledger identity keys to ``runtime_pid`` /
+        # ``runtime_start``: the sweep dual-reads them with the old
+        # ``owner_pid``/``owner_start`` keys (``_entry_owner_identity``), and
+        # ledgers are per-process and short-lived, so this write-new-only +
+        # dual-read-for-one-release shape is ample (stage4-owner-retirement
+        # §3). TODO: stop reading the old keys in the release that follows
+        # this change.
+        "runtime_pid": pid,
+        "runtime_start": owner_start,
         "grp_leader_start": grp_leader_start,
         "cmd": cmd[:_CMD_LOG_CHARS],
         # Diagnostics ONLY. BANNED as a decision input (§2 of the design): a
@@ -656,10 +663,12 @@ def sweep_orphan_groups(
     leader identity still matches, then unlinks the ledger. A LIVE owner's
     ledger is never touched — that is the live-trainer guarantee.
 
-    OWNER identity is two-factor (``owner_pid`` + ``owner_start``), because a
-    bare pid is forgeable: after the OS recycles a dead ``lop``'s pid onto an
-    unrelated live process, a bare-pid probe reads "alive" and the sweep would
-    refuse to reap a genuinely-orphaned group forever. The truth table:
+    OWNER identity is two-factor (``runtime_pid`` + ``runtime_start``; the
+    pre-rename ``owner_pid``/``owner_start`` keys are still accepted, see
+    ``_entry_owner_identity``), because a bare pid is forgeable: after the OS
+    recycles a dead ``lop``'s pid onto an unrelated live process, a bare-pid
+    probe reads "alive" and the sweep would refuse to reap a
+    genuinely-orphaned group forever. The truth table:
 
         _process_alive(owner_pid) | start token | verdict
         --------------------------|-------------|--------------------------------
@@ -710,11 +719,11 @@ def sweep_orphan_groups(
         # skip — but that only happens if a stale ledger from a PRIOR process
         # reused our pid, which the start-token check below still resolves
         # correctly.
-        owner_pid = entries[0].get("owner_pid")
-        owner_start = entries[0].get("owner_start")
-        if not isinstance(owner_pid, int) or not isinstance(owner_start, str):
+        identity = _entry_owner_identity(entries[0])
+        if identity is None:
             errors += 1
             continue
+        owner_pid, owner_start = identity
         if owner_pid == me:
             # Never reap groups attributed to the sweeping process itself; the
             # soft-death path owns those.
@@ -791,6 +800,33 @@ def _sweep_orphan_locks(groups_dir: Path) -> int:
             continue
         _safe_unlink(lock)
     return errors
+
+
+def _entry_owner_identity(entry: dict[str, object]) -> tuple[int, str] | None:
+    """Resolve an entry's two-factor owner identity, tolerating old ledgers.
+
+    The Stage-4 owner->runtime rename changed the ledger keys written by
+    ``register_group`` to ``runtime_pid``/``runtime_start``, but a ledger
+    written by an older binary still carries ``owner_pid``/``owner_start``. A
+    sweep that read only the new keys would fail the type check on those old
+    ledgers, count them as errors, and leave them in place forever — meaning a
+    hard-killed older build's groups are never reaped, the exact bug class
+    this module exists to close (stage4-owner-retirement §3). Dual-read is
+    safe because ledgers are per-process and short-lived, so one release of
+    it is ample. New key wins when both are present; ``None`` when neither
+    yields a well-typed pair.
+
+    TODO: drop the old-key fallback in the release that follows this change.
+    """
+    pid = entry.get("runtime_pid")
+    start = entry.get("runtime_start")
+    if isinstance(pid, int) and isinstance(start, str):
+        return pid, start
+    old_pid = entry.get("owner_pid")
+    old_start = entry.get("owner_start")
+    if isinstance(old_pid, int) and isinstance(old_start, str):
+        return old_pid, old_start
+    return None
 
 
 def _owner_is_dead(owner_pid: int, owner_start: str) -> bool | None:

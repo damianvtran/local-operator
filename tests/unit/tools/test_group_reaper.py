@@ -134,7 +134,13 @@ def test_register_writes_owner_keyed_ledger(tmp_path):
     assert files[0].name.startswith(f"{pid}-")
     entry = json.loads(files[0].read_text().splitlines()[0])
     assert entry["pgid"] == 4242
-    assert entry["owner_pid"] == pid
+    # Stage-4 rename: new ledgers carry the runtime_* identity keys only; the
+    # old owner_* keys must NOT be written any more (the sweep dual-reads them
+    # for one release — see _entry_owner_identity).
+    assert entry["runtime_pid"] == pid
+    assert isinstance(entry["runtime_start"], str)
+    assert "owner_pid" not in entry
+    assert "owner_start" not in entry
     assert entry["cmd"] == "pyright ."
     assert "ts" in entry  # written for diagnostics
 
@@ -167,6 +173,81 @@ def test_register_appends_multiple_groups_one_file(tmp_path):
     assert len(files) == 1
     lines = files[0].read_text().splitlines()
     assert {json.loads(x)["pgid"] for x in lines} == {11, 22}
+
+
+# --------------------------------------------------------------------------- #
+# dual-read of the pre-rename owner_* ledger keys (stage4-owner-retirement §3)
+# --------------------------------------------------------------------------- #
+def test_entry_owner_identity_prefers_new_keys():
+    """When both key spellings exist, the runtime_* pair wins."""
+    entry = {
+        "runtime_pid": 111,
+        "runtime_start": "new-token",
+        "owner_pid": 222,
+        "owner_start": "old-token",
+    }
+    assert group_reaper._entry_owner_identity(entry) == (111, "new-token")
+
+
+def test_entry_owner_identity_falls_back_to_old_keys():
+    """An entry from an older binary resolves via owner_pid/owner_start."""
+    entry = {"owner_pid": 222, "owner_start": "old-token"}
+    assert group_reaper._entry_owner_identity(entry) == (222, "old-token")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},  # neither spelling present
+        {"runtime_pid": "not-an-int", "runtime_start": "tok"},  # wrong type
+        {"runtime_pid": 111},  # missing start token
+        {"owner_pid": 222},  # old key present but token missing
+    ],
+)
+def test_entry_owner_identity_rejects_malformed(entry):
+    """A malformed identity stays None in either spelling -> sweep errors out."""
+    assert group_reaper._entry_owner_identity(entry) is None
+
+
+def test_sweep_reaps_ledger_written_with_old_owner_keys(tmp_path):
+    """A pre-rename ledger (owner_* keys only) is still reaped on owner death.
+
+    This is the compat the dual-read exists for: without it a ledger written
+    by an older binary would fail the identity check and be left in place
+    forever, so a hard-killed older build's groups would leak (stage4-owner-
+    retirement §3). Remove together with the fallback when the old keys are
+    dropped after the release that follows this change.
+    """
+    proc, pgid = _spawn_group()
+    try:
+        leader_start = group_reaper._owner_start_token(pgid)
+        dead = subprocess.Popen(["/bin/sh", "-c", "true"])
+        dead.wait()
+        _write_ledger(
+            tmp_path,
+            dead.pid,
+            "old-owner-token",
+            [
+                {
+                    "pgid": pgid,
+                    # Deliberately the PRE-RENAME keys only, as an older
+                    # binary's register_group wrote them.
+                    "owner_pid": dead.pid,
+                    "owner_start": "old-owner-token",
+                    "grp_leader_start": leader_start,
+                    "cmd": "sleep 600",
+                    "ts": 1.0,
+                }
+            ],
+        )
+        assert _alive(pgid)
+        result = sweep_orphan_groups(tmp_path)
+        assert result.reaped_groups == 1
+        assert _reaped(proc, pgid)
+        assert list(_groups_dir(tmp_path).glob("*.jsonl")) == []
+    finally:
+        _reap_group(pgid)
+        proc.wait(timeout=2)
 
 
 def test_unregister_drops_one_line_keeps_others(tmp_path):
