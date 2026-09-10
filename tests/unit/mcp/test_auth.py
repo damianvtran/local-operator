@@ -22,13 +22,16 @@ from local_operator.mcp.auth import (
     DEFAULT_CALLBACK_PATH,
     DEFAULT_CALLBACK_PORT,
     MCP_OAUTH_PROVIDER,
+    McpCredentialDeleteError,
     McpTokenStorage,
     StructuralAuthStore,
+    clear_for_reauth,
     mcp_logged_out_servers,
     mcp_logout_server,
     mcp_oauth_credential_id,
     oauth_server_names,
     parse_oauth_callback_input,
+    payload_carries_grant,
     wire_oauth_auth,
 )
 from local_operator.mcp.config import (
@@ -267,10 +270,16 @@ class TestMcpTokenStorage:
         storage._store = None
         assert storage.clear() is False
 
-    def test_clear_when_the_delete_itself_fails_reports_false_and_keeps_the_row(self) -> None:
-        """The case the reauth safety depends on: a FAILED delete must never
-        be reported as a successful logout — clear() is False and the row
-        survives, so the caller refuses to run a "fresh" grant on top of it."""
+    def test_clear_when_the_delete_itself_fails_raises_and_keeps_the_row(self) -> None:
+        """The case the reauth safety depends on: a FAILED delete must never be
+        reported as a successful logout, NOR as the benign "nothing was stored".
+
+        It used to return False for both, and that single falsey channel is
+        what let ``mcp reauth`` read a delete that raised as "the row was
+        already gone" and log in over the surviving credential. Raising gives
+        the two outcomes different channels, so no caller can conflate them by
+        accident and none has to string-match a message to tell them apart.
+        """
 
         class RefusingStore(FakeAuthStore):
             def delete_credential(self, credential_id: int) -> None:
@@ -279,8 +288,30 @@ class TestMcpTokenStorage:
         store = RefusingStore()
         storage = McpTokenStorage("https://srv.example/mcp", store)
         storage._write({"tokens": {"access_token": "a"}})
-        assert storage.clear() is False
+        with pytest.raises(McpCredentialDeleteError, match="still in place"):
+            storage.clear()
+        # The row survives — which is the whole reason the failure is loud.
         assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 1
+
+    def test_clear_distinguishes_an_absent_row_from_a_failed_delete(self) -> None:
+        """Both used to be ``False``; only one means "nothing is stored here".
+
+        The distinction is the fix, so it gets a test that fails if the two
+        ever share a channel again — the observation gap that let a widened
+        fall-through ship past a green suite.
+        """
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        absent = McpTokenStorage("https://srv.example/mcp", FakeAuthStore())
+        assert absent.clear() is False  # no row: a reportable no-op
+
+        blocked = McpTokenStorage("https://srv.example/mcp", RefusingStore())
+        blocked._write({"tokens": {"access_token": "a"}})
+        with pytest.raises(McpCredentialDeleteError):
+            blocked.clear()  # a row that is still there: never a no-op
 
 
 class TestRealAuthStoreConformance:
@@ -402,6 +433,31 @@ class TestLogoutHelpers:
         error = mcp_logout_server("linear", Path("/anywhere"), FakeAuthStore())
         assert error is not None and "nothing to log out of" in error
 
+    def test_logout_surfaces_a_failed_delete_as_a_raise_not_an_error_string(
+        self, monkeypatch
+    ) -> None:
+        """A failed delete must not join the "nothing stored" error channel.
+
+        ``mcp_logout_server`` reports its three benign failures as strings, so
+        a caller branching on ``error is not None`` cannot distinguish them —
+        which is why the row-survives case leaves through a different door.
+        """
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (self._configs(), {}),
+        )
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        store = RefusingStore()
+        McpTokenStorage("https://mcp.linear.app/mcp", store)._write(
+            {"tokens": {"access_token": "a"}}
+        )
+        with pytest.raises(McpCredentialDeleteError):
+            mcp_logout_server("linear", Path("/anywhere"), store)
+
     def test_logout_of_unknown_or_non_oauth_server_is_an_error(self, monkeypatch) -> None:
         """A name the config does not know is a typo the user wants told
         about — silently succeeding would claim a credential was removed."""
@@ -412,6 +468,57 @@ class TestLogoutHelpers:
         assert "not configured" in (mcp_logout_server("linar", Path("/anywhere")) or "")
         not_oauth = mcp_logout_server("stdio", Path("/anywhere")) or ""
         assert "does not use OAuth" in not_oauth
+
+    def test_deleting_a_url_only_grant_preserves_what_it_proved(self, monkeypatch) -> None:
+        """The ``/mcp reauth`` regression: the delete must not erase capability.
+
+        A Codex-imported config is url-only, so its stored grant is its ONLY
+        evidence under ``server_is_oauth_capable``. Reauth deletes that row and
+        immediately reconnects, and the reconnect re-asks the same question:
+        without this transfer it answered False, attached no OAuth provider,
+        and the connect went out unauthenticated and took a 401.
+        """
+        url = "https://codex.example/mcp"
+        auth_mod.OAUTH_CHALLENGES.clear()
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: ({"codex": MCPHttpServerConfig(url=url)}, {}),
+        )
+        store = FakeAuthStore()
+        McpTokenStorage(url, store)._write({"tokens": {"access_token": "a"}})
+
+        assert mcp_logout_server("codex", Path("/anywhere"), store) is None
+        assert auth_mod.server_has_stored_grant(url, store) is False
+        # The row is gone, but the server is still known to take OAuth.
+        assert auth_mod.server_is_oauth_capable(MCPHttpServerConfig(url=url), store) is True
+
+    def test_deleting_a_registration_only_row_records_no_challenge(self, monkeypatch) -> None:
+        """Only a grant we actually HELD is evidence of a live challenge.
+
+        The row deleted here carries just a dynamic client registration — the
+        artifact the SDK writes when it merely DISCOVERS a server, before anyone
+        authorizes (see ``server_has_stored_grant``). Deleting it proves nothing
+        was ever issued, so recording an observed 401 for that URL would put a
+        fact we never established into an observation-only ledger. The config's
+        explicit ``auth.type: oauth`` is what keeps this server capable, and it
+        needs no ledger entry to stay that way.
+        """
+        url = "https://declared.example/mcp"
+        auth_mod.OAUTH_CHALLENGES.clear()
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: ({"declared": cfg}, {}),
+        )
+        store = FakeAuthStore()
+        McpTokenStorage(url, store).seed_client_info("client-1")
+        assert auth_mod.server_has_stored_grant(url, store) is False
+
+        # The delete succeeds: a registration row exists and is removed.
+        assert mcp_logout_server("declared", Path("/anywhere"), store) is None
+        assert url not in auth_mod.OAUTH_CHALLENGES
+        # Still capable — on the declared block alone, as it should be.
+        assert auth_mod.server_is_oauth_capable(cfg, store) is True
 
     def test_logged_out_servers_keys_by_url(self) -> None:
         """The picker list is keyed by server NAME but the store by URL; the
@@ -434,6 +541,182 @@ class TestLogoutHelpers:
                 raise RuntimeError("database is locked")
 
         assert mcp_logged_out_servers(ExplodingStore()) is None
+
+
+class TestClearForReauth:
+    """``clear_for_reauth`` — the ONE gate both reauth surfaces ask.
+
+    Reauth needs a weaker precondition than logout ("nothing is left for the
+    coming grant to reuse", not "something was deleted") and a stricter one
+    than nothing at all. Every outcome below used to be answered differently by
+    the CLI arm and the TUI arm, or collapsed into a single error channel.
+    """
+
+    URL = "https://codex.example/mcp"
+
+    def _pin(self, monkeypatch, store, cfg=None) -> None:
+        """Point config discovery and store resolution at the fakes.
+
+        ``_resolve_store`` is stubbed the way the real one behaves — an
+        explicitly passed store wins, ``None`` falls back — because the gate
+        re-reads the store to confirm the row is gone, and a stub that ignored
+        its argument would silently redirect an injected store.
+        """
+        cfg = cfg if cfg is not None else MCPHttpServerConfig(url=self.URL)
+        auth_mod.OAUTH_CHALLENGES.clear()
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: ({"codex": cfg}, {}),
+        )
+        monkeypatch.setattr(auth_mod, "_resolve_store", lambda given: given or store)
+
+    def test_nothing_stored_lets_the_login_proceed(self, monkeypatch) -> None:
+        """The PR's bug: a url-only Codex import with a cold ledger and no row
+        satisfies none of ``server_is_oauth_capable``'s evidence kinds, so the
+        removal declines — but a no-op delete leaves reauth's precondition
+        already met, so it must fall through rather than dead-end."""
+        store = FakeAuthStore()
+        self._pin(monkeypatch, store)
+        removed: list[str] = []
+        assert clear_for_reauth("codex", Path("/anywhere"), store, removed) is None
+        # Nothing was deleted, so the cancellation notice must not claim it was.
+        assert removed == []
+
+    def test_a_real_grant_is_deleted_and_reported_as_removed(self, monkeypatch) -> None:
+        store = FakeAuthStore()
+        McpTokenStorage(self.URL, store)._write({"tokens": {"access_token": "a"}})
+        self._pin(monkeypatch, store)
+        removed: list[str] = []
+        assert clear_for_reauth("codex", Path("/anywhere"), store, removed) is None
+        assert store.list_credentials(MCP_OAUTH_PROVIDER) == []
+        assert removed == ["codex"]
+
+    def test_a_failed_delete_refuses_loudly(self, monkeypatch) -> None:
+        """THE regression this round exists for.
+
+        A delete that raised used to be indistinguishable from "nothing was
+        stored", so reauth fell through and logged in over a credential still
+        on disk: the SDK reused the token and ``client_info``, no consent
+        screen appeared, and reauth exited 0 for the account switch that
+        silently did not happen. Reachable via ``database is locked`` from a
+        concurrent writer.
+        """
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        store = RefusingStore()
+        McpTokenStorage(self.URL, store)._write({"tokens": {"access_token": "OLD"}})
+        self._pin(monkeypatch, store)
+        removed: list[str] = []
+        error = clear_for_reauth("codex", Path("/anywhere"), store, removed)
+        assert error is not None and "still in place" in error
+        # The row survives — which is exactly why the grant must not run.
+        assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 1
+        assert removed == []
+
+    def test_a_client_info_only_row_is_removed_rather_than_refused(self, monkeypatch) -> None:
+        """Not a grant, but exactly what short-circuits DCR on the next login.
+
+        ``payload_carries_grant`` is False here, so on a cold ledger the server
+        is not ``server_is_oauth_capable`` and the removal declines to touch
+        it. Leaving it would deny the user the fresh registration they ran
+        reauth for, so the gate deletes it directly — "remove what would be
+        reused" IS reauth's contract.
+        """
+        store = FakeAuthStore()
+        McpTokenStorage(self.URL, store).seed_client_info("client-1")
+        self._pin(monkeypatch, store)
+        removed: list[str] = []
+        assert clear_for_reauth("codex", Path("/anywhere"), store, removed) is None
+        assert store.list_credentials(MCP_OAUTH_PROVIDER) == []
+        assert removed == ["codex"]
+
+    def test_a_client_info_only_row_that_cannot_be_deleted_refuses(self, monkeypatch) -> None:
+        """The SECOND arm's failed delete — the one no test reached.
+
+        The two cases above cover this gate's arms separately: a grant row
+        whose delete fails (refused) and a ``client_info``-only row that
+        deletes cleanly (removed). Their intersection is its own path — the
+        direct removal in the second arm, reached only when the capability
+        test was False — and mutating away either of its guards left all 261
+        tests green, so nothing pinned it.
+
+        It has to refuse for the same reason the first arm does, and the
+        reason is stronger here than "a row survived": a surviving
+        ``client_info`` short-circuits DCR, so the login would reuse the very
+        registration the user ran reauth to replace, and would do it while
+        reporting success. ``removed`` must stay empty — a caller that warns
+        "your credential is gone" after a cancelled grant must not say so for
+        a row that is still on disk.
+
+        The refusal is DOUBLE-COVERED and both layers are load-bearing:
+        the ``except`` here, and the re-read below that asks the store rather
+        than trusting the call's return. Measured, not assumed — swallowing
+        the exception alone still leaves this test green, because the re-read
+        catches it; only removing BOTH lets the reauth proceed. That is
+        defence in depth against a racing writer, not redundancy, so neither
+        layer may be deleted as "already handled by the other".
+        """
+
+        class RefusingStore(FakeAuthStore):
+            def delete_credential(self, credential_id: int) -> None:
+                raise RuntimeError("database is locked")
+
+        store = RefusingStore()
+        McpTokenStorage(self.URL, store).seed_client_info("client-1")
+        self._pin(monkeypatch, store)
+        # The precondition that puts us in the second arm at all: no grant, so
+        # the strict capability test is False and the first removal declines.
+        # Asserted rather than assumed — if this were a grant the test would
+        # silently exercise the arm above and prove nothing new.
+        assert payload_carries_grant(McpTokenStorage(self.URL, store)._read()) is False
+
+        removed: list[str] = []
+        error = clear_for_reauth("codex", Path("/anywhere"), store, removed)
+        assert error is not None and "still in place" in error
+        assert len(store.list_credentials(MCP_OAUTH_PROVIDER)) == 1  # really survived
+        assert removed == []
+
+    def test_an_unreadable_store_refuses_rather_than_assuming_empty(self, monkeypatch) -> None:
+        """ "Cannot rule out a surviving credential" is not "there is none".
+
+        Refusing costs the user a retry; proceeding costs them a reauth that
+        silently did nothing — so the unknown resolves toward the refusal.
+        """
+
+        class BlindStore(FakeAuthStore):
+            def list_credentials(  # type: ignore[no-untyped-def]
+                self, provider=None, include_disabled=False
+            ):
+                raise RuntimeError("database is locked")
+
+        store = BlindStore()
+        self._pin(monkeypatch, store)
+        error = clear_for_reauth("codex", Path("/anywhere"), store)
+        assert error is not None and "could not read the credential store" in error
+
+    def test_static_refusals_survive_the_fall_through(self, monkeypatch) -> None:
+        """The F3 protection: falling through on a declined removal must not
+        let a typo or an API-key server reach a browser tab."""
+        configs = {
+            "apikey": MCPHttpServerConfig(
+                url="https://api.example/mcp", auth=MCPAuthConfig(type="apikey")
+            ),
+            "stdio": MCPStdioServerConfig(command="run-me"),
+        }
+        auth_mod.OAUTH_CHALLENGES.clear()
+        monkeypatch.setattr(
+            "local_operator.mcp.config.load_all_mcp_configs",
+            lambda cwd: (configs, {}),
+        )
+        store = FakeAuthStore()
+        for name in ("apikey", "stdio"):
+            error = clear_for_reauth(name, Path("/anywhere"), store)
+            assert error is not None and "does not use OAuth" in error
+        unknown = clear_for_reauth("nosuch", Path("/anywhere"), store)
+        assert unknown is not None and "not configured" in unknown
 
 
 class TestCallbackInputParsing:
