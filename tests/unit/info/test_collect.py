@@ -362,6 +362,28 @@ def test_live_capture_of_none_is_a_full_default_state() -> None:
     assert live.running == 0 and live.tree == () and live.max_running is None
 
 
+def test_live_capture_of_a_snapshot_jobs_facade_records_no_capacity_errors() -> None:
+    """A follower's ``jobs`` is ``SnapshotJobs`` — roster only, no
+    ``max_running``/``at_capacity``. The probes must SKIP the capacity row and
+    record NOTHING in ``errors``, rather than two AttributeError entries that
+    render as "Could not read" on a healthy screen."""
+    from local_operator.session.frontend_state import SnapshotJobs
+
+    class _Follower:
+        jobs = SnapshotJobs()
+        subagent_comms = None
+        mcp_startup = None
+        session_id = "s"
+        conversation_name = ""
+        model_label = ""
+        effective_model_label = ""
+
+    live = collect_live(_Follower())
+    assert live.max_running is None and live.at_capacity is False
+    # No capacity probe name may appear among the recorded probe failures.
+    assert not any("max_running" in name or "at_capacity" in name for name, _ in live.errors)
+
+
 @pytest.mark.parametrize("failing", ["sessions", "agents", "env", "install"])
 def test_each_block_degrades_independently(failing: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make exactly ONE collector raise; every other block must still populate.
@@ -813,6 +835,29 @@ def test_nested_subagents_are_counted_once() -> None:
 
         subagent_comms = _Comms()
 
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
+
     live = collect_live(_Session())
     assert live.running == 3, "one per roster entry, not per path through the tree"
     assert len(live.tree) == 3
@@ -895,6 +940,29 @@ def test_a_comms_object_without_nodes_degrades_instead_of_raising() -> None:
         runtime_locality: RuntimeLocality = "this-process"
 
         subagent_comms = _NoNodes()
+
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
 
     live = collect_live(_Session())  # must not raise
     assert live.roster_unread is True

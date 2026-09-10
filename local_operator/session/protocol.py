@@ -458,6 +458,23 @@ class SessionProtocol(Protocol):
         """
         ...
 
+    # --- credentials ------------------------------------------------------
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """Run one ``/credential`` verb against the session's store.
+
+        A SESSION capability, declared here so it is declared once for every
+        session shape: a session that runs its tools in this process executes
+        the verb against its own store, and a session that is a window onto a
+        runtime routes it there, because the store the tools' environment is
+        built from lives beside the turn loop — on the wrong side of that
+        split, a stored key would be advertised to the model while no
+        executing tool could read it.
+
+        The value is never logged, never journalled, and never returned —
+        only the key name and the outcome cross back.
+        """
+        ...
+
     # --- events -----------------------------------------------------------
     def subscribe(self, handler: EventHandler) -> Callable[[], None]:
         """Register an event handler; returns an unsubscribe callable."""
@@ -881,15 +898,6 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     async def set_working_directory(self, cwd: str) -> str:
         """Change the OWNER's working directory; returns its receipt."""
-        ...
-
-    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
-        """Run a credential verb on the runtime.
-
-        Routed rather than executed locally because the store lives beside the
-        runtime: a viewer that answered from this machine would report the
-        wrong secrets and, worse, refuse a write the user is entitled to make.
-        """
         ...
 
     async def route_shared_slash(

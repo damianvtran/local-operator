@@ -375,6 +375,29 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
         def set_model(self, spec, *, explicit: bool = False) -> None:  # noqa: ANN001
             self.model = spec
 
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
+
     handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
     handle._notify = lambda: None  # type: ignore[method-assign]
     session = _Session()

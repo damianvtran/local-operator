@@ -251,6 +251,29 @@ async def test_is_pristine_reads_the_attachment_sidecar(tmp_path: Path, monkeypa
         def history(self):  # noqa: ANN202
             return []
 
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
+
     handle = object.__new__(OwnedSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
     object.__setattr__(handle, "is_busy", lambda: False)
@@ -294,6 +317,29 @@ async def test_is_pristine_reads_durable_rows_not_the_model_window(
 
         def history(self):  # noqa: ANN202 — compaction emptied the window
             return []
+
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
 
     handle = object.__new__(OwnedSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
@@ -613,6 +659,29 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
 
         def history(self):  # noqa: ANN202
             return []
+
+        # ``SessionProtocol.credential_op``: the REAL verb table against a
+        # memory-only store (the ``test_app_pilot.FakeSession`` pattern), so a
+        # credential probe of this double answers the way the owner session it
+        # stands in for does instead of silently refusing — a double that
+        # swallows the verb is how #891 passed review on an unreachable path.
+        @property
+        def variables(self) -> Any:
+            store = getattr(self, "_variables", None)
+            if store is None:
+                from local_operator.variables import VariableStore
+
+                store = self._variables = VariableStore(cwd="/tmp", env={})
+            return store
+
+        async def credential_op(
+            self, action: str, key: str = "", value: str = ""
+        ) -> dict[str, Any]:
+            from local_operator.session.credential_ops import run_credential_verb
+
+            return await run_credential_verb(
+                self.variables, getattr(self, "journal_credential_change", None), action, key, value
+            )
 
     handle = object.__new__(OwnedSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
