@@ -490,7 +490,7 @@ def test_the_exec_legend_paints_on_a_scrolling_list_which_is_the_ordinary_case()
             created_at=NOW - index * 60,
             forked=False,
             live_state="",
-            pending=0,
+            pending=None,
             wakes=0,
             wakes_dormant=False,
             kind="exec" if index == 1 else "",
