@@ -1,0 +1,12 @@
+attached; viewer title='fake'
+session runtime: frontend_update frame is 1528021 bytes, over the 1048576-byte socket line limit; relaying a degraded placeholder instead of killing the connection (the viewer recovers this state through frontend_sync + durable history)
+attach client: owner frame could not be applied: 1 validation error for FrontendUpdate
+changes
+  Field required [type=missing, input_value={'epoch': 'fake-owner', '...session's own history."}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/missing; the connection cannot continue
+connection alive        : False
+owner  title/seq        : 'post-degrade title' / 1
+viewer title/seq        : 'fake' / 0
+viewer catalogue rows   : 0
+state matches owner     : False
+stream still live after : 'fake'

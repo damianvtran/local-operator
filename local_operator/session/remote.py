@@ -616,6 +616,12 @@ class RemoteSession:
         self._display_revision = 0
         self._loaded_history_generation = 0
         self._display_window_supported = False
+        #: A degraded canonical delta is owed a fresh snapshot. Separate from
+        #: ``_display_invalidated`` because that flag is about display history
+        #: and is gated on a windowed-history owner; this one is about canonical
+        #: FIELDS and applies to every follower. See
+        #: ``_resync_after_degraded_delta``.
+        self._frontend_resync_pending = False
         self._frontend_refresh_cut: tuple[str, int] | None = None
         self._hydrated_once = False
         self._display_history: DisplayHistoryWindow | None = None
@@ -2619,6 +2625,53 @@ class RemoteSession:
 
             task.add_done_callback(finished)
 
+    def _resync_after_degraded_delta(self) -> None:
+        """Force a canonical re-snapshot after the owner shed a delta's body.
+
+        Deliberately NOT ``_invalidate_display_history``, even though it shares
+        that method's task and lock. That one returns early unless
+        ``_display_window_supported``, because it exists for DISPLAY history
+        drift — and a degraded delta drops canonical FIELDS (roster, usage,
+        gates), which every follower has whether or not it negotiated a windowed
+        history. Gating this on that flag would leave legacy and full-replay
+        viewers permanently stale on exactly the frame this fix is about.
+
+        It reuses ``_refresh_display_history`` rather than adding a second
+        recovery path so there is one place that captures a cut, buffers live
+        deltas and installs them in order. That method re-snapshots the whole
+        canonical state through ``frontend_sync``, which is a superset of what a
+        shed body could have carried.
+
+        A BURST OF DEGRADED FRAMES MUST NOT BECOME A REFRESH STORM. Two existing
+        mechanisms already bound it and are reused rather than duplicated: the
+        task slot is only refilled when the previous refresh has finished, and
+        ``_refresh_display_history`` loops on ``_display_invalidated`` under its
+        lock, so frames that arrive mid-refresh fold into at most one further
+        pass instead of one sync each. Deltas arriving during the refresh are
+        buffered and replayed, and the refresh cut discards those the snapshot
+        already covers.
+        """
+        self._frontend_resync_pending = True
+        self._display_revision += 1
+        task = self._display_refresh_task
+        if task is not None and not task.done():
+            # A refresh is already running; it re-reads the flag above under its
+            # lock and folds this frame into at most one further pass.
+            return
+        task = asyncio.create_task(self._refresh_display_history())
+        self._display_refresh_task = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if not done.cancelled() and done.exception() is not None:
+                # The socket may already be gone (this runs off a frame the pump
+                # delivered). Log rather than raise into the task's context: the
+                # invalidation fence stays closed, so a reconnect re-syncs.
+                logger.warning(
+                    "canonical re-sync after a degraded delta failed: %s", done.exception()
+                )
+
+        task.add_done_callback(finished)
+
     async def ensure_display_current(self) -> None:
         task = self._display_refresh_task
         if task is not None:
@@ -2636,13 +2689,19 @@ class RemoteSession:
         """
         async with self._display_refresh_lock:
             self._display_invalidated = True
-            while self._display_invalidated:
+            while self._display_invalidated or self._frontend_resync_pending:
                 client = self._client
                 if client is None or not client.connected:
                     raise ConnectionError("history owner is unavailable")
                 self._ready_for_events = False
                 self._owner_ready.clear()
                 self._pending_frontend_updates = []
+                # Cleared BEFORE the capture, so a degraded delta that lands
+                # while this pass is in flight (buffered here, replayed by
+                # ``_install_frontend``) re-arms the flag and earns another
+                # pass. Clearing it after would swallow exactly the frame that
+                # raced the snapshot it is not covered by.
+                self._frontend_resync_pending = False
                 try:
                     frontend = FrontendSync.model_validate(await client.frontend_sync())
                     if (
@@ -2659,6 +2718,12 @@ class RemoteSession:
                         self._read_state_field("history_generation")
                         != self._loaded_history_generation
                     )
+                    # A degraded delta replayed during this pass carries a
+                    # sequence the snapshot did not cover, so its fields are
+                    # still missing. Folded into ONE further pass rather than
+                    # spawning a second task — this is the burst bound.
+                    if self._frontend_resync_pending:
+                        self._display_invalidated = True
                     self._finish_sync()
                 except BaseException:
                     # The transport remains usable even when this read fails.
@@ -3135,6 +3200,22 @@ class RemoteSession:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
         self._apply_frontend_facades(state)
+        if update.degraded:
+            # The owner shed this delta's body to keep the line under the socket
+            # limit. The sequence was consumed on both sides, so the gap check
+            # stays satisfied forever while our canonical fields are missing
+            # whatever that frame carried — a silent, permanent drift. The only
+            # cure is the fresh snapshot the degrade path already promises.
+            logger.warning(
+                "session %s: owner degraded canonical delta %s/%d (%s); "
+                "re-syncing canonical state from the owner's snapshot",
+                self._session_id,
+                update.epoch,
+                update.sequence,
+                update.degraded_reason or "no reason given",
+            )
+            self._resync_after_degraded_delta()
+            return
         if state.history_generation != self._loaded_history_generation:
             self._invalidate_display_history()
 

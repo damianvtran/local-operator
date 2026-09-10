@@ -41,6 +41,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
+    FrontendUpdate,
     FrontendUsage,
     JobState,
     McpServerState,
@@ -1425,6 +1426,177 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
         registrant.close()
 
 
+@pytest.mark.asyncio
+async def test_an_oversized_delta_keeps_the_socket_and_the_follower_resyncs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End to end over a REAL socket: the connection survives AND state recovers.
+
+    The serialization tests above prove the frame validates. This one proves the
+    two claims that actually matter to the operator, neither of which a shape
+    assertion can reach:
+
+    1. The socket stays up. Before the fix the follower's ``model_validate``
+       raised, the pump's catch-all named it ``owner frame could not be
+       applied`` and dropped the connection — the reported failure.
+    2. The follower ends up with the owner's CANONICAL state, not silently
+       stale state. The degraded frame consumed a sequence, so the gap check
+       stays satisfied forever; without a forced re-snapshot the viewer would
+       keep a title from before the shed delta and never learn otherwise. That
+       is the difference between a fixed bug and a hidden one.
+
+    The fixture degrades a DELTA while leaving the snapshot small — a huge
+    catalogue mutation is 1.5 MB on the wire and re-syncs to ~1.2 KB — which is
+    the real shape: the snapshot the recovery rides on has to fit.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        assert remote.frontend_state.conversation_title == "fake"
+
+        # One mutation whose DELTA cannot ride the wire. `conversation_title`
+        # rides along in the same delta: it is the field whose loss proves the
+        # follower would otherwise be stale, because it survives into the
+        # snapshot while the catalogue is what made the frame oversized.
+        handle._frontend.mutate(
+            model_catalogue=[_catalogue_row(index) for index in range(5_000)],
+            conversation_title="after the degrade",
+        )
+
+        # The owner's delta really was over the limit, so this test cannot pass
+        # by the frame simply fitting.
+        assert (
+            _line_bytes(
+                {
+                    "op": "frontend_update",
+                    "data": {
+                        "epoch": handle._frontend.state.epoch,
+                        "sequence": handle._frontend.state.sequence,
+                        "changes": {
+                            "model_catalogue": [_catalogue_row(index) for index in range(5_000)],
+                            "conversation_title": "after the degrade",
+                        },
+                    },
+                }
+            )
+            > _MAX_LINE_BYTES
+        )
+
+        # Wait on the RESULT, never on the clock: the recovery is an async task
+        # the frame scheduled, so poll the property it repairs.
+        for _ in range(200):
+            if remote.frontend_state.conversation_title == "after the degrade":
+                break
+            await asyncio.sleep(0.02)
+
+        # 1. The connection is still up. This is the regression assertion.
+        client = remote._client
+        assert client is not None and client.connected, "the degraded delta killed the socket"
+
+        # 2. Canonical state matches the OWNER, rather than being stale at the
+        #    pre-degrade value while the sequence marches on.
+        owner = handle._frontend.state
+        assert remote.frontend_state.conversation_title == owner.conversation_title
+        assert remote.frontend_state.sequence == owner.sequence
+        # The catalogue came back too (clipped by the wire budget, as ever), so
+        # the recovery restored the shed body rather than only the scalar.
+        assert remote.frontend_state.model_catalogue
+        assert remote.frontend_state.model_catalogue[0] == _catalogue_row(0)
+
+        # And the stream is still LIVE after recovery: a later ordinary delta
+        # applies on top, proving the sequence cursor was not left desynced.
+        handle._frontend.mutate(conversation_title="still live")
+        for _ in range(200):
+            if remote.frontend_state.conversation_title == "still live":
+                break
+            await asyncio.sleep(0.02)
+        assert remote.frontend_state.conversation_title == "still live"
+        assert client.connected
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_degraded_deltas_coalesces_into_one_resync(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Recovery must not turn one bad minute into a snapshot storm.
+
+    The frame that degrades is by definition a frame the session is big enough
+    to produce repeatedly — the operator hit this with nine subagents running —
+    so a naive "re-sync on every degraded delta" answers a 1.5 MB frame with a
+    sync RPC per frame and makes the overload worse.
+
+    The bound is the existing refresh task slot plus ``_refresh_display_history``'s
+    own loop, not a timer: frames arriving while a refresh is in flight re-arm
+    the flag and fold into at most ONE further pass. The assertion is on the
+    number of ``frontend_sync`` round trips, and on the state still converging
+    — a coalescing bound that lost the last delta would be a worse bug.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _record(tmp_path)
+        remote = await RemoteSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        client = remote._client
+        assert client is not None
+
+        syncs = 0
+        original = client.frontend_sync
+
+        async def counting_sync() -> Any:
+            nonlocal syncs
+            syncs += 1
+            return await original()
+
+        monkeypatch.setattr(client, "frontend_sync", counting_sync)
+
+        # Every delta must be GENUINELY oversized, so the catalogue has to
+        # DIFFER each time: re-sending an identical list produces no field diff
+        # and a small delta, which would let this pass for free.
+        rounds = 20
+        for index in range(rounds):
+            handle._frontend.mutate(
+                model_catalogue=[_catalogue_row(row + index * 10_000) for row in range(5_000)],
+                conversation_title=f"title-{index}",
+            )
+
+        for _ in range(400):
+            if remote.frontend_state.conversation_title == f"title-{rounds - 1}":
+                break
+            await asyncio.sleep(0.02)
+
+        # Converged on the owner's latest, not on some intermediate the
+        # coalescing happened to stop at.
+        owner = handle._frontend.state
+        assert remote.frontend_state.conversation_title == owner.conversation_title
+        assert remote.frontend_state.sequence == owner.sequence
+        assert client.connected
+        # The bound itself. Far below one-per-frame; exact count is scheduling
+        # dependent, so this asserts the ORDER of magnitude the design promises.
+        assert 0 < syncs <= 3, f"{rounds} degraded frames caused {syncs} snapshot round trips"
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
 def _oversized_event_frame() -> dict[str, Any]:
     """An ``event`` frame the size the operator's real transcript produced.
 
@@ -1518,6 +1690,73 @@ def test_oversized_frontend_update_keeps_its_sequence():
     assert sendable["data"]["epoch"] == "epoch-1"
     assert sendable["data"]["sequence"] == 42
     assert sendable["data"]["degraded"] is True
+
+
+def test_a_degraded_frontend_update_still_validates_as_one():
+    """The degrade path's own frame must satisfy the model the follower parses.
+
+    THE BUG THIS PINS. ``changes`` was a REQUIRED field, so the stand-in built
+    by ``relay_frame_or_degraded`` — which sheds the body and keeps only
+    sequencing — raised ``ValidationError`` inside the follower's
+    ``_on_frontend_update``. ``AttachClient._pump``'s catch-all turned that into
+    ``owner frame could not be applied: ...`` and tore the socket down, so the
+    guard written specifically to avoid killing the connection killed it one
+    layer further down. The operator saw exactly this string.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    frame = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "epoch-1",
+            "sequence": 42,
+            "changes": {"cwd": "y" * (_MAX_LINE_BYTES + 10)},
+        },
+    }
+
+    sendable = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+
+    # The exact call the follower makes. Before the fix this raised.
+    update = FrontendUpdate.model_validate(sendable["data"])
+    assert update.degraded is True
+    assert update.degraded_reason
+    # Empty rather than absent, so `payload["changes"]` readers keep working.
+    assert update.changes == {}
+    assert update.model_dump(mode="json")["changes"] == {}
+
+
+def test_a_degraded_delta_advances_the_sequence_without_touching_fields():
+    """Applying a shed body as an empty change set would be a silent corruption.
+
+    The owner consumed the sequence, so it must advance here or every later
+    delta is refused as a gap. But the fields the frame carried are UNKNOWN,
+    not unchanged — writing an empty change set over canonical state and
+    calling it applied is what leaves a follower permanently, quietly wrong.
+    """
+    store = FrontendStateStore(
+        FrontendSessionState(session_id="s1", epoch="e1", conversation_title="before")
+    )
+    seen: list[FrontendUpdate] = []
+    store.subscribe(seen.append)
+    start = store.state.sequence
+
+    state = store.apply_update(
+        FrontendUpdate(
+            epoch="e1",
+            sequence=start + 1,
+            degraded=True,
+            degraded_reason="too large",
+        )
+    )
+
+    assert state.sequence == start + 1
+    assert state.conversation_title == "before"
+    # Published, so an in-process subscriber and the resync path agree that a
+    # delta was shed rather than one of them believing state is complete.
+    assert [u.degraded for u in seen] == [True]
 
 
 def test_ordinary_relay_frames_pass_through_untouched():
