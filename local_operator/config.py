@@ -171,9 +171,32 @@ DEFAULT_CONFIG = Config(
             # base-equivalent), while the incremental writes on those contexts
             # were only 14.7M (~11M base-equivalent extra at 2×). 150k is the
             # size above which the rewrite dominates; 0 disables the feature.
+            # `providers.openrouter.*`: the chat-completions `provider` routing
+            # object (see `settings_io.py` for the per-key semantics). Every
+            # default below is "no opinion" — the resolver emits NO `provider`
+            # object at all until the user sets at least one preference, so
+            # OpenRouter's sticky routing (which keeps a long DeepSeek
+            # conversation's prompt cache warm on one host) stays untouched.
+            # In particular `sort` must never gain an explicit default value:
+            # an always-on sort is an always-on cold cache.
             "providers": {
                 "openai": {"api": "responses", "use_max_context_window": True},
                 "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
+                "openrouter": {
+                    "sort": "",
+                    "order": [],
+                    "only": [],
+                    "ignore": [],
+                    "allow_fallbacks": True,
+                    "require_parameters": False,
+                    "data_collection": "",
+                    "zdr": False,
+                    "enforce_distillable_text": False,
+                    "quantizations": [],
+                    "max_price": "",
+                    "preferred_min_throughput": 0.0,
+                    "preferred_max_latency": 0.0,
+                },
             },
             # One ordered cascade for every text-model call. Entries may be
             # "provider/model" strings or {provider, model, effort} mappings;

@@ -113,6 +113,41 @@ def _consumer_defaults() -> dict[str, object]:
         "providers.anthropic.cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
+        # The openrouter routing rows are guarded against the shipped config
+        # block itself: their consumer is the single-shot resolver
+        # ``model.configure._openrouter_provider_preferences`` (no independent
+        # constant exists to compare against, and inventing one would be a
+        # third restatement), so the registry default and DEFAULT_CONFIG must
+        # not be allowed to disagree.
+        "providers.openrouter.sort": DEFAULT_CONFIG.values["providers"]["openrouter"]["sort"],
+        "providers.openrouter.order": DEFAULT_CONFIG.values["providers"]["openrouter"]["order"],
+        "providers.openrouter.only": DEFAULT_CONFIG.values["providers"]["openrouter"]["only"],
+        "providers.openrouter.ignore": DEFAULT_CONFIG.values["providers"]["openrouter"]["ignore"],
+        "providers.openrouter.allow_fallbacks": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["allow_fallbacks"]
+        ),
+        "providers.openrouter.require_parameters": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["require_parameters"]
+        ),
+        "providers.openrouter.data_collection": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["data_collection"]
+        ),
+        "providers.openrouter.zdr": DEFAULT_CONFIG.values["providers"]["openrouter"]["zdr"],
+        "providers.openrouter.enforce_distillable_text": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["enforce_distillable_text"]
+        ),
+        "providers.openrouter.quantizations": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["quantizations"]
+        ),
+        "providers.openrouter.max_price": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["max_price"]
+        ),
+        "providers.openrouter.preferred_min_throughput": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_min_throughput"]
+        ),
+        "providers.openrouter.preferred_max_latency": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["preferred_max_latency"]
+        ),
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -294,6 +329,7 @@ def _sample_value(setting: settings_io.Setting) -> object:
 _VALID_TEXT_SAMPLES: dict[object, str] = {
     local_providers.validate_endpoint_setting: "http://127.0.0.1:9/v1",
     local_providers.model_overrides: '{"round-trip-probe":{"context_window":8192}}',
+    settings_io._validate_openrouter_max_price: '{"prompt": 1, "completion": 2}',
 }
 
 
@@ -491,6 +527,59 @@ def test_validation_rejects_unknown_enum_and_list_members(manager: ConfigManager
     assert settings_io.validate(settings_io.BY_KEY["compaction.strategy"], "nope") is not None
     assert settings_io.validate(settings_io.BY_KEY["web_search.providers"], ["bing"]) is not None
     assert settings_io.validate(settings_io.BY_KEY["web_search.providers"], []) is not None
+
+
+def test_openrouter_rows_round_trip(manager: ConfigManager) -> None:
+    """Write path → stored value → read back, for each kind the block uses."""
+    sort = settings_io.BY_KEY["providers.openrouter.sort"]
+    settings_io.write_setting(manager, sort, "throughput")
+    assert settings_io.read_setting(manager, sort) == "throughput"
+    assert settings_io.validate(sort, "fastest") is not None
+
+    ignore = settings_io.BY_KEY["providers.openrouter.ignore"]
+    settings_io.write_setting(manager, ignore, ["groq"])
+    assert settings_io.read_setting(manager, ignore) == ["groq"]
+    assert settings_io.validate(ignore, ["not-a-host"]) is not None
+    # Unlike web_search.providers, an EMPTY routing list is "no opinion" and
+    # must be writable — the resolver emits nothing for it.
+    assert settings_io.validate(ignore, []) is None
+    settings_io.write_setting(manager, ignore, [])
+    assert settings_io.read_setting(manager, ignore) == []
+
+    zdr = settings_io.BY_KEY["providers.openrouter.zdr"]
+    settings_io.write_setting(manager, zdr, True)
+    assert settings_io.read_setting(manager, zdr) is True
+
+
+def test_openrouter_max_price_validation(manager: ConfigManager) -> None:
+    """The JSON-object row accepts both its write shapes and rejects the rest."""
+    setting = settings_io.BY_KEY["providers.openrouter.max_price"]
+    assert settings_io.validate(setting, "") is None
+    assert settings_io.validate(setting, '{"prompt": 1, "completion": 2}') is None
+    assert settings_io.validate(setting, {"request": 0.5}) is None
+    assert settings_io.validate(setting, "{not json") is not None
+    assert settings_io.validate(setting, "[1, 2]") is not None
+    assert settings_io.validate(setting, {"weight": 1}) is not None
+    assert settings_io.validate(setting, {"prompt": -1}) is not None
+
+    # A mapping stored via PATCH/hand-written YAML reads back as JSON text the
+    # TUI editor can round-trip.
+    settings_io.write_setting(manager, setting, {"prompt": 1})
+    assert settings_io.read_setting(manager, setting) == '{"prompt": 1}'
+
+
+def test_openrouter_defaults_mean_no_opinion() -> None:
+    """Every default is the resolver's "unset" sentinel, so the shipped config
+    emits NO `provider` object (sticky routing / warm cache stays in force)."""
+    from local_operator.model.configure import _openrouter_provider_preferences
+
+    defaults = {
+        key.split(".")[-1]: settings_io.BY_KEY[key].default
+        for key in settings_io.BY_KEY
+        if key.startswith("providers.openrouter.")
+    }
+    assert len(defaults) == 13
+    assert _openrouter_provider_preferences({"providers": {"openrouter": defaults}}) is None
 
 
 def test_retired_settings_cannot_be_written(manager: ConfigManager) -> None:
