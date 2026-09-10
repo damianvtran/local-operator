@@ -4256,6 +4256,32 @@ class Session:
         """
         return self._variables
 
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """Run one ``/credential`` verb against this session's own store.
+
+        The in-process half of a capability the base protocol declares for
+        every session: this class runs its own turn loop, so its ``bash``
+        commands read ``credential_env()`` from THIS store and a store held
+        anywhere else would advertise a key no executing tool could read.
+        A session attached to a runtime routes the same verb there instead;
+        both shapes share ONE verb table
+        (:func:`local_operator.session.credential_ops.run_credential_verb`) so
+        the verbs cannot drift between them.
+
+        ``async`` for signature parity with the routed implementation, not
+        because the work awaits: the callers sit on an event loop and must not
+        care which shape they hold.
+
+        The value is never logged, never journalled, and never returned — only
+        the key name and the outcome cross back (the journal record names the
+        KEY only, exactly as the masked-paste flow journals).
+        """
+        from local_operator.session.credential_ops import run_credential_verb
+
+        return await run_credential_verb(
+            self._variables, self.journal_credential_change, action, key, value
+        )
+
     @property
     def conversation_name(self) -> str:
         """The conversation's title ("" until one is set or generated)."""
