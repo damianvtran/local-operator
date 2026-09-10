@@ -103,6 +103,40 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
             "model reply must be one duplicate-free JSON object, with no trailing text"
         ) from error
     if not isinstance(value, dict) or set(value) != _ENVELOPE_KEYS:
+        # Name the DEFECT, not just the rule. Validation is unchanged -- a
+        # partial envelope is still rejected, because silently downgrading one
+        # to the legacy interpretation would drop whatever the model meant to
+        # put in ``public_observations``. What changes is what the model is
+        # told, and that decides whether the correction can land.
+        #
+        # Reserving every envelope key means touching ONE of them commits the
+        # reply to strict decoding, so the common failure is a near-miss: a
+        # model emits ``{"action_batch": {...}}`` and gets told the rule it
+        # already half-followed, without being told which half it missed.
+        # Measured on minimax/minimax-m3, which produces exactly that shape in
+        # ~1 of 10 replies: re-prompting with the bare rule recovered 4/10,
+        # while naming the keys present and missing recovered 9/10. The
+        # difference is the whole gap between an episode that continues and one
+        # that spends its retry bound and seals as a model failure -- which is
+        # how a paid canary episode died at three calls.
+        if isinstance(value, dict):
+            present = sorted(_ENVELOPE_KEYS & set(value))
+            missing = sorted(_ENVELOPE_KEYS - set(value))
+            extra = sorted(set(value) - _ENVELOPE_KEYS)
+            parts = []
+            if present:
+                parts.append("carried " + ", ".join(repr(key) for key in present))
+            if missing:
+                parts.append("omitted " + ", ".join(repr(key) for key in missing))
+            if extra:
+                parts.append("added unexpected " + ", ".join(repr(key) for key in extra))
+            raise ValueError(
+                "model reply used the reserved envelope but "
+                + "; ".join(parts)
+                + '. Reply with EITHER the plain batch {"actions": [...]} and no other '
+                "top-level keys, OR the full envelope with exactly reply_version, "
+                "action_batch, public_observations"
+            )
         raise ValueError(
             "model reply requires exactly reply_version, action_batch, public_observations"
         )

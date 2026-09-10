@@ -538,3 +538,71 @@ async def test_old_fake_client_does_not_claim_a_new_reply_contract(
     assert "model_reply_contract" not in manifest["metadata"]
     assert payloads(root, ModelResponsePayload)[0].redacted_response is None
     assert decode_public_reply(envelope(type_payload(observation())))
+
+
+@pytest.mark.parametrize(
+    ("body", "carried", "omitted"),
+    [
+        (
+            '{"action_batch": {"actions": []}}',
+            ["'action_batch'"],
+            ["'public_observations'", "'reply_version'"],
+        ),
+        (
+            '{"reply_version": "1.0", "action_batch": {"actions": []}}',
+            ["'action_batch'", "'reply_version'"],
+            ["'public_observations'"],
+        ),
+    ],
+)
+def test_a_partial_envelope_is_told_which_keys_it_missed(
+    body: str, carried: list[str], omitted: list[str]
+) -> None:
+    """Validation is unchanged; what the model is TOLD is what changed.
+
+    Reserving every envelope key means touching one of them commits the reply
+    to strict decoding, so the common failure is a near-miss: the model emits
+    ``{"action_batch": {...}}`` and used to be told only the rule it had
+    already half-followed, never which half it missed.
+
+    That difference decides whether the correction lands. Measured on
+    ``minimax/minimax-m3``, which produces this exact shape in ~1 of 10
+    replies: re-prompting with the bare rule recovered 4/10, while naming the
+    keys present and missing recovered 9/10 -- the gap between an episode that
+    continues and one that spends its retry bound and seals as a model
+    failure.
+    """
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(body)
+
+    message = str(info.value)
+    for key in carried:
+        assert key in message.split("omitted")[0]
+    for key in omitted:
+        assert key in message
+    # Both legal shapes are offered, so the model can pick the cheaper one
+    # rather than guessing which half of the contract to repair.
+    assert '{"actions": [...]}' in message
+    assert "reply_version, action_batch, public_observations" in message
+
+
+def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
+    """The other near-miss: every required key present, plus one more."""
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(
+            '{"reply_version": "1.0", "action_batch": {"actions": []}, '
+            '"public_observations": "", "notes": "x"}'
+        )
+
+    assert "added unexpected 'notes'" in str(info.value)
+
+
+def test_a_non_object_reply_keeps_the_plain_rule() -> None:
+    """A JSON array names no keys, so there is no defect to describe."""
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply("[1, 2]")
+
+    assert "requires exactly" in str(info.value)
