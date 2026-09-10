@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import httpx
 
-from local_operator.harness.types import ModelSpec
+from local_operator.harness.types import AbortSignal, ModelSpec
 from local_operator.model.configure import (  # noqa: F401  (used by callers)
     build_model_spec,
 )
@@ -481,7 +481,11 @@ class ProviderController:
         )
 
     async def login(
-        self, provider_id: str, *, open_browser: Callable[[str], None] | None = None
+        self,
+        provider_id: str,
+        *,
+        open_browser: Callable[[str], None] | None = None,
+        signal: AbortSignal | None = None,
     ) -> str:
         """Run the provider's login flow and report a human summary.
 
@@ -489,11 +493,31 @@ class ProviderController:
         wraps this in ``App.suspend()``). Returns a message like
         ``Logged in to 'anthropic' (you@example.com).``; raises
         ``ValueError`` / ``LoginError`` on failure.
+
+        ``signal`` makes a PENDING login cancellable. Every layer beneath this
+        one already had the machinery -- ``OAuthCallbackFlow._await_code``
+        races an abort watcher against its capture futures, the device flow
+        polls it, and the registry's lazy thunks forward it -- but nothing ever
+        constructed one, so all of it was unreachable and a user whose browser
+        never came back had no way out but the 300 s
+        ``DEFAULT_TIMEOUT_SECONDS``. This parameter is the missing end of that
+        chain, not a new mechanism.
+
+        Forwarded to EVERY login callable, including the paste-a-key providers
+        and ``local_setup``, which ignore it: they all accept ``**kwargs``, and
+        keeping the call shape uniform is what stops a host having to know
+        which flavour of provider it is talking to before it can offer a
+        cancel.
         """
         definition = get_provider_definition(provider_id)
         if definition is None:
             raise ValueError(f"Unknown provider: {provider_id}")
         if definition.local_setup:
+            # Endpoint setup has no loopback listener and no timeout to escape:
+            # it is a sequence of prompts, and its cancel is the host declining
+            # one (each `prompt` returning None raises LoginCancelledError
+            # already). The signal is accepted and dropped here rather than
+            # threaded through, so a caller can pass one to any provider.
             return await self._configure_local(definition)
         if definition.login is None:
             raise ValueError(f"Provider '{provider_id}' has no interactive login.")
@@ -506,7 +530,11 @@ class ProviderController:
         options: dict[str, Any] = {}
         if open_browser is not None and definition.callback_port is not None:
             options["open_browser"] = open_browser
-        result = await definition.login(callbacks, **options)
+        # Passed UNCONDITIONALLY, including when it is None, so there is exactly
+        # one call shape. Every login callable in the registry takes it: the
+        # lazy OAuth thunks name it explicitly, and `create_api_key_login`'s
+        # paste-only login swallows it through `**_kwargs`.
+        result = await definition.login(callbacks, signal=signal, **options)
 
         storage = definition.store_credentials_as or provider_id
         if isinstance(result, str):

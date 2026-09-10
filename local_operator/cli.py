@@ -5300,4 +5300,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    exit(main())
+    # ``sys.exit``, NOT the ``exit()`` builtin, so ``python -m local_operator.cli``
+    # ends the same way the installed console scripts do. ``exit`` is
+    # ``_sitebuiltins.Quitter``, which CLOSES ``sys.stdin`` before raising
+    # SystemExit — and that close waits on the buffered reader's lock. The
+    # interactive login reads a pasted value on a daemon thread that may still
+    # be parked in that read (it is deliberately not joined; see
+    # ``auth_cli.on_manual_code_input``), so the two together can deadlock a
+    # cancel that has already printed its receipt: the user is told the login
+    # was cancelled and the shell prompt never returns.
+    #
+    # ``sys.exit`` raises SystemExit without touching stdin, which is why the
+    # shipped entry points have never had this shape. Site builtins are also
+    # absent under ``python -S`` and in frozen builds, so this is the more
+    # portable spelling regardless (QA round 1, Q1).
+    sys.exit(main())
