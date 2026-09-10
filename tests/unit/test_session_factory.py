@@ -752,6 +752,44 @@ async def test_knowledge_backend_failure_degrades_to_no_listing(
 
 
 @pytest.mark.asyncio
+async def test_knowledge_discovery_uses_the_session_cwd_not_the_process_cwd(
+    tmp_config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Project-local skills must follow the SESSION's cwd.
+
+    Sessions are created with an explicit cwd by bootstrap, the scheduler and
+    owned runtimes; discovery used ``Path.cwd()`` and so scanned whatever
+    directory the process happened to start in. Every other consumer in
+    ``create_session`` already takes the session's cwd.
+    """
+    session_dir = tmp_path / "session-project"
+    process_dir = tmp_path / "process-project"
+    for base, skill_name in ((session_dir, "session-skill"), (process_dir, "process-skill")):
+        skill_dir = base / ".local-operator" / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: Belongs to {base.name}.\n---\n\nBody."
+        )
+    # The process sits in the WRONG directory: if the cwd argument were
+    # ignored, discovery would find process-skill instead.
+    monkeypatch.chdir(process_dir)
+
+    warnings: list[str] = []
+    hooks = await session_factory._setup_knowledge(
+        MagicMock(),
+        tmp_config_dir,
+        cast(Any, FakeRegistry(tmp_config_dir)),
+        warnings,
+        str(session_dir),
+    )
+
+    assert "session-skill" in hooks.skills_by_name
+    assert "process-skill" not in hooks.skills_by_name
+    # The roots are retained so the resolver can rescan the SAME set on a miss.
+    assert session_dir / ".local-operator" / "skills" in hooks.skill_roots
+
+
+@pytest.mark.asyncio
 async def test_knowledge_backend_failure_falls_back_to_local_routing(
     tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

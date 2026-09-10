@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 import yaml
@@ -247,3 +247,312 @@ def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
 
     final.sort(key=_sort_key)
     return final, warnings
+
+
+def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
+    """Cheap change-detector for the skill tree, used to gate a full rescan.
+
+    Mirrors :func:`scan_skills_dir`'s one-level walk ON PURPOSE: a fingerprint
+    that walked differently from the scanner would miss changes the scanner
+    would have seen, and the entire value of this function is that an unchanged
+    fingerprint is a trustworthy "do not bother scanning".
+
+    Root-directory mtime alone is NOT sufficient, and that was measured rather
+    than assumed: creating a skill directory bumps the root's mtime, creating a
+    ``SKILL.md`` inside an existing directory bumps only the child's, and
+    editing a ``SKILL.md`` in place bumps NEITHER. That third row is a real
+    case, not a hypothetical -- a skill dropped at discovery for a blank
+    ``description`` is absent from the mapping, so repairing its frontmatter in
+    place is precisely a miss that root and child mtimes both fail to notice.
+    Hence per-file ``(mtime_ns, size)``.
+
+    Never raises, and its ``OSError`` tolerance deliberately matches the
+    scanner's: a directory vanishing mid-walk or a symlink loop yields a
+    shorter tuple rather than an exception. Making the gate stricter than the
+    scanner it gates would turn a tree the scanner survives into a hard failure
+    on the read path.
+
+    Costs ~0.29 ms across 8 roots / 57 skills, against 17-25 ms for the full
+    scan it decides whether to run.
+    """
+    entries: list[object] = []
+    for raw_root in roots:
+        root = Path(raw_root).expanduser()
+        try:
+            root_stat = root.stat()
+        except OSError:
+            # Absent roots are still part of the fingerprint: a root that comes
+            # into existence has to read as a change, not as "same as before".
+            entries.append((str(root), None))
+            continue
+        entries.append((str(root), root_stat.st_mtime_ns))
+        try:
+            children = sorted(os.scandir(root), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            try:
+                if not child.is_dir():
+                    continue
+                skill_stat = os.stat(os.path.join(child.path, "SKILL.md"))
+            except OSError:
+                continue
+            entries.append((child.path, skill_stat.st_mtime_ns, skill_stat.st_size))
+    return tuple(entries)
+
+
+def _has_frontmatter_block(text: str) -> bool:
+    """Whether ``text`` opens AND closes a ``---`` block.
+
+    :func:`parse_frontmatter` collapses "no frontmatter", "unterminated",
+    "malformed YAML" and "well-formed but empty" into the same ``{}``, which is
+    the right degradation for discovery but the wrong answer for a diagnostic:
+    reporting "malformed frontmatter" to an author whose block is perfectly
+    well-formed and merely missing a ``description`` sends them to fix the one
+    thing that is not broken. This distinguishes the structural failure from
+    the content failure so each gets its own message.
+    """
+    if not text.startswith("---"):
+        return False
+    lines = text.split("\n")
+    return any(lines[i].strip() == "---" for i in range(1, len(lines)))
+
+
+def _frontmatter_yaml_error(text: str) -> str | None:
+    """The YAML parser's own complaint about a delimited block, or ``None``.
+
+    WHY this exists rather than reusing ``_has_frontmatter_block`` as the
+    malformed-YAML discriminator: a block whose ``---`` delimiters are BOTH
+    present but whose YAML is invalid is the overwhelmingly common authoring
+    error -- an unquoted colon, ``description: Lean 4: formalize proofs`` --
+    and it yields ``{}`` with the delimiters intact. Keying "malformed" off
+    the delimiters alone therefore sent that author down the *description*
+    branch, which told them to add a description their file visibly already
+    had, and following that remedy provably does not fix the file. The only
+    thing that can tell "invalid YAML" apart from "valid YAML that happens to
+    be empty" is the parser, so ask it.
+
+    :func:`parse_frontmatter` deliberately discards this exception -- discovery
+    must degrade silently and never pay for error text on the scan path. Here,
+    on a miss that has already failed, the re-parse costs nothing that matters
+    and it is the difference between a next move and a wrong next move.
+    """
+    if not text.startswith("---"):
+        return None
+    lines = text.split("\n")
+    end: int | None = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        # Unterminated: a structural failure, reported by the delimiter branch.
+        return None
+    try:
+        yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        # Collapse to one line: the parser appends a multi-line context/snippet
+        # block that is noise inside a one-line diagnostic.
+        return " ".join(str(exc).split())
+    return None
+
+
+# WHY a module constant instead of an inline ``os.name`` test: this is the seam
+# both directions of the platform-divergent drive rule are tested through, so
+# the POSIX-admits case and the Windows-denies case each run on every CI leg
+# rather than only on the leg whose native semantics happen to match.
+_DRIVE_RESETS_JOIN = os.name == "nt"
+
+
+def is_plain_skill_name(name: str) -> bool:
+    """Whether ``name`` is a single plain segment safe to join onto a root.
+
+    The shape this admits is the DIRECT child of a root that
+    :func:`scan_skills_dir` produces (it walks exactly one level), so anything
+    carrying a separator, a traversal token or a path anchor can never name
+    such a directory and must not be joined onto a root at all.
+
+    NOT every registered skill name has this shape. :func:`_skill_from_file`
+    prefers the frontmatter ``name:`` over the directory name, so a skill
+    declaring ``name: group/sub`` registers under a separator-bearing name and
+    is rejected here. That is deliberate and its cost is bounded: such a skill
+    still resolves at startup and after any later rescan, and loses only the
+    mid-session authoring refresh on the read that created it. Widening the
+    predicate to admit it would hand every hostile netloc (``skill://..``,
+    ``skill://%2fetc``) the filesystem work and the join this guard exists to
+    deny, which is not a trade worth making for a name shape the harness
+    itself never generates.
+
+    WHY this is a name check and not a resolved-path containment check
+    (``protocol._contained``): ``scan_skills_dir`` deliberately FOLLOWS a
+    symlinked child directory, so a resolved-target containment test would
+    reject skills the scanner accepts and make the diagnostic disagree with
+    discovery. Once the name is a single plain segment, ``root / name`` is a
+    direct child of ``root`` by construction and there is nothing left to
+    escape with -- the check is complete without resolving anything, which is
+    also what keeps an unsafe URL from spending filesystem work.
+
+    The concrete leaks this closes: ``skill://..`` parses the traversal token
+    as the URL's netloc, sailing past the guards that only inspect the PATH
+    portion, and ``skill://%2fetc`` decodes to ``/etc`` where ``root / "/etc"``
+    is ``/etc`` outright -- an existence oracle for any absolute path, and a
+    reader of out-of-root frontmatter ``name`` values.
+
+    THE DRIVE RULE IS DELIBERATELY PLATFORM-DIVERGENT -- do not "simplify" it
+    back to one unconditional test. What is rejected where, and why:
+
+    * Separators, NUL, ``.`` and ``..``, and a ROOT anchor are rejected
+      EVERYWHERE. They reset or escape the join on every platform.
+    * A DRIVE anchor (``D:x``, ``a:b``, ``C:``, and -- since pathlib accepts
+      any single printable character as a drive letter -- ``1:x`` and ``#:x``)
+      is rejected ONLY when running on Windows.
+
+    The asymmetry is correct because the join that actually executes is the
+    RUNNING platform's, not a portable abstraction over both. On Windows
+    ``PureWindowsPath(root) / "D:x"`` is ``"D:x"`` outright -- drive-relative
+    names are not absolute by ``is_absolute()`` yet still reset the join, so
+    the drive is a genuine existence oracle and that door must stay shut. On
+    POSIX ``:`` is an ordinary, legal directory character and
+    ``PurePosixPath(root) / "a:b"`` is ``<root>/a:b`` -- a contained direct
+    child with nothing to escape through. Rejecting it there buys no safety
+    and costs a real feature: ``scan_skills_dir`` genuinely registers a
+    POSIX skill directory named ``a:b``, so an unconditional drive test makes
+    this predicate disagree with the scanner, silently denying that skill the
+    mid-session authoring refresh AND its miss-path diagnostic.
+    """
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    # PureWindowsPath parses BOTH separators, so its ``root`` is the superset
+    # of the POSIX one and covers either platform in a single test. Checked
+    # unconditionally, and kept even though the separator test above already
+    # implies it: a root anchor needs a separator, so this is the defence that
+    # does not depend on that check having run first.
+    shape = PureWindowsPath(name)
+    if shape.root:
+        return False
+    # DRIVE, not anchor: the one term gated on the running platform, per the
+    # docstring. ``drive`` rather than ``is_absolute()`` because a
+    # drive-RELATIVE name resets the join without being absolute.
+    return not (_DRIVE_RESETS_JOIN and shape.drive)
+
+
+def _diagnose_one(name: str, root: Path, skill_md: Path) -> str | None:
+    """Why this one SKILL.md would not load under ``name``, or None if it would.
+
+    Applies exactly the drop rules :func:`_skill_from_file` applies silently,
+    in the same order, so the message an author gets describes the rule that
+    actually rejected their file.
+    """
+    try:
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"{skill_md} could not be read: {exc}"
+
+    meta = parse_frontmatter(text)
+    if not meta:
+        if not _has_frontmatter_block(text):
+            return f"{skill_md} has malformed YAML frontmatter (it must open and close with ---)."
+        yaml_error = _frontmatter_yaml_error(text)
+        if yaml_error is not None:
+            # A well-formed pair of delimiters wrapping YAML that does not
+            # parse. Quote the parser rather than guessing: "mapping values are
+            # not allowed here" names the unquoted colon, which no rule of ours
+            # can locate. A block that parses to nothing (an EMPTY one) falls
+            # through instead -- "has no 'description'" is the true answer there.
+            return (
+                f"{skill_md} has invalid YAML in its frontmatter: {yaml_error}. "
+                "Quote any value containing a colon, then read the URL again."
+            )
+
+    enabled = meta.get("enabled")
+    if enabled is not None and (
+        not enabled or str(enabled).strip().lower() in ("false", "no", "off")
+    ):
+        return f"'{name}' is disabled by 'enabled: false' in {skill_md}."
+
+    description = meta.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return (
+            f"{skill_md} has no 'description' in its frontmatter; skills without one "
+            "are not loaded. Add one and read the URL again."
+        )
+
+    declared = meta.get("name")
+    if isinstance(declared, str) and declared.strip() and declared.strip() != name:
+        return (
+            f"{skill_md} declares name '{declared.strip()}'; read "
+            f"skill://{declared.strip()} (the frontmatter name wins over the "
+            "directory name)."
+        )
+    return None
+
+
+def diagnose_missing_skill(name: str, roots: Sequence[Path]) -> str | None:
+    """Explain why ``name`` did not load, or ``None`` when there is nothing to say.
+
+    ``Unknown skill: <name>`` is emitted identically for four distinct causes --
+    not yet scanned, a blank ``description`` silently dropping the skill, a
+    frontmatter ``name`` disagreeing with the directory, and collision
+    shadowing -- and an agent that hits it has no next move except to give up or
+    grep the filesystem, which the system prompt forbids. Every message
+    produced here names its own remedy instead.
+
+    Called ONLY on the miss path, after a refresh has already failed to find
+    the name, so the filesystem work below is never paid on a hit. It reports
+    on the ONE name being read rather than on the tree as a whole: this machine
+    emits 37 shadow warnings at startup, and a diagnostic that dumped them all
+    would be noise where an answer is needed.
+    """
+    if not is_plain_skill_name(name):
+        # BEFORE ANY FILESYSTEM WORK. ``root / name`` is unguarded join: a
+        # traversal token or an absolute path in the NAME position escapes the
+        # roots entirely, and the resolver's own path-portion guards never see
+        # it because a name is the URL's netloc, not its path. Returning None
+        # keeps the bare "Unknown skill" -- which is the honest answer for a
+        # name no scan could ever have produced -- and, equally deliberately,
+        # spends no probe on a malformed URL (design §3).
+        return None
+    found: list[tuple[Path, Path]] = []
+    for raw_root in roots:
+        root = Path(raw_root).expanduser()
+        candidate = root / name
+        try:
+            if not candidate.is_dir():
+                continue
+            skill_md = candidate / "SKILL.md"
+            if not skill_md.is_file():
+                return f"A directory '{name}' exists at {root} but has no SKILL.md."
+        except OSError:
+            continue
+        found.append((root, skill_md))
+
+    if not found:
+        return None
+
+    # Walk in root precedence order and report the first candidate that has a
+    # problem. Reaching here at all means the name genuinely missed, so no
+    # candidate registered under it -- each one is either unloadable or
+    # declares a different frontmatter name, and the earliest such file is the
+    # one an author following root precedence will look at first.
+    for root, skill_md in found:
+        problem = _diagnose_one(name, root, skill_md)
+        if problem is not None:
+            return problem
+
+    if len(found) > 1:
+        # Every candidate loads cleanly on its own terms. On the resolver's
+        # miss path this is defensive rather than routine -- if the earliest
+        # copy loads, it also claims the name, so the read would have hit. It
+        # stays because this helper is callable outside that path (against an
+        # arbitrary root list) and because "shadowed" is the one collision
+        # outcome a user can otherwise never see: the warning discover_skills
+        # raises for it goes to a list printed only at startup.
+        return (
+            f"'{name}' at {found[1][1]} is shadowed by the one at {found[0][1]} "
+            "(earlier roots win). Rename it or edit the winner."
+        )
+    return None
