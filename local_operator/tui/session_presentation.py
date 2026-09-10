@@ -80,6 +80,37 @@ RETAIN_TEXT_BYTES = 1024 * 1024
 COMPACTION_MARKER_NOTICE = "context compacted — earlier history above the agent no longer sees"
 
 
+def live_projection_call_ids(session: Any) -> set[str]:
+    """Call ids a settled replay must SKIP because they are executing NOW.
+
+    ``executing() - pending()``, and the subtraction is the load-bearing
+    half. A turn parked at an approval gate is ALSO a streaming one, so both
+    accessors answer with exactly the call the gate is holding; seeding a
+    projection with the un-subtracted set would skip that call out of the
+    replay, and the skip path (``_paint_skipped_live_tool_rows``) paints
+    ``running`` without consulting the gate — bypassing the "waiting wins"
+    rule ``_mark_pending_tool_rows`` exists to enforce. With the held call
+    left out of the seed, the replay mounts its row and the pending scan
+    marks it ``waiting``: the honest state for a call parked on the USER,
+    not on a tool.
+
+    One helper because three sites ask this question — the visible seed in
+    ``_project_settled_rows``, the offscreen seed in the sidebar prepare
+    path, and the fold's own fallback for a target that never seeded — and
+    a divergence between any two reopens the gate bug on exactly one path.
+    Lives here rather than on the app so the fold can ask it without a
+    circular import.
+    """
+    executing = getattr(session, "executing_display_tool_ids", None)
+    if not callable(executing):
+        return set()
+    live = cast(set[str], executing())
+    pending = getattr(session, "pending_display_tool_ids", None)
+    if callable(pending):
+        live -= cast(set[str], pending())
+    return live
+
+
 class CompactionMarkerBlock(NoticeBlock):
     """The compaction seam, spaced apart from whatever it lands beside.
 
@@ -1003,10 +1034,14 @@ def replay_tool_call(
     beside it, overcount "running N tools", and stamp ``⊘ interrupted`` on a
     call that has not stopped. Skipping the settled row loses nothing: the
     live row owns the call's intent (which the transcript does not persist)
-    and its real start time, and it settles through the ordinary
-    ``on_tool_ended`` path. A COLD resume has no live turn, so
-    ``executing_display_tool_ids()`` is empty there and killed-mid-turn calls
-    still render ``interrupted`` exactly as before.
+    and its real start time. Where no live row exists yet — the local adopt,
+    whose ``ToolStarted`` predates this process's subscription — the
+    projection's owner paints the one row afterwards
+    (``_paint_skipped_live_tool_rows``) and registers it with the event
+    controller, so it settles through the ordinary ``on_tool_ended`` path.
+    A COLD resume has no live turn, so ``executing_display_tool_ids()`` is
+    empty there and killed-mid-turn calls still render ``interrupted``
+    exactly as before.
     """
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
@@ -1026,13 +1061,15 @@ def replay_tool_call(
     else:
         # The snapshot the caller seeded for this projection first; a
         # ReplayTarget carrying the session itself (the app) falls back to
-        # asking the session directly, which is how a live call is still
-        # honoured on a path that never seeds the set.
+        # asking the session directly through the SAME subtracted question
+        # the seed uses, so a caller that never seeded cannot reopen the
+        # gate-parked-skip bug (a target with no session — a prepared
+        # presentation — answers nothing and mounts, which for a prepared
+        # tail the commit path repaints is the pre-existing behaviour).
         live_ids: set[str] = self._projection_live_call_ids
         if not live_ids:
             session = getattr(self, "_session", None)
-            executing = getattr(session, "executing_display_tool_ids", None)
-            live_ids = cast(set[str], executing()) if callable(executing) else set()
+            live_ids = live_projection_call_ids(session)
         if call_id in live_ids:
             # Record it, so the projection's owner can paint the ONE row for
             # this call when no live path is going to (a local resume: the
