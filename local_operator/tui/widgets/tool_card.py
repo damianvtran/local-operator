@@ -1504,6 +1504,16 @@ class ToolCard(ExpandableActionBlock):
         call finally starts.
         """
         self._stop_clock()
+        # A card restored onto the screen mid-execution (`restore(state="running")`)
+        # holds ``_started=None`` DELIBERATELY: no surface ever learned when
+        # the call began, so it refuses to invent an elapsed time. A re-delivered
+        # ``ToolStarted`` reaches exactly that card — `/resume` onto the running
+        # turn, or a switch away and back replaying the owner's live seed — and
+        # restarting the clock here would fabricate `0s` at arrival, tick from
+        # the RESUME instant, and settle the receipt to "time since the
+        # command" instead of the call's life. The withheld clock survives
+        # re-entry; only a card that can date itself restarts.
+        clockless = self._state == "running" and self._started is None
         # The name comes from the EXECUTION, not from the announcement. The first
         # compose event fires on the first name fragment — deliberately, so the
         # row appears immediately — and a provider that splits `write` into `wr`
@@ -1515,8 +1525,9 @@ class ToolCard(ExpandableActionBlock):
         # so a `write` that executed in 0.1s settled as `✓ 2.4s`, and on the
         # reported 1m41s case would have read `✓ 101s`. Two receipts on one
         # ledger would then be measuring different things with no way to tell
-        # which from the row.
-        self._started = time.monotonic()
+        # which from the row. Unless the clock was withheld (above): a
+        # clockless card has no zero to restart from.
+        self._started = None if clockless else time.monotonic()
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row — including
@@ -1559,8 +1570,11 @@ class ToolCard(ExpandableActionBlock):
         # Without it the duration on a running row is painted once, at zero,
         # and then holds still for the whole call — which is the frame this
         # change exists to stop producing, since a timer that never moves is
-        # indistinguishable from a hung command.
-        self._start_clock()
+        # indistinguishable from a hung command. A clockless card starts no
+        # timer at all: its tick cannot paint a duration (see `_elapsed`) and
+        # would only burn a repaint per second.
+        if not clockless:
+            self._start_clock()
         self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:

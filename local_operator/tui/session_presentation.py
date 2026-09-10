@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 from textual import events
@@ -78,6 +78,37 @@ RETAIN_TEXT_BYTES = 1024 * 1024
 #: the reference journal (D2). Capture one with
 #: ``scripts/audit_history_shot.py <dir> marker 80x30``.
 COMPACTION_MARKER_NOTICE = "context compacted — earlier history above the agent no longer sees"
+
+
+def live_projection_call_ids(session: Any) -> set[str]:
+    """Call ids a settled replay must SKIP because they are executing NOW.
+
+    ``executing() - pending()``, and the subtraction is the load-bearing
+    half. A turn parked at an approval gate is ALSO a streaming one, so both
+    accessors answer with exactly the call the gate is holding; seeding a
+    projection with the un-subtracted set would skip that call out of the
+    replay, and the skip path (``_paint_skipped_live_tool_rows``) paints
+    ``running`` without consulting the gate — bypassing the "waiting wins"
+    rule ``_mark_pending_tool_rows`` exists to enforce. With the held call
+    left out of the seed, the replay mounts its row and the pending scan
+    marks it ``waiting``: the honest state for a call parked on the USER,
+    not on a tool.
+
+    One helper because three sites ask this question — the visible seed in
+    ``_project_settled_rows``, the offscreen seed in the sidebar prepare
+    path, and the fold's own fallback for a target that never seeded — and
+    a divergence between any two reopens the gate bug on exactly one path.
+    Lives here rather than on the app so the fold can ask it without a
+    circular import.
+    """
+    executing = getattr(session, "executing_display_tool_ids", None)
+    if not callable(executing):
+        return set()
+    live = cast(set[str], executing())
+    pending = getattr(session, "pending_display_tool_ids", None)
+    if callable(pending):
+        live -= cast(set[str], pending())
+    return live
 
 
 class CompactionMarkerBlock(NoticeBlock):
@@ -310,6 +341,19 @@ class ReplayState:
     _block_sink: list[Any] | None = None
     _projection_message_id: str = ""
     _projection_part: int = 0
+    #: Call ids of the turn still executing on the session being projected,
+    #: captured at projection time by the caller that knows the session (the
+    #: app for the visible transcript, the prepare caller for an offscreen
+    #: presentation). ``replay_tool_call`` skips the settled row for these —
+    #: the live path owns that call's one visible row — and the empty default
+    #: is the COLD-resume answer: no live turn, nothing to skip.
+    _projection_live_call_ids: set[str] = field(default_factory=set)
+    #: The CALL OBJECTS the projection skipped because their call id is live,
+    #: in transcript order. Read by the projection's owner after the fold to
+    #: paint the one visible row for a still-running call that no live path
+    #: will paint (a local resume onto a turn already in flight). Cleared with
+    #: the ids above.
+    _projection_skipped_live: list[Any] = field(default_factory=list)
 
 
 class ReplayTarget(Protocol):
@@ -325,6 +369,8 @@ class ReplayTarget(Protocol):
     _block_sink: list[Any] | None
     _projection_message_id: str
     _projection_part: int
+    _projection_live_call_ids: set[str]
+    _projection_skipped_live: list[Any]
 
     def _transcript_view(self) -> TranscriptView: ...
 
@@ -384,7 +430,19 @@ class PreparedReplay(ReplayState):
     ) -> None:
         replay_tool_call(self, call, results, user_run=user_run)
 
-    def prepare(self, history: list[Any], *, bound: int = 12, anchor_id: str = "") -> None:
+    def prepare(
+        self,
+        history: list[Any],
+        *,
+        bound: int = 12,
+        anchor_id: str = "",
+        live_call_ids: set[str] | None = None,
+    ) -> None:
+        # Snapshot the session's in-flight calls NOW, before the fold: the
+        # answer can change mid-projection, and a half-guarded tail is the
+        # duplicate this field exists to prevent.
+        self._projection_live_call_ids = set(live_call_ids or ())
+        self._projection_skipped_live = []
         self._block_sink = self.blocks
         anchor = (
             next(
@@ -413,6 +471,10 @@ class PreparedReplay(ReplayState):
             self._resume_tail_notice = HistoryPageNotice()
             self.blocks.append(self._resume_tail_notice)
         self._block_sink = None
+        # One projection's liveness answer must not leak into the next pass:
+        # the empty set is the cold-resume default, the only correct answer
+        # when nobody re-seeds it.
+        self._projection_live_call_ids = set()
 
 
 @dataclass
@@ -961,18 +1023,78 @@ def replay_tool_call(
     duration: the harness persists the executor's measured interval as
     ``provider_payload.duration_s`` beside the result's ``details``, and it is
     restored here rather than recomputed from when this row was mounted.
+
+    One call has exactly ONE visible row. When the transcript carries an
+    outcome, a card the live path already painted is settled in place rather
+    than doubled by a second row. When the call is live IN THIS PROCESS right
+    now — the replay ran against a session whose turn is still in flight, as
+    ``/resume`` onto a running conversation does — mounting a settled row at
+    all is the reported duplicate: the running turn's own ``ToolStarted``
+    paints (or has painted) the live row, and this second card would sit
+    beside it, overcount "running N tools", and stamp ``⊘ interrupted`` on a
+    call that has not stopped. Skipping the settled row loses nothing: the
+    live row owns the call's intent (which the transcript does not persist)
+    and its real start time. Where no live row exists yet — the local adopt,
+    whose ``ToolStarted`` predates this process's subscription — the
+    projection's owner paints the one row afterwards
+    (``_paint_skipped_live_tool_rows``) and registers it with the event
+    controller, so it settles through the ordinary ``on_tool_ended`` path.
+    A COLD resume has no live turn, so ``executing_display_tool_ids()`` is
+    empty there and killed-mid-turn calls still render ``interrupted``
+    exactly as before.
     """
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
+    call_id = getattr(call, "id", "") or ""
+    result = results.get(call_id)
+    if result is not None:
+        # The outcome is recorded, so the call cannot still be running: a card
+        # the live path already painted (a resumed live projection, a
+        # reconnect's pre-disconnect card) is settled in place through the same
+        # derivation instead of being doubled by a fresh row — review round 4,
+        # MINOR-1 built exactly this pairing for the gap replay.
+        painted = self._painted_tool_card(call_id)
+        if painted is not None:
+            self._settle_painted_tool_card(painted, result)
+            return
+    else:
+        # The snapshot the caller seeded for this projection first; a
+        # ReplayTarget carrying the session itself (the app) falls back to
+        # asking the session directly through the SAME subtracted question
+        # the seed uses, so a caller that never seeded cannot reopen the
+        # gate-parked-skip bug (a target with no session — a prepared
+        # presentation — answers nothing and mounts, which for a prepared
+        # tail the commit path repaints is the pre-existing behaviour).
+        live_ids: set[str] = self._projection_live_call_ids
+        if not live_ids:
+            session = getattr(self, "_session", None)
+            live_ids = live_projection_call_ids(session)
+        if call_id in live_ids:
+            # Record it, so the projection's owner can paint the ONE row for
+            # this call when no live path is going to (a local resume: the
+            # turn's ToolStarted fired before this process/subscription
+            # existed, so no card will arrive for it). The replay itself still
+            # mounts nothing — the owner paints it after the fold, where it
+            # knows whether a card is already on screen.
+            self._projection_skipped_live.append(call)
+            return
+        # The gate-free seed answered "not live", but the seed is a snapshot:
+        # a call parked at an approval gate is subtracted out of it (so the
+        # row paints `waiting`, not `running`) while the live ToolStarted
+        # already mounted a card during adoption. Mounting a second row here
+        # is the same duplicate the live-skip above prevents, one arm over —
+        # consult the already-painted registry exactly as the outcome branch
+        # does (QA round 2, Q-R2-1).
+        if self._painted_tool_card(call_id) is not None:
+            return
     card = ToolCard(
-        getattr(call, "id", "") or "",
+        call_id,
         getattr(call, "name", "") or "",
         getattr(call, "arguments", None) or {},
         user_run=user_run,
     )
     self._append_block(card)
-    result = results.get(getattr(call, "id", "") or "")
     if result is None:
         # No result recorded: the session ended between the call and its
         # answer. Showing it as complete would invent an outcome, and there is
