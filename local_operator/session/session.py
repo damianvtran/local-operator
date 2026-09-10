@@ -2159,6 +2159,10 @@ class Session:
         #: result deliveries, resume catch-ups (design-runtime-autorefresh §1.2).
         #: Sync, non-raising by contract (the pipeline guards it anyway).
         self.on_turn_settled: Callable[[], None] | None = None
+        #: Flips the discovery record's ``started`` bit; wired by the runtime
+        #: handle (``OwnedSessionHandle._publish_session_started``) and probed
+        #: so a reduced host without it is a no-op.
+        self._publish_session_started: Callable[[], None] | None = None
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
         # by any turn that actually runs, so the honest "I am dropping these"
@@ -6356,6 +6360,21 @@ class Session:
         opened the run, so the TUI's supersede guard still pairs them.
         """
         await self._refresh_context_metadata()
+        # Flip the discovery record's ``started`` bit the first time a REAL
+        # turn runs. This is the single choke point every spawn path funnels
+        # through — the user's ``prompt()``, wake deliveries
+        # (``_prompt_messages``), and the resume catch-up — so one hook covers
+        # them all and a fresh ``/new`` session that has only had a peer
+        # message spooled into its mailbox stays ``started=False`` until its
+        # owner actually sends a prompt. One-way and idempotent: the
+        # registrant's ``set_record_started`` de-duplicates, so the per-turn
+        # cost is one attribute probe on every turn after the first.
+        mark_started = getattr(self, "_publish_session_started", None)
+        if callable(mark_started):
+            try:
+                mark_started()
+            except Exception:  # noqa: BLE001 — a stale flag is not a turn failure
+                logger.debug("could not publish the started state", exc_info=True)
         # Re-arm the todo guardrail: a fresh user message may well be the answer
         # a stalled list was waiting for, so the latch must not carry over. It is
         # reset HERE and not in `_run_turn` on purpose — `_run_turn` also runs

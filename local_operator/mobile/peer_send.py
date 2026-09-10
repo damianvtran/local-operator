@@ -165,6 +165,17 @@ def resolve_peer_target(
     needle = needle_source.lower()
     matches: list[Any] = []
     for rec, _state in live:
+        # A session that has never run a turn (``/new``, owner still composing
+        # the first prompt) is excluded from a BROADCAST/substring match: an
+        # interrupt there would drive a turn into a session whose owner has not
+        # started it. An EXACT ``--pid``/``--session`` send still resolves to it
+        # (the sender deliberately named that session) and is spooled by
+        # ``deliver_peer_message`` rather than dialled — see there. The default
+        # True keeps a record that simply lacks the attribute (a test double, a
+        # hand-built record) eligible; a pre-field binary's record round-trips
+        # through ``from_json`` with the conservative ``False`` instead.
+        if not getattr(rec, "started", True):
+            continue
         haystacks = [
             rec.conversation_name or "",
             rec.session_id or "",
@@ -381,6 +392,30 @@ async def deliver_peer_message(
     from local_operator.mobile.peer_client import send_peer_message
 
     if record is not None:
+        if not getattr(record, "started", True):
+            # Belt-and-braces with the resolver's broadcast exclusion: an
+            # exact-address send (or any caller that bypassed resolution) must
+            # NEVER drive a turn into a session whose owner is still composing
+            # their first prompt. Degrade mailbox, mailbox+wake and steer alike
+            # to a quiet spool; the existing inbox-drain path hands the message
+            # to the session's first real turn. The default True is a defence
+            # against a NON-standard record that simply lacks the attribute (a
+            # test double, a hand-built record), keeping such a peer on the old
+            # socket path. A record a PRE-FIELD binary wrote round-trips through
+            # ``from_json``, which reads the absent key as the dataclass default
+            # ``False`` — the conservative mixed-version direction documented
+            # there — so an old working session is spooled, never driven.
+            from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+            directory = config_dir() / "sessions" / session_id
+            written = await asyncio.to_thread(
+                append_inbox,
+                directory,
+                InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+            )
+            if not written:
+                raise RuntimeError("could not spool the message for that session")
+            return "spooled (session not started yet; will be read when it next opens)"
         return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
 
     if not wake and mode == "mailbox":

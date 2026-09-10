@@ -578,6 +578,11 @@ class RuntimeServer:
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
+        #: True once this session has run at least one real turn. Starts
+        #: False for every fresh boot (a ``/new`` session sitting in the
+        #: composer) and flips True the first time a turn actually runs — the
+        #: hook lives in ``Session._run_turn_pipeline``.
+        self._started = False
         self._busy = False
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
@@ -1639,6 +1644,24 @@ class RuntimeServer:
         self._busy = busy
         self._republish()
 
+    def set_record_started(self, started: bool) -> None:
+        """Record that this session has run at least one real turn.
+
+        One-way, like the ``busy`` bit's dual: once a turn has run the flag
+        stays True for the life of the record, so a ``False`` -> ``True``
+        transition is the only change worth republishing for (a no-op when
+        already True, and a second ``True`` writes nothing).
+        """
+        if self._started == started:
+            return
+        self._started = started
+        # Write through to the record NOW, not only on the next republish: the
+        # publisher serializes ``self._record``, and a caller reading the record
+        # between here and the republish (or a republish that never comes, e.g.
+        # no publisher yet) must already see the flipped bit.
+        self._record.started = started
+        self._republish()
+
     def set_subagents(self, running: int | None, queued: int | None) -> None:
         """Record this runtime's subagent trajectory counts.
 
@@ -1677,6 +1700,7 @@ class RuntimeServer:
             publisher.heartbeat(
                 pending=self._pending,
                 busy=self._busy,
+                started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,

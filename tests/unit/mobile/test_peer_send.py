@@ -27,6 +27,7 @@ class _Record:
         conversation_name: str = "peer",
         model_label: str = "test/model",
         cwd: str = "/tmp",
+        started: bool = True,
     ) -> None:
         self.pid = pid
         self.session_id = session_id
@@ -35,6 +36,7 @@ class _Record:
         self.cwd = cwd
         self.control_port = 1
         self.control_key = "k"
+        self.started = started
 
 
 def _scan(records: "list[tuple[Any, str]]"):
@@ -198,6 +200,45 @@ def test_only_live_records_are_eligible(fake_scan) -> None:
     record, _c, error = peer_send.resolve_peer_target(target="slow")
     assert record is None
     assert "not responding" in error
+
+
+def test_a_broadcast_substring_skips_an_unstarted_session(fake_scan) -> None:
+    """A ``/new`` session sitting in the composer (``started=False``) is
+    invisible to a substring/broadcast match: an interrupt there would drive a
+    turn into a session whose owner has not started it."""
+    fresh = _Record(10, conversation_name="release", started=False)
+    working = _Record(20, conversation_name="release cutter", started=True)
+    fake_scan([(fresh, "live"), (working, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="release")
+    assert record is working
+    assert candidates == []
+    assert error == ""
+
+
+def test_a_broadcast_matching_only_unstarted_sessions_finds_nothing(fake_scan) -> None:
+    fresh = _Record(10, conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(target="release")
+    assert record is None
+    assert "no live session matches" in error
+
+
+def test_an_exact_pid_send_still_resolves_an_unstarted_session(fake_scan) -> None:
+    """The sender deliberately NAMED this session by pid, so it resolves — the
+    delivery layer spools rather than drives a turn (see deliver_peer_message)."""
+    fresh = _Record(10, conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(pid=10)
+    assert record is fresh
+    assert error == ""
+
+
+def test_an_exact_session_send_still_resolves_an_unstarted_session(fake_scan) -> None:
+    fresh = _Record(10, session_id="fresh-id", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(session="fresh-id")
+    assert record is fresh
+    assert error == ""
 
 
 def test_no_target_is_a_clean_error(fake_scan) -> None:
@@ -624,3 +665,100 @@ def test_a_non_dict_sender_cannot_escape_the_handler(monkeypatch) -> None:
             raise RuntimeError("hostile keys")
 
     assert peer_send.resolve_sender_identity(_HostileMapping()) == {}
+
+
+# --- ``started`` gating on the DELIVERY path ---------------------------------
+#
+# ``resolve_peer_target`` excludes an unstarted session from a broadcast, but
+# an exact-address send still resolves to it. The spool-below is the belt-and-
+# braces that makes "no turn is ever driven into an unstarted session" hold even
+# for a caller that bypassed resolution.
+
+
+def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
+    return registry.SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="fresh",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unstarted_session_is_spooled_not_dialled(monkeypatch, tmp_path) -> None:
+    """mailbox/wake/steer all degrade to a quiet spool for an unstarted session;
+    the socket is never dialled, so no turn can be driven."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    record = _unstarted_record()
+    dialed = False
+
+    async def _dial(*_a: Any, **_k: Any) -> str:
+        nonlocal dialed
+        dialed = True
+        return "delivered"
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
+    from local_operator.session.runtime.inbox import drain_inbox
+
+    for mode, wake in (("mailbox", False), ("mailbox", True), ("steer", False), ("steer", True)):
+        detail = await peer_send.deliver_peer_message(
+            record,
+            session_id=record.session_id,
+            text=f"note-{mode}-{wake}",
+            mode=mode,
+            wake=wake,
+            sender={"pid": 1},
+        )
+        assert detail == "spooled (session not started yet; will be read when it next opens)"
+    assert not dialed, "an unstarted session must never be dialled"
+    # Every spooled line is drained by the existing inbox path on first open.
+    directory = tmp_path / "sessions" / record.session_id
+    assert len(drain_inbox(directory)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
+    """The new branch must not change the normal path: a started session is
+    dialled and its ack detail is returned verbatim."""
+    record = _unstarted_record()
+    record.started = True
+
+    async def _dial(rec: Any, *, text: str, mode: str, wake: bool, sender: Any) -> str:
+        assert rec is record
+        return "delivered and woke the session" if wake else "delivered to the mailbox"
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
+    detail = await peer_send.deliver_peer_message(
+        record,
+        session_id=record.session_id,
+        text="hi",
+        mode="mailbox",
+        wake=True,
+        sender={"pid": 1},
+    )
+    assert detail == "delivered and woke the session"
+
+
+def test_a_record_without_the_started_key_reads_as_unstarted() -> None:
+    """Mixed-version: a record an OLDER binary wrote has no ``started`` key, so
+    the dataclass default ``False`` applies — the safe direction (excluded from
+    broadcasts, spooled on an exact send) rather than risk driving a turn into a
+    fresh ``/new`` session. See ``SessionRecord.from_json``."""
+    record = registry.SessionRecord.from_json(
+        {
+            "pid": 4242,
+            "kind": "tui",
+            "session_id": "old-id",
+            "conversation_name": "old",
+            "cwd": "/tmp",
+            "model_label": "test/model",
+            "control_port": 1,
+            "control_key": "k",
+        }
+    )
+    assert record.started is False

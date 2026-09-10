@@ -1174,6 +1174,43 @@ class TestLiveStateReachesTheRecord:
         server._republish_detached()  # unchanged: no publish
         assert len(publishes) == 1
 
+    @pytest.mark.asyncio
+    async def test_a_new_runtime_reports_itself_unstarted(self) -> None:
+        """A fresh boot (a ``/new`` session in the composer) has run no turn."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        assert server._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_started_is_one_way_and_deduplicated(self) -> None:
+        """The flag flips once and a repeat ``True`` (every turn after the
+        first) publishes nothing."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._started)  # type: ignore[method-assign]
+
+        server.set_record_started(True)
+        server.set_record_started(True)  # already started: must not republish
+
+        assert publishes == [True]
+
+    @pytest.mark.asyncio
+    async def test_started_survives_the_republish(self, tmp_path, monkeypatch) -> None:
+        """A heartbeat rewrite carries ``started`` forward rather than resetting
+        it — the field must stay True once set, or a working session would
+        become broadcast-invisible again on the next heartbeat."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        server.start()
+        try:
+            await _wait_record()
+            server.set_record_started(True)
+            # A republish through the heartbeat path must keep the bit set.
+            server._republish()
+            found = registry.scan()
+            assert found and found[0][0].started is True
+        finally:
+            server.close()
+
 
 @pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:

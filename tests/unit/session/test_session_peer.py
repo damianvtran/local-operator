@@ -535,3 +535,59 @@ async def test_a_sender_with_no_record_still_delivers(tmp_path, monkeypatch):
     rows = _peer_rows(session)
     assert rows[0].payload["details"]["sender"] == {"pid": 999999}
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_peer_message_does_not_start_the_session(tmp_path):
+    """A mailbox message landing on an unstarted session must NOT flip the
+    record's ``started`` bit: the flag marks a REAL turn, not a spooled note."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.receive_peer_message("quiet note", mode="mailbox", wake=False, sender={"pid": 42})
+
+    assert marks == [], "a spooled mailbox message ran no turn, so it must not start the session"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_first_real_turn_flips_started_once(tmp_path):
+    """A user prompt (and a wake-driven turn) each run a real turn; the hook
+    fires at the pipeline's choke point and the registrant de-duplicates, so the
+    first turn publishes exactly once and later turns republish nothing."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.prompt("first")
+    await session.prompt("second")
+
+    # The hook runs at the top of EVERY turn; the one-way dedupe lives in the
+    # registrant's set_record_started, so the session emits a mark per turn and
+    # the publish layer (not the session) is what collapses them to one write.
+    assert len(marks) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wake_peer_message_that_opens_the_first_turn_starts_the_session(tmp_path):
+    """A wake/steer delivery that itself runs the session's first turn DOES set
+    the flag: the session is now genuinely working."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.receive_peer_message("wake up", mode="mailbox", wake=True, sender={"pid": 42})
+    await wait_for(lambda: len(marks) == 1)
+
+    assert len(marks) == 1
+    await session.dispose()

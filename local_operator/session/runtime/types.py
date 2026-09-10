@@ -213,6 +213,15 @@ class SessionRecord:
     #: A turn is running right now. The picker's liveness marker, and the
     #: difference between a session that is working and one merely resident.
     busy: bool = False
+    #: This session has run at least one REAL turn (a user prompt, a wake
+    #: delivery, a resume catch-up — anything through ``_run_turn_pipeline``).
+    #: ``False`` marks the window after ``/new`` when the record is already
+    #: published but the owner is still composing their first prompt, so a
+    #: peer broadcast or an exact-address wake/steer must not drive a turn
+    #: into it. The flag is one-way: once a real turn has run it stays True
+    #: for the life of the record, and every heartbeat/republish carries it
+    #: forward so it is never reset by a later write.
+    started: bool = False
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
@@ -283,5 +292,19 @@ class SessionRecord:
         # Tolerate unknown keys (a NEWER binary's record read by an older
         # daemon mid-upgrade): forward-compat here is what lets a restart
         # rolling-upgrade the daemon without the phone losing sessions.
+        #
+        # ``started`` therefore defaults to ``False`` for a record an OLDER
+        # binary wrote (no key): the conservative read treats it as not yet
+        # started, so a broadcast skips it and an exact-address send is spooled
+        # rather than driven. That is the safe direction — the only cost is the
+        # brief upgrade window where a genuinely-working OLD runtime reads as
+        # unstarted and is excluded from broadcasts / spooled on an exact send.
+        # The alternative (default True) would let a broadcast wake a fresh
+        # ``/new`` session sitting in the composer, which is the exact bug
+        # being fixed, so the transient misclassification of old sessions is
+        # accepted. The record carries ``started_at`` (process birth) and
+        # ``protocol`` either way, but neither can distinguish "old binary,
+        # actually working" from "new binary, not yet started" — no signal
+        # distinguishes them, so the default is deliberately conservative.
         known = {f for f in SessionRecord.__dataclass_fields__}
         return SessionRecord(**{k: v for k, v in data.items() if k in known})

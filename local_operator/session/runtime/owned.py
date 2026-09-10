@@ -392,6 +392,11 @@ class OwnedSessionHandle(SessionHandle):
         # sessions in tests that never grew the attribute keep working.
         if hasattr(session, "on_turn_settled"):
             session.on_turn_settled = self._publish_busy_soon
+        # Same shape as ``on_turn_settled``: the session flips the record's
+        # ``started`` bit the first time a real turn runs (see
+        # ``_run_turn_pipeline``), and the registrant owns the publish.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = self._publish_session_started
         # Discovery/attachment does not authorize replacing a headless deny
         # gate with a parked interactive gate. Exec opts into that separately.
         #: Why the most recent admitted turn failed, for a headless caller that
@@ -3775,6 +3780,24 @@ class OwnedSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
         self._publish_subagents()
+
+    def _publish_session_started(self) -> None:
+        """Flip the record's ``started`` bit once a real turn has run.
+
+        Called from ``Session._run_turn_pipeline`` at the top of every turn;
+        the registrant's ``set_record_started`` de-duplicates so only the
+        first call publishes. A peer message spooled into an unstarted
+        session's mailbox never reaches this — it only becomes ``started``
+        when its owner actually runs a turn.
+        """
+        server = self._registrant
+        setter = getattr(server, "set_record_started", None)
+        if not callable(setter):
+            return
+        try:
+            setter(True)
+        except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
+            logger.debug("could not publish the started state", exc_info=True)
 
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories, or ``(None, None)``.
