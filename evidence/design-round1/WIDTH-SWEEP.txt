@@ -1,0 +1,35 @@
+SOURCE CLAIM under test: 'the tail here is Esc cancels, the way out,
+  which is exactly the half that must not be the part that crops.'
+
+FULL STRING (60 cells): 'masked as you type — Enter turns it into a chip, Esc cancels'
+
+width   Esc?  chip?  Enter?  painted row
+   90   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   88   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   86   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   84   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   82   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   80   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   78   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   76   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   74   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   72   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   70   True   True    True  'masked as you type — Enter turns it into a chip, Esc cancels'
+   68  False   True    True  'masked as you type — Enter turns it into a chip, Esc cance…'
+   66  False   True    True  'masked as you type — Enter turns it into a chip, Esc can…'
+   64  False   True    True  'masked as you type — Enter turns it into a chip, Esc c…'
+   62  False   True    True  'masked as you type — Enter turns it into a chip, Esc…'
+   60  False   True    True  'masked as you type — Enter turns it into a chip, E…'
+   58  False   True    True  'masked as you type — Enter turns it into a chip,…'
+   56  False  False    True  'masked as you type — Enter turns it into a chi…'
+   54  False  False    True  'masked as you type — Enter turns it into a c…'
+   52  False  False    True  'masked as you type — Enter turns it into a…'
+   50  False  False    True  'masked as you type — Enter turns it into…'
+   48  False  False    True  'masked as you type — Enter turns it in…'
+   46  False  False    True  'masked as you type — Enter turns it…'
+   44  False  False    True  'masked as you type — Enter turns i…'
+   42  False  False    True  'masked as you type — Enter turns…'
+   40  False  False    True  'masked as you type — Enter tur…'
+
+  'Esc cancels' first LOST at width : 68
+  'chip' first LOST at width        : 56

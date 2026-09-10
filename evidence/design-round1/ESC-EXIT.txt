@@ -1,0 +1,39 @@
+=== WHAT 'Esc cancels' LEAVES THE OPERATOR HOLDING ===
+
+  == bare ==
+     masked        : buffer='/credential ••••••••••••••••••'
+     marker glyph  : '•'   armed-class=True
+     after Esc     : buffer='/credential hunter2-typed-test'
+     secret PAINTED IN COMPOSER: True
+     marker glyph  : '❯'   armed-class=False
+     TYPING notice : False
+     any warning   : []
+     -> next Enter : buffer=''
+        secret painted anywhere: False
+        secret UPPERCASED as a key: True
+        store: []
+          row: '? Paste the value for HUNTER2_TYPED_TEST'
+
+  == prose ==
+     masked        : buffer='please store /credential ••••••••••••••••••'
+     marker glyph  : '•'   armed-class=True
+     after Esc     : buffer='please store /credential hunter2-typed-test'
+     secret PAINTED IN COMPOSER: True
+     marker glyph  : '❯'   armed-class=False
+     TYPING notice : False
+     any warning   : []
+     -> next Enter : buffer=''
+        secret painted anywhere: True
+        secret UPPERCASED as a key: False
+        store: []
+          row: '▌ please store /credential hunter2-typed-test'
+
+=== REACHABILITY of the two OTHER strings this PR rewrote ===
+  ARMED_NOTICE = 'armed — type or paste the secret; it is never shown'
+  PLACEHOLDER  = 'Type or paste the secret… — masked; Enter chips it'
+  empty composer (placeholder shown?)    ARMED=0 PLACEHOLDER=0 TYPING=0
+  /credential + space                    ARMED=0 PLACEHOLDER=0 TYPING=1
+  /cred + space                          ARMED=0 PLACEHOLDER=0 TYPING=1
+  /credential (no space) then paste      ARMED=0 PLACEHOLDER=0 TYPING=0
+  /credential + space then paste         ARMED=0 PLACEHOLDER=0 TYPING=0
+  chip minted, then a second arm         ARMED=0 PLACEHOLDER=0 TYPING=1

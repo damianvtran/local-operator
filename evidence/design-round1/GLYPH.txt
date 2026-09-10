@@ -1,0 +1,37 @@
+=== GUTTER GLYPH vs MASK GLYPH ===
+  MASK = '•' U+2022
+
+  -- ordinary prose (unarmed)
+     chevron widget text : None
+     row (stripped)      : '❯  hello there'
+     row codepoints [0:4]: U+276F U+0020 U+0020 U+0068
+     U+2022 in WHOLE row : 0   (typed 18)
+     leading marker cell : '❯'
+     U+2022 after marker : 0
+     editor.text         : 'hello there'
+     mask chars in buffer: 0
+
+  -- armed, nothing typed
+     chevron widget text : None
+     row (stripped)      : '•  /credential'
+     row codepoints [0:4]: U+2022 U+0020 U+0020 U+002F
+     U+2022 in WHOLE row : 1   (typed 18)
+     leading marker cell : '•'
+     U+2022 after marker : 0
+     editor.text         : '/credential '
+     mask chars in buffer: 0
+
+  -- armed, secret typed
+     chevron widget text : None
+     row (stripped)      : '•  /credential ••••••••••••••••••'
+     row codepoints [0:4]: U+2022 U+0020 U+0020 U+002F
+     U+2022 in WHOLE row : 19   (typed 18)
+     leading marker cell : '•'
+     U+2022 after marker : 18
+     editor.text         : '/credential ••••••••••••••••••'
+     mask chars in buffer: 18
+
+=== IS CREDENTIAL_PLACEHOLDER USED ANYWHERE THAT PAINTS? ===
+  placeholder string      : 'Type or paste the secret… — masked; Enter chips it'
+  painted while armed     : False
+  editor.placeholder      : 'Type or paste the secret… — masked; Enter chips it'
