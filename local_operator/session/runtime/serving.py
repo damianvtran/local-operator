@@ -49,9 +49,7 @@ from local_operator.mobile.types import (
     SessionProjection,
     ask_pending_request,
 )
-from local_operator.session.runtime.server import (
-    SessionHandle,
-)
+from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
