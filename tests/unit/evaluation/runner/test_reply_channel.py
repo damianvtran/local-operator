@@ -625,13 +625,18 @@ async def test_a_channel_answer_without_prose_is_not_read_as_silence() -> None:
 
     ``provider_client`` rejects a reply that emitted no tool call AND no text,
     because that model said nothing on either channel. The tool-call half of
-    that condition is load-bearing and easy to drop by accident: a model that
-    answers ON the channel and writes no prose arrives here with empty
-    ``text``, so keying the guard on silence alone would reject the very
-    replies the channel exists to carry.
+    that condition is load-bearing: a model that answers ON the channel and
+    writes no prose arrives with empty ``text``, so keying the guard on silence
+    alone would reject the very replies the channel exists to carry.
 
-    Without this test, deleting ``tool_call_count == 0`` leaves the guard's own
-    test file entirely green.
+    This test asserts the ACCEPTANCE side of that -- a channel answer is
+    decoded normally. It does NOT by itself fail when ``tool_call_count == 0``
+    is deleted, because a valid channel call sets ``text`` from the channel
+    reply and so never reaches the guard. The mutation is caught by
+    ``test_an_empty_channel_call_is_rejected_like_an_empty_prose_body``, whose
+    empty-argument call leaves ``text`` empty WITH a tool call present -- the
+    one shape that distinguishes the two conditions. Both are kept: this one
+    pins the behaviour, that one pins the clause.
     """
 
     current = observation()

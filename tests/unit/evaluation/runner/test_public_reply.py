@@ -596,7 +596,48 @@ def test_an_envelope_with_an_extra_key_is_told_the_key_is_unexpected() -> None:
             '"public_observations": "", "notes": "x"}'
         )
 
-    assert "added unexpected 'notes'" in str(info.value)
+    assert "added 1 unexpected key(s): 'notes'" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"X" * 50_000: "y"},
+        {f"key{index}" * 20: index for index in range(60)},
+    ],
+    ids=["one-enormous-key", "many-long-keys"],
+)
+def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object]) -> None:
+    """Model-supplied key names are bounded before they reach the model again.
+
+    ``present`` and ``missing`` intersect a fixed set, so they can only name
+    the three reserved keys. ``extra`` is arbitrary model output, and echoing
+    it whole turned a 50,000-character key into a 50,000-character retry
+    prompt -- intercepted by neither ``MAX_REJECTED_REPLY_CHARS`` nor
+    ``_diagnostic``'s cap, and re-opening the replay channel that the
+    reserved-key suppression exists to close.
+
+    Bounded in BOTH directions, so neither one enormous key nor many short
+    ones can rebuild a payload through the diagnostic.
+    """
+
+    payload = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {"actions": []},
+            "public_observations": "",
+            **extra,
+        }
+    )
+
+    with pytest.raises(ValueError) as info:
+        decode_public_reply(payload)
+
+    message = str(info.value)
+    assert len(message) < 1_000, f"diagnostic grew to {len(message)} characters"
+    # The count is still reported, so the model learns how many keys to drop
+    # even when their names are withheld.
+    assert f"added {len(extra)} unexpected key(s)" in message
 
 
 def test_a_non_object_reply_keeps_the_plain_rule() -> None:

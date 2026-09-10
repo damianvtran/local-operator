@@ -19,6 +19,17 @@ from local_operator.evaluation.receipts import RedactionSet
 REPLY_VERSION = "1.0"
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
 _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
+
+#: Bounds on how much of a rejected reply's OWN key names may appear in the
+#: diagnostic sent back to the model. The reserved keys are safe to name (they
+#: come from a fixed set), but any other key is model-supplied text: echoing it
+#: whole turns a malformed reply into an unbounded retry prompt and re-opens
+#: the replay channel the reserved-key suppression exists to close. Capped in
+#: both directions so neither one long key nor many short ones can rebuild a
+#: payload.
+_MAX_EXTRA_KEY_CHARS = 40
+_MAX_EXTRA_KEYS_SHOWN = 5
+
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
 
 #: What the reply-channel function tells the model it is for. Kept beside the
@@ -129,7 +140,25 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
             if missing:
                 parts.append("omitted " + ", ".join(repr(key) for key in missing))
             if extra:
-                parts.append("added unexpected " + ", ".join(repr(key) for key in extra))
+                # ``present``/``missing`` are intersections with a fixed set,
+                # so they can only ever name the three reserved keys. ``extra``
+                # is arbitrary MODEL-SUPPLIED text and must never be echoed
+                # whole: a 50,000-character key produced a 50,000-character
+                # retry prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
+                # ``_diagnostic``'s cap intercepts, and which re-opens the
+                # replay channel the reserved-key suppression below closes.
+                #
+                # Bounded in BOTH directions -- each key truncated, and the
+                # number of keys quoted capped -- because either alone is
+                # enough to reconstruct a payload from many short keys.
+                shown = [
+                    key[:_MAX_EXTRA_KEY_CHARS] + ("…" if len(key) > _MAX_EXTRA_KEY_CHARS else "")
+                    for key in extra[:_MAX_EXTRA_KEYS_SHOWN]
+                ]
+                summary = ", ".join(repr(key) for key in shown)
+                if len(extra) > _MAX_EXTRA_KEYS_SHOWN:
+                    summary += f" and {len(extra) - _MAX_EXTRA_KEYS_SHOWN} more"
+                parts.append(f"added {len(extra)} unexpected key(s): {summary}")
             raise ValueError(
                 "model reply used the reserved envelope but "
                 + "; ".join(parts)
