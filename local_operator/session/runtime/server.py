@@ -1305,9 +1305,77 @@ class RuntimeServer:
             # In-flight transcript state rides the same canonical sync as every
             # other full-TUI field. Raw events begin only after that frame.
             conn.events_ready = True
+        # Bytes discarded by the CURRENT oversized line. Doubles as the
+        # "already reported this one" flag, since a run always starts at zero:
+        # one oversized frame raises REPEATEDLY — once per limit-sized chunk,
+        # measured at 7 raises for a 10 MB line — so a log call per raise would
+        # turn one bad message into a burst that buries the fact that they were
+        # all the same frame.
+        overrun_bytes = 0
         try:
             while not self._closed.is_set():
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError:
+                    # AN OVERSIZED INBOUND LINE MUST NOT BE A FATAL ERROR.
+                    # ``start_server(..., limit=_MAX_LINE_BYTES)`` makes
+                    # ``readline`` raise ``ValueError`` (wrapping
+                    # ``LimitOverrunError``) for a line past the limit, and the
+                    # raise happens HERE, outside the ``json.loads`` try below
+                    # that looks like it covers it. Uncaught it escaped the
+                    # ``ConnectionResetError``/``BrokenPipeError`` handler, the
+                    # reader loop died, and the ``finally`` dropped the
+                    # connection — so a client sending one large frame lost its
+                    # whole session and the operator had to ``lop --resume``.
+                    # A pasted screenshot over ~780 KB of source does it, which
+                    # is how this was found.
+                    #
+                    # CONTINUING IS SAFE HERE and is NOT the infinite loop the
+                    # sibling ``viewer_server`` guard warns about. The
+                    # difference is ``readline`` vs ``readuntil``: ``readuntil``
+                    # leaves the offending bytes in the buffer so the next read
+                    # re-raises forever, while ``readline`` catches its own
+                    # ``LimitOverrunError`` and DRAINS — deleting through the
+                    # separator when one was found and clearing the buffer when
+                    # it was not (CPython ``asyncio/streams.py``). So the next
+                    # read starts at the following frame, and the connection
+                    # survives to carry the user's NEXT message, which is the
+                    # behaviour the operator actually missed.
+                    #
+                    # LOUDLY, at error, but ONCE PER FRAME: the frame is gone
+                    # and whoever sent it is owed the reason. ``AttachClient``
+                    # now refits images before sending (``fit_request_frame``),
+                    # so a line reaching this point means an old client, a
+                    # non-attach peer, or a bug — each of which is worth one
+                    # greppable line rather than a vanished session.
+                    if overrun_bytes == 0:
+                        logger.error(
+                            "session runtime: dropping an inbound frame from %s client %s "
+                            "over the %d-byte line limit; the frame is discarded and the "
+                            "connection kept — the sender must resize its payload",
+                            conn.kind,
+                            conn.writer.get_extra_info("peername"),
+                            _MAX_LINE_BYTES,
+                        )
+                    overrun_bytes += _MAX_LINE_BYTES
+                    continue
+                if overrun_bytes:
+                    # The read that finally SUCCEEDS is the tail of the
+                    # oversized line (everything after the last discarded
+                    # chunk), never a frame of its own — so it is dropped by the
+                    # JSON guard below and the total is reported here, where the
+                    # size is finally known. Naming the total is what makes the
+                    # log actionable: "over 1 MiB" does not say whether to trim
+                    # one screenshot or five.
+                    logger.error(
+                        "session runtime: discarded ~%d bytes of oversized inbound frame "
+                        "from %s client %s; the connection is still up and the next "
+                        "message will be read normally",
+                        overrun_bytes + len(line),
+                        conn.kind,
+                        conn.writer.get_extra_info("peername"),
+                    )
+                    overrun_bytes = 0
                 if not line:
                     self._drop_client(conn, reason="reader eof")
                     return  # client hung up

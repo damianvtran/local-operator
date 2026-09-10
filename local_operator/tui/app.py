@@ -17974,6 +17974,11 @@ class OperatorApp(App[None]):
                 aborted = True
                 raise
             except Exception as error:  # surface, never crash the app
+                # Lazy, matching the other two references to this module here:
+                # `attach_client` is imported on the owned-resume branch only,
+                # and the startup path stays light.
+                from local_operator.mobile.attach_client import OversizedRequest
+
                 error_text = str(error)
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
@@ -17987,6 +17992,24 @@ class OperatorApp(App[None]):
                 ):
                     text_line, kind = self._no_session_notice(unsent=True)
                     self._notice_for(source, text_line, kind)
+                elif isinstance(error, OversizedRequest):
+                    # THE MESSAGE WAS NEVER SENT, and that is the whole reason
+                    # this branch exists rather than falling through to the
+                    # bare-error one below. `OversizedRequest` is raised
+                    # INSTEAD of the socket write (see `fit_request_frame`), so
+                    # unlike every other failure here the composer's content is
+                    # not merely un-answered — it is un-delivered, and the only
+                    # copy of it is the one this worker is holding. Printing the
+                    # error alone would leave the user with a refusal notice and
+                    # no text and no attachment: their work, gone, for a
+                    # transport limit they cannot see.
+                    #
+                    # So the draft goes back the same way a dead runtime returns
+                    # it, and the error's own sentence is the notice — it
+                    # already names the size, the limit, and which attachment to
+                    # drop, which is what makes the refusal actionable.
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
+                    self._notice_for(source, str(error), "warning")
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]

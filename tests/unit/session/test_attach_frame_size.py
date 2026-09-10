@@ -16,7 +16,11 @@ error anybody reports.
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
+import logging
+import random
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +29,12 @@ from typing import Any, cast
 import pytest
 
 from local_operator.harness.types import ModelSpec, ToolResult, Usage
-from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
+from local_operator.media import sniff_image
+from local_operator.mobile.attach_client import (
+    _READ_LIMIT_BYTES,
+    AttachClient,
+    OversizedRequest,
+)
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _DERIVED_STATE_LABELS,
@@ -2136,3 +2145,409 @@ def test_model_and_usage_accessors_still_deep_copy(tmp_path: Path) -> None:
     # observe a corruption the slow path prevented.
     assert remote.model_label == "openai/gpt-4o"
     assert remote.effective_model_label == "anthropic/claude"
+
+
+# ---------------------------------------------------------------------------
+# The INBOUND twin: a frame the CLIENT sends that the owner cannot read.
+#
+# Everything above guards frames travelling owner -> viewer. The same 1 MiB
+# line limit applies to the other direction and had no protection at all: the
+# runtime's reader loop called `readline()` OUTSIDE the `try` that catches
+# `ValueError`, so an over-limit inbound line escaped through the reader task
+# and the `finally` dropped the connection. One pasted screenshot over ~780 KB
+# of source was enough, which the operator experienced as "sending a message
+# with an image exits lop and I have to run `lop --resume`".
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    """A PNG of CONTINUOUS-TONE content, which is what makes it a real fixture.
+
+    The content matters more than the size here. Pure noise and a flat fill are
+    both pathological for the ladder under test — noise defeats every codec and
+    a flat fill compresses to nothing, so either one tests the fixture rather
+    than the refit. Blurred noise behaves the way a photograph or a screenshot
+    does: PNG stores it badly (no flat runs to pack) and JPEG stores it well,
+    which is the whole premise of preferring a re-encode over lost pixels.
+    """
+    Image = pytest.importorskip("PIL.Image")
+    ImageFilter = pytest.importorskip("PIL.ImageFilter")
+    rng = random.Random(width * height)
+    coarse = Image.frombytes(
+        "RGB",
+        (width // 4, height // 4),
+        bytes(rng.getrandbits(8) for _ in range((width // 4) * (height // 4) * 3)),
+    )
+    image = coarse.resize((width, height), Image.BILINEAR).filter(ImageFilter.GaussianBlur(1.2))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _wire_image(width: int, height: int) -> dict[str, str]:
+    return {
+        "mime_type": "image/png",
+        "data_b64": base64.b64encode(_png_bytes(width, height)).decode("ascii"),
+    }
+
+
+class _ImageRecordingHandle(FakeHandle):
+    """A handle that KEEPS the images it was given.
+
+    ``FakeHandle`` records only the text, and the whole question here is what
+    pixels survived the wire — so a test asserting on its calls could not tell
+    a delivered image from a dropped one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[tuple[str, list[Any]]] = []
+
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
+        self.received.append((text, list(images or [])))
+        return await super().prompt(text, images, command_id)
+
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+        self.received.append((f"steer:{text}", list(images or [])))
+        return await super().steer(text, images)
+
+    async def slash_images(self, command, args, images):  # noqa: ANN001, ANN202
+        self.received.append((f"slash:{command}", list(images or [])))
+        return "slash ok"
+
+
+def test_an_oversized_prompt_frame_is_the_shape_that_killed_the_session() -> None:
+    """The regression is real: an ordinary pasted screenshot overflows the line.
+
+    The sibling of ``test_ten_jobs_at_the_cap_overflow_the_line_limit_without_
+    the_fix`` for the inbound direction. Asserting the UNGUARDED size keeps the
+    tests below honest — if images ever got small enough to fit anyway, those
+    would pass for the wrong reason and this one would fail loudly instead.
+    """
+    image = _wire_image(1400, 1400)
+    naive = _line_bytes(
+        {
+            "op": "prompt",
+            "req": 1,
+            "command_id": str(uuid.uuid4()),
+            "text": "what does this show?",
+            "images": [image],
+        }
+    )
+    assert naive > _MAX_LINE_BYTES, (
+        "the fixture no longer reproduces the oversized inbound frame; "
+        f"{naive} bytes is under the {_MAX_LINE_BYTES} limit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_inbound_frame_does_not_kill_the_session(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """THE BUG, end to end: the connection must survive a frame it cannot read.
+
+    Driven against the REAL ``RuntimeServer`` over a REAL socket with a
+    deliberately unguarded write, which is what an OLD client (or any peer that
+    is not ``AttachClient``) does. Before the fix the reader loop's
+    ``readline`` raised ``ValueError`` past the ``ConnectionResetError`` handler
+    and the ``finally`` dropped the client — the session death the operator hit.
+
+    The assertion that matters is the SECOND message: surviving the bad frame is
+    only useful if the session is still usable afterwards, and that is precisely
+    what the operator lost.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _record(tmp_path)
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=_MAX_LINE_BYTES
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "attach"}).encode() + b"\n")
+        await writer.drain()
+        welcome = json.loads((await asyncio.wait_for(reader.readline(), timeout=5)).decode())
+        assert welcome.get("op") in ("projection", "welcome")
+
+        # Unguarded on purpose: this is the frame the fixed client would never
+        # send and an older one still does.
+        oversized = {
+            "op": "prompt",
+            "req": 1,
+            "command_id": str(uuid.uuid4()),
+            "text": "here is a screenshot",
+            "images": [{"mime_type": "image/png", "data_b64": "A" * (_MAX_LINE_BYTES + 350_000)}],
+        }
+        assert _line_bytes(oversized) > _MAX_LINE_BYTES
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            writer.write(json.dumps(oversized).encode() + b"\n")
+            await writer.drain()
+
+            # THE NEXT MESSAGE, which is the whole point. On the pre-fix tree
+            # the socket is already gone and this ack never arrives.
+            follow_up = {
+                "op": "prompt",
+                "req": 2,
+                "command_id": str(uuid.uuid4()),
+                "text": "the next message",
+            }
+            writer.write(json.dumps(follow_up).encode() + b"\n")
+            await writer.drain()
+            reply = None
+            deadline = asyncio.get_running_loop().time() + 10
+            while asyncio.get_running_loop().time() < deadline:
+                line = await asyncio.wait_for(reader.readline(), timeout=10)
+                assert line, "the runtime closed the connection; the oversized frame killed it"
+                frame = json.loads(line.decode())
+                if frame.get("req") == 2:
+                    reply = frame
+                    break
+            assert reply is not None, "the follow-up was never answered"
+            assert reply.get("op") == "ack", f"the follow-up was refused: {reply}"
+
+        # The oversized frame was DISCARDED, not delivered half-parsed.
+        assert [text for text, _ in handle.received] == ["the next message"]
+        # And it was reported loudly enough to find, naming the limit.
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "line limit" in logged, f"the discard was not reported: {logged!r}"
+        assert str(_MAX_LINE_BYTES) in logged
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_large_pasted_image_is_refitted_and_actually_arrives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The product half: an ordinary paste must SEND, not be refused.
+
+    The operator pastes screenshots routinely, and the sizes that overflow the
+    frame are ordinary — one composer-bounded render measured 1.23 MB of base64
+    on this machine. So the client refits rather than rejecting, and the
+    assertion is that the image genuinely reaches the owner: a guard that
+    silently dropped the attachment would pass a "did not crash" test while
+    losing the user's work.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1400, 1400)
+        assert _line_bytes({"op": "prompt", "images": [image]}) > _MAX_LINE_BYTES
+
+        detail = await client.prompt("what does this show?", images=[image])
+        assert detail == "prompt ok"
+        assert client.connected, "the send severed the connection"
+
+        text, delivered = handle.received[-1]
+        assert text == "what does this show?"
+        assert len(delivered) == 1, "the attachment was dropped instead of resized"
+        arrived = delivered[0]
+        payload = getattr(arrived, "data", None) or arrived.get("data_b64")
+        # It really is an image, and it really is smaller than the budget.
+        decoded = base64.b64decode(payload)
+        info = sniff_image(decoded)
+        assert info is not None, "what arrived is not a decodable image"
+        assert len(payload) < _MAX_LINE_BYTES
+
+        # The session keeps working afterwards, which is the operator's actual
+        # complaint — the send used to be the thing that ended it.
+        assert await client.prompt("and a follow-up") == "prompt ok"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["prompt", "steer", "slash"])
+async def test_every_image_bearing_op_is_guarded_not_just_prompt(
+    tmp_path: Path, monkeypatch, op: str
+) -> None:
+    """``steer`` and ``slash`` carry images too, on the same socket.
+
+    Guarding ``prompt`` alone would leave two live routes to the same session
+    death: steering mid-turn with a pasted image, and a slash command that
+    takes attachments (``slash_images``). Parametrized rather than copied so a
+    FOURTH image-bearing op cannot quietly skip the guard — it shares the one
+    seam in ``_request_frame``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        images = [_wire_image(1400, 1400)]
+        assert _line_bytes({"op": op, "images": images}) > _MAX_LINE_BYTES
+
+        if op == "prompt":
+            await client.prompt("look", images=images)
+        elif op == "steer":
+            await client.steer("look", images=images)
+        else:
+            await client.slash("compact", "", images=images)
+
+        assert client.connected, f"{op} with an oversized image severed the connection"
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 1, f"{op} lost its attachment"
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_several_images_share_one_frame_budget(tmp_path: Path, monkeypatch) -> None:
+    """N images must fit TOGETHER, not each against the whole limit.
+
+    The subtle way to get this wrong: refit every image against the full 1 MiB
+    and each one passes while the frame still overflows. Two composer-bounded
+    screenshots already serialize past the limit on this machine, so the
+    multi-image case is the ordinary one rather than an edge.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        images = [_wire_image(900 + index * 60, 900) for index in range(4)]
+
+        assert await client.prompt("compare these", images=images) == "prompt ok"
+        assert client.connected
+
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 4, "an attachment was dropped rather than resized"
+        rebuilt = [
+            {
+                "mime_type": getattr(image, "mime_type", None) or image.get("mime_type"),
+                "data_b64": getattr(image, "data", None) or image.get("data_b64"),
+            }
+            for image in delivered
+        ]
+        # The FRAME is what had to fit, so that is what is measured.
+        assert _line_bytes({"op": "prompt", "req": 1, "images": rebuilt}) <= _MAX_LINE_BYTES
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unsendable_message_is_refused_by_name_not_silently_lost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A refusal must reach the USER, and must not take the session with it.
+
+    The user's composer content is their work: the two ways to get this wrong
+    are to drop it silently and to kill the connection reporting it. So the
+    refusal is an exception the TUI turns into a notice (and a restored draft),
+    the wording names what to do, and the session is still usable after it.
+
+    Two shapes, because they need different sentences: prose over the limit
+    (nothing to resize) and an attachment that is not a decodable image at all
+    — telling someone to shrink bytes that were never an image sends them off
+    fixing the wrong thing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        with pytest.raises(OversizedRequest) as prose:
+            await client.prompt("x" * (_MAX_LINE_BYTES + 200_000))
+        assert "shorten" in str(prose.value), str(prose.value)
+        assert f"{_MAX_LINE_BYTES:,}" in str(prose.value), "the refusal hides the actual limit"
+        assert client.connected, "reporting the refusal killed the connection"
+
+        junk = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(b"\x00" * (_MAX_LINE_BYTES + 200_000)).decode("ascii"),
+        }
+        with pytest.raises(OversizedRequest) as unreadable:
+            await client.prompt("look at this", images=[junk])
+        # Named by POSITION so it points at a specific composer chip, and NOT
+        # described as merely "too large", which would be the wrong remedy.
+        assert "image 1" in str(unreadable.value), str(unreadable.value)
+        assert "not a readable image" in str(unreadable.value), str(unreadable.value)
+        assert client.connected
+
+        # Nothing was delivered, and the session still works.
+        assert handle.received == []
+        assert await client.prompt("a normal message") == "prompt ok"
+    finally:
+        client.close()
+        registrant.close()
+
+
+def test_a_refused_request_leaves_nothing_pending() -> None:
+    """A refusal must not park a future nobody will ever resolve.
+
+    Found while testing the refusal path: the request id was registered in
+    ``_pending`` BEFORE the fit could raise, so a refused send left a future
+    that nothing completes. It sat until teardown, took the disconnect's
+    ``ConnectionError``, and logged "exception was never retrieved" for a
+    refusal the caller had already handled cleanly.
+    """
+
+    async def scenario() -> int:
+        client = AttachClient(lambda _projection: None, lambda _reason: None)
+        client._connected = True
+        # A writer that would FAIL the test by being used: a refused request
+        # must never reach the socket at all.
+        client._writer = cast(Any, SimpleNamespace(write=_forbidden_write, drain=None))
+        with pytest.raises(OversizedRequest):
+            await client.prompt("x" * (_MAX_LINE_BYTES + 200_000))
+        return len(client._pending)
+
+    assert asyncio.run(scenario()) == 0
+
+
+def _forbidden_write(_payload: bytes) -> None:
+    raise AssertionError("a refused request must not be written to the socket")
+
+
+def test_the_refit_prefers_the_codec_over_the_users_pixels() -> None:
+    """Fidelity means legible text, and pixels carry that while the codec does not.
+
+    The ladder's first rung re-encodes at UNCHANGED dimensions, so an ordinary
+    screenshot clears the budget with every pixel intact. Asserted as a
+    property rather than against a byte count: the claim is "it did not have to
+    downscale", which is what the user would notice.
+    """
+    from local_operator.imaging import refit_image_to_budget
+
+    source = _png_bytes(1200, 800)
+    data_b64 = base64.b64encode(source).decode("ascii")
+    # A budget the PNG cannot meet, so the refit genuinely has to do something.
+    budget = len(data_b64) // 2
+    result = refit_image_to_budget(data_b64, "image/png", budget)
+    assert result is not None, "an ordinary screenshot must not be refused"
+    refitted_b64, _mime = result
+    assert len(refitted_b64) <= budget
+    info = sniff_image(base64.b64decode(refitted_b64))
+    assert info is not None
+    assert (info.width, info.height) == (1200, 800), (
+        "the refit gave up pixels when a re-encode would have been enough; "
+        f"it delivered {info.width}x{info.height}"
+    )

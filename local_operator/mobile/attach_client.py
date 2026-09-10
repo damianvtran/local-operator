@@ -90,6 +90,158 @@ class _OversizedFrame(Exception):
     what it sent) and were logged as the same overrun before this existed."""
 
 
+class OversizedRequest(ValueError):
+    """This side refused to SEND a frame the owner could not have read.
+
+    The outbound twin of :class:`_OversizedFrame`, and the whole point is that
+    it is raised INSTEAD of a write. Writing an over-limit line does not fail:
+    it succeeds, the owner's ``readline`` raises on the far side, and the
+    connection dies — so the caller's request is answered by a dead socket
+    rather than an error, which is exactly the session death this guards
+    (pasting a large screenshot exited ``lop`` and forced ``lop --resume``).
+
+    A ``ValueError`` and not a ``ConnectionError``, deliberately: the socket is
+    healthy and redialling fixes nothing. The TUI's prompt worker surfaces the
+    message as a notice and puts the draft back in the composer, which is what
+    makes the refusal actionable rather than a loss.
+    """
+
+
+#: Bytes of ONE request frame's non-image overhead to hold back from the image
+#: budget: the op name, the ``req`` id, a UUID command id, and the user's text.
+#:
+#: Sized against the TEXT, which is the only part that varies much — the
+#: composer caps a paste at ``MAX_CLIPBOARD_TEXT_BYTES`` (1 MiB), but a prompt
+#: that large is over the line limit on its own words and is refused by the
+#: same guard rather than silently truncated. 64 KiB covers any prompt a person
+#: types alongside a screenshot with two orders of magnitude of room, and the
+#: exact frame is measured again after the refit, so this reserve only has to be
+#: generous rather than precise.
+_FRAME_OVERHEAD_RESERVE_BYTES = 64 * 1024
+
+
+async def fit_request_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    """Return ``frame`` sized to fit the socket, refitting its images if needed.
+
+    THE BUG THIS CLOSES. The owner's control socket reads one JSON line per
+    frame with ``limit=_MAX_LINE_BYTES``; a line over that makes its
+    ``readline`` raise and (before the sibling fix in ``RuntimeServer``) killed
+    the reader loop and the connection. Nothing on this side checked, so
+    ``prompt``/``steer``/``slash`` put the user's images on the wire fully
+    base64-encoded and unguarded, and ONE pasted screenshot over ~780 KB of
+    source severed the socket at the moment of sending. Measured on this
+    machine: a 1672x941 render is 1.23 MB of base64 after the composer's own
+    ingest bound, and two ordinary screenshots together are 1.1 MB, so the
+    frames that break it are ordinary rather than pathological.
+
+    WHY REFIT RATHER THAN REFUSE. Pasting screenshots is a routine gesture, and
+    the sizes above are routine too — a hard rejection would break the feature
+    to protect the transport. So each image is re-encoded to fit
+    (:func:`~local_operator.imaging.refit_image_to_budget`, JPEG at full
+    resolution first, downscale only if that is not enough) and the user sees
+    nothing. Only an image that cannot fit even at its tightest rung is
+    refused, named by its POSITION in the message so it points at a specific
+    composer chip and the user knows which attachment to drop.
+
+    WHY THE BUDGET IS SHARED ACROSS THE IMAGES. The line limit applies to the
+    whole frame, so N images have to fit TOGETHER; refitting each against the
+    full limit would pass N times and still overflow. Each image gets an equal
+    share of what is left after the overhead reserve, which is also what makes
+    a four-image message shrink evenly instead of refusing the last one.
+
+    A COROUTINE because the refit decodes and re-encodes images — ~315 ms for a
+    20 MP frame — and every caller is on an event loop. The work goes to a
+    thread; a frame with no images (the overwhelming majority: every ack, every
+    watch, every projection request) returns after one length check without
+    ever reaching it.
+
+    Raises :class:`OversizedRequest` when the frame cannot be made to fit,
+    which is strictly better than the alternative: the caller learns its
+    request was not sent while the connection is still alive.
+    """
+    images = frame.get("images")
+    encoded_size = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    if encoded_size <= _READ_LIMIT_BYTES:
+        return frame
+    if not isinstance(images, list) or not images:
+        # Nothing bulky to shrink, so the text itself is over the limit. Say so
+        # with both numbers rather than truncating: a prompt silently cut in
+        # half is worse than one that was not sent, because the damage is
+        # invisible until the model answers about the wrong thing.
+        raise OversizedRequest(
+            f"this message is {encoded_size:,} bytes and the limit is "
+            f"{_READ_LIMIT_BYTES:,} bytes; shorten it and send again"
+        )
+    budget = max(0, _READ_LIMIT_BYTES - _FRAME_OVERHEAD_RESERVE_BYTES)
+    share = budget // len(images)
+    fitted = await asyncio.to_thread(_refit_images, images, share)
+    candidate = {**frame, "images": fitted}
+    refitted_size = len(json.dumps(candidate).encode()) + 1
+    if refitted_size > _READ_LIMIT_BYTES:
+        # The reserve was not enough, which means the TEXT is the bulk. Measured
+        # on the real frame rather than assumed, so the refusal names the size
+        # the user can actually act on.
+        raise OversizedRequest(
+            f"this message is {refitted_size:,} bytes even after its images were "
+            f"resized, and the limit is {_READ_LIMIT_BYTES:,} bytes; shorten the "
+            "text or send fewer attachments"
+        )
+    logger.warning(
+        "attach client: %s frame was %d bytes, over the %d-byte line limit; "
+        "resized %d image(s) to %d bytes so the message could be sent",
+        frame.get("op", "request"),
+        encoded_size,
+        _READ_LIMIT_BYTES,
+        len(images),
+        refitted_size,
+    )
+    return candidate
+
+
+def _refit_images(images: list[Any], share_bytes: int) -> list[Any]:
+    """Refit every image block to ``share_bytes`` of base64, or refuse by name.
+
+    Runs in a thread (see :func:`fit_request_frame`). A block that is not a
+    dict, or carries no ``data_b64``, is passed through untouched: the owner
+    already drops unusable blocks (``_images_from_wire``), and inventing a
+    refusal for one here would fail a send over something the owner would have
+    ignored.
+    """
+    from local_operator.imaging import ImageUnreadable, refit_image_to_budget
+
+    fitted: list[Any] = []
+    for index, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
+            fitted.append(image)
+            continue
+        data_b64 = image.get("data_b64") or ""
+        if not isinstance(data_b64, str) or not data_b64:
+            fitted.append(image)
+            continue
+        mime_type = str(image.get("mime_type") or "image/png")
+        try:
+            result = refit_image_to_budget(data_b64, mime_type, share_bytes)
+        except ImageUnreadable as exc:
+            # A DIFFERENT SENTENCE FROM "too large", deliberately: these bytes
+            # would not have been sendable at any size, so telling the user to
+            # shrink them sends them off fixing the wrong thing.
+            raise OversizedRequest(
+                f"image {index} could not be sent because {exc}; remove it and send again"
+            ) from exc
+        if result is None:
+            # Named by POSITION, because that is what the user can act on: the
+            # composer numbers its attachments `[Image #N]` in the same order,
+            # so "image 2" points at a specific chip on their screen.
+            megabytes = len(data_b64) / (1024 * 1024)
+            raise OversizedRequest(
+                f"image {index} is too large to send ({megabytes:.1f} MB) and could "
+                "not be resized to fit; remove it and send again"
+            )
+        refitted_b64, refitted_mime = result
+        fitted.append({**image, "data_b64": refitted_b64, "mime_type": refitted_mime})
+    return fitted
+
+
 def find_owner_record(config_dir: Path, session_id: str) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
@@ -493,9 +645,15 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
+        # `OversizedRequest` and a future parked in `_pending` for a request
+        # that was never written is never resolved by anything: it sits there
+        # until the connection closes, then takes the teardown's
+        # `ConnectionError` with nobody awaiting it — an "exception was never
+        # retrieved" log for a refusal the caller had already handled cleanly.
+        frame = await fit_request_frame({"op": op, "req": req, **fields})
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
-        frame = {"op": op, "req": req, **fields}
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
@@ -516,9 +674,12 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # Fitted before the future is registered, for the reason spelled out in
+        # :meth:`_request_frame`: a refusal must leave nothing parked in
+        # ``_pending``.
+        frame = await fit_request_frame({"op": op, "req": req, **fields})
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[req] = future
-        frame = {"op": op, "req": req, **fields}
         try:
             self._writer.write(json.dumps(frame).encode() + b"\n")
             await self._writer.drain()
