@@ -12,9 +12,12 @@ preserving (they are scar tissue from real provider behaviour):
   only ports the provider accepts) without weakening it: an OS-assigned port
   is still never advertised to such a provider.
 - A busy port is retried briefly before it is believed. The common cause is a
-  sibling login of ours still tearing down, not a permanent squatter, so the
-  ladder pokes ``GET /cancel`` at the incumbent once and retries — matching
-  upstream Codex's ``bind_server``.
+  sibling login of ours still parked on its timeout, not a permanent squatter,
+  so the ladder pokes ``GET /cancel`` at the incumbent once and retries —
+  matching upstream Codex's ``bind_server``. **That poke only works because
+  this server also ANSWERS ``/cancel``** (see ``_handle_connection``): sending
+  it without implementing it, as this did at first, leaves the sibling holding
+  the port and the retry waiting for something that will never happen.
 - Two routes on one server: the callback path and ``/launch`` (302 to the
   pending auth URL) so a TUI can hand the user a short copy target.
 - The paste-code prompt may only race the HTTP callback for providers that
@@ -112,8 +115,29 @@ def _parse_pasted_callback(pasted: str) -> tuple[str, str]:
     # Providers hand users "code#state" in the redirect URL fragment.
     if "#" in pasted:
         code, _, frag_state = pasted.partition("#")
-        return code.strip(), frag_state.strip()
-    return pasted, ""
+        return _require_code(code.strip()), frag_state.strip()
+    return _require_code(pasted), ""
+
+
+def _require_code(code: str) -> str:
+    """Reject a paste that yields no authorization code.
+
+    A stray Enter at the prompt, or a fragment-only paste like ``#state``,
+    otherwise reaches the token endpoint AS the code: the login is spent on a
+    round trip that must fail, and the user gets an opaque provider error in
+    the one place this flow exists to help people whose browser cannot reach
+    the loopback port. Raising instead re-offers the prompt, which is what
+    every other unusable shape in this parser already does.
+
+    Checks the RESULT rather than the input's shape, so every branch that can
+    produce an empty code is covered by construction.
+    """
+    if not code.strip():
+        raise LoginError(
+            "That paste carried no authorization code. Paste the code itself, "
+            "or the whole redirect URL from your browser's address bar."
+        )
+    return code
 
 
 def _describe_port_holders(ports: tuple[int, ...]) -> str:
@@ -137,8 +161,11 @@ def _describe_port_holders(ports: tuple[int, ...]) -> str:
     for port in ports:
         try:
             # Ports are ints from our own config, so there is no shell and no
-            # interpolation risk; -F pn asks for a stable machine-readable
-            # (pid, name) stream rather than the localised table layout.
+            # interpolation risk; -F pcn asks for a stable machine-readable
+            # stream of p(id), c(ommand) and n(ame) fields rather than the
+            # localised table layout. The parse below reads the `c` field, so
+            # dropping it from this argv silently removes the "X (pid N) is
+            # holding it" clause from every message.
             completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 [binary, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pcn"],
                 capture_output=True,
@@ -540,6 +567,11 @@ class OAuthCallbackFlow(ABC):
         self._pending_auth_url: str | None = None
         self._captured: asyncio.Future[tuple[str, str]] | None = None
         self._capture_error: asyncio.Future[str] | None = None
+        #: Resolved when a newer login asks this one to stand down over
+        #: ``/cancel``. Separate from ``_capture_error`` because the outcome is
+        #: a CANCELLATION, not a failure: hosts report the two differently, and
+        #: a superseded login is not an error the user did anything about.
+        self._cancelled: asyncio.Future[str] | None = None
         self._sent_state: str | None = None
 
     # -- subclass hooks ----------------------------------------------------
@@ -577,6 +609,13 @@ class OAuthCallbackFlow(ABC):
         Upstream Codex handles it by poking ``/cancel`` on the incumbent before
         retrying (`server.rs::send_cancel_request`), and this mirrors it.
 
+        The other half of this is the ``/cancel`` ROUTE in
+        ``_handle_connection``. Without it this method is theatre: the request
+        is sent, our sibling answers 404, the port stays held, and the retry
+        budget is spent waiting for a release that never comes. That was the
+        state this code shipped in first, and it mattered most for Anthropic
+        and Z.AI, which have no second rung to fall back to.
+
         Strictly best-effort: an unrelated server on that port answers 404 or
         garbage and nothing changes, so every failure here is swallowed and the
         retry ladder proceeds either way. It is deliberately a raw request
@@ -607,7 +646,7 @@ class OAuthCallbackFlow(ABC):
                 except Exception:
                     pass
 
-    async def _try_bind(self, port: int, *, required: bool) -> bool:
+    async def _try_bind(self, port: int, *, required: bool, may_cancel: bool = True) -> bool:
         """Bind ``port``. Returns True on success.
 
         ``required`` says whether this port is the only acceptable answer, and
@@ -636,7 +675,7 @@ class OAuthCallbackFlow(ABC):
             except OSError:
                 if not required:
                     return False
-                if not cancel_attempted:
+                if may_cancel and not cancel_attempted:
                     cancel_attempted = True
                     await self._cancel_stale_server(port)
                 if attempt < attempts - 1:
@@ -653,8 +692,13 @@ class OAuthCallbackFlow(ABC):
         pinned = opts.redirect_uri is not None or not opts.allow_port_fallback
         candidates = opts.candidate_ports if pinned else (opts.preferred_port,)
 
-        for port in candidates:
-            if await self._try_bind(port, required=pinned):
+        for index, port in enumerate(candidates):
+            # Only the PREFERRED rung is poked, matching upstream's
+            # `!using_fallback_port` guard. A fallback rung is a port we merely
+            # may use, so an incumbent there has at least as much claim to it
+            # as we do; standing one down to save ourselves a rung we do not
+            # need would be taking someone else's login for our convenience.
+            if await self._try_bind(port, required=pinned, may_cancel=index == 0):
                 return
 
         if pinned:
@@ -689,13 +733,29 @@ class OAuthCallbackFlow(ABC):
             where = f"The {provider} login can only use port {listed}, and all are"
         busy = " but is already in use." if len(candidates) == 1 else " in use."
         detail = f" {holders}" if holders else ""
-        probe = " ".join(f"lsof -nP -iTCP:{port} -sTCP:LISTEN" for port in candidates[:1])
-        return (
+        # `lsof` takes a comma list, so one command covers every candidate --
+        # naming only the first left the second port's holder unfindable in
+        # exactly the two-port case this message exists for.
+        probe = f"lsof -nP -iTCP:{','.join(str(port) for port in candidates)} -sTCP:LISTEN"
+        message = (
             f"{where}{busy}{detail} {provider} only accepts redirect URIs on "
             f"{'that port' if len(candidates) == 1 else 'those ports'}, so the login "
             "cannot fall back to another one. Quit the process holding it and run the "
             f"login again — `{probe}` shows what it is."
         )
+        # This failure happens BEFORE the server starts, so the paste prompt --
+        # the fallback this flow otherwise leans on -- is never offered. That
+        # left the only stated remedy "kill the other process", which a user
+        # who does not own that process cannot do. Naming the paste route makes
+        # the hard failure recoverable, and it is only mentioned where a host
+        # has actually attached a prompt.
+        if self.callbacks.on_manual_code_input is not None:
+            message += (
+                " If you cannot free the port, run the login again and use the "
+                "paste option: approve the sign-in in your browser, then paste "
+                "the code or the whole redirect URL at the prompt."
+            )
+        return message
 
     def _socket_port(self) -> int | None:
         """The actually-bound port — the one that lands in redirect_uri."""
@@ -817,6 +877,31 @@ class OAuthCallbackFlow(ABC):
                         tone="danger",
                     )
                     await self._respond(writer, 200, body)
+        elif path == "/cancel" and method == "GET":
+            # A NEWER login of ours found this port busy and is asking this
+            # one to stand down so it can have it. Without this route the poke
+            # in `_cancel_stale_server` lands on the 404 below and the
+            # incumbent keeps the port -- which made the retry ladder's whole
+            # premise ("the usual holder is a sibling still parked on its
+            # timeout") false for our own servers. Upstream Codex implements
+            # the same route for the same reason (`server.rs` `"/cancel" =>
+            # ResponseAndExit`).
+            #
+            # Safe to honour unauthenticated: it is reachable only from
+            # loopback, it destroys no credential, and the worst a local
+            # process can do with it is end a login the user can simply run
+            # again. It deliberately carries NO state check -- the caller is a
+            # sibling process that never saw our `state`, which is the whole
+            # point.
+            self._finish_cancelled("Login superseded by a newer sign-in that needed this port.")
+            body = self._page(
+                "Sign-in cancelled",
+                "Another sign-in started and took over this address, so this "
+                "one was stopped. Nothing was connected. Continue in the "
+                "window where you started the newer sign-in.",
+                closable=False,
+            )
+            await self._respond(writer, 200, body)
         elif path == "/launch" and method == "GET":
             if self._pending_auth_url:
                 await self._respond(
@@ -913,6 +998,10 @@ class OAuthCallbackFlow(ABC):
         if self._capture_error and not self._capture_error.done():
             self._capture_error.set_result(message)
 
+    def _finish_cancelled(self, message: str) -> None:
+        if self._cancelled and not self._cancelled.done():
+            self._cancelled.set_result(message)
+
     def _launch_url(self) -> str | None:
         """Short 302 alias for the auth URL; only safe for loopback http(s)."""
         if self.options.manual_input_only or self._server is None or self._bound_port is None:
@@ -998,6 +1087,7 @@ class OAuthCallbackFlow(ABC):
         loop = asyncio.get_running_loop()
         self._captured = loop.create_future()
         self._capture_error = loop.create_future()
+        self._cancelled = loop.create_future()
         state = secrets.token_hex(16)
         self._sent_state = state
         try:
@@ -1024,6 +1114,12 @@ class OAuthCallbackFlow(ABC):
 
     async def _await_code(self) -> tuple[str, str]:
         assert self._captured is not None and self._capture_error is not None
+        # `run()` creates this, but `_await_code` is also driven directly (by
+        # tests, and by any caller that owns its own server lifecycle). A
+        # future added to this class must not become a precondition existing
+        # callers have to learn about, so it is created on demand here.
+        if self._cancelled is None:
+            self._cancelled = asyncio.get_running_loop().create_future()
         waiters: list[asyncio.Future[Any]] = []
         loop = asyncio.get_running_loop()
 
@@ -1108,6 +1204,7 @@ class OAuthCallbackFlow(ABC):
 
         waiters.append(self._captured)
         waiters.append(self._capture_error)
+        waiters.append(self._cancelled)
         waiters.append(loop.create_task(_manual()))
         if self._signal is not None:
             waiters.append(loop.create_task(_abort_watch()))
@@ -1129,7 +1226,13 @@ class OAuthCallbackFlow(ABC):
             if exc is not None:
                 raise exc
             result = task.result()
-            if isinstance(result, str):  # capture_error path
+            if isinstance(result, str):
+                # Both string-valued futures land here, and which one resolved
+                # decides the EXCEPTION TYPE: a superseded login is a
+                # cancellation (hosts report it quietly and offer no remedy),
+                # while `_capture_error` is a real failure worth surfacing.
+                if task is self._cancelled:
+                    raise LoginCancelledError(result)
                 raise LoginError(result)
             return result
         raise LoginTimeoutError()  # unreachable

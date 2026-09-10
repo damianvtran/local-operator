@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import inspect
 import json
@@ -2006,7 +2007,7 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def test_fallback_ports_reject_pinned_redirect_uri() -> None:
+async def test_fallback_ports_reject_pinned_redirect_uri() -> None:
     """A ladder plus a literal URI would advertise a port we did not bind."""
     with pytest.raises(ValueError, match="pinned redirect_uri"):
         CallbackFlowOptions(
@@ -2017,20 +2018,20 @@ def test_fallback_ports_reject_pinned_redirect_uri() -> None:
         )
 
 
-def test_fallback_ports_reject_os_assigned_fallback() -> None:
+async def test_fallback_ports_reject_os_assigned_fallback() -> None:
     """The ladder IS the allowlist; an OS-assigned port would defeat it."""
     with pytest.raises(ValueError, match="allow_port_fallback=False"):
         CallbackFlowOptions(preferred_port=1455, fallback_ports=(1457,))
 
 
-def test_candidate_ports_dedupe_preserving_order() -> None:
+async def test_candidate_ports_dedupe_preserving_order() -> None:
     opts = CallbackFlowOptions(
         preferred_port=1455, fallback_ports=(1457, 1455), allow_port_fallback=False
     )
     assert opts.candidate_ports == (1455, 1457)
 
 
-def test_openai_uses_the_allowlisted_port_pair() -> None:
+async def test_openai_uses_the_allowlisted_port_pair() -> None:
     """The literal ports are the contract: 1455 then 1457, both server-side
     allowlisted for this client id (upstream commit 8d5da3f). Asserted without
     binding anything, so a developer running Cursor cannot fail it."""
@@ -2102,51 +2103,131 @@ async def test_port_ladder_fails_when_every_allowlisted_port_is_busy() -> None:
             await server.wait_closed()
 
 
-async def test_port_ladder_pokes_cancel_at_a_stale_login_server() -> None:
-    """A busy port is retried, and the incumbent is asked to stand down first
-    -- the common cause is a sibling login of ours still parked on its
-    timeout, not a permanent squatter."""
-    seen: list[str] = []
-    holder: list[asyncio.base_events.Server] = []
+async def test_a_real_sibling_login_stands_down_when_poked() -> None:
+    """The claim the retry ladder is built on, tested against a REAL sibling.
 
-    async def _stale(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        raw = await reader.read(256)
-        seen.append(raw.decode("latin-1").split("\r\n", 1)[0])
-        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-        try:
-            await writer.drain()
-        except Exception:
-            pass
-        writer.close()
-        # Release the port, as a real login server does when cancelled.
-        holder[0].close()
+    This must not use a hand-written responder that closes its own listener:
+    such a stand-in asserts only that we SEND `/cancel`, which was true even
+    when our server answered it with a 404 and kept the port. The regression
+    that hid behind exactly that shape is what this test exists to catch, so
+    the incumbent here is a genuine OAuthCallbackFlow with `run()` pending.
+    """
+    port = _free_port()
+    sibling = _EchoFlow(
+        CallbackFlowOptions(
+            preferred_port=port,
+            allow_port_fallback=False,
+            callback_path="/auth/callback",
+            timeout_seconds=30.0,
+        ),
+        LoginCallbacks(),
+    )
+    sibling_run = asyncio.create_task(sibling.run())
+    for _ in range(400):  # let the sibling actually bind before we compete
+        if sibling.bound_port is not None and sibling.generated:
+            break
+        await asyncio.sleep(0.01)
 
-    holder.append(await asyncio.start_server(_stale, "127.0.0.1", 0))
-    preferred = _port_of(holder[0])
+    # PRECONDITION: the sibling really holds the port and its login is really
+    # pending. Without this, "the newcomer got the port" could just mean the
+    # sibling never started, which is a passing test for a broken feature.
+    assert sibling.bound_port == port
+    assert not sibling_run.done(), "sibling login should still be pending"
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        flow = _EchoFlow(
+        with pytest.raises(OSError):
+            probe.bind(("127.0.0.1", port))
+    finally:
+        probe.close()
+
+    try:
+        newcomer = _EchoFlow(
             CallbackFlowOptions(
-                preferred_port=preferred,
-                fallback_ports=(_free_port(),),
+                preferred_port=port,
                 allow_port_fallback=False,
                 callback_path="/auth/callback",
             ),
             LoginCallbacks(),
         )
-        await flow._start_server()
+        await newcomer._start_server()
         try:
-            assert seen and seen[0] == "GET /cancel HTTP/1.1"
-            # Having stood the incumbent down, the retry wins the PREFERRED
-            # port rather than burning the fallback.
-            assert flow.bound_port == preferred
+            # The newcomer won the PREFERRED port, which is only possible if
+            # the sibling honoured `/cancel` and released it.
+            assert newcomer.bound_port == port
         finally:
-            await flow._stop_server()
+            await newcomer._stop_server()
+
+        # And the sibling ended as a CANCELLATION, not as a generic failure:
+        # it was superseded, which is not something the user did wrong.
+        with pytest.raises(LoginCancelledError):
+            await asyncio.wait_for(sibling_run, timeout=10)
     finally:
-        try:
-            holder[0].close()
-            await holder[0].wait_closed()
-        except Exception:
-            pass
+        sibling_run.cancel()
+        with contextlib.suppress(asyncio.CancelledError, LoginError):
+            await sibling_run
+
+
+async def test_cancel_route_answers_200_not_404() -> None:
+    """The route itself: our server must ANSWER `/cancel`, not 404 it.
+
+    Pinned directly because the 404 is what made the poke a no-op, and a 404
+    here is indistinguishable from "route missing" at the ladder's call site.
+    """
+    flow = _EchoFlow(CallbackFlowOptions(preferred_port=0, timeout_seconds=30.0), LoginCallbacks())
+    run = asyncio.create_task(flow.run())
+    for _ in range(400):
+        if flow.bound_port is not None and flow.generated:
+            break
+        await asyncio.sleep(0.01)
+    assert flow.bound_port is not None
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{flow.bound_port}/cancel")
+        assert response.status_code == 200
+        with pytest.raises(LoginCancelledError):
+            await asyncio.wait_for(run, timeout=10)
+    finally:
+        run.cancel()
+        with contextlib.suppress(asyncio.CancelledError, LoginError):
+            await run
+
+
+async def test_the_fallback_rung_is_never_poked() -> None:
+    """Upstream gates the poke on `!using_fallback_port`; so do we.
+
+    An incumbent on a rung we merely MAY use has as much claim to it as we do,
+    so standing it down to save ourselves a fallback would be taking someone
+    else's login for our own convenience.
+    """
+    poked: list[str] = []
+
+    async def _watch(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw = await reader.read(256)
+        poked.append(raw.decode("latin-1").split("\r\n", 1)[0])
+        writer.close()
+
+    preferred = await asyncio.start_server(_watch, "127.0.0.1", 0)
+    fallback = await asyncio.start_server(_watch, "127.0.0.1", 0)
+    try:
+        flow = _EchoFlow(
+            CallbackFlowOptions(
+                preferred_port=_port_of(preferred),
+                fallback_ports=(_port_of(fallback),),
+                allow_port_fallback=False,
+                callback_path="/auth/callback",
+            ),
+            LoginCallbacks(),
+        )
+        with pytest.raises(ConfigurationError):
+            await flow._start_server()
+        assert (
+            poked.count("GET /cancel HTTP/1.1") == 1
+        ), f"expected exactly one poke (the preferred rung), saw {poked}"
+    finally:
+        for server in (preferred, fallback):
+            server.close()
+            await server.wait_closed()
 
 
 async def test_single_pinned_port_message_names_the_port() -> None:
@@ -2417,7 +2498,7 @@ async def test_timeout_with_a_paste_path_names_the_recovery() -> None:
     assert "clock" in message  # the WSL/VM note is kept, not replaced
 
 
-def test_anthropic_pins_its_callback_port() -> None:
+async def test_anthropic_pins_its_callback_port() -> None:
     """54545 is allowlisted by Anthropic; inheriting the default port fallback
     meant a busy 54545 minted a random-port redirect_uri that the allowlist
     rejects at the IdP, after the browser had opened, with an error the user
