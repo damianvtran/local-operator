@@ -895,6 +895,13 @@ async def generate_retitle(
 #: natural word and expects the natural thing, the reserved words win — the same
 #: trade ``/goal clear`` and ``/model default`` already make.
 #:
+#: The vocabulary is matched on the ARGUMENT regardless of which spelling of the
+#: command carried it, so ``/rename refresh`` refreshes exactly as ``/title
+#: refresh`` does. That is deliberate and not an oversight: they are ONE registry
+#: entry, and an alias that behaved differently from its primary name would be
+#: the drift ``test_an_alias_inherits_its_command_policy`` exists to forbid. A
+#: user who reaches the feature through the older spelling gets the feature.
+#:
 #: HERE rather than in ``tui/app.py`` because three surfaces read it — the TUI
 #: handler, the routed ``slash_result`` path, and the detached runtime's own
 #: handler — and the last of those must never import Textual (see the module

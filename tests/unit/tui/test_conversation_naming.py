@@ -1540,6 +1540,112 @@ async def test_a_failed_refresh_leaves_the_title_standing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refresh_writes_only_through_the_source_it_was_dispatched_for() -> None:
+    """The moving-target defect: ``self._interaction`` is not the conversation
+    the worker was started for.
+
+    A sidebar switch during the call moves it, and a worker that re-read it on
+    resume painted the refreshed title onto the conversation the user switched
+    TO and stamped that innocent session's naming schedule — while the session
+    that asked kept a stale baseline. The generation guard cannot catch it: it
+    reads the generation off the NEW source, which this refresh never bumped.
+
+    Staged by moving ``_interaction`` directly rather than driving a real
+    sidebar switch, because the seam under test is the worker's binding of the
+    source, and a full switch would exercise a dozen unrelated ones.
+    """
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+        asked = app._interaction
+        baseline = asked.naming.last_titled_turn_count
+
+        gate = asyncio.Event()
+        session.name_gate = gate
+        session.title = "<title>Billing importer rewrite</title>"
+        app._run_slash_command("/title refresh")
+        await _settle()
+
+        # The user switches to another conversation while the call is in flight.
+        bystander = SessionInteraction(session=None, token="bystander")
+        app._interaction = bystander
+        gate.set()
+        await _settle()
+
+        assert (
+            bystander.naming.last_titled_turn_count == 0
+        ), "the refresh stamped the schedule of the conversation switched TO"
+        assert (
+            asked.naming.last_titled_turn_count != baseline
+        ), "the asking conversation's own schedule was never re-seeded"
+        assert session.conversation_name == "Billing importer rewrite"
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_landing_after_a_rename_leaves_the_rename_alone() -> None:
+    """A `/rename` during the call outranks an answer decided before it.
+
+    Without the re-read, the release would strip the very latch protecting the
+    words the user had just typed and the refresh would overwrite them —
+    silently revoking their most recent instruction in favour of the previous
+    one. The automatic worker has guarded this since it shipped; this is the
+    same guard on the on-demand path.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+
+        # The rename lands while the refresh call is in flight.
+        gate = asyncio.Event()
+        session.name_gate = gate
+        session.title = "<title>Billing importer rewrite</title>"
+        app._run_slash_command("/title refresh")
+        await _settle()
+        session.set_conversation_name("Ledger reconciliation", user_set=True)
+        gate.set()
+        await _settle()
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert session.conversation_name_state.user_set, "the rename was revoked"
+        assert "title unchanged: Ledger reconciliation" in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_supersedes_the_first_naming_call_frees_the_latch() -> None:
+    """Naming fires once per conversation, and the ONE thing that re-arms it is
+    the naming worker's own failure path — which a superseded worker returns
+    before reaching. So a refresh dispatched while the opening call was still in
+    flight left an unnamed conversation with naming permanently disarmed.
+    """
+    app, session = await _boot(title="<title>Login redirect loop</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        gate = asyncio.Event()
+        session.name_gate = gate
+        app._submit_prompt("fix the login redirect loop")
+        session.gate.set()
+        await _settle()
+        assert not session.conversation_name, "the opening call was not still in flight"
+
+        # The refresh bumps the generation, superseding the naming call above.
+        app._run_slash_command("/title refresh")
+        await _settle()
+        gate.set()
+        await _settle()
+
+        assert not session.conversation_name
+        assert (
+            not app._interaction.naming.requested
+        ), "an unnamed conversation was left with naming permanently disarmed"
+
+
+@pytest.mark.asyncio
 async def test_the_refresh_word_is_never_mistaken_for_a_title() -> None:
     """`/title refresh` asks; `/title <anything else>` names. The dividing line
     is a small reserved vocabulary, so a user typing the natural word from

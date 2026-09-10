@@ -168,7 +168,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
-        # 51 cells, inside the ~55 at which the description column wraps and
+        # 43 cells, inside the ~55 at which the description column wraps and
         # renders a phantom command name in `/help` (see `/model`, `/theme`).
         # The `refresh` word has to be HERE because the help table is where a
         # user learns the command exists at all, and the capability it names is

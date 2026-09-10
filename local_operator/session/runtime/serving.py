@@ -2844,11 +2844,16 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
             logger.debug("routed title refresh failed", exc_info=True)
             result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
-        if not result.changed:
+        # The second condition is the rename-during-the-call guard: a `/rename`
+        # landing while this was in flight outranks an answer decided against a
+        # title no longer in force, and storing over it would strip the latch
+        # protecting the words the user just typed.
+        standing = getattr(session, "conversation_name", "") or ""
+        if not result.changed or standing != current:
             text = (
                 "nothing to title yet — /title <words> names it by hand"
                 if result.outcome == naming.TITLE_NOTHING_YET
-                else f"title unchanged: {current}"
+                else f"title unchanged: {standing}"
             )
             return SlashResult(kind="notice", text=text, style="info")
         state = getattr(session, "conversation_name_state", None)

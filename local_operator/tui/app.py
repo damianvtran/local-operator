@@ -21302,14 +21302,17 @@ class OperatorApp(App[None]):
         rename always wins, including one that landed while this call was in
         flight, so this may store nothing and return the name already there.
 
-        ``turn_count`` distinguishes the two callers and drives the growth
-        gate's counters. ``None`` is the FIRST title (the naming path): the
-        session's identity starts here, so the baseline is seeded from the
-        transcript's current turn count and the refresh budget is (re)set to
-        zero — this is where omp's ``lastTitledTurnCount``/``refreshCount`` are
-        initialised. An int is a RE-title: the baseline moves to the count the
-        check was dispatched at and one refresh is spent, so the next re-title
-        needs another doubling of the transcript.
+        ``turn_count`` distinguishes the callers and drives the growth gate's
+        counters. ``None`` means the conversation's identity is being DECIDED,
+        not merely refined, so the baseline is seeded from the transcript's
+        current turn count and the refresh budget is (re)set to zero — this is
+        where omp's ``lastTitledTurnCount``/``refreshCount`` are initialised.
+        Two callers pass it: the first naming call, where the identity starts;
+        and ``/title refresh``, where the user has just re-decided it by hand,
+        which restarts the drift clock for the same reason rather than by
+        coincidence. An int is an automatic RE-title: the baseline moves to the
+        count the check was dispatched at and one refresh is spent, so the next
+        one needs another doubling of the transcript.
         """
         stored = session.set_conversation_name(title, user_set=False)
         if turn_count is None:
@@ -21812,7 +21815,13 @@ class OperatorApp(App[None]):
         )
         notice("refreshing the title…")
         self.run_worker(
-            self._title_refresh_worker(session, generation, turns, notice),
+            self._title_refresh_worker(
+                session,
+                session.conversation_name,
+                generation,
+                turns,
+                source=self._interaction,
+            ),
             thread=False,
             group=self._interaction.worker_group("naming"),
         )
@@ -21820,9 +21829,10 @@ class OperatorApp(App[None]):
     async def _title_refresh_worker(
         self,
         session: SessionProtocol,
+        current: str,
         generation: int,
         turns: list[AgentMessage] | None,
-        notice: NoticeFn,
+        source: SessionInteraction | None = None,
     ) -> None:
         """One isolated refresh call, whose every outcome gets a receipt.
 
@@ -21832,16 +21842,23 @@ class OperatorApp(App[None]):
         resolve to doing nothing. Here a user typed a command and is watching
         for an answer, so each outcome says which one it was — a refresh that
         quietly changed nothing is indistinguishable from a broken command.
+
+        ``source`` is captured at DISPATCH and every write goes through it —
+        ``_store_title_for``, ``_notice_for`` — rather than through
+        ``self._interaction``, which is a moving target: a sidebar switch during
+        the call moves it, and a worker that re-read it on resume would paint
+        the refreshed title onto the conversation the user switched TO and stamp
+        that innocent session's naming schedule. The neighbouring naming workers
+        both take the source as a parameter for this reason; this one is not
+        special.
         """
-        source = self._interaction
+        source = source or self._interaction
         source.active_workers += 1
         try:
             try:
                 if turns is None:
                     turns = await getattr(session, "materialize_history")()
-                result = await naming.refresh_title(
-                    session.conversation_name, session.complete_once, turns=turns
-                )
+                result = await naming.refresh_title(current, session.complete_once, turns=turns)
             except asyncio.CancelledError:
                 return
             # Superseded (a reload) or belonging to a session no longer on
@@ -21850,19 +21867,45 @@ class OperatorApp(App[None]):
                 return
             if not result.changed:
                 if result.outcome == naming.TITLE_NOTHING_YET:
-                    notice("nothing to title yet — /title <words> names it by hand")
+                    self._notice_for(
+                        source, "nothing to title yet — /title <words> names it by hand"
+                    )
                 else:
-                    notice(f"title unchanged: {session.conversation_name}")
+                    self._notice_for(source, f"title unchanged: {session.conversation_name}")
+                return
+            # Re-read rather than trusting `current`, the rule
+            # `_retitle_conversation_worker` follows: a `/rename` may have landed
+            # while this call was in flight, and it outranks an answer decided
+            # against a title no longer in force. Without this the release below
+            # would strip the very latch protecting the name the user just typed,
+            # and the refresh would overwrite it — silently revoking their most
+            # recent instruction in favour of their previous one.
+            if session.conversation_name != current:
+                self._notice_for(source, f"title unchanged: {session.conversation_name}")
                 return
             # Released only once a replacement is actually in hand. Released
             # before the call instead, a refresh that came back "unchanged"
             # would still have silently re-armed automatic naming over a name
             # the user typed and is keeping.
             session.conversation_name_state.release_user_set()
-            stored = self._store_title(session, result.title)
-            notice(f"title refreshed: {stored}")
+            stored = self._store_title_for(source, session, result.title)
+            self._notice_for(source, f"title refreshed: {stored}")
         finally:
             source.active_workers -= 1
+            # Naming fires ONCE per conversation, and the only thing that re-arms
+            # it is `_name_conversation_worker`'s own failure path — which a
+            # worker superseded by this one's generation bump returns before
+            # reaching. So a refresh dispatched while the opening naming call was
+            # still in flight would leave an unnamed conversation with naming
+            # permanently disarmed AND no title, the two failures compounding.
+            #
+            # In the `finally` rather than on one branch because the condition is
+            # about the OUTCOME, not the route to it: any exit that leaves this
+            # conversation unnamed — superseded, nothing-yet, a dead provider,
+            # cancellation — should let a later substantive message try again. A
+            # landed title sets the name, so the latch correctly stays spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
@@ -32465,21 +32508,24 @@ class OperatorApp(App[None]):
         ``user_set`` flag. What differs is only the delivery: a receipt returned
         as data instead of painted through ``notice``.
         """
+        current = session.conversation_name
         turns = None
         if not hasattr(session, "materialize_history"):
             turns = list(session.history()) if hasattr(session, "history") else []
         try:
             if turns is None:
                 turns = await getattr(session, "materialize_history")()
-            result = await naming.refresh_title(
-                session.conversation_name, session.complete_once, turns=turns
-            )
+            result = await naming.refresh_title(current, session.complete_once, turns=turns)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
             logger.debug("routed title refresh failed", exc_info=True)
             result = naming.TitleRefresh(naming.TITLE_UNCHANGED)
-        if not result.changed:
+        # The rename-during-the-call guard the TUI worker documents: a `/rename`
+        # that landed while this was in flight outranks an answer decided
+        # against a title no longer in force, and storing over it would strip
+        # the latch protecting the words the user just typed.
+        if not result.changed or session.conversation_name != current:
             text = (
                 "nothing to title yet — /title <words> names it by hand"
                 if result.outcome == naming.TITLE_NOTHING_YET
