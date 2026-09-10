@@ -659,10 +659,17 @@ def test_unexpected_keys_cannot_inflate_the_retry_prompt(extra: dict[str, object
     message = str(info.value)
     # Tight, and deliberately so. A loose ceiling passes while an unsafe key is
     # quoted in ESCAPED form -- the raw key is absent from the message, so a
-    # substring assertion alone cannot see it. The diagnostic is a fixed
-    # template plus at most five short plain keys, so anything approaching this
-    # bound means model text is being rendered into it.
-    assert len(message) < 400, f"diagnostic grew to {len(message)} characters"
+    # substring assertion alone cannot see it, and the 702-character escape
+    # expansion this replaces slipped under a 1,000-char ceiling.
+    #
+    # 600 is chosen against the CODE's reachable worst case, not against these
+    # fixtures. Five keys of 40 characters are all quotable, and that renders
+    # 513 characters (review round 4 measured it); a bound below that would
+    # assert a property the code does not have and would fail on a legitimate
+    # input. These fixtures top out far lower because every key in them is
+    # withheld, which is the point -- the margin between their ~344 and this
+    # ceiling is the room an escaped quote would need.
+    assert len(message) < 600, f"diagnostic grew to {len(message)} characters"
     # No fragment of an unsafe key escapes: whole-or-nothing, so a redaction
     # canary still matches and nothing is rendered in a reshaped form.
     quoted = sum(1 for key in extra if repr(key) in message)
