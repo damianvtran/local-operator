@@ -50,6 +50,21 @@ export interface TranscriptEntryDetails {
 	   conversation_name / model_label / session_id / cwd, all advisory. Rides
 	   through the fold's `details` so the card can label who reached in. */
 	sender?: PeerSender;
+	/* Severity ink for a `notice` row, mirroring the TUI's NoticeBlock kind.
+	   A refusal, a failed turn and a failed compaction are `error`; an
+	   unattended gate timeout and a declined compaction are `warning`.
+	   Absent means the quiet default — most notices are receipts nobody has
+	   to read, and tinting those would spend the loudest ink in the palette
+	   on routine chrome. */
+	severity?: "info" | "warning" | "error";
+	/* A wake delivery, which the TUI gives its own affordance. Carried so
+	   the phone can tell a wake receipt from an arbitrary notice rather
+	   than flattening both into the same grey line. */
+	notice_kind?: "wake";
+	/* Bang-mode (`! cmd`): the user ran this command themselves, so its card
+	   opens EXPANDED — they are waiting to read the output, not to be told a
+	   command they typed has finished. Mirrors the TUI's ToolCard user_run. */
+	user_run?: boolean;
 }
 
 export interface PeerSender {

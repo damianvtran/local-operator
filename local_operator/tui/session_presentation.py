@@ -499,8 +499,20 @@ def project_settled_rows(
 
     from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+
+    # The row DECISIONS this fold shares with the phone's. Held outside both
+    # hosts so neither owns them: every divergence the convergence review
+    # found was a decision one surface made and the other missed
+    # (docs/design/history-fold-convergence.md §3).
+    from local_operator.harness.rows import (
+        assistant_row_text,
+        assistant_stop_notice,
+        compaction_refused_notice,
+        gate_timeout_notice,
+        is_harness_chrome,
+        user_row_text,
+    )
     from local_operator.tui.app import (
-        LOOP_PROMPT,
         PEER_MESSAGE_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
         WAKE_PROMPT_MESSAGE_TYPE,
@@ -508,9 +520,7 @@ def project_settled_rows(
         PeerMessageBlock,
         UserBlock,
         WakeBlock,
-        _gate_timeout_notice,
         _resume_tail_start,
-        _typed_line_of,
     )
 
     # Results are keyed by the call they answer, and a tool message can sit
@@ -527,13 +537,6 @@ def project_settled_rows(
     # rendered tail. Empty for every unbounded caller.
     results: dict[str, Any] = dict(self._resume_results)
     settled_results: set[str] = set()
-    # Harness chrome the LIVE path never paints as a user row, so replay
-    # must not either (see the `role == "user"` branch). Deferred once to
-    # the top of this method rather than inside the loop, matching the
-    # file's other lazy session.* imports.
-    from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
-    from local_operator.session.session import _CONTINUATION_PROMPT
-
     for message in history:
         if getattr(message, "role", None) != "tool":
             continue
@@ -651,7 +654,7 @@ def project_settled_rows(
             # distinction the transcript row itself exists to preserve.
             if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
                 details = getattr(message, "details", None) or {}
-                self._append_block(NoticeBlock(_gate_timeout_notice(details), kind="warning"))
+                self._append_block(NoticeBlock(gate_timeout_notice(details), kind="warning"))
                 appended = True
                 continue
             # A compaction that did NOT run. Rendered here for the same
@@ -662,8 +665,7 @@ def project_settled_rows(
             # context the user asked to reclaim is still there.
             if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
                 details = getattr(message, "details", None) or {}
-                text = str(details.get("detail") or "compaction did not run").strip()
-                kind = "error" if text.startswith("compaction failed") else "warning"
+                text, kind = compaction_refused_notice(details)
                 self._append_block(NoticeBlock(text, kind=kind))
                 appended = True
                 continue
@@ -684,11 +686,12 @@ def project_settled_rows(
                 # reason: it is persisted so the TRANSCRIPT explains why one
                 # answer arrived in two pieces, but the user never typed it
                 # and the live run showed a NoticeEvent instead.
-                if text in (
-                    LOOP_PROMPT,
-                    _CONTINUATION_PROMPT,
-                    CONNECTIVITY_CONTINUATION_PROMPT,
-                ):
+                #
+                # The list itself lives in ``harness/rows.py`` so the phone
+                # fold reads the SAME three. It previously kept its own
+                # partial copy — suppressing the connectivity prompt while
+                # painting the other two as the user's own words.
+                if is_harness_chrome(text):
                     continue
                 # A `$skill` invocation persists as its EXPANDED payload,
                 # because that is what the model was sent. Replaying it
@@ -699,7 +702,7 @@ def project_settled_rows(
                 # rides the payload's own opening tag, so replay repaints
                 # exactly what the live session painted. Same live/replay
                 # parity rule as the two prompts skipped above.
-                text = _typed_line_of(text) or text
+                text = user_row_text(text)
                 # The images ride the persisted message as base64 content
                 # blocks — the same bytes the model saw — so a resumed
                 # prompt replays WITH its pictures, not just the receipt
@@ -730,7 +733,12 @@ def project_settled_rows(
             # inherit the open-on-settle flag.
             bang_pending = self._replay_bang_pending
             self._replay_bang_pending = False
-            if text:
+            # Through the shared helper even though this loop already
+            # stripped: the DECISION about what an assistant row shows is the
+            # thing both surfaces must read from one place. Leaving it as a
+            # bare truthiness test here is what let the phone's own bare test
+            # drift — the helper is only load-bearing if both hosts call it.
+            if assistant_row_text(text):
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
                 block.update_text(text)
@@ -748,34 +756,23 @@ def project_settled_rows(
                 )
                 self._replay_tool_call(call, results, user_run=user_run)
                 appended = True
-            stop = getattr(message, "stop_reason", None)
-            if stop == "refusal":
-                # A refused turn replays its refusal even when the model DID
-                # stream some prose first (Gemini safety stops often cut a
-                # partial answer): the prose alone reads as a complete,
-                # oddly short reply, and the user re-reading the session
-                # needs to know the provider cut it off and why. The message
-                # itself was stashed on the assistant message by the loop
-                # precisely so this replay could show it.
-                payload = getattr(message, "provider_payload", None) or {}
-                # The fallback keeps the marker grammar (D3): every other
-                # refusal line ends in a parenthetical, and a user who has
-                # learned that shape would read its absence as meaningful.
-                refusal = str(payload.get("refusal") or "") or (
-                    "model refused the request (no details recorded)"
-                )
-                self._append_block(NoticeBlock(refusal, "error"))
+            # A refused, failed or interrupted turn needs a notice the prose
+            # alone does not carry — a refusal fires even when the model
+            # streamed some prose first, while error/aborted fire only for a
+            # turn that produced nothing at all. The decision is shared with
+            # the phone fold, which had NO stop_reason branch and therefore
+            # showed a truncated answer as complete and a failed turn as
+            # silence (§3, D2-D4).
+            notice = assistant_stop_notice(
+                text=text,
+                has_tool_calls=bool(tool_calls),
+                stop_reason=getattr(message, "stop_reason", None),
+                provider_payload=getattr(message, "provider_payload", None),
+            )
+            if notice is not None:
+                reason, severity = notice
+                self._append_block(NoticeBlock(reason, severity))
                 appended = True
-            elif not text and not tool_calls:
-                # An assistant message with neither prose nor a call is a
-                # turn that FAILED. Skipping it is what left a resumed
-                # session showing a prompt and nothing after it, with no
-                # hint that the answer had errored rather than never been
-                # asked for.
-                if stop in ("error", "aborted"):
-                    reason = "turn failed" if stop == "error" else "interrupted"
-                    self._append_block(NoticeBlock(reason, "error"))
-                    appended = True
     # Every message this pass rendered, by stable id — the dedupe key a
     # later backward page is filtered through.
     self._projection_message_id = ""
