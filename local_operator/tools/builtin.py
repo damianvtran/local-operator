@@ -5623,11 +5623,14 @@ class SendParams(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            "Peer to message: case-insensitive substring of the conversation name, "
-            "session id, or cwd basename (`lop sessions` lists what is running). "
-            "ALTERNATIVE to pid/session, not a companion — pass exactly one way of "
-            "addressing the peer; target together with pid or session is refused as "
-            "an ambiguous recipient."
+            "Peer to message: case-insensitive substring of the conversation "
+            "name or session id. RUNNING sessions are searched first (`lop "
+            "sessions` lists them), then stored ones a closed session left "
+            "behind (`lop sessions --all`), so a name from a finished session "
+            "still resolves. The cwd basename matches only while the session "
+            "runs. ALTERNATIVE to pid/session, not a companion — pass exactly "
+            "one way of addressing the peer; target together with pid or "
+            "session is refused as an ambiguous recipient."
         ),
     )
     pid: int | None = Field(
@@ -5815,6 +5818,7 @@ async def execute_send(
 
     from local_operator.mobile.peer_send import (
         candidate_lines,
+        live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
         validate_peer_body,
@@ -5854,20 +5858,38 @@ async def execute_send(
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
         cold_session_id = cold_session_id or ""
-    if not cold_session_id and not candidates and params.target and record is None:
+    if (
+        not cold_session_id
+        and not candidates
+        and params.target
+        and record is None
+        and live_scan_found_nothing(error)
+    ):
         # The substring found no LIVE record. Fall back to the STORED store
         # before refusing, so a note addressed by the name a session had before
         # its terminal was closed still delivers. The resolver decides WHO;
         # delivery below is the unchanged cold path (spool / engage), so live
         # still wins over stored for the same substring.
+        #
+        # Entry requires the live error's NO-MATCH form, not a bare
+        # ``record is None``: the resolver also returns no record for a
+        # conflicting target+selector pair (BLOCKER-1) and for a unique match
+        # that is wedged (MAJOR-1). Both are refusals about a live session the
+        # call DID reach — falling through here would deliver to a stored
+        # session that merely shares the name, or spool behind a wedged
+        # process that still owns the target. See
+        # ``peer_send.live_scan_found_nothing``.
         from local_operator.mobile.peer_send import (
             resolve_stored_target,
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
+        stored_id, stored_candidates, _stored_error = await asyncio.to_thread(
             resolve_stored_target, params.target
         )
+        # ``_stored_error`` is deliberately unread: the resolver returns ""
+        # for a no-match by contract (see its docstring) and the refusal that
+        # reaches the user is composed below, where the live miss is known.
         if stored_candidates:
             lines = [
                 f"{len(stored_candidates)} stored sessions match; drop `target` and "
@@ -5877,10 +5899,8 @@ async def execute_send(
             return _error(tool_call_id, "send", "\n".join(lines))
         if stored_id:
             cold_session_id = stored_id
-        elif stored_error:
-            return _error(tool_call_id, "send", stored_error)
     if not cold_session_id and (error or record is None):
-        if error and "no live session matches" in error:
+        if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"
         return _error(tool_call_id, "send", error or "no target resolved")
 

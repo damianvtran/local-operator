@@ -564,10 +564,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     sessions_parser.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="N",
-        help="with --all, cap the number of stored rows listed (default: 50)",
+        help="with --all, cap the stored rows listed; positive (default: 50)",
     )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
@@ -2226,6 +2226,13 @@ def send_command(args: argparse.Namespace) -> int:
         _peer_red(bind_error)
         return 1
 
+    # Shared with the in-session send tool: the stored fallback below must run
+    # only on the live resolver's NO-MATCH form — see
+    # ``peer_send.live_scan_found_nothing`` for why a bare ``record is None``
+    # is not enough (it is also how a conflicting selector pair and a wedged
+    # unique match come back, and neither may be converted into a stored send).
+    from local_operator.mobile.peer_send import live_scan_found_nothing
+
     record, candidates, error = _resolve_peer_target(args, target)
     if candidates:
         # "REPLACE the target with", not "add --pid": appending the flag to the
@@ -2271,19 +2278,34 @@ def send_command(args: argparse.Namespace) -> int:
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = resolve_cold_session(args.session or "") or ""
-    if not cold_session_id and not candidates and target and record is None:
+    if (
+        not cold_session_id
+        and not candidates
+        and target
+        and record is None
+        and live_scan_found_nothing(error)
+    ):
         # The substring found no LIVE record and named no exact id. Fall back
         # to the STORED store before refusing: a note addressed by the name a
         # session had before its terminal was closed must still deliver. The
         # resolver decides WHO; delivery still goes through the unchanged
         # cold path below, so live keeps winning over stored for the same
         # substring and the delivery mechanics are untouched.
+        #
+        # The ``live_scan_found_nothing(error)`` term is the whole point of
+        # this guard (review round 1, BLOCKER-1/MAJOR-1): ``record is None``
+        # is ALSO how a refused target+selector conflict and a wedged unique
+        # match come back, and delivering those to a similarly named stored
+        # session would be a send to a recipient the command never named.
         from local_operator.mobile.peer_send import (
             resolve_stored_target,
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, stored_error = resolve_stored_target(target)
+        stored_id, stored_candidates, _stored_error = resolve_stored_target(target)
+        # ``_stored_error`` is deliberately unread: a no-match returns "" by
+        # contract and the refusal the user sees is composed in the final
+        # block below, where the live miss is known to have happened too.
         if stored_candidates:
             print(
                 f"{len(stored_candidates)} stored sessions match; replace the "
@@ -2295,11 +2317,8 @@ def send_command(args: argparse.Namespace) -> int:
             return 1
         if stored_id:
             cold_session_id = stored_id
-        elif stored_error:
-            _peer_red(stored_error)
-            return 1
     if not cold_session_id and (error or record is None):
-        if error and "no live session matches" in error:
+        if error and live_scan_found_nothing(error):
             # The stored fallback just failed too, so the message names BOTH
             # searches rather than leaving the user to discover the store on
             # their own.
@@ -2565,6 +2584,26 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     return 3 if result.errors else 0
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type for counts where 0 or negative is a typo, not a request.
+
+    `lop sessions --all --limit 0` parsed fine and listed NOTHING (`rows[:0]`),
+    which reads on screen as "no sessions exist" — a lie about the store
+    (review round 1, Q2). There is no zero-or-uncapped spelling to protect
+    either: 0 stored rows is what plain `lop sessions` already means, and the
+    no-cap case is served by the advertised DEFAULT, not by a magic number.
+    """
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {value!r} — omit --limit for the default cap"
+        )
+    return parsed
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -2600,7 +2639,10 @@ def sessions_command(args: argparse.Namespace) -> int:
         return 0
 
     if not rows:
-        print("no active lop sessions")
+        # `--all` asked about the STORE as well as the fleet; the live-only
+        # empty line would answer a question the user did not ask (review
+        # round 1, MINOR-5). The default listing keeps its established copy.
+        print("no lop sessions (live or stored)" if args.all else "no active lop sessions")
         return 0
 
     # NEEDS is the column this release adds, and it earns its width: a parked
@@ -2608,8 +2650,10 @@ def sessions_command(args: argparse.Namespace) -> int:
     # waiting on me" has to be answerable from the same place the memory is
     # visible. Blank for every session that is simply working.
     #
-    # LAST_ACTIVE appears only under ``--all``: a stored session has no process,
-    # so PID/RSS/FOOTPRINT/UPTIME/HB_AGE read "—" for it, and the one fact a
+    # LAST_ACTIVE appears only when stored rows are present — normally under
+    # ``--all``, but NOT when the flag found none to add (every stored id
+    # already live, or an empty store): a stored session has no process, so
+    # PID/RSS/FOOTPRINT/UPTIME/HB_AGE read "—" for it, and the one fact a
     # stored row CAN offer is when its transcript last moved. Adding the column
     # unconditionally would re-flow the live-only listing every existing
     # consumer parses, so it is appended only when the flag brought stored rows.

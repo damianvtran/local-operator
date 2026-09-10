@@ -248,18 +248,29 @@ def test_stored_match_is_case_insensitive(monkeypatch, fake_scan) -> None:
     assert session_id == "abc123def456"
 
 
-def test_live_session_wins_over_a_stored_row_with_the_same_name(monkeypatch, fake_scan) -> None:
-    live = _Record(10, session_id="live1", conversation_name="shared name")
+def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_scan) -> None:
+    """The exclusion is by ID, not by name, and exists for the id collision.
+
+    The fallback is entered only after the live scan matched nothing (see
+    ``live_scan_found_nothing``), so a live session sharing the stored row's
+    NAME cannot be what this guards: both read their name from the same
+    transcript. What the exclusion exists for is a stored row whose ID belongs
+    to a session that currently has a runtime — delivering cold to it would
+    queue behind a process that could have been dialled. Review round 1,
+    MINOR-3: an earlier draft of this test passed a live NAME and asserted the
+    stored row still returned, which pinned nothing the production callers
+    exercise.
+    """
+    live = _Record(10, session_id="shared-id", conversation_name="live name")
     fake_scan([(live, "live")])
-    _stored(monkeypatch, [_StoredRow("stored1", "shared name")])
-    # The stored resolver is told which ids are already live so it cannot
-    # report one conversation as ambiguous with itself.
+    _stored(monkeypatch, [_StoredRow("shared-id", "old name"), _StoredRow("other-id", "old name")])
     session_id, candidates, error = peer_send.resolve_stored_target(
-        "shared name", live_ids={"live1"}
+        "old name", live_ids={"shared-id"}
     )
     assert error == ""
     assert candidates == []
-    assert session_id == "stored1"
+    # The live-owned row is skipped; the distinct stored row still resolves.
+    assert session_id == "other-id"
 
 
 def test_ambiguous_stored_matches_are_refused_with_candidates(monkeypatch, fake_scan) -> None:

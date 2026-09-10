@@ -1173,3 +1173,58 @@ def test_an_absurd_count_is_refused_rather_than_breaking_the_layout() -> None:
         assert info.available is True
         assert (info.lines[1].subagents_running is not None) is reported, value
         assert info.subagents_unreported == (0 if reported else 1), value
+
+
+def test_stored_rows_default_to_the_advertised_cap_on_a_real_store(
+    tmp_path: Path,
+) -> None:
+    """MAJOR-2/QA Q1: `--all` with no --limit lists 50, not the whole store.
+
+    Deliberately does NOT patch ``recent_session_rows``: round 1 shipped
+    ``STORED_SESSIONS_DEFAULT_LIMIT`` unwired because every test mocked the
+    scan, and ``limit=None`` — "no truncation" to the scan — reached it
+    straight from the CLI's argparse default. The store below is built on
+    disk (60 transcript-carrying directories, distinct activity stamps) so
+    the default path is exercised end to end through the real scan.
+    """
+    import json
+    import os
+
+    sessions = tmp_path / "sessions"
+    # The writer's envelope (``type: message`` wrapping a ``payload`` whose text
+    # sits in a ``content`` list) — the shape the real name scan parses, so the
+    # rows carry a name exactly as a picker-listed session would.
+    entry = json.dumps(
+        {
+            "type": "message",
+            "payload": {"role": "user", "content": [{"type": "text", "text": "old work"}]},
+        }
+    )
+    for index in range(60):
+        session_dir = sessions / f"dead{index:04d}"
+        session_dir.mkdir(parents=True)
+        transcript = session_dir / "transcript.jsonl"
+        transcript.write_text(entry + "\n")
+        stamp = 1000.0 + index
+        os.utime(transcript, (stamp, stamp))
+    info = collect_sessions(
+        tmp_path, scan=_scan([]), usage=_usage({}), now=0.0, include_stored=True
+    )
+    stored = [line for line in info.lines if line.state == "stored"]
+    assert len(stored) == collect_mod.STORED_SESSIONS_DEFAULT_LIMIT
+    # The rows are real scan output, so the name resolves too — this also keeps
+    # the fixture honest: a transcript shape the name scan cannot parse would
+    # still cap correctly but would no longer be a store the picker recognises.
+    assert stored[0].conversation_name == "old work"
+    # The cap keeps the NEWEST rows (the top of the picker's ordering), not
+    # whichever 50 scandir happened to yield first.
+    assert stored[0].session_id == "dead0059"
+    assert stored[-1].session_id == "dead0010"
+
+    # An explicit limit still wins over the default, through the same real scan.
+    capped = collect_sessions(
+        tmp_path, scan=_scan([]), usage=_usage({}), now=0.0, include_stored=True, stored_limit=7
+    )
+    assert [line.session_id for line in capped.lines if line.state == "stored"] == [
+        f"dead{index:04d}" for index in range(59, 52, -1)
+    ]
