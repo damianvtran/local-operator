@@ -2458,6 +2458,11 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
     from local_operator.session.remote import RemoteSession
 
     remote = MagicMock(spec=RemoteSession)
+    # ``owns_runtime`` is a property: ``spec=`` constrains which names exist but
+    # does not run them, so a spec'd mock auto-fabricates a TRUTHY ``Mock`` —
+    # the exact opposite of the viewer this stands in for. Same pattern as
+    # the two sibling tests above (line 596/700).
+    remote.owns_runtime = False
     remote.session_id = "spec"
     remote.is_cold = False
     remote.frontend_state = SimpleNamespace(pending_gate=None)
