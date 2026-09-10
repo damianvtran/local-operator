@@ -498,12 +498,22 @@ def _account_status_note(  # noqa: ANN001
     verbatim, neither of which touches a counter. ``header_ms`` is optional so
     the pure renderer stays callable without a title (tests, ``_measure_columns``).
 
+    A probe miss after a fresh confirmation misdates nothing, which is why
+    ``consecutive_failures > 0`` is deliberately NOT a trigger on its own. The
+    reported frame — title ``just now · 5 stale`` over rows reading ``last known
+    just now`` — is what pressing ``r`` during a rate-limit storm produces: the
+    force round zeroes every streak and re-probes all accounts in one burst, and
+    a 429 in that burst lands in ``_mark_account_failure`` with ``failures=1``
+    while KEEPING the previous round's seconds-old ``fetched_at``. The numbers
+    were confirmed seconds ago; one missed probe does not change what they say
+    or when they were confirmed, so the title's age still describes the row and
+    a note would contradict it. The row renders clean and is not counted stale.
+
     A dead grant outranks both: it is the only one of these states with a
     remedy the user can act on, so it names the command instead of an age.
     An exhausted 200 (100% weekly) is quota, not this path.
     """
     unavailable = bool(getattr(report, "usage_unavailable", False))
-    failures = int(getattr(report, "consecutive_failures", 0) or 0)
     fetched_at = int(getattr(report, "fetched_at", 0) or 0)
     if getattr(report, "credential_invalid", False):
         # The provider is named because the panel lists several accounts and
@@ -535,18 +545,28 @@ def _account_status_note(  # noqa: ANN001
     behind_header = bool(
         header_ms is not None and fetched_at and (header_ms - fetched_at) >= _stale_behind_ms()
     )
-    if not unavailable and failures <= 0 and not behind_header:
-        return ""
-    age = ""
-    if fetched_at and report.limits:
-        age = format_age(max(0.0, now_ms - fetched_at))
     if unavailable:
-        if age:
+        # The age rides along only when it would misdate the numbers. A
+        # sub-minute-old report renders `just now` — exactly what the title
+        # already says — so appending it produced the self-contradictory
+        # `usage unavailable — last known just now` this panel was reported
+        # for. Past the formatter's minute the vintage is information again.
+        age = format_age(max(0.0, now_ms - fetched_at)) if fetched_at and report.limits else ""
+        if age and age != "just now":
             return f"usage unavailable — last known {age}"
         return "usage unavailable"
-    if age:
-        return f"last known {age}"
-    return "last known"
+    if behind_header:
+        # (header_ms - fetched_at) >= TTL*1.25 (~6.25 min) by construction, so
+        # the age can never be `just now` here.
+        age = format_age(max(0.0, now_ms - fetched_at)) if fetched_at and report.limits else ""
+        if age:
+            return f"last known {age}"
+        return "last known"
+    # A probe miss after a fresh confirmation misdates nothing: the numbers were
+    # confirmed seconds ago and one 429/blip does not change what they say or
+    # when they were confirmed, so the title's age still describes the row.
+    # `consecutive_failures > 0` is deliberately NOT a trigger — see docstring.
+    return ""
 
 
 def _fit_status_note(note: str, width: int) -> str:
