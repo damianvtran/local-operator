@@ -407,3 +407,113 @@ class TestDiagnoseMissingSkill:
         root = tmp_path / "skills"
         root.mkdir()
         assert diagnose_missing_skill("absent", [root]) is None
+
+    def test_unquoted_colon_is_reported_as_invalid_yaml(self, tmp_path: Path) -> None:
+        """R4 regression: the commonest authoring error must name its own cause.
+
+        The malformed branch used to require the ``---`` delimiters to be
+        ABSENT, so a file with both delimiters and invalid YAML fell through to
+        the description branch and was told "has no 'description'" -- about a
+        file that visibly has one, with a remedy that provably does not fix it.
+        """
+        root = tmp_path / "skills"
+        (root / "lean").mkdir(parents=True)
+        # An unquoted colon in the value: valid-looking to a human, invalid YAML.
+        (root / "lean" / "SKILL.md").write_text(
+            "---\nname: lean\ndescription: Lean 4: formalize proofs\n---\n\n# Body\n"
+        )
+        message = diagnose_missing_skill("lean", [root])
+        assert message is not None
+        assert "invalid YAML in its frontmatter" in message
+        assert "Quote any value containing a colon" in message
+        # The wrong remedy must be gone, not merely accompanied.
+        assert "no 'description'" not in message
+        # And the parser's own words, which are the only thing that locates it.
+        assert "mapping values are not allowed" in message
+
+    def test_empty_but_well_formed_block_still_reports_the_description(
+        self, tmp_path: Path
+    ) -> None:
+        # The other side of R4: a block that PARSES to nothing is not malformed,
+        # and telling that author to quote a colon would be the same class of
+        # wrong answer in the opposite direction.
+        root = tmp_path / "skills"
+        (root / "alpha").mkdir(parents=True)
+        (root / "alpha" / "SKILL.md").write_text("---\n---\n\n# Body\n")
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        assert "no 'description'" in message
+        assert "invalid YAML" not in message
+
+
+class TestDiagnoseMissingSkillContainment:
+    """Q1: a name is a directory entry, never a path. It may not leave the roots.
+
+    ``root / name`` is an unguarded join and a skill NAME is a URL's netloc, so
+    the resolver's path-portion guards never inspect it. Each shape below
+    reached the filesystem outside every configured root.
+    """
+
+    @staticmethod
+    def _outside(tmp_path: Path) -> Path:
+        """A skill-shaped directory OUTSIDE the roots, to be reached or not."""
+        secret = tmp_path / "outside" / "private-project"
+        secret.mkdir(parents=True)
+        (secret / "SKILL.md").write_text(
+            "---\nname: internal-codename\ndescription: Secret.\n---\n# body\n"
+        )
+        return secret
+
+    def test_parent_traversal_name_reads_nothing(self, tmp_path: Path) -> None:
+        # skill://.. -- ".." parses as the netloc, so no path guard ever saw it.
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+        assert diagnose_missing_skill("..", [root]) is None
+
+    def test_absolute_name_is_not_an_existence_oracle(self, tmp_path: Path) -> None:
+        # skill://%2fetc decodes to "/etc", and Path(root) / "/etc" IS "/etc":
+        # the diagnostic distinguished "this absolute path exists" from "it does
+        # not" for ANY path on the host.
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+        existing = tmp_path / "outside"
+        existing.mkdir()
+        assert diagnose_missing_skill(str(existing), [root]) is None
+        assert diagnose_missing_skill("/definitely/not/there/xyz", [root]) is None
+
+    def test_relative_traversal_name_does_not_leak_frontmatter(self, tmp_path: Path) -> None:
+        # The leak with teeth: an out-of-root SKILL.md's frontmatter `name`
+        # came back in the "declares name '...'" message.
+        secret = self._outside(tmp_path)
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+        message = diagnose_missing_skill(f"../../outside/{secret.name}", [root])
+        assert message is None
+
+    def test_separator_bearing_names_never_touch_the_filesystem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rejection happens BEFORE any stat, not merely before the message.
+
+        A malformed URL that still spends a real probe defeats the design rule
+        that unsafe input must not drive filesystem work, even when its output
+        is safe.
+        """
+        import local_operator.skills.discovery as discovery_module
+
+        root = tmp_path / "roots" / "skills"
+        root.mkdir(parents=True)
+
+        def explode(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("an unsafe name must not reach the filesystem")
+
+        monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
+        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", ""):
+            assert diagnose_missing_skill(name, [root]) is None
+
+    def test_a_plain_name_still_diagnoses(self, tmp_path: Path) -> None:
+        # The guard must not swallow the legitimate case it sits in front of.
+        root = tmp_path / "roots" / "skills"
+        (root / "alpha").mkdir(parents=True)
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None and "has no SKILL.md" in message

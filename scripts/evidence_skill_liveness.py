@@ -143,16 +143,15 @@ async def main() -> int:
     )
     print(f"\nauthored           : {skill_dir / 'SKILL.md'}")
 
-    # The refresh is cooldown-bounded to one filesystem probe per second, and
-    # the BEFORE reads above just spent it. Showing the blocked read rather
-    # than hiding it behind a sleep: this is the designed bound, not a defect,
-    # and a real agent turn is seconds long so it is not reachable in practice.
+    # Read back IMMEDIATELY, with no sleep. Write-then-read is the normal
+    # authoring sequence, so the interesting evidence is that it works in the
+    # same millisecond: the refresh is gated on a stat, not on a clock, and a
+    # time-based cooldown here used to make exactly this read fail.
     _say(
-        "IMMEDIATELY AFTER (inside the 1s cooldown - probe bounded, still misses)",
+        "IMMEDIATELY AFTER the write - no sleep",
         child_read("skill://lean-formalization"),
     )
 
-    await asyncio.sleep(1.1)
     _say(
         "AFTER — parent reads skill://lean-formalization", parent_read("skill://lean-formalization")
     )
@@ -179,6 +178,13 @@ async def main() -> int:
             "---\ndescription: Unterminated block.\n\n# Body\n",
         ),
         (
+            # The commonest real authoring mistake: delimiters intact, YAML
+            # invalid. This used to be reported as a MISSING description.
+            "invalid YAML (unquoted colon)",
+            "unquoted-colon",
+            "---\nname: unquoted-colon\ndescription: Lean 4: formalize proofs\n---\n\n# Body\n",
+        ),
+        (
             "disabled",
             "switched-off",
             "---\nname: switched-off\ndescription: Turned off.\nenabled: false\n---\n\n# Body\n",
@@ -189,8 +195,6 @@ async def main() -> int:
         case_dir.mkdir(parents=True, exist_ok=True)
         if content:
             (case_dir / "SKILL.md").write_text(content)
-        # Past the 1.0 s cooldown, so each read genuinely re-probes.
-        await asyncio.sleep(1.1)
         _say(f"diagnostic — {label}", child_read(f"skill://{dirname}"))
 
     # The shadow case, shown honestly: it is NOT reachable through a URL read,
@@ -207,7 +211,6 @@ async def main() -> int:
     (global_shadow / "SKILL.md").write_text(
         "---\nname: shadowed\ndescription: The global copy loses the name.\n---\n\n# Global copy\n"
     )
-    await asyncio.sleep(1.1)
     _say(
         "shadowing — the READ hits the winner (project root beats global)",
         child_read("skill://shadowed"),

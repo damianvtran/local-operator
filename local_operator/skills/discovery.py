@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 import yaml
@@ -320,6 +320,76 @@ def _has_frontmatter_block(text: str) -> bool:
     return any(lines[i].strip() == "---" for i in range(1, len(lines)))
 
 
+def _frontmatter_yaml_error(text: str) -> str | None:
+    """The YAML parser's own complaint about a delimited block, or ``None``.
+
+    WHY this exists rather than reusing ``_has_frontmatter_block`` as the
+    malformed-YAML discriminator: a block whose ``---`` delimiters are BOTH
+    present but whose YAML is invalid is the overwhelmingly common authoring
+    error -- an unquoted colon, ``description: Lean 4: formalize proofs`` --
+    and it yields ``{}`` with the delimiters intact. Keying "malformed" off
+    the delimiters alone therefore sent that author down the *description*
+    branch, which told them to add a description their file visibly already
+    had, and following that remedy provably does not fix the file. The only
+    thing that can tell "invalid YAML" apart from "valid YAML that happens to
+    be empty" is the parser, so ask it.
+
+    :func:`parse_frontmatter` deliberately discards this exception -- discovery
+    must degrade silently and never pay for error text on the scan path. Here,
+    on a miss that has already failed, the re-parse costs nothing that matters
+    and it is the difference between a next move and a wrong next move.
+    """
+    if not text.startswith("---"):
+        return None
+    lines = text.split("\n")
+    end: int | None = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end = i
+            break
+    if end is None:
+        # Unterminated: a structural failure, reported by the delimiter branch.
+        return None
+    try:
+        yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        # Collapse to one line: the parser appends a multi-line context/snippet
+        # block that is noise inside a one-line diagnostic.
+        return " ".join(str(exc).split())
+    return None
+
+
+def is_plain_skill_name(name: str) -> bool:
+    """Whether ``name`` can name a skill directory a root scan would produce.
+
+    A registered skill name comes from ``<root>/<child>`` where ``child`` is a
+    DIRECT entry of a root (:func:`scan_skills_dir` walks exactly one level),
+    so anything carrying a separator, a traversal token or an absolute-path
+    shape can never correspond to a scanned directory and must not be joined
+    onto a root at all.
+
+    WHY this is a name check and not a resolved-path containment check
+    (``protocol._contained``): ``scan_skills_dir`` deliberately FOLLOWS a
+    symlinked child directory, so a resolved-target containment test would
+    reject skills the scanner accepts and make the diagnostic disagree with
+    discovery. Once the name is a single plain segment, ``root / name`` is a
+    direct child of ``root`` by construction and there is nothing left to
+    escape with -- the check is complete without resolving anything, which is
+    also what keeps an unsafe URL from spending filesystem work.
+
+    The concrete leaks this closes: ``skill://..`` parses the traversal token
+    as the URL's netloc, sailing past the guards that only inspect the PATH
+    portion, and ``skill://%2fetc`` decodes to ``/etc`` where ``root / "/etc"``
+    is ``/etc`` outright -- an existence oracle for any absolute path, and a
+    reader of out-of-root frontmatter ``name`` values.
+    """
+    if not name or name in (".", ".."):
+        return False
+    if "/" in name or "\\" in name or "\x00" in name:
+        return False
+    return not PurePosixPath(name).is_absolute() and not PureWindowsPath(name).is_absolute()
+
+
 def _diagnose_one(name: str, root: Path, skill_md: Path) -> str | None:
     """Why this one SKILL.md would not load under ``name``, or None if it would.
 
@@ -333,8 +403,20 @@ def _diagnose_one(name: str, root: Path, skill_md: Path) -> str | None:
         return f"{skill_md} could not be read: {exc}"
 
     meta = parse_frontmatter(text)
-    if not meta and not _has_frontmatter_block(text):
-        return f"{skill_md} has malformed YAML frontmatter (it must open and close with ---)."
+    if not meta:
+        if not _has_frontmatter_block(text):
+            return f"{skill_md} has malformed YAML frontmatter (it must open and close with ---)."
+        yaml_error = _frontmatter_yaml_error(text)
+        if yaml_error is not None:
+            # A well-formed pair of delimiters wrapping YAML that does not
+            # parse. Quote the parser rather than guessing: "mapping values are
+            # not allowed here" names the unquoted colon, which no rule of ours
+            # can locate. A block that parses to nothing (an EMPTY one) falls
+            # through instead -- "has no 'description'" is the true answer there.
+            return (
+                f"{skill_md} has invalid YAML in its frontmatter: {yaml_error}. "
+                "Quote any value containing a colon, then read the URL again."
+            )
 
     enabled = meta.get("enabled")
     if enabled is not None and (
@@ -375,11 +457,15 @@ def diagnose_missing_skill(name: str, roots: Sequence[Path]) -> str | None:
     emits 37 shadow warnings at startup, and a diagnostic that dumped them all
     would be noise where an answer is needed.
     """
-    if not name:
+    if not is_plain_skill_name(name):
+        # BEFORE ANY FILESYSTEM WORK. ``root / name`` is unguarded join: a
+        # traversal token or an absolute path in the NAME position escapes the
+        # roots entirely, and the resolver's own path-portion guards never see
+        # it because a name is the URL's netloc, not its path. Returning None
+        # keeps the bare "Unknown skill" -- which is the honest answer for a
+        # name no scan could ever have produced -- and, equally deliberately,
+        # spends no probe on a malformed URL (design §3).
         return None
-
-    # Candidates in root precedence order -- earlier roots win, so found[0] is
-    # the one that would claim the name if it loads at all.
     found: list[tuple[Path, Path]] = []
     for raw_root in roots:
         root = Path(raw_root).expanduser()

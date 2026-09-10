@@ -120,15 +120,24 @@ something changed, and make the surviving miss self-diagnosing.**
 Concretely, `make_skill_resolver` gains optional roots. When a `skill://` URL
 names something not in the mapping (and only then):
 
-1. If less than `_REFRESH_COOLDOWN` (1.0 s) since the last check, skip
-   everything and return today's error. Bounds a hostile or looping agent to one
-   filesystem probe per second per session.
-2. Compute a cheap fingerprint of the roots. If unchanged, return today's error
-   without scanning.
-3. If changed, run `discover_skills(roots)` and **`dict.update`** the mapping
-   in place. Never rebind it.
-4. Retry the resolution. If it still misses, run a diagnostic that explains
-   *why* and return that instead of the bare `Unknown skill`.
+1. Compute a cheap fingerprint of the roots. If unchanged, skip the scan.
+2. If changed, run `discover_skills(roots)` and **`dict.update`** the mapping
+   in place. Never rebind it. Commit the fingerprint only after the scan
+   SUCCEEDS, so a transient `OSError` retries instead of poisoning the session.
+3. Retry the resolution **unconditionally** — the question is "is the name
+   resolvable now", not "did this call perform the scan", and under concurrency
+   another thread may have populated the mapping while this one waited on the
+   lock. If it still misses, run a diagnostic that explains *why* and return
+   that instead of the bare `Unknown skill`.
+
+> **Revised during review (round 1).** This originally opened with a 1.0 s
+> `_REFRESH_COOLDOWN` gating every probe. It was removed: it is shared by every
+> subagent, so a miss at t=0 made a skill written at t=0.05 unreadable until
+> t=1.0 — breaking write-then-read, the normal authoring sequence and the exact
+> case this design exists for — and it suppressed the diagnostic too. Measured,
+> it saved 0.224 ms → 0.002 ms per read on a looping typo. A 0.2 ms saving on an
+> error path does not buy a one-second window of wrong answers. The fingerprint
+> gate is the real bound and it is stat-based rather than clock-based.
 
 Cost on the frequent path — a skill that exists — is **one dict lookup**,
 because nothing above step 0 runs on a hit. That is the constraint the task set
@@ -148,14 +157,16 @@ A typo'd skill name costs 0.29 ms rather than 17–25 ms — a ~60× reduction o
 exact path the task flagged as the risk. The full scan is paid only when the
 tree actually changed, which is the case the feature exists for. This answers
 "is a filesystem walk on a typo acceptable, and should it be bounded" with: it
-is bounded twice, by the fingerprint and by the cooldown, and the residual is
-sub-millisecond.
+is bounded by the fingerprint, and the residual is sub-millisecond. A typo in a
+tight retry loop therefore pays one sub-millisecond stat per read and **never** a
+scan, because an unchanged tree compares equal every time.
 
 The 17–25 ms scan runs synchronously on the event loop that renders the TUI
 (`tools/builtin.py:2650` is inside an `async def` but the resolver is sync). That
 is about one frame, on a rare path, once per real change — I judge it acceptable
-and would not complicate the sync resolver contract to avoid it. The cooldown is
-what guarantees it cannot repeat in a loop.
+and would not complicate the sync resolver contract to avoid it. The fingerprint
+is what guarantees it cannot repeat in a loop: the scan runs only on a tree that
+actually changed, so repeating it requires repeatedly editing the filesystem.
 
 ### What must be in the fingerprint
 
@@ -376,7 +387,7 @@ to a broken behaviour; it does not clear the step-function bar for a minor
 | file | change |
 |---|---|
 | `skills/discovery.py` | add `roots_fingerprint(roots)` and `diagnose_missing_skill(name, roots)`. No change to `discover_skills` or its callers. |
-| `skills/api.py` | `make_skill_resolver(skills, roots=None)` — cooldown, fingerprint gate, in-place `update`, diagnostic on surviving miss, `threading.Lock`. Export the two new helpers. |
+| `skills/api.py` | `make_skill_resolver(skills, roots=None)` — fingerprint gate, in-place `update`, unconditional re-lookup after the refresh, diagnostic on surviving miss, `threading.Lock`. Export the two new helpers. |
 | `session_factory.py` | `_KnowledgeHooks` gains `skill_roots: list[Path]`; `_setup_knowledge` takes `cwd` and stores the roots it used (fixes the `Path.cwd()` bug at `:1234`); call site `:1952` passes `effective_cwd`; `_make_knowledge_resolver` (`:1361`) passes `hooks.skill_roots`. |
 | `tui/app.py` | `_discovered_skills` (`:28708`) gated on the fingerprint; docstring at `:28712-28716` rewritten. |
 | `guides/extensions/GUIDE.md` | replace `:57` (below). |
@@ -424,7 +435,10 @@ Unit, `tests/unit/skills/test_api.py` and `test_discovery.py`:
 4. Hit path does no filesystem work — monkeypatch `roots_fingerprint` to raise
    and assert a successful resolve still succeeds.
 5. Fingerprint unchanged → `discover_skills` not called (patch and count).
-6. Cooldown: two misses inside the window produce one fingerprint call.
+6. A looping typo probes per miss but never rescans (the stat is the bound);
+   a skill written milliseconds after a miss is readable at once; two THREADS
+   missing the same new name concurrently both resolve it; a transient scan
+   `OSError` does not freeze the fingerprint.
 7. Fingerprint detects each of the three mutation shapes in the §3 table,
    especially in-place `SKILL.md` edit.
 8. Deleted skill stays in the mapping and reads as a clean `OSError` message.
@@ -449,20 +463,29 @@ is the reported defect and it is the one that has to be shown working.
 1. **Rebinding regression.** The single point of failure. Mitigated by test 2
    and by a comment at the mutation site; nothing else will catch it.
 2. **Event-loop stall.** 17–25 ms sync scan on the loop that renders the TUI,
-   here ~one frame. Rare and cooldown-bounded. If a user reports a hitch on a
+   here ~one frame. Rare and fingerprint-bounded — it runs only on a tree that
+   actually changed. If a user reports a hitch on a
    pathological tree, the fix is `to_thread` at the `read`-tool call site, not a
    change to the resolver contract.
 3. **Pathological trees.** A root with tens of thousands of child directories
-   makes even the fingerprint slow. Bounded by the cooldown to one probe/second,
-   and note that startup already pays a larger version of the same cost — this
-   adds no new exposure class.
+   makes even the fingerprint slow, and with the cooldown removed it is paid per
+   miss rather than per second. Note that startup already pays a larger version
+   of the same cost, and a miss is an error path — this adds no new exposure
+   class. If it ever bites, gate the probe on something stat-based (a root-level
+   mtime pre-check), never on a clock: a clock is what made a just-written skill
+   unreadable in round 1.
 4. **Symlinks and mid-walk mutation.** `scan_skills_dir` is one level deep,
    realpath-dedupes and swallows `OSError` (`discovery.py:173-202`), so a symlink
    loop or a directory vanishing mid-walk yields a shorter list, never an
    exception. The fingerprint must walk one level with the same `OSError`
    tolerance; do not make it stricter than the scanner it gates.
-5. **Concurrent refresh from two children.** Handled by the lock; verify no
-   `await` sneaks inside the locked region, which would deadlock the loop.
+5. **Concurrent refresh from two children.** The lock serialises the refresh,
+   but serialising is not sufficient on its own: the thread that loses the race
+   must still RE-LOOK-UP the name after the lock releases, because the winner
+   populated the mapping while it waited. Gating that retry on the refresh's own
+   outcome ("did I scan?") makes the loser answer `Unknown skill` for a skill
+   already in the dict. Verify no `await` sneaks inside the locked region, which
+   would deadlock the loop.
 6. **Shadow warnings becoming noisy.** The diagnostic can now surface a class of
    message this machine produces 37 of at startup. It is emitted only for the
    *one* name being read, so it stays targeted — but if a diagnostic ever grows
