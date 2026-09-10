@@ -1,0 +1,40 @@
+== BEFORE Esc ==
+   buffer      : '/credential ••••••••••••••••••'
+   typing      : True   armed: True
+   mask cells in frame    : 19
+   secret painted in frame: False
+== AFTER Esc ==
+   buffer      : '/credential hunter2-typed-test'
+   typing      : False   armed: False
+   secret PAINTED IN COMPOSER: True
+   warning rows: ['! 18 characters are now PLAIN TEXT in the composer — Enter will send them']
+   any '!' notice row: ['! 18 characters are now PLAIN TEXT in the composer — Enter will send them']
+   settle: frame(n) == frame(n+1) ? True
+== EMPTY span, before Esc ==
+   buffer '/credential ' typing=True armed=True
+== EMPTY span, after Esc ==
+   buffer '/credential ' typing=False armed=False
+   PLAIN TEXT warning present? False  (must be False)
+   prose buffer: '/credential is broken please fix'
+   typing now  : False
+== Esc THEN Enter (the round-1 leak completion) ==
+   buffer after enter: ''
+   secret in frame   : False
+   rows carrying it  : []
+== POSITIVE CONTROL: literal secret is on screen after Esc ==
+   literal in frame   : True   (must be True)
+   normalized in frame: False
+== Esc then ENTER ==
+   warned at Esc      : True
+   buffer             : ''
+   LITERAL   'hunter2-typed-test'     in frame: False
+   NORMALIZED 'HUNTER2_TYPED_TEST'    in frame: True
+   rows carrying either: ['? Paste the value for HUNTER2_TYPED_TEST']
+   session store names : ()
+== Esc then Enter twice ==
+   warned at Esc      : True
+   buffer             : ''
+   LITERAL   'hunter2-typed-test'     in frame: False
+   NORMALIZED 'HUNTER2_TYPED_TEST'    in frame: True
+   rows carrying either: ['✗ HUNTER2_TYPED_TEST not stored']
+   session store names : ()

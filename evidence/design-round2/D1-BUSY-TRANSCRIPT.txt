@@ -1,0 +1,54 @@
+--- width 100 ---
+  warning row index : 12
+  composer row index: 13
+  rows between      : 0
+  warning still visible: True
+  warning as painted: '! 18 characters are now PLAIN TEXT in the composer — Enter will send them'
+  its cell_len      : 73
+  ellipsized?       : False
+  tail of frame:
+    |    · ran a tool call and it returned result 9
+    |    · ran a tool call and it returned result 10
+    |    · ran a tool call and it returned result 11
+    |    ! 18 characters are now PLAIN TEXT in the composer — Enter will send them
+    |  ❯  /credential hunter2-typed-test
+    |  ◆ test/model › ⌂ /private/tmp/d891r2/wt
+
+  settle: frame(n)==frame(n+1) ? True
+
+--- width 80 ---
+  warning row index : 12
+  composer row index: 14
+  rows between      : 1
+  warning still visible: True
+  warning as painted: '! 18 characters are now PLAIN TEXT in the composer — Enter will send'
+  its cell_len      : 68
+  ellipsized?       : False
+  tail of frame:
+    |    · ran a tool call and it returned result 10
+    |    · ran a tool call and it returned result 11
+    |    ! 18 characters are now PLAIN TEXT in the composer — Enter will send
+    |      them
+    |  ❯  /credential hunter2-typed-test
+    |  ◆ test/model › ⌂ /private/tmp/d891r2/wt
+
+  settle: frame(n)==frame(n+1) ? True
+
+--- width 45 ---
+  warning row index : 13
+  composer row index: 15
+  rows between      : 1
+  warning still visible: True
+  warning as painted: '! 18 characters are now PLAIN TEXT in'
+  its cell_len      : 37
+  ellipsized?       : False
+  tail of frame:
+    |    · ran a tool call and it returned
+    |      result 11
+    |    ! 18 characters are now PLAIN TEXT in
+    |      the composer — Enter will send them
+    |  ❯  /credential hunter2-typed-test
+    |  ◆ test/model › ⌂ /private/tmp/d891r2/wt
+
+  settle: frame(n)==frame(n+1) ? True
+

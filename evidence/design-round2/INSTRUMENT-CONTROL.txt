@@ -1,0 +1,43 @@
+frame_text length      : 1279
+frame non-blank rows   : 22
+--- POSITIVE CONTROLS on the MASKED frame ---
+  mask char '•' in frame : True   count=19
+  '/credential' in frame : True
+  secret in frame        : False
+--- raw frame dump ---
+    1|                                             ▄█████▄    ▄▄██▄▄
+    2|                                            ██     ██   ██  ██
+    3|                                            ██    ▄█▀    ▀██▀
+    4|                                            ▄██████▄     ██
+    5|                                          ▄█▀▀     ▀█████▀
+    6|                                          ██        ██
+    7|                                          ██        ██
+    8|                                        ▄▄██▄       ██
+    9|                                        ██ ▄█       ██
+   10|                                         ▀▀▀        ██
+   11|                                     l o c a l   o p e r a t o r
+   13|                                    v0.44.66
+   14|                                    test/model
+   15|                                    /private/tmp/d891r2/wt
+   16|                                    ! latest is v0.53.6 — /update
+   18|                                    /         command picker
+   19|                                    /help     all commands
+   20|                                    ctrl+d    quit
+   22|                        · /resume picks up a recent session where you left off
+   24|              •  /credential ••••••••••••••••••
+   25|                 masked as you type — Enter turns it into a chip, Esc cancels
+   27|              ◆ test/model › ⌂ /private/tmp/d891r2/wt
+--- export_screenshot cross-check ---
+  svg length             : 35823
+  '/credential' in svg   : True
+  secret in svg          : False
+--- AFTER Esc, both instruments ---
+  buffer                 : '/credential hunter2-typed-test'
+  frame_text sees secret : True
+  svg sees secret        : True
+  frame_text sees PLAIN  : True
+  svg sees PLAIN TEXT    : False
+--- raw frame dump AFTER Esc ---
+    2|     ! 18 characters are now PLAIN TEXT in the composer — Enter will send them
+   25|   ❯  /credential hunter2-typed-test
+   27|   ◆ test/model › ⌂ /private/tmp/d891r2/wt

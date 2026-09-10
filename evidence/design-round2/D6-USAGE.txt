@@ -1,0 +1,78 @@
+=== CREDENTIAL_USAGE as a constant ===
+  0: cell_len= 42  'Usage: /credential <space> then the secret'
+  1: cell_len= 65  '       Enter chips it, Esc cancels     # it never enters the line'
+  2: cell_len= 45  '       /credential                     # list'
+  3: cell_len= 63  '       /credential --persist <KEY>     # also save it long-term'
+  4: cell_len= 51  '       /credential --forget <KEY>      # forget one'
+  5: cell_len= 57  '       /credential --forget-all        # forget every one'
+
+--- width 60: whole notice region ---
+  |    · No credentials stored for this session. Usage:
+  |      /credential <space> then the secret
+  |             Enter chips it, Esc cancels     # it never
+  |             enters the line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save
+  |             it long-term
+  |             /credential --forget <KEY>      # forget
+  |             one
+  |             /credential --forget-all        # forget
+  |             every one
+  lead phrase 'then the secret' present anywhere: True
+  ellipsis in block: True
+
+--- width 70: whole notice region ---
+  |    · No credentials stored for this session. Usage: /credential
+  |      <space> then the secret
+  |             Enter chips it, Esc cancels     # it never enters the
+  |             line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save it
+  |             long-term
+  |             /credential --forget <KEY>      # forget one
+  |             /credential --forget-all        # forget every one
+  lead phrase 'then the secret' present anywhere: True
+  ellipsis in block: True
+
+--- width 80: whole notice region ---
+  |    · No credentials stored for this session. Usage: /credential <space>
+  |      then the secret
+  |             Enter chips it, Esc cancels     # it never enters the line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save it long-term
+  |             /credential --forget <KEY>      # forget one
+  |             /credential --forget-all        # forget every one
+  lead phrase 'then the secret' present anywhere: True
+  ellipsis in block: True
+
+--- width 90: whole notice region ---
+  |    · No credentials stored for this session. Usage: /credential <space> then the
+  |      secret
+  |             Enter chips it, Esc cancels     # it never enters the line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save it long-term
+  |             /credential --forget <KEY>      # forget one
+  |             /credential --forget-all        # forget every one
+  lead phrase 'then the secret' present anywhere: False
+  ellipsis in block: True
+
+--- width 100: whole notice region ---
+  |    · No credentials stored for this session. Usage: /credential <space> then the secret
+  |             Enter chips it, Esc cancels     # it never enters the line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save it long-term
+  |             /credential --forget <KEY>      # forget one
+  |             /credential --forget-all        # forget every one
+  lead phrase 'then the secret' present anywhere: True
+  ellipsis in block: True
+
+--- width 120: whole notice region ---
+  |    · No credentials stored for this session. Usage: /credential <space> then the secret
+  |             Enter chips it, Esc cancels     # it never enters the line
+  |             /credential                     # list
+  |             /credential --persist <KEY>     # also save it long-term
+  |             /credential --forget <KEY>      # forget one
+  |             /credential --forget-all        # forget every one
+  lead phrase 'then the secret' present anywhere: True
+  ellipsis in block: True
+

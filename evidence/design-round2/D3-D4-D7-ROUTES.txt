@@ -1,0 +1,52 @@
+=== D4: six routes, does ARMED_NOTICE or PLACEHOLDER ever PAINT? ===
+  ARMED_NOTICE = 'armed — add a space, then type or paste the secret'
+  PLACEHOLDER  = 'Type or paste the secret… — masked; Enter chips it'
+
+  POSITIVE CONTROL (typing)              armed=True  typing=True  | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=True
+  -> detector CAN see a notice paint. Absences below are real.
+
+  1. /credential (no space)              armed=True  typing=False | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=False
+  2. /credential + space                 armed=True  typing=True  | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=True
+  3. + space + '-' (flag disarm)         armed=False typing=False | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=False
+  4. caret left out of span              armed=True  typing=False | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=False
+  5. chip minted, then re-arm            armed=True  typing=True  | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=True
+  6. backspace back to the token         armed=True  typing=False | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=False
+  7. empty composer (placeholder?)       armed=False typing=False | ARMED_paints=False PLACEHOLDER_paints=False HELD_paints=False TYPING_paints=False
+     editor.placeholder attribute = 'Message Local Operator…'
+
+=== D3: marker vs mask glyph ===
+  composer row      : '•  /credential ••••••••••••••••••'
+  U+2022 in row     : 19  (typed 18)
+  marker cell       : '•'
+
+=== D7/D6: Enter on an armed-but-EMPTY span (usage block) ===
+  buffer after enter: ''
+    |     · No credentials stored for this session. Usage: /credential <space> then the secret
+    |              Enter chips it, Esc cancels     # it never enters the line
+    |              /credential                     # list
+    |              /credential --persist <KEY>     # also save it long-term
+    |              /credential --forget <KEY>      # forget one
+    |              /credential --forget-all        # forget every one
+    |   ❯   Message Local Operator…
+    |   ◆ test/model › ⌂ /private/tmp/d891r2/wt
+
+  -- usage block at width 80 --
+    |     · No credentials stored for this session. Usage: /credential <space>
+    |              /credential                     # list
+    |              /credential --persist <KEY>     # also save it long-term
+    |              /credential --forget <KEY>      # forget one
+    |              /credential --forget-all        # forget every one
+
+  -- usage block at width 100 --
+    |     · No credentials stored for this session. Usage: /credential <space> then the secret
+    |              /credential                     # list
+    |              /credential --persist <KEY>     # also save it long-term
+    |              /credential --forget <KEY>      # forget one
+    |              /credential --forget-all        # forget every one
+
+  -- usage block at width 120 --
+    |     · No credentials stored for this session. Usage: /credential <space> then the secret
+    |              /credential                     # list
+    |              /credential --persist <KEY>     # also save it long-term
+    |              /credential --forget <KEY>      # forget one
+    |              /credential --forget-all        # forget every one

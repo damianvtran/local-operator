@@ -1,0 +1,34 @@
+== immediately after Esc ==
+   buffer: '/credential hunter2-typed-test'
+   warning_row_present   : True
+   secret_in_composer    : True
+   amber_marker          : False
+   chevron_marker        : True
+   mask_cells            : 0
+== after caret move (home) ==
+   warning_row_present   : True
+   secret_in_composer    : True
+   amber_marker          : False
+   chevron_marker        : True
+   mask_cells            : 0
+== after typing prose in front of it ==
+   buffer: 'please store /credential hunter2-typed-test'
+   warning_row_present   : True
+   secret_in_composer    : True
+   amber_marker          : False
+   chevron_marker        : True
+   mask_cells            : 0
+== after 4 unrelated notices ==
+   warning_row_present   : True
+   secret_in_composer    : True
+   amber_marker          : False
+   chevron_marker        : True
+   mask_cells            : 0
+   visible rows:
+     |     ! 18 characters are now PLAIN TEXT in the composer — Enter will send them
+     |     · unrelated activity line 0
+     |     · unrelated activity line 1
+     |     · unrelated activity line 2
+     |     · unrelated activity line 3
+     |   ❯  please store /credential hunter2-typed-test
+     |   ◆ test/model › ⌂ /private/tmp/d891r2/wt

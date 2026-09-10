@@ -1,0 +1,33 @@
+=== the ladder's own numbers ===
+  narrowest rung        : 'Enter chips · Esc cancels'
+  its cell_len          : 25   (docstring says 22)
+  _GUTTER_CELLS=3  _EDGE_MARGIN=2
+  screen width needed for the narrowest rung uncropped: 30
+
+=== per width: is the full exit phrase 'Esc cancels' intact? ===
+   w picker w budget  exit intact  painted
+  24       20     15        False  'Enter chips ·…'
+  25       21     16        False  'Enter chips · E…'
+  26       22     17        False  'Enter chips · Es…'
+  27       23     18        False  'Enter chips · Esc…'
+  28       24     19        False  'Enter chips · Esc…'
+  29       25     20        False  'Enter chips · Esc c…'
+  30       26     21        False  'Enter chips · Esc ca…'
+  31       27     22        False  'Enter chips · Esc can…'
+  32       28     23        False  'Enter chips · Esc canc…'
+  33       29     24        False  'Enter chips · Esc cance…'
+  34       30     25         True  'Enter chips · Esc cancels'
+  35       31     26         True  'Enter chips · Esc cancels'
+  36       32     27         True  'Enter chips it, Esc cancels'
+  37       33     28         True  'Enter chips it, Esc cancels'
+  38       34     29         True  'Enter chips it, Esc cancels'
+  39       35     30         True  'Enter chips it, Esc cancels'
+  40       36     31         True  'Enter chips it, Esc cancels'
+  41       37     32         True  'Enter chips it, Esc cancels'
+  42       38     33         True  'Enter chips it, Esc cancels'
+  43       39     34         True  'Enter chips it, Esc cancels'
+  44       40     35         True  'Enter chips it, Esc cancels'
+  45       41     36         True  'masked — Enter chips it, Esc cancels'
+
+  'Esc cancels' first INCOMPLETE at screen width : 24
+  docstring claim: 'exit survives every width the picker paints at'

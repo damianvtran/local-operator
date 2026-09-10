@@ -1,0 +1,14 @@
+width  space named cropped  painted picker row
+   45        False    True  '❯  /credential  /cred  Type or paste a…'
+   56        False    True  '❯  /credential  /cred  Type or paste a secret aft…'
+   60        False    True  '❯  /credential  /cred  Type or paste a secret after a…'
+   66         True    True  '❯  /credential  /cred  Type or paste a secret after a space…'
+   68         True    True  '❯  /credential  /cred  Type or paste a secret after a space;…'
+   69         True    True  '❯  /credential  /cred  Type or paste a secret after a space; m…'
+   80         True   False  '❯  /credential  /cred  Type or paste a secret after a space; masked'
+  100         True   False  '❯  /credential  /cred  Type or paste a secret after a space; masked'
+  120         True   False  '❯  /credential  /cred  Type or paste a secret after a space; masked'
+  140         True   False  '❯  /credential  /cred  Type or paste a secret after a space; masked'
+
+  CREDENTIAL_ARMED_NOTICE: cell_len=50  'armed — add a space, then type or paste the secret'
+  CREDENTIAL_PLACEHOLDER: cell_len=50  'Type or paste the secret… — masked; Enter chips it'

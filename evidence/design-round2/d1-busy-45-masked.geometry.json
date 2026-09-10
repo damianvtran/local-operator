@@ -1,0 +1,722 @@
+{
+  "grid": [
+    45,
+    30
+  ],
+  "native_pixels": [
+    360.0,
+    510.0
+  ],
+  "profile": {
+    "cell_width": 8.0,
+    "cell_height": 17.0,
+    "font_size": 13.0,
+    "font_family": "Menlo, DejaVu Sans Mono, monospace"
+  },
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
+  "css_path": [
+    "local_operator.tcss"
+  ],
+  "screen": {
+    "size": [
+      43,
+      28
+    ],
+    "virtual_size": [
+      43,
+      28
+    ],
+    "region": [
+      0,
+      0,
+      45,
+      30
+    ],
+    "scrollbar": [
+      false,
+      false
+    ]
+  },
+  "widgets": [
+    {
+      "widget": "SessionWorkspace",
+      "id": "session-workspace",
+      "region": [
+        1,
+        1,
+        43,
+        28
+      ],
+      "content_region": [
+        1,
+        1,
+        43,
+        28
+      ],
+      "size": [
+        43,
+        28
+      ],
+      "virtual_size": [
+        43,
+        28
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "session-conversation",
+      "region": [
+        1,
+        1,
+        43,
+        28
+      ],
+      "content_region": [
+        1,
+        1,
+        43,
+        28
+      ],
+      "size": [
+        43,
+        28
+      ],
+      "virtual_size": [
+        43,
+        28
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "TranscriptView",
+      "id": "transcript",
+      "region": [
+        1,
+        1,
+        43,
+        22
+      ],
+      "content_region": [
+        2,
+        2,
+        42,
+        20
+      ],
+      "size": [
+        42,
+        20
+      ],
+      "virtual_size": [
+        41,
+        35
+      ],
+      "scrollbar": [
+        false,
+        true
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        -13,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        -13,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        -10,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        -10,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        -7,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        -7,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        -4,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        -4,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        -1,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        -1,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        2,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        2,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        5,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        5,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        8,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        8,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        11,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        11,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        14,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        14,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        17,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        17,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "NoticeBlock",
+      "id": null,
+      "region": [
+        2,
+        20,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        20,
+        41,
+        2
+      ],
+      "size": [
+        41,
+        2
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "input-dock",
+      "region": [
+        1,
+        23,
+        43,
+        6
+      ],
+      "content_region": [
+        1,
+        23,
+        43,
+        6
+      ],
+      "size": [
+        43,
+        6
+      ],
+      "virtual_size": [
+        43,
+        6
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "input-shell",
+      "region": [
+        1,
+        23,
+        43,
+        6
+      ],
+      "content_region": [
+        2,
+        24,
+        41,
+        4
+      ],
+      "size": [
+        41,
+        4
+      ],
+      "virtual_size": [
+        41,
+        4
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Band",
+      "id": "status-band",
+      "region": [
+        2,
+        26,
+        41,
+        2
+      ],
+      "content_region": [
+        2,
+        27,
+        40,
+        1
+      ],
+      "size": [
+        40,
+        1
+      ],
+      "virtual_size": [
+        41,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": "input-row",
+      "region": [
+        2,
+        24,
+        41,
+        1
+      ],
+      "content_region": [
+        2,
+        24,
+        41,
+        1
+      ],
+      "size": [
+        41,
+        1
+      ],
+      "virtual_size": [
+        41,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Chrome",
+      "id": "prompt-chevron",
+      "region": [
+        2,
+        24,
+        2,
+        1
+      ],
+      "content_region": [
+        2,
+        24,
+        2,
+        1
+      ],
+      "size": [
+        2,
+        1
+      ],
+      "virtual_size": [
+        2,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Editor",
+      "id": null,
+      "region": [
+        4,
+        24,
+        39,
+        1
+      ],
+      "content_region": [
+        5,
+        24,
+        37,
+        1
+      ],
+      "size": [
+        37,
+        1
+      ],
+      "virtual_size": [
+        0,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "CommandPicker",
+      "id": null,
+      "region": [
+        2,
+        25,
+        41,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        41,
+        1
+      ],
+      "size": [
+        41,
+        1
+      ],
+      "virtual_size": [
+        41,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    }
+  ]
+}

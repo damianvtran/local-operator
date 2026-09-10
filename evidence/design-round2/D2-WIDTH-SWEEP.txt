@@ -1,0 +1,27 @@
+width   Esc? Enter? rung#  painted row
+   30   True   True  None  'Enter chips · Esc ca…'  <-- ELLIPSIZED
+   35   True   True     4  'Enter chips · Esc cancels'
+   40   True   True     3  'Enter chips it, Esc cancels'
+   45   True   True     2  'masked — Enter chips it, Esc cancels'
+   50   True   True     2  'masked — Enter chips it, Esc cancels'
+   56   True   True     2  'masked — Enter chips it, Esc cancels'
+   60   True   True     1  'masked as you type — Enter chips it, Esc cancels'
+   66   True   True     1  'masked as you type — Enter chips it, Esc cancels'
+   68   True   True     1  'masked as you type — Enter chips it, Esc cancels'
+   69   True   True     0  'masked as you type — Enter turns it into a chip, Esc cancels'
+   72   True   True     0  'masked as you type — Enter turns it into a chip, Esc cancels'
+   80   True   True     0  'masked as you type — Enter turns it into a chip, Esc cancels'
+  100   True   True     0  'masked as you type — Enter turns it into a chip, Esc cancels'
+  120   True   True     0  'masked as you type — Enter turns it into a chip, Esc cancels'
+
+widths LOSING 'Esc'    : none
+widths LOSING 'Enter'  : none
+widths ELLIPSIZED      : [30]
+widths NOT in typing   : none
+
+== MID-CAPTURE RESIZE (the property paint-time resolution is for) ==
+   opened at 120 : 'masked as you type — Enter turns it into a chip, Esc cancels'
+   resized to  60 : 'masked as you type — Enter chips it, Esc cancels'   Esc=True ellipsized=False
+   resized to  45 : 'masked — Enter chips it, Esc cancels'   Esc=True ellipsized=False
+   resized to 100 : 'masked as you type — Enter turns it into a chip, Esc cancels'   Esc=True ellipsized=False
+   settle at 45: frame(n)==frame(n+1) ? True
