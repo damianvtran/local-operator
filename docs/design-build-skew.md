@@ -311,8 +311,8 @@ one comparison at bind is complete.)
   (coder: confirm `RecordPublisher` rewrites from the live record object, and
   pin it in a test).
 - `local_operator/session/remote.py` — at bind, stash the owner's stamp on
-  the facade: `self.owner_version = record.version`,
-  `self.owner_source_ref = record.source_ref` in `_bind_to` (and the
+  the facade: `self.runtime_version = record.version`,
+  `self.runtime_source_ref = record.source_ref` in `_bind_to` (and the
   equivalent in `connect`).
 - `local_operator/tui/app.py` — compare and warn (§4.3).
 - `local_operator/cli.py` — `lop sessions --json` rows gain `"version"` and
@@ -335,14 +335,14 @@ loaded". Debounce state: `self._skew_notice_shown: set[tuple]`.
    - **A (disk drift):** `update.installed_build() != self._loaded_build` →
      warning notice (copy below).
    - **C (owner skew):** if the adopted session is already attached and
-     exposes `owner_version`, compare with `self._loaded_build`. An empty
-     `owner_version` means the runtime predates the field, i.e. it is older
+     exposes `runtime_version`, compare with `self._loaded_build`. An empty
+     `runtime_version` means the runtime predates the field, i.e. it is older
      than this window by construction — warn once per session with the
      absent-version copy.
 2. `_start_runtime_engage` (`app.py:8848`) and the success tail of
    `_bind_then_dispatch` (`app.py:9004`) — re-check A immediately before a
    spawn, and re-check C after a fresh bind (`ensure()` resolved
-   `owner_version`). Both are debounced, so the mount engage, the draft
+   `runtime_version`). Both are debounced, so the mount engage, the draft
    warm-up, and the slash-command engage cost one comparison each and paint at
    most one notice per distinct (kind, from, to, scope) key — scope being the
    session id for the owner notices and empty for disk drift, which is a fact
@@ -442,7 +442,7 @@ Unit — TUI (new `tests/unit/tui/test_build_skew.py`, plus one audit edit):
 10. Drift: monkeypatch `installed_build` to a new token after app init →
     `_adopt_session`/engage posts exactly one warning naming both builds and
     `/reload`; a second adopt with the same token posts nothing (debounce).
-11. Owner skew: facade with `owner_version` older/absent → the C notice with
+11. Owner skew: facade with `runtime_version` older/absent → the C notice with
     `/stop` copy; matching version → silence.
 12. Renderer: `noop {"type": "team_mutate"}` → warning notice, no exception,
     no submit; `team_attached` with request on a normal session still calls

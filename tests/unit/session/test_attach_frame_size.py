@@ -1437,7 +1437,7 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
         assert remote.frontend_state.model_catalogue_truncated is True
         # The rows that survived are usable, in the owner's own order.
         assert catalogue[0] == _catalogue_row(0)
-        assert remote.owner_model_catalogue()[0]["model_id"] == _catalogue_row(0)["model_id"]
+        assert remote.runtime_model_catalogue()[0]["model_id"] == _catalogue_row(0)["model_id"]
     finally:
         if remote is not None:
             await remote.dispose()

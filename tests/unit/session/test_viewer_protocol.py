@@ -447,7 +447,7 @@ def _all_touched() -> dict[str, list[str]]:
 def _declared() -> set[str]:
     """Every name the two protocols declare.
 
-    ``dir()`` alone is not enough: a bare annotation (``owner_version: str``)
+    ``dir()`` alone is not enough: a bare annotation (``runtime_version: str``)
     declares a member for both pyright and ``isinstance``, but creates no class
     attribute, so it does not appear in ``dir()``. Reading
     ``__annotations__`` as well is what makes the four instance attributes on
@@ -470,7 +470,7 @@ def _members(klass: type, module: str, name: str) -> set[str]:
 
     ``dir(klass)`` sees only class-level members, so attributes assigned as
     ``self.x = ...`` in ``__init__`` are missing from it. That is not a corner
-    case here: ``RemoteSession`` sets ``owner_version``, ``degraded_reason``,
+    case here: ``RemoteSession`` sets ``runtime_version``, ``degraded_reason``,
     ``jobs`` and others that way, and ``Session`` sets ``agent_registry`` and
     ``team_registry`` that way while ``RemoteSession`` exposes them as
     properties. Comparing ``dir()`` to ``dir()`` therefore reported
@@ -546,7 +546,7 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     rounds, is an ``__init__``-assigned attribute disappearing. The four below
     are hand-assigned to satisfy ``__new__``, so the ``isinstance`` passes
     whether or not ``__init__`` still sets them — the reviewer deleted
-    ``owner_version`` from the class outright and got 7 tests passing against 2
+    ``runtime_version`` from the class outright and got 7 tests passing against 2
     pyright errors (review round 2, MINOR-2). For those four the division of
     labour runs the other way: **pyright is the guard and this test is
     structurally blind.** Stated here because a test believed to cover a case it
@@ -557,8 +557,8 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     # socket. Set them directly: presence is what the protocol requires, and
     # constructing a real facade would make this a network test. See the
     # docstring: this assignment is exactly why the four are pyright's to guard.
-    session.owner_version = ""
-    session.owner_source_ref = ""
+    session.runtime_version = ""
+    session.runtime_source_ref = ""
     session.degraded_reason = ""
     session.saved_preview_partial = False
 

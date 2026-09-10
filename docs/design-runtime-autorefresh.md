@@ -30,7 +30,7 @@ whose disk had been 0.49.9@f4a70b99 since ~05:00: `lop --resume a6a8186ea42d`
 at record construction (`server.py:411-443`), and never again.
 
 The only thing that notices is the *viewer*: `OperatorApp._check_build_skew`
-(`tui/app.py:14870-15011`) compares `owner_version/owner_source_ref` off the
+(`tui/app.py:14870-15011`) compares `runtime_version/runtime_source_ref` off the
 record with its own `_loaded_build` and paints notice C —
 `“<name>” is running 0.49.8@46a4e9b but this window is 0.49.9@f4a70b99 — some
 commands may not work. /stop, then send again to restart it.` — at
@@ -481,7 +481,7 @@ viewer never waits on a runtime that is "about to" leave.
 | `session/runtime/process.py` | `BUILD_CHECK_S/SETTLE_S/STAGGER_S`; `_build_changed`; reaper refresh branch |
 | `session/runtime/server.py` | `_boot_build`; `announce_retiring`; `refresh_if_idle` op; heartbeat republishes busy |
 | `mobile/attach_client.py` | `RETIRING_REASON`; `retiring` op in `_pump`; `request_refresh()` |
-| `session/remote.py` | `_on_disconnected` refresh branch; `_go_cold(refresh=)`; `set_refresh_callback`; `request_refresh()`; `owner_idle` helper |
+| `session/remote.py` | `_on_disconnected` refresh branch; `_go_cold(refresh=)`; `set_refresh_callback`; `request_refresh()`; `runtime_idle` helper |
 | `tui/app.py` | `_on_runtime_refreshed`; `_check_build_skew` C→C′ + belt; copy |
 | `update.py` | `build_marker_age_s()` (mtime of `.lop-source` or dist-info) |
 | `cli.py` | nothing (record fields unchanged) |

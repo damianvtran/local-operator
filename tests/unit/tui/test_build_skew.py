@@ -76,7 +76,7 @@ MOVES_OVER = "will switch to the new version when it is next idle"
 class _BoundViewer(FakeSession):
     """A follower facade that has already bound to a runtime.
 
-    Not owning the runtime, plus a resolved ``owner_version``, is what a real
+    Not owning the runtime, plus a resolved ``runtime_version``, is what a real
     ``RemoteSession`` looks like after ``_dial``; ``is_cold`` False is what
     makes the owner comparison meaningful, since a cold viewer has not dialled
     anything and its empty stamp would otherwise read as a prehistoric
@@ -92,17 +92,17 @@ class _BoundViewer(FakeSession):
 
     def __init__(
         self,
-        owner_version: str = "",
-        owner_source_ref: str = "",
+        runtime_version: str = "",
+        runtime_source_ref: str = "",
         session_id: str = "",
         conversation_name: str = "",
         idle: bool = False,
         refresh_answer: str = "retiring",
     ) -> None:
         super().__init__()
-        self.owner_version = owner_version
-        self.owner_source_ref = owner_source_ref
-        # ``idle`` is what a real ``RemoteSession.owner_idle`` reads off the
+        self.runtime_version = runtime_version
+        self.runtime_source_ref = runtime_source_ref
+        # ``idle`` is what a real ``RemoteSession.runtime_idle`` reads off the
         # canonical snapshot. The default is BUSY so every pre-existing cell
         # keeps exercising the notice path; the refresh cells opt in.
         self._skew_idle = idle
@@ -129,7 +129,7 @@ class _BoundViewer(FakeSession):
     def conversation_name(self) -> str:  # type: ignore[override]
         return self._skew_conversation_name
 
-    def owner_idle(self) -> bool:
+    def runtime_idle(self) -> bool:
         return self._skew_idle
 
     async def request_refresh(self):  # deliberately unannotated: see below
@@ -295,7 +295,7 @@ async def test_a_busy_older_runtime_is_told_it_will_move_over(monkeypatch, tmp_p
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        viewer = _BoundViewer(owner_version="0.46.23", idle=False)
+        viewer = _BoundViewer(runtime_version="0.46.23", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -331,7 +331,7 @@ async def test_an_idle_older_runtime_is_refreshed_silently(monkeypatch, tmp_path
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        viewer = _BoundViewer(owner_version="0.46.23", idle=True)
+        viewer = _BoundViewer(runtime_version="0.46.23", idle=True)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -375,7 +375,7 @@ async def test_an_idle_owner_that_stays_still_gets_the_notice(
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        viewer = _BoundViewer(owner_version="0.46.23", idle=True, refresh_answer=answer)
+        viewer = _BoundViewer(runtime_version="0.46.23", idle=True, refresh_answer=answer)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -411,7 +411,7 @@ async def test_an_unstamped_idle_owner_that_stays_gets_the_unknown_copy(
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        viewer = _BoundViewer(owner_version="", idle=True, refresh_answer="raise")
+        viewer = _BoundViewer(runtime_version="", idle=True, refresh_answer="raise")
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -453,7 +453,7 @@ async def test_a_non_string_answer_cannot_take_the_window_down(
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        app._session = _BoundViewer(owner_version="0.46.23", idle=True, refresh_answer=answer)
+        app._session = _BoundViewer(runtime_version="0.46.23", idle=True, refresh_answer=answer)
         app._check_build_skew(reason="bind")
         await pilot.pause()
         # Raises WorkerFailed on the unfixed tree, before any assertion below.
@@ -491,7 +491,7 @@ async def test_a_same_version_rebuild_names_only_the_refs(monkeypatch, tmp_path)
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        app._session = _BoundViewer(owner_version="0.49.0", owner_source_ref="aaaaaaa1111")
+        app._session = _BoundViewer(runtime_version="0.49.0", runtime_source_ref="aaaaaaa1111")
         app._check_build_skew(reason="bind")
         await pilot.pause()
         notices = _notices(app)
@@ -523,8 +523,8 @@ async def test_the_version_pair_survives_a_narrow_splash(monkeypatch, tmp_path) 
 
             monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
             app._session = _BoundViewer(
-                owner_version="0.49.8",
-                owner_source_ref="46a4e9b1234567",
+                runtime_version="0.49.8",
+                runtime_source_ref="46a4e9b1234567",
                 conversation_name="Runtime refresh notes",
             )
             app._check_build_skew(reason="bind")
@@ -581,7 +581,7 @@ async def test_a_runtime_without_a_stamp_is_reported_as_predating_it(monkeypatch
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        app._session = _BoundViewer(owner_version="")
+        app._session = _BoundViewer(runtime_version="")
         app._check_build_skew(reason="bind")
         app._check_build_skew(reason="bind-again")
         await pilot.pause()
@@ -615,12 +615,12 @@ async def test_a_second_stale_session_gets_its_own_notice(monkeypatch, tmp_path)
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
 
-        first = _BoundViewer(owner_version="", session_id="sessionaaaa1")
+        first = _BoundViewer(runtime_version="", session_id="sessionaaaa1")
         app._session = first
         app._check_build_skew(reason="bind")
         app._check_build_skew(reason="bind-again")  # same session: still once
 
-        second = _BoundViewer(owner_version="", session_id="sessionbbbb2")
+        second = _BoundViewer(runtime_version="", session_id="sessionbbbb2")
         app._session = second
         app._check_build_skew(reason="resume")
         await pilot.pause()
@@ -652,11 +652,11 @@ async def test_disk_drift_is_not_rescoped_by_a_session_swap(monkeypatch, tmp_pat
         monkeypatch.setattr(
             update_mod, "installed_build", lambda *_a, **_k: BuildStamp(version="0.49.0")
         )
-        first = _BoundViewer(owner_version="0.49.0", session_id="sessionaaaa1")
+        first = _BoundViewer(runtime_version="0.49.0", session_id="sessionaaaa1")
         app._session = first
         app._check_build_skew(reason="adopt")
 
-        second = _BoundViewer(owner_version="0.49.0", session_id="sessionbbbb2")
+        second = _BoundViewer(runtime_version="0.49.0", session_id="sessionbbbb2")
         app._session = second
         app._check_build_skew(reason="adopt-2")
         await pilot.pause()
@@ -679,7 +679,7 @@ async def test_a_matching_runtime_is_silent(monkeypatch, tmp_path) -> None:
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        app._session = _BoundViewer(owner_version="0.49.0", owner_source_ref="abc1234")
+        app._session = _BoundViewer(runtime_version="0.49.0", runtime_source_ref="abc1234")
         app._check_build_skew(reason="bind")
         await pilot.pause()
         notices = _notices(app)
@@ -694,7 +694,7 @@ async def test_a_cold_viewer_is_not_reported_as_a_prehistoric_runtime(
 ) -> None:
     """A cold viewer has not dialled anything, so it has no owner to compare.
 
-    Its ``owner_version`` is empty for the trivial reason that no runtime
+    Its ``runtime_version`` is empty for the trivial reason that no runtime
     exists yet. Reading that as "the runtime predates the field" would fire
     the notice on every fresh `lop`, which is the false-positive that would
     make the whole mechanism ignorable.
@@ -709,7 +709,7 @@ async def test_a_cold_viewer_is_not_reported_as_a_prehistoric_runtime(
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        cold = _BoundViewer(owner_version="")
+        cold = _BoundViewer(runtime_version="")
         cold.is_cold = True
         app._session = cold
         app._check_build_skew(reason="cold")
@@ -732,7 +732,7 @@ async def test_an_unreadable_own_build_disables_the_check(monkeypatch, tmp_path)
         await pilot.pause()
         app._loaded_build = None
         app._skew_notice_shown.clear()
-        app._session = _BoundViewer(owner_version="0.1.0")
+        app._session = _BoundViewer(runtime_version="0.1.0")
         app._check_build_skew(reason="unknown")
         await pilot.pause()
         notices = _notices(app)
@@ -994,13 +994,13 @@ async def test_two_stale_sessions_are_told_apart_by_name(monkeypatch, tmp_path) 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
 
         first = _BoundViewer(
-            owner_version="", session_id="sessionaaaa1", conversation_name="ingest pipeline"
+            runtime_version="", session_id="sessionaaaa1", conversation_name="ingest pipeline"
         )
         app._session = first
         app._check_build_skew(reason="bind")
 
         second = _BoundViewer(
-            owner_version="", session_id="sessionbbbb2", conversation_name="release notes"
+            runtime_version="", session_id="sessionbbbb2", conversation_name="release notes"
         )
         app._session = second
         app._check_build_skew(reason="resume")
@@ -1034,7 +1034,7 @@ async def test_an_unnamed_session_falls_back_to_the_deictic(monkeypatch, tmp_pat
         import local_operator.update as update_mod
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: stamp)
-        unnamed = _BoundViewer(owner_version="", session_id="sessionccccc")
+        unnamed = _BoundViewer(runtime_version="", session_id="sessionccccc")
         app._session = unnamed
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1141,8 +1141,8 @@ async def test_a_runtime_newer_than_this_window_is_completely_silent(monkeypatch
         on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
         viewer = _BoundViewer(
-            owner_version="0.51.30",
-            owner_source_ref="d7f12d3a7",
+            runtime_version="0.51.30",
+            runtime_source_ref="d7f12d3a7",
             idle=True,
             refresh_answer="kept: build on disk matches (or has not settled)",
         )
@@ -1182,7 +1182,7 @@ async def test_a_runtime_newer_than_this_window_is_silent_while_busy(monkeypatch
 
         on_disk = BuildStamp(version="0.51.30", source_ref="d7f12d3a7")
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
-        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7", idle=False)
+        viewer = _BoundViewer(runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1212,7 +1212,9 @@ async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_
         app._loaded_build = BuildStamp(version="0.51.30", source_ref="aaaaaaa1111")
         app._skew_notice_shown.clear()
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
-        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="bbbbbbb2222", idle=False)
+        viewer = _BoundViewer(
+            runtime_version="0.51.30", runtime_source_ref="bbbbbbb2222", idle=False
+        )
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1228,7 +1230,9 @@ async def test_a_same_version_rebuild_is_directional_both_ways(monkeypatch, tmp_
         app._loaded_build = on_disk
         app._skew_notice_shown.clear()
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
-        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="aaaaaaa1111", idle=False)
+        viewer = _BoundViewer(
+            runtime_version="0.51.30", runtime_source_ref="aaaaaaa1111", idle=False
+        )
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1259,7 +1263,7 @@ async def test_an_unreadable_disk_falls_back_to_version_order(monkeypatch, tmp_p
             raise OSError("no install metadata")
 
         monkeypatch.setattr(update_mod, "installed_build", _boom)
-        viewer = _BoundViewer(owner_version="0.51.30", idle=True)
+        viewer = _BoundViewer(runtime_version="0.51.30", idle=True)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1297,7 +1301,9 @@ async def test_an_inconclusive_order_keeps_todays_notice(monkeypatch, tmp_path) 
             raise OSError("no install metadata")
 
         monkeypatch.setattr(update_mod, "installed_build", _boom)
-        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="bbbbbbb2222", idle=False)
+        viewer = _BoundViewer(
+            runtime_version="0.51.30", runtime_source_ref="bbbbbbb2222", idle=False
+        )
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1331,7 +1337,7 @@ async def test_an_unparseable_version_is_not_guessed_at(monkeypatch, tmp_path) -
             raise OSError("no install metadata")
 
         monkeypatch.setattr(update_mod, "installed_build", _boom)
-        app._session = _BoundViewer(owner_version="0.51.30rc1", idle=False)
+        app._session = _BoundViewer(runtime_version="0.51.30rc1", idle=False)
         app._check_build_skew(reason="bind")
         await pilot.pause()
         notices = _notices(app)
@@ -1364,8 +1370,8 @@ async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tm
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         # The runtime that is leaving.
         app._session = _BoundViewer(
-            owner_version="0.51.29",
-            owner_source_ref="2412b1daf",
+            runtime_version="0.51.29",
+            runtime_source_ref="2412b1daf",
             session_id="s1",
             conversation_name="Investigating suspicious pwned notification source",
         )
@@ -1374,7 +1380,7 @@ async def test_a_completed_refresh_names_the_version_it_moved_to(monkeypatch, tm
         # session rebound — the refresh keeps the id, which is exactly what the
         # belt keys on.
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
         )
         app._announce_refresh_completed()
         await pilot.pause()
@@ -1409,11 +1415,11 @@ async def test_an_unchanged_build_after_a_refresh_says_nothing(monkeypatch, tmp_
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
         )
         app._on_runtime_refreshed()
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
         )
         app._announce_refresh_completed()
         await pilot.pause()
@@ -1430,7 +1436,7 @@ async def test_an_ordinary_engage_never_announces_a_refresh(monkeypatch, tmp_pat
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         app._skew_notice_shown.clear()
-        app._session = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7")
+        app._session = _BoundViewer(runtime_version="0.51.30", runtime_source_ref="d7f12d3a7")
         app._announce_refresh_completed()
         await pilot.pause()
         notices = _notices(app)
@@ -1453,11 +1459,11 @@ async def test_a_runtime_too_old_to_name_its_build_is_not_half_announced(
         await pilot.pause()
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
-        app._session = _BoundViewer(owner_version="", session_id="s1")
+        app._session = _BoundViewer(runtime_version="", session_id="s1")
         app._on_runtime_refreshed()
         assert app._refreshed_from is None
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
         )
         app._announce_refresh_completed()
         await pilot.pause()
@@ -1501,8 +1507,8 @@ async def test_a_newer_runtime_is_silent_when_disk_has_moved_again(monkeypatch, 
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
         viewer = _BoundViewer(
-            owner_version="0.51.30",
-            owner_source_ref="d7f12d3a7",
+            runtime_version="0.51.30",
+            runtime_source_ref="d7f12d3a7",
             idle=True,
             refresh_answer="kept: build on disk matches (or has not settled)",
         )
@@ -1537,7 +1543,7 @@ async def test_a_newer_runtime_stays_silent_while_busy_in_the_triple(monkeypatch
             "installed_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
-        viewer = _BoundViewer(owner_version="0.51.30", owner_source_ref="d7f12d3a7", idle=False)
+        viewer = _BoundViewer(runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1566,8 +1572,8 @@ async def test_a_long_lived_window_does_not_start_speaking_when_disk_moves_again
         import local_operator.update as update_mod
 
         viewer = _BoundViewer(
-            owner_version="0.51.30",
-            owner_source_ref="d7f12d3a7",
+            runtime_version="0.51.30",
+            runtime_source_ref="d7f12d3a7",
             idle=True,
             refresh_answer="kept: build on disk matches (or has not settled)",
         )
@@ -1621,7 +1627,7 @@ async def test_an_older_runtime_still_speaks_when_disk_has_moved_again(
             "installed_build",
             lambda *_a, **_k: BuildStamp(version="0.52.0", source_ref="5db5f6d65"),
         )
-        viewer = _BoundViewer(owner_version="0.51.28", owner_source_ref="8c2015f11", idle=False)
+        viewer = _BoundViewer(runtime_version="0.51.28", runtime_source_ref="8c2015f11", idle=False)
         app._session = viewer
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1657,7 +1663,7 @@ async def test_three_refs_at_one_version_claim_no_direction(monkeypatch, tmp_pat
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="ccccccc33"),
         )
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="bbbbbbb22", idle=False
+            runtime_version="0.51.30", runtime_source_ref="bbbbbbb22", idle=False
         )
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1695,7 +1701,7 @@ async def test_a_ref_only_pair_still_uses_the_arrow_when_disk_ranks_it(
 
         monkeypatch.setattr(update_mod, "installed_build", lambda *_a, **_k: on_disk)
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="aaaaaaa11", idle=False
+            runtime_version="0.51.30", runtime_source_ref="aaaaaaa11", idle=False
         )
         app._check_build_skew(reason="bind")
         await pilot.pause()
@@ -1728,8 +1734,8 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._session = _BoundViewer(
-            owner_version="0.51.29",
-            owner_source_ref="2412b1daf",
+            runtime_version="0.51.29",
+            runtime_source_ref="2412b1daf",
             session_id="sess-a",
             conversation_name="Session A",
         )
@@ -1742,8 +1748,8 @@ async def test_a_cancelled_engage_cannot_announce_the_previous_session(
 
         # Session B binds normally. Nothing about session A may be said.
         app._session = _BoundViewer(
-            owner_version="0.51.19",
-            owner_source_ref="dc6bec0aa",
+            runtime_version="0.51.19",
+            runtime_source_ref="dc6bec0aa",
             session_id="sess-b",
             conversation_name="Session B",
         )
@@ -1771,8 +1777,8 @@ async def test_a_sidebar_switch_cannot_announce_the_previous_session(monkeypatch
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._session = _BoundViewer(
-            owner_version="0.51.29",
-            owner_source_ref="2412b1daf",
+            runtime_version="0.51.29",
+            runtime_source_ref="2412b1daf",
             session_id="sess-a",
             conversation_name="Session A",
         )
@@ -1782,8 +1788,8 @@ async def test_a_sidebar_switch_cannot_announce_the_previous_session(monkeypatch
         # The sidebar swap: the pending slot SURVIVES this, which is the
         # route round 1 missed. Session B then binds and its engage tail runs.
         app._session = _BoundViewer(
-            owner_version="0.51.19",
-            owner_source_ref="dc6bec0aa",
+            runtime_version="0.51.19",
+            runtime_source_ref="dc6bec0aa",
             session_id="sess-b",
             conversation_name="Session B",
         )
@@ -1807,14 +1813,14 @@ async def test_a_refresh_rebind_to_the_same_session_still_announces(monkeypatch,
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._session = _BoundViewer(
-            owner_version="0.51.29",
-            owner_source_ref="2412b1daf",
+            runtime_version="0.51.29",
+            runtime_source_ref="2412b1daf",
             session_id="s1",
             conversation_name="Session A",
         )
         app._on_runtime_refreshed()
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
         )
         app._announce_refresh_completed()
         await pilot.pause()
@@ -1851,7 +1857,7 @@ async def test_one_build_pair_is_announced_once_across_a_disk_move(monkeypatch, 
             lambda *_a, **_k: BuildStamp(version="0.51.30", source_ref="aaaaaaa11"),
         )
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="bbbbbbb22", session_id="s1", idle=False
+            runtime_version="0.51.30", runtime_source_ref="bbbbbbb22", session_id="s1", idle=False
         )
         app._check_build_skew(reason="adopt")
         await pilot.pause()
@@ -1900,7 +1906,7 @@ async def test_a_title_that_raises_does_not_cost_the_re_engage(monkeypatch, tmp_
         reasons: list[str] = []
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: reasons.append(reason))
         app._warm_engage_started = True
-        app._session = _Raising(owner_version="0.51.29", owner_source_ref="2412b1daf")
+        app._session = _Raising(runtime_version="0.51.29", runtime_source_ref="2412b1daf")
         app._on_runtime_refreshed()
         await pilot.pause()
 
@@ -1929,14 +1935,14 @@ async def test_the_refresh_note_keeps_its_version_pair_on_one_row(monkeypatch, t
                 app._skew_notice_shown.clear()
                 monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
                 app._session = _BoundViewer(
-                    owner_version="0.51.29",
-                    owner_source_ref="2412b1daf",
+                    runtime_version="0.51.29",
+                    runtime_source_ref="2412b1daf",
                     session_id="s1",
                     conversation_name=name,
                 )
                 app._on_runtime_refreshed()
                 app._session = _BoundViewer(
-                    owner_version="0.51.30", owner_source_ref="d7f12d3a7", session_id="s1"
+                    runtime_version="0.51.30", runtime_source_ref="d7f12d3a7", session_id="s1"
                 )
                 app._announce_refresh_completed()
                 await pilot.pause()
@@ -1963,11 +1969,11 @@ async def test_the_refresh_note_does_not_restate_the_version_twice(monkeypatch, 
         app._skew_notice_shown.clear()
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="aaaaaaa11", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="aaaaaaa11", session_id="s1"
         )
         app._on_runtime_refreshed()
         app._session = _BoundViewer(
-            owner_version="0.51.30", owner_source_ref="bbbbbbb22", session_id="s1"
+            runtime_version="0.51.30", runtime_source_ref="bbbbbbb22", session_id="s1"
         )
         app._announce_refresh_completed()
         await pilot.pause()
