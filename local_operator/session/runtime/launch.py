@@ -30,7 +30,7 @@ an error (``process.py`` logs the loss and returns 0 for that reason).
    now covers it — and would just be another loser to reap.
 
 **What the parent's dead time is NOT.** Two other suspects were measured and
-acquitted, so nobody re-derives them. (1) The first ``find_owner_record``
+acquitted, so nobody re-derives them. (1) The first ``find_runtime_record``
 scan is a guaranteed miss for a freshly minted ``/new`` session, which looks
 like serialized latency ahead of the spawn — but in the warm parent that
 actually runs ``/new`` (a long-lived TUI) engage-entry to fork measures a
@@ -517,7 +517,7 @@ async def engage_runtime(
     existing expiry path unlinks the capture file and reports the child's own
     reason, where a cancelled task would leak that tempfile and lose it.
     """
-    from local_operator.mobile.attach_client import find_owner_record
+    from local_operator.mobile.attach_client import find_runtime_record
 
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one
@@ -571,7 +571,7 @@ async def engage_runtime(
     defer = isinstance(work, WarmErrand)
 
     while time.monotonic() < _deadline():
-        record, _owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+        record, _owner = await asyncio.to_thread(find_runtime_record, config_dir, session_id)
         if record is not None:
             try:
                 detail, duplicate = await _deliver(record, session_id, work)
@@ -706,7 +706,7 @@ async def engage_runtime(
         # dialable is open-ended and belongs on the backoff.
         #
         # It also bounds the scan cost the dense interval assumes. A quiet
-        # record makes `scan()` fork `ps`, but `find_owner_record` only reaches
+        # record makes `scan()` fork `ps`, but `find_runtime_record` only reaches
         # `scan()` once an owner marker exists; requiring `record is None`
         # keeps the dense regime off the marker-plus-record case entirely. See
         # `_poll_delay` for the measured table and the one overlap that
@@ -791,10 +791,10 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     WHY DENSE POLLING IS AFFORDABLE HERE
     ====================================
     The backoff was protecting against a cost that does not exist at these
-    timescales. One full poll iteration — ``find_owner_record`` (a miss scan),
+    timescales. One full poll iteration — ``find_runtime_record`` (a miss scan),
     ``_lease_holder``, and ``Popen.poll`` — measures 23-30 µs against a run
     directory of 200 real records, and is FLAT from 0 to 200 because
-    ``find_owner_record`` returns before ``scan()`` when there is no owner
+    ``find_runtime_record`` returns before ``scan()`` when there is no owner
     marker (QA round 1, Q3; an earlier author estimate of 339 µs on an
     11-record dir was pessimistic). At a 10 ms interval that is a 0.2-0.3%
     duty cycle on one thread, for at most ``_CONSTRUCTING_WINDOW_S``, and only
@@ -815,7 +815,7 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     so it pays that fork on every scan (review round 1, MINOR-1).
 
     Where that lands is narrower than it first appears, because
-    ``find_owner_record`` returns BEFORE ``scan()`` when the session has no
+    ``find_runtime_record`` returns BEFORE ``scan()`` when the session has no
     ``.session.pid`` owner marker. Measured on this host, 8 fresh records plus
     N quiet ones:
 

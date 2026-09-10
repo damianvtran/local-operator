@@ -16,7 +16,13 @@ error anybody reports.
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import io
 import json
+import logging
+import random
+import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,8 +30,19 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import ModelSpec, ToolResult, Usage
-from local_operator.mobile.attach_client import _READ_LIMIT_BYTES
+from local_operator.harness.types import ImageContent, ModelSpec, ToolResult, Usage
+from local_operator.media import sniff_image
+from local_operator.mobile.attach_client import (
+    _FRAME_ENCODING_SLACK_BYTES,
+    _MIN_VIABLE_IMAGE_BUDGET_BYTES,
+    _READ_LIMIT_BYTES,
+    AttachClient,
+    OversizedRequest,
+    _frame_overhead_bytes,
+    _megabytes,
+    _RefitReport,
+    _text_is_the_bulk_refusal,
+)
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _DERIVED_STATE_LABELS,
@@ -1318,6 +1335,29 @@ def test_a_catalogue_too_large_for_the_frame_is_clipped_and_says_so() -> None:
     assert len(kept) >= MODEL_CATALOGUE_FLOOR_ROWS
 
 
+def test_a_clipped_catalogue_still_fits_the_rpc_reply_envelope() -> None:
+    """The clipper's budget must cover the envelope the RPC reply adds.
+
+    The binary search measures the payload through one mirror of the wire, but
+    a ``frontend_sync`` RPC replies in ``{"op": "result", "req": <seq>,
+    "data": ...}`` — a few bytes larger than the push frame the mirror
+    described. When the search parked the line within that delta of the cap,
+    the real reply measured over it and the handler degraded a perfectly good
+    display page to ``full_required`` to pay for bytes the envelope — not the
+    page — had added; the follower then strict-replayed and a cursor its local
+    journal lacked turned the degrade into an error. Pinned by measuring the
+    clipped payload in the reply envelope itself, with a ``req`` no attach
+    will outgrow.
+    """
+    _frame, snapshot = _catalogue_frame(5_000, jobs=200)
+    assert snapshot["model_catalogue_truncated"] is True
+    # The REAL reply shape: the RPC returns the whole clipped payload, so the
+    # envelope is measured around exactly what the handler serializes back.
+    payload = _frame["data"]
+    reply = {"op": "result", "req": 9_999_999_999, "data": payload}
+    assert len(json.dumps(reply).encode()) + 1 < _MAX_LINE_BYTES
+
+
 def test_an_untruncated_catalogue_leaves_the_flag_alone() -> None:
     """The flag describes the list that SHIPPED, so it stays false when whole."""
     _frame, snapshot = _catalogue_frame(10)
@@ -1420,7 +1460,7 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
         assert remote.frontend_state.model_catalogue_truncated is True
         # The rows that survived are usable, in the owner's own order.
         assert catalogue[0] == _catalogue_row(0)
-        assert remote.owner_model_catalogue()[0]["model_id"] == _catalogue_row(0)["model_id"]
+        assert remote.runtime_model_catalogue()[0]["model_id"] == _catalogue_row(0)["model_id"]
     finally:
         if remote is not None:
             await remote.dispose()
@@ -3195,3 +3235,1227 @@ def test_model_and_usage_accessors_still_deep_copy(tmp_path: Path) -> None:
     # observe a corruption the slow path prevented.
     assert remote.model_label == "openai/gpt-4o"
     assert remote.effective_model_label == "anthropic/claude"
+
+
+# ---------------------------------------------------------------------------
+# The INBOUND twin: a frame the CLIENT sends that the owner cannot read.
+#
+# Everything above guards frames travelling owner -> viewer. The same 1 MiB
+# line limit applies to the other direction and had no protection at all: the
+# runtime's reader loop called `readline()` OUTSIDE the `try` that catches
+# `ValueError`, so an over-limit inbound line escaped through the reader task
+# and the `finally` dropped the connection. One pasted screenshot over ~780 KB
+# of source was enough, which the operator experienced as "sending a message
+# with an image exits lop and I have to run `lop --resume`".
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    """A PNG of CONTINUOUS-TONE content, which is what makes it a real fixture.
+
+    The content matters more than the size here. Pure noise and a flat fill are
+    both pathological for the ladder under test — noise defeats every codec and
+    a flat fill compresses to nothing, so either one tests the fixture rather
+    than the refit. Blurred noise behaves the way a photograph or a screenshot
+    does: PNG stores it badly (no flat runs to pack) and JPEG stores it well,
+    which is the whole premise of preferring a re-encode over lost pixels.
+    """
+    Image = pytest.importorskip("PIL.Image")
+    ImageFilter = pytest.importorskip("PIL.ImageFilter")
+    rng = random.Random(width * height)
+    coarse = Image.frombytes(
+        "RGB",
+        (width // 4, height // 4),
+        bytes(rng.getrandbits(8) for _ in range((width // 4) * (height // 4) * 3)),
+    )
+    image = coarse.resize((width, height), Image.BILINEAR).filter(ImageFilter.GaussianBlur(1.2))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _wire_image(width: int, height: int) -> dict[str, str]:
+    return {
+        "mime_type": "image/png",
+        "data_b64": base64.b64encode(_png_bytes(width, height)).decode("ascii"),
+    }
+
+
+class _ImageRecordingHandle(FakeHandle):
+    """A handle that KEEPS the images it was given.
+
+    ``FakeHandle`` records only the text, and the whole question here is what
+    pixels survived the wire — so a test asserting on its calls could not tell
+    a delivered image from a dropped one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[tuple[str, list[Any]]] = []
+
+    async def prompt(self, text, images=None, command_id=None):  # noqa: ANN001, ANN202
+        self.received.append((text, list(images or [])))
+        return await super().prompt(text, images, command_id)
+
+    async def steer(self, text, images=None):  # noqa: ANN001, ANN202
+        self.received.append((f"steer:{text}", list(images or [])))
+        return await super().steer(text, images)
+
+    async def slash_images(self, command, args, images):  # noqa: ANN001, ANN202
+        self.received.append((f"slash:{command}", list(images or [])))
+        return "slash ok"
+
+
+def test_an_oversized_prompt_frame_is_the_shape_that_killed_the_session() -> None:
+    """The regression is real: an ordinary pasted screenshot overflows the line.
+
+    The sibling of ``test_ten_jobs_at_the_cap_overflow_the_line_limit_without_
+    the_fix`` for the inbound direction. Asserting the UNGUARDED size keeps the
+    tests below honest — if images ever got small enough to fit anyway, those
+    would pass for the wrong reason and this one would fail loudly instead.
+    """
+    image = _wire_image(1400, 1400)
+    naive = _line_bytes(
+        {
+            "op": "prompt",
+            "req": 1,
+            "command_id": str(uuid.uuid4()),
+            "text": "what does this show?",
+            "images": [image],
+        }
+    )
+    assert naive > _MAX_LINE_BYTES, (
+        "the fixture no longer reproduces the oversized inbound frame; "
+        f"{naive} bytes is under the {_MAX_LINE_BYTES} limit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_inbound_frame_does_not_kill_the_session(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """THE BUG, end to end: the connection must survive a frame it cannot read.
+
+    Driven against the REAL ``RuntimeServer`` over a REAL socket with a
+    deliberately unguarded write, which is what an OLD client (or any peer that
+    is not ``AttachClient``) does. Before the fix the reader loop's
+    ``readline`` raised ``ValueError`` past the ``ConnectionResetError`` handler
+    and the ``finally`` dropped the client — the session death the operator hit.
+
+    The assertion that matters is the SECOND message: surviving the bad frame is
+    only useful if the session is still usable afterwards, and that is precisely
+    what the operator lost.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    writer = None
+    try:
+        record = await _record(tmp_path)
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=_MAX_LINE_BYTES
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "attach"}).encode() + b"\n")
+        await writer.drain()
+        welcome = json.loads((await asyncio.wait_for(reader.readline(), timeout=5)).decode())
+        assert welcome.get("op") in ("projection", "welcome")
+
+        # Unguarded on purpose: this is the frame the fixed client would never
+        # send and an older one still does.
+        oversized = {
+            "op": "prompt",
+            "req": 1,
+            "command_id": str(uuid.uuid4()),
+            "text": "here is a screenshot",
+            "images": [{"mime_type": "image/png", "data_b64": "A" * (_MAX_LINE_BYTES + 350_000)}],
+        }
+        assert _line_bytes(oversized) > _MAX_LINE_BYTES
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            writer.write(json.dumps(oversized).encode() + b"\n")
+            await writer.drain()
+
+            # THE NEXT MESSAGE, which is the whole point. On the pre-fix tree
+            # the socket is already gone and this ack never arrives.
+            follow_up = {
+                "op": "prompt",
+                "req": 2,
+                "command_id": str(uuid.uuid4()),
+                "text": "the next message",
+            }
+            writer.write(json.dumps(follow_up).encode() + b"\n")
+            await writer.drain()
+            reply = None
+            deadline = asyncio.get_running_loop().time() + 10
+            while asyncio.get_running_loop().time() < deadline:
+                line = await asyncio.wait_for(reader.readline(), timeout=10)
+                assert line, "the runtime closed the connection; the oversized frame killed it"
+                frame = json.loads(line.decode())
+                if frame.get("req") == 2:
+                    reply = frame
+                    break
+            assert reply is not None, "the follow-up was never answered"
+            assert reply.get("op") == "ack", f"the follow-up was refused: {reply}"
+
+        # The oversized frame was DISCARDED, not delivered half-parsed.
+        assert [text for text, _ in handle.received] == ["the next message"]
+        # And it was reported loudly enough to find, naming the limit.
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "line limit" in logged, f"the discard was not reported: {logged!r}"
+        assert str(_MAX_LINE_BYTES) in logged
+    finally:
+        if writer is not None:
+            writer.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_large_pasted_image_is_refitted_and_actually_arrives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The product half: an ordinary paste must SEND, not be refused.
+
+    The operator pastes screenshots routinely, and the sizes that overflow the
+    frame are ordinary — one composer-bounded render measured 1.23 MB of base64
+    on this machine. So the client refits rather than rejecting, and the
+    assertion is that the image genuinely reaches the owner: a guard that
+    silently dropped the attachment would pass a "did not crash" test while
+    losing the user's work.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1400, 1400)
+        assert _line_bytes({"op": "prompt", "images": [image]}) > _MAX_LINE_BYTES
+
+        detail = await client.prompt("what does this show?", images=[image])
+        assert detail == "prompt ok"
+        assert client.connected, "the send severed the connection"
+
+        text, delivered = handle.received[-1]
+        assert text == "what does this show?"
+        assert len(delivered) == 1, "the attachment was dropped instead of resized"
+        arrived = delivered[0]
+        payload = getattr(arrived, "data", None) or arrived.get("data_b64")
+        # It really is an image, and it really is smaller than the budget.
+        decoded = base64.b64decode(payload)
+        info = sniff_image(decoded)
+        assert info is not None, "what arrived is not a decodable image"
+        assert len(payload) < _MAX_LINE_BYTES
+
+        # The session keeps working afterwards, which is the operator's actual
+        # complaint — the send used to be the thing that ended it.
+        assert await client.prompt("and a follow-up") == "prompt ok"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_the_refit_log_names_the_payload_and_the_frame_as_what_they_are(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """QA round 3, Q1: the one fix in the round-2 delta that had no test.
+
+    The refit log line carries TWO quantities, and round 2 fixed the second
+    one reporting the first: the clause reading ``to N bytes of image payload``
+    said ``refitted_size`` — the WHOLE frame, the user's text included — which
+    understated-by-conflation was harmless beside a fixed 64 KiB reserve and
+    became a 3.25x-16.75x overstatement of the attachments once up to 1 MiB of
+    text sat inside the number. Every other fix in that delta gained a test
+    that goes red when reverted; this one did not, so the conflation could
+    silently return. This pins the logged payload figure against the bytes
+    the owner actually received — exact, not approximate, because both sides
+    of the comparison are measured on the same send.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    # Substantial text is the regime the old conflation overstated: the frame
+    # figure must dwarf the payload figure, or the assertion below could pass
+    # with the two quantities swapped back together.
+    text = "context: " + ("the model must read this. " * 12_000)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1400, 1400)
+        assert _line_bytes({"op": "prompt", "text": text, "images": [image]}) > _MAX_LINE_BYTES
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.mobile.attach_client"):
+            assert await client.prompt(text, images=[image]) == "prompt ok"
+        assert client.connected, "the send severed the connection"
+    finally:
+        client.close()
+        registrant.close()
+
+    refit = [record for record in caplog.records if "bytes of image payload" in record.getMessage()]
+    assert len(refit) == 1, f"expected one refit line, got {len(refit)}"
+    logged = refit[0].getMessage()
+    match = re.search(
+        r"resized \d+ image\(s\) to (\d+) bytes of image payload and the frame "
+        r"is now (\d+) bytes",
+        logged,
+    )
+    assert match is not None, f"the refit line does not carry both figures: {logged!r}"
+    logged_payload, logged_frame = (int(match.group(1)), int(match.group(2)))
+
+    _prompt_text, delivered = handle.received[-1]
+    assert len(delivered) == 1, "the attachment was dropped instead of resized"
+    payload = getattr(delivered[0], "data", None) or delivered[0].get("data_b64")
+    assert isinstance(payload, str) and payload, "no image payload reached the owner"
+    assert logged_payload == len(payload), (
+        f"the log's image-payload figure is {logged_payload:,} bytes but what "
+        f"arrived is {len(payload):,} — the line is reporting the frame again"
+    )
+    assert logged_frame > logged_payload, (
+        "the frame and payload figures agree, so the two quantities the line "
+        "exists to distinguish have collapsed back into one"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["prompt", "steer", "slash"])
+async def test_every_image_bearing_op_is_guarded_not_just_prompt(
+    tmp_path: Path, monkeypatch, op: str
+) -> None:
+    """``steer`` and ``slash`` carry images too, on the same socket.
+
+    Guarding ``prompt`` alone would leave two live routes to the same session
+    death: steering mid-turn with a pasted image, and a slash command that
+    takes attachments (``slash_images``). Parametrized rather than copied so a
+    FOURTH image-bearing op cannot quietly skip the guard — it shares the one
+    seam in ``_request_frame``.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        images = [_wire_image(1400, 1400)]
+        assert _line_bytes({"op": op, "images": images}) > _MAX_LINE_BYTES
+
+        if op == "prompt":
+            await client.prompt("look", images=images)
+        elif op == "steer":
+            await client.steer("look", images=images)
+        else:
+            await client.slash("compact", "", images=images)
+
+        assert client.connected, f"{op} with an oversized image severed the connection"
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 1, f"{op} lost its attachment"
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_several_images_share_one_frame_budget(tmp_path: Path, monkeypatch) -> None:
+    """N images must fit TOGETHER, not each against the whole limit.
+
+    The subtle way to get this wrong: refit every image against the full 1 MiB
+    and each one passes while the frame still overflows. Two composer-bounded
+    screenshots already serialize past the limit on this machine, so the
+    multi-image case is the ordinary one rather than an edge.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        images = [_wire_image(900 + index * 60, 900) for index in range(4)]
+
+        assert await client.prompt("compare these", images=images) == "prompt ok"
+        assert client.connected
+
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 4, "an attachment was dropped rather than resized"
+        rebuilt = [
+            {
+                "mime_type": getattr(image, "mime_type", None) or image.get("mime_type"),
+                "data_b64": getattr(image, "data", None) or image.get("data_b64"),
+            }
+            for image in delivered
+        ]
+        # The FRAME is what had to fit, so that is what is measured.
+        assert _line_bytes({"op": "prompt", "req": 1, "images": rebuilt}) <= _MAX_LINE_BYTES
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unsendable_message_is_refused_by_name_not_silently_lost(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A refusal must reach the USER, and must not take the session with it.
+
+    The user's composer content is their work: the two ways to get this wrong
+    are to drop it silently and to kill the connection reporting it. So the
+    refusal is an exception the TUI turns into a notice (and a restored draft),
+    the wording names what to do, and the session is still usable after it.
+
+    Two shapes, because they need different sentences: prose over the limit
+    (nothing to resize) and an attachment that is not a decodable image at all
+    — telling someone to shrink bytes that were never an image sends them off
+    fixing the wrong thing.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        with pytest.raises(OversizedRequest) as prose:
+            await client.prompt("x" * (_MAX_LINE_BYTES + 200_000))
+        assert "shorten" in str(prose.value), str(prose.value)
+        # The LIMIT, in the same scale as the size beside it. Asserted as "the
+        # sentence carries the ceiling" rather than against a raw byte count:
+        # both figures print as MB now, because a refusal that quotes
+        # `1,341,208 bytes` against an image refusal quoting MB makes the user
+        # compare two scales to understand one failure (design round 1, D1).
+        assert _megabytes(_MAX_LINE_BYTES) in str(prose.value), "the refusal hides the actual limit"
+        assert client.connected, "reporting the refusal killed the connection"
+
+        junk = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(b"\x00" * (_MAX_LINE_BYTES + 200_000)).decode("ascii"),
+        }
+        with pytest.raises(OversizedRequest) as unreadable:
+            await client.prompt("look at this", images=[junk])
+        # Named by POSITION so it points at a specific composer chip, and NOT
+        # described as merely "too large", which would be the wrong remedy.
+        assert "image 1" in str(unreadable.value), str(unreadable.value)
+        assert "not a readable image" in str(unreadable.value), str(unreadable.value)
+        assert client.connected
+
+        # Nothing was delivered, and the session still works.
+        assert handle.received == []
+        assert await client.prompt("a normal message") == "prompt ok"
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_attachment_keeps_its_own_sentence_when_the_text_is_the_bulk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review round 3, NIT-1: two failures, two remedies, and the rewrite must
+    not collapse them.
+
+    When the text has eaten the frame's budget, :func:`fit_request_frame`
+    re-blames a SIZE failure on the text — the copy call review round 2
+    (MAJOR-4) argued for, because a per-image share rounding to ``0.0 MB``
+    points at a screenshot when only shortening the prompt can help.
+
+    That rewrite used to catch the UNREADABLE refusal too, since it is also an
+    ``OversizedRequest``. So a corrupt attachment on a text-heavy frame told
+    the user to "shorten the text or send the images on their own" — advice
+    that cannot work, because those bytes are not an image at any size and no
+    amount of shortening makes them one. The remedy there is always "remove
+    it", whatever the budget looks like, which is why the refusal got its own
+    class (``UnreadableImageRequest``) rather than a message check.
+
+    The sibling test above covers the same junk payload with a ROOMY budget;
+    this one is the text-dominated budget, the only regime where the rewrite
+    runs. Both must produce the same sentence.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # THE FIXTURE MUST REACH THE REWRITE, or this asserts nothing: the
+        # text has to leave less than `_MIN_VIABLE_IMAGE_BUDGET_BYTES` for the
+        # images, which is the only condition under which the text-blaming
+        # sentence is selected at all.
+        text = "x" * 1_015_000
+        junk = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(b"\x00" * 40_000).decode("ascii"),
+        }
+        probe = {"op": "prompt", "req": 1, "text": text, "images": [junk]}
+        assert (
+            len(json.dumps(probe).encode()) + 1 > _READ_LIMIT_BYTES
+        ), "the fixture no longer crosses the line limit, so the refit never runs"
+        overhead = _frame_overhead_bytes(probe)
+        budget = _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES
+        assert 0 < budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES, (
+            f"the fixture leaves {budget} bytes for its images; the rewrite "
+            "under test only runs below the text-is-the-bulk gate"
+        )
+
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt(text, images=[junk])
+        sentence = str(refusal.value)
+        assert "not a readable image" in sentence, (
+            f"the unreadable attachment was re-blamed on the text, sending the "
+            f"user off shortening a prompt that was never the problem: {sentence}"
+        )
+        assert "image 1" in sentence, f"the refusal does not name the chip: {sentence}"
+        assert "text alone fills" not in sentence, f"the text rewrite replaced it: {sentence}"
+        assert client.connected, "reporting the refusal killed the connection"
+        assert handle.received == []
+
+        # And the session still works afterwards.
+        assert await client.prompt("a normal message") == "prompt ok"
+    finally:
+        client.close()
+        registrant.close()
+
+
+def test_a_refused_request_leaves_nothing_pending() -> None:
+    """A refusal must not park a future nobody will ever resolve.
+
+    Found while testing the refusal path: the request id was registered in
+    ``_pending`` BEFORE the fit could raise, so a refused send left a future
+    that nothing completes. It sat until teardown, took the disconnect's
+    ``ConnectionError``, and logged "exception was never retrieved" for a
+    refusal the caller had already handled cleanly.
+    """
+
+    async def scenario() -> int:
+        client = AttachClient(lambda _projection: None, lambda _reason: None)
+        client._connected = True
+        # A writer that would FAIL the test by being used: a refused request
+        # must never reach the socket at all.
+        client._writer = cast(Any, SimpleNamespace(write=_forbidden_write, drain=None))
+        with pytest.raises(OversizedRequest):
+            await client.prompt("x" * (_MAX_LINE_BYTES + 200_000))
+        return len(client._pending)
+
+    assert asyncio.run(scenario()) == 0
+
+
+def _forbidden_write(_payload: bytes) -> None:
+    raise AssertionError("a refused request must not be written to the socket")
+
+
+def test_the_refit_prefers_the_codec_over_the_users_pixels() -> None:
+    """Fidelity means legible text, and pixels carry that while the codec does not.
+
+    The ladder's first rung re-encodes at UNCHANGED dimensions, so an ordinary
+    screenshot clears the budget with every pixel intact. Asserted as a
+    property rather than against a byte count: the claim is "it did not have to
+    downscale", which is what the user would notice.
+    """
+    from local_operator.imaging import refit_image_to_budget
+
+    source = _png_bytes(1200, 800)
+    data_b64 = base64.b64encode(source).decode("ascii")
+    # A budget the PNG cannot meet, so the refit genuinely has to do something.
+    budget = len(data_b64) // 2
+    result = refit_image_to_budget(data_b64, "image/png", budget)
+    assert result is not None, "an ordinary screenshot must not be refused"
+    refitted_b64, _mime = result
+    assert len(refitted_b64) <= budget
+    info = sniff_image(base64.b64decode(refitted_b64))
+    assert info is not None
+    assert (info.width, info.height) == (1200, 800), (
+        "the refit gave up pixels when a re-encode would have been enough; "
+        f"it delivered {info.width}x{info.height}"
+    )
+
+
+def test_the_every_rung_jpeg_rule_has_its_own_test() -> None:
+    """A 1400x1400 continuous-tone frame against 240 KB must FIT, not be refused.
+
+    The self-reported defect this pins: the JPEG re-encode was applied only to
+    the no-resize rung, so every descending rung handed back a PNG of content
+    PNG cannot compress, the ladder ran out of rungs, and the image was refused
+    while the real remedy had never been tried below full size.
+
+    Its own test, named for the claim. The regression was previously caught only
+    as a side effect of ``test_several_images_share_one_frame_budget``, whose
+    stated subject is the shared budget — so a legitimate refactor of the budget
+    split could rewrite that test and silently drop coverage of this rule
+    (review round 1, NIT-1). Asserted as a PROPERTY (it fits at all) rather than
+    against a byte count or a specific rung, so the ladder stays free to change.
+    """
+    from local_operator.imaging import refit_image_to_budget
+
+    data_b64 = base64.b64encode(_png_bytes(1400, 1400)).decode("ascii")
+    result = refit_image_to_budget(data_b64, "image/png", 240 * 1024)
+
+    assert result is not None, (
+        "a 1400x1400 frame against a 240 KB budget was refused; the JPEG "
+        "re-encode is not being applied at every rung"
+    )
+    refitted_b64, mime = result
+    assert len(refitted_b64) <= 240 * 1024
+    assert mime == "image/jpeg", f"the descending rung returned {mime}, not a re-encode"
+
+
+@pytest.mark.asyncio
+async def test_a_long_prompt_beside_a_screenshot_still_sends(tmp_path: Path, monkeypatch) -> None:
+    """The PR's OWN headline repro: a big screenshot over ~780 KB of source.
+
+    The image budget used to be ``limit - 64 KiB``, a constant, while the text
+    it had to cover is bounded only by ``MAX_CLIPBOARD_TEXT_BYTES`` (1 MiB). Any
+    prompt past ~64 KiB therefore had its images fitted against room that was
+    never available, the post-refit re-measure caught the overflow, and the
+    whole message was refused — including the exact "one pasted screenshot over
+    ~780 KB of source" this module's docstring names as the bug being fixed
+    (review round 1, MAJOR-1).
+
+    Parametrized over the text sizes that used to fail, because the threshold is
+    what regressed: 32 KiB passed before this fix and everything above it did
+    not.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        image = _wire_image(1672, 941)
+
+        for text_bytes in (100 * 1024, 300 * 1024, 780 * 1024):
+            prompt = "x" * text_bytes
+            assert await client.prompt(prompt, images=[image]) == "prompt ok", (
+                f"a {text_bytes // 1024} KiB prompt beside a screenshot was refused; "
+                "the image budget is not being measured against the real text"
+            )
+            delivered_text, delivered = handle.received[-1]
+            assert delivered_text == prompt, "the text was altered to make it fit"
+            assert len(delivered) == 1, "the attachment was dropped rather than resized"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_small_image_hands_its_unused_budget_to_a_large_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An icon must not reserve the same share as a screenshot and waste it.
+
+    A flat ``budget // len(images)`` split gave a 32x32 icon the same share as a
+    1600x1000 screenshot, and the icon handed nothing back: the screenshot lost
+    half its pixels while most of the frame went unspent (review round 1,
+    MINOR-2). Asserted against the SHARE the flat split would have imposed
+    rather than a fixed size, so the test states the property — the big image
+    got more than an equal share — instead of pinning today's ladder rung.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        assert (
+            await client.prompt(
+                "what is this", images=[_wire_image(32, 32), _wire_image(1600, 1000)]
+            )
+            == "prompt ok"
+        )
+        _text, delivered = handle.received[-1]
+        assert len(delivered) == 2
+
+        payloads = [getattr(image, "data", None) or image.get("data_b64") for image in delivered]
+        flat_share = (_MAX_LINE_BYTES - len("what is this")) // 2
+        assert len(payloads[0]) < flat_share // 4, "the icon grew to fill its share"
+        assert len(payloads[1]) > flat_share, (
+            "the screenshot was held to an equal share while the icon's went "
+            f"unspent: it got {len(payloads[1])} of a {flat_share} flat share"
+        )
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_quotes_the_marker_the_user_can_see(tmp_path: Path, monkeypatch) -> None:
+    """ "image 3" must name the chip on screen, not the wire position.
+
+    Marker numbers do not renumber when an attachment is deleted, so after three
+    pastes and two backspaces the survivor's chip reads ``[Image #3]`` while its
+    wire position is 1 — and the refusal said "image 1", pointing at a chip that
+    is not on the user's screen (design round 1, D4).
+
+    Also pins the two numbers the sentence carries (design round 1, D1): the
+    IMAGE's size rather than its base64 (which inflates by 4/3 and overstated a
+    2.4 MB file as 3.2 MB), and the ceiling that actually applied, without which
+    the user cannot tell whether cropping would help.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        # THIRTY-TWO attachments, not the sixteen this test was written with.
+        # The smallest-first reclaim (review round 1, MINOR-2) raised capacity,
+        # so the old fixture REFITS successfully at this head and a test built
+        # on it asserts nothing about a refusal at all (QA round 2). The
+        # `pytest.raises` below is what keeps that honest.
+        images = [{**_wire_image(1024, 1024), "marker": 20 + index} for index in range(32)]
+
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt("compare these", images=images)
+
+        message = str(refusal.value)
+        named = re.search(r"image (\d+)", message)
+        assert named is not None, f"the refusal named no image at all: {message}"
+        quoted = int(named.group(1))
+        assert quoted >= 20, (
+            "the refusal quoted a wire position rather than the block's marker: " f"{message}"
+        )
+        assert "per-image budget" in message, f"the refusal hides the ceiling: {message}"
+        assert "32 attachments" in message, f"the refusal hides the share's cause: {message}"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+def test_the_composer_stamps_the_chip_number_onto_every_image_it_sends() -> None:
+    """The PRODUCER half of the refusal's marker, pinned from a real draft.
+
+    ``_refit_images`` prefers ``image["marker"]`` and falls back to the wire
+    position. That lookup shipped in round 1 with NOTHING populating it:
+    ``ImageContent`` had no marker field and ``_image_to_wire`` emitted only
+    ``data_b64``/``mime_type``, so every refusal still quoted the position and
+    the fix was the old behaviour under a new name (design round 2, D8).
+
+    Starting from a DRAFT rather than a wire dict is the whole point. The
+    round-1 test hand-injected ``"marker"`` into its blocks, which pins the
+    lookup and can never see the producer go missing; this walks
+    ``resolve_markers`` -> ``_image_to_wire``, so deleting either end fails it.
+
+    The gap is what makes it a real test: marker numbers do not renumber on
+    delete, so a draft that lost ``#2`` sends chips 1 and 3 from wire positions
+    0 and 1.
+    """
+    from local_operator.session.remote import _image_to_wire
+    from local_operator.tui.widgets.editor import Attachment, resolve_markers
+
+    def _attachment(index: int) -> Attachment:
+        payload = base64.b64encode(f"png{index}".encode()).decode()
+        return Attachment(
+            ImageContent(data=payload, mime_type="image/png"),
+            f"[Image #{index}]",
+        )
+
+    # Three pastes, then the middle chip deleted: the draft cites #1 and #3.
+    attachments = {1: _attachment(1), 2: _attachment(2), 3: _attachment(3)}
+    text = "compare [Image #1] and [Image #3]"
+
+    images = resolve_markers(text, attachments)
+    assert [image.marker for image in images] == [1, 3], (
+        "resolve_markers did not carry the chip number onto the images it "
+        f"resolved: {[image.marker for image in images]}"
+    )
+
+    blocks = [_image_to_wire(image) for image in images]
+    assert [block.get("marker") for block in blocks] == [
+        1,
+        3,
+    ], f"_image_to_wire dropped the marker on the way to the socket: {blocks}"
+    # The gap is real: wire position 1 is the chip labelled #3.
+    assert blocks[1]["marker"] == 3
+
+    # A producer with no chips to name leaves the key OFF rather than sending
+    # null, so the position fallback stays in charge for the phone relay.
+    bare = _image_to_wire(ImageContent(data="AAAA", mime_type="image/png"))
+    assert "marker" not in bare, f"a marker-less image put a key on the wire: {bare}"
+
+
+def test_the_marker_never_reaches_a_provider_or_a_transcript() -> None:
+    """``marker`` is presentation state, and must not become conversation content.
+
+    It rides ``ImageContent`` so the transport can name a chip, which puts it
+    one field away from every provider payload, transcript row and context
+    hash. ``exclude=True`` is what keeps it out; this pins that, because a
+    later change dropping the flag would silently start writing composer state
+    into persisted history and into the bytes sent to a model.
+    """
+    image = ImageContent(data="AAAA", mime_type="image/png", marker=7)
+
+    assert image.marker == 7, "the field must be readable in-process"
+    assert "marker" not in image.model_dump()
+    assert "marker" not in image.model_dump(exclude_defaults=True)
+    assert "marker" not in image.model_dump(mode="json")
+    assert "marker" not in image.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_a_refit_that_could_fit_is_never_refused_for_being_predicted_to_fail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The small-budget branch picks a SENTENCE; it must not veto the send.
+
+    An earlier version short-circuited to a refusal whenever the text left less
+    than ``_MIN_VIABLE_IMAGE_BUDGET_BYTES`` for the images, justified as a
+    guarantee that the refit would fail anyway. That premise holds for
+    continuous-tone photographs and is false for flat screenshots and line art,
+    which compress to a fraction of it — so messages the refit would have sent
+    were refused unsent (review round 2, MAJOR-4), the same defect MAJOR-1
+    filed against the old fixed reserve, one layer up.
+
+    A flat image is the fixture precisely because it is the shape the constant
+    mispredicts.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # A SMOOTH GRADIENT: heavy as PNG on the wire, so the frame really
+        # crosses the limit, but it re-encodes to a fraction of the budget the
+        # gate predicted it could not meet. That combination is the whole
+        # finding — a flat screenshot is small enough that the frame never
+        # crosses at all and the early return, not the gate, decides.
+        Image = pytest.importorskip("PIL.Image")
+        canvas = Image.new("RGB", (3000, 2000))
+        pixels = canvas.load()
+        for y in range(canvas.height):
+            for x in range(canvas.width):
+                pixels[x, y] = (
+                    (x * 255) // canvas.width,
+                    (y * 255) // canvas.height,
+                    ((x + y) * 255) // (canvas.width + canvas.height),
+                )
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        gradient = {
+            "mime_type": "image/png",
+            "data_b64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        }
+
+        # THE FIXTURE MUST REACH THE BRANCH, or this asserts nothing. A mutation
+        # run caught exactly that: an earlier fixture never crossed the limit,
+        # so `fit_request_frame` returned at its first length check and the test
+        # passed with the defect restored.
+        text = "x" * 1_015_000
+        frame = {
+            "op": "prompt",
+            "req": 1,
+            "command_id": "00000000-0000-4000-8000-000000000000",
+            "text": text,
+            "images": [gradient],
+        }
+        assert (
+            len(json.dumps(frame).encode()) + 1 > _READ_LIMIT_BYTES
+        ), "the fixture no longer exceeds the line limit, so the refit never runs"
+        overhead = _frame_overhead_bytes(frame)
+        budget = _READ_LIMIT_BYTES - overhead - _FRAME_ENCODING_SLACK_BYTES
+        assert 0 < budget < 32 * 1024, (
+            f"the fixture leaves {budget} bytes for its images; the branch under "
+            "test only runs for a positive budget under the gate"
+        )
+
+        assert await client.prompt(text, images=[gradient]) == "prompt ok"
+        assert client.connected
+
+        # THE OTHER DIRECTION: when the text genuinely leaves no room and the
+        # refit really cannot fit the image, the refusal still fires and still
+        # blames the text rather than the attachment.
+        heavy = _wire_image(1400, 1400)
+        with pytest.raises(OversizedRequest) as refusal:
+            await client.prompt("x" * 1_045_000, images=[heavy])
+        assert "text alone fills" in str(
+            refusal.value
+        ), f"a text-dominated refusal blamed the attachment: {refusal.value}"
+        assert client.connected
+    finally:
+        client.close()
+        registrant.close()
+
+
+@contextlib.contextmanager
+def _refit_report(entries: tuple[_RefitReport, ...]):
+    """Publish ``entries`` as the current task's refit report, then clear it.
+
+    ``_report_wire_refit_for`` CONSUMES the report, so a test that set the
+    ContextVar and left it would leak into the next one; the reset token is
+    what keeps these independent of ordering.
+    """
+    from local_operator.mobile.attach_client import _REFIT_REPORT
+
+    token = _REFIT_REPORT.set(entries)
+    try:
+        yield
+    finally:
+        _REFIT_REPORT.reset(token)
+
+
+def test_the_refit_caption_saturates_on_a_mixed_aspect_paste() -> None:
+    """The caption's cost is bounded by SHAPES, not by the attachment count.
+
+    ``_report_wire_refit_for`` used to join one ``#N WxH -> WxH`` clause per
+    downscaled image, in ``_refit_images``' internal smallest-first walk. The
+    rung that earns a caption is by construction the many-attachment case, so
+    the row a user actually got was three lines of 28 at 100x30 and **five of
+    20 at 60x22** — a quarter of a narrow viewport spent on a ``note`` about a
+    message that was delivered fine — enumerated in an order the user cannot
+    see, with six of eight clauses the identical string (design round 2, D9;
+    QA round 2, Q5).
+
+    The honest bound is RUNGS x ASPECT RATIOS, not rungs alone. A rung caps
+    the LONG edge and the refit preserves aspect ratio, so grouping on the
+    exact delivered ``WxH`` splits once per distinct shape in the paste — and
+    this test's earlier version built every fixture as a SQUARE, which
+    collapsed ``(w, h)`` onto the rung count by construction and passed
+    vacuously against a docstring promising "one row at 100 cols for ANY
+    number of attachments" (review round 3, MAJOR-5). Re-fixtured with the
+    aspect mix an operator actually pastes, that claim failed at every count
+    above two.
+
+    What this asserts is the property that survives, and it is the one that
+    distinguishes the count form from the per-image enumeration D9 killed:
+    given a fixed set of delivered SHAPES, the clause count does not grow
+    with the attachment count. The fixture cycles ten real delivered sizes,
+    so at 300 attachments the row is the same length as at 10 — where the
+    enumeration form would have 300 clauses. Through the real fitter the
+    clause count moves within a measured envelope rather than holding exactly
+    (4-9 clauses over n=10..30 on a five-aspect paste, because which rung a
+    shape lands on tracks the per-image budget); ``_report_wire_refit_for``'s
+    docstring carries those figures and the row budget they imply.
+    """
+    from local_operator.tui.app import OperatorApp
+
+    def caption(entries: list[Any]) -> str:
+        captured: list[str] = []
+        source = cast(Any, SimpleNamespace())
+        app = cast(Any, OperatorApp.__new__(OperatorApp))
+        app._notice_for = lambda _source, text, _kind: captured.append(text)
+        with _refit_report(tuple(entries)):
+            OperatorApp._report_wire_refit_for(app, source)
+        return captured[0] if captured else ""
+
+    # Delivered sizes the ladder really produces for composer-bounded source
+    # shapes — 16:9 window captures, 9:19.5 phone shots, squares, 3:2 and 4:3
+    # photos. NINE of them, because that is the most the real fitter produced
+    # over a five-aspect paste swept from n=10 to 30 (measured: 4-9 clauses,
+    # 97-168 characters). A fixture wider than reality would make the row
+    # budget below a guess rather than a measurement.
+    mixed_delivered = (
+        (768, 432),
+        (512, 288),
+        (354, 768),
+        (236, 512),
+        (768, 768),
+        (512, 512),
+        (768, 512),
+        (512, 342),
+        (512, 384),
+    )
+
+    def entry(index: int, size: tuple[int, int]) -> _RefitReport:
+        width, height = size
+        # The composer-bounded source that produced this delivered size: the
+        # same aspect at the 1024px ingest edge, so every entry really lost
+        # pixels (a paste is bounded BEFORE the transport refit sees it).
+        if width >= height:
+            source_width, source_height = 1024, round(height * 1024 / width)
+        else:
+            source_width, source_height = round(width * 1024 / height), 1024
+        return _RefitReport(
+            marker=index + 1,
+            width=width,
+            height=height,
+            source_width=source_width,
+            source_height=source_height,
+        )
+
+    # SATURATION: past the point where every shape in the mix has appeared,
+    # adding attachments — a hundred, three hundred — adds no clause and keeps
+    # the row inside the measured budget.
+    for count in (10, 24, 60, 300):
+        entries = [entry(i, mixed_delivered[i % len(mixed_delivered)]) for i in range(count)]
+        row = caption(entries)
+        assert row.startswith(
+            f"{count} image"
+        ), f"the caption does not lead with the count it is claiming: {row!r}"
+        clauses = row.split(": ", 1)[1].split(", ")
+        assert len(clauses) == len(mixed_delivered), (
+            f"{count} attachments produced {len(clauses)} clauses where the mix "
+            f"has {len(mixed_delivered)} shapes — the caption is grouping by "
+            f"something other than the delivered size, or growing again: {row!r}"
+        )
+        # THE CLAIM GUARD, in the idiom `test_ten_jobs_at_the_cap_overflow_the_
+        # line_limit_without_the_fix` sets: assert the shape that DISPROVES the
+        # old docstring, so "bounded by the ladder's rungs" can never silently
+        # return. A composer-bounded paste reaches three rungs (768/512/384 —
+        # never the 1024 one, because the ingest bound already applied), and
+        # this paste produces nine clauses from them (review round 3, MAJOR-5).
+        from local_operator.imaging import IMAGE_WIRE_REFIT_EDGES
+
+        reachable_rungs = sum(
+            1 for edge in IMAGE_WIRE_REFIT_EDGES if edge is not None and edge < 1024
+        )
+        assert len(clauses) > reachable_rungs, (
+            f"{len(clauses)} clauses from {reachable_rungs} reachable rungs no "
+            "longer exceeds the rung count, so this fixture has stopped being "
+            "the mixed-aspect paste it exists to be"
+        )
+        # A CHARACTER-COUNT PROXY for the rendered row count, not the row count
+        # itself: the notice's own glyph and spine indent cost a couple of
+        # columns this does not model, and the authority on real geometry is
+        # the rendered frames in the design and QA rounds. The budget is the
+        # measured envelope — the real fitter over a five-aspect paste swept
+        # n=10..30 topped out at 9 clauses and 168 characters, 2 rows at 100
+        # cols and 3 at 60, and this fixture reproduces that shape at 167-178
+        # characters — so the headroom is measurement, not luck.
+        assert len(row) <= 2 * 98, (
+            f"the caption is {len(row)} characters at {count} attachments, past "
+            f"the measured 2-row budget at 100 columns: {row!r}"
+        )
+        assert len(row) <= 4 * 58, (
+            f"the caption is {len(row)} characters at {count} attachments, past "
+            f"the measured 4-row budget at 60 columns: {row!r}"
+        )
+
+    # THE COMMON PASTE is a run of same-shape screenshots, and it stays ONE
+    # row at 100 cols at any count — the single-shape collapse QA measured to
+    # 300 attachments, which the mixed fixtures above must not be read as
+    # replacing.
+    for count in (2, 8, 300):
+        entries = [
+            entry(i, (512, 288) if i % 2 else (768, 432))  # one shape, two rungs
+            for i in range(count)
+        ]
+        row = caption(entries)
+        clauses = row.split(": ", 1)[1].split(", ")
+        assert len(clauses) == 2, f"one shape reached {len(clauses)} rungs: {row!r}"
+        assert len(row) < 98, f"a single-shape paste wraps at 100 columns: {row!r}"
+
+    # NO GLYPH ON THIS ROW AT ALL (design round 3, D14 — round 2's D10 had it
+    # bound to the count). The chips carry their own ``↓`` for the INGEST
+    # bound, and a caption ``↓`` for the TRANSPORT refit put two shrink counts
+    # within one glyph of each other on a partial refit.
+    #
+    # Asserted on the BARE arrow, not on ``RESIZED_MARK`` (which is ``" ↓"``,
+    # space included): the finding is that this row shares no glyph with the
+    # chips, so any spelling of the arrow is a regression. Pinning the exact
+    # constant would let a space-less one back in — a canary caught precisely
+    # that, a mutation restoring ``\u2193`` without the leading space sailing
+    # through an assertion written against ``RESIZED_MARK``.
+    from local_operator.tui.widgets.editor import RESIZED_MARK
+
+    row = caption(
+        [
+            entry(0, (512, 512)),
+            entry(1, (384, 384)),
+        ]
+    )
+    assert RESIZED_MARK.strip() not in row, f"the resize glyph is back on the caption: {row!r}"
+
+    # IN THE USER'S ORDER: groups appear by their lowest chip number, not in
+    # the refit's internal smallest-first walk.
+    row = caption(
+        [
+            entry(8, (384, 384)),
+            entry(1, (512, 512)),
+        ]
+    )
+    assert row.index("512x512") < row.index(
+        "384x384"
+    ), f"the caption enumerates in the refit's order rather than the user's: {row!r}"
+
+
+def test_the_size_scale_never_prints_a_smaller_number_in_a_bigger_unit() -> None:
+    """``_megabytes`` must not move DOWN as the byte count goes up.
+
+    The switch used to be keyed on the rounded MB figure, which put the
+    boundary mid-KB: ``104,857`` printed ``102 KB`` and ``104,858`` printed
+    ``0.1 MB``, so a one-byte step showed a smaller number in a larger unit and
+    a user comparing two refusals a minute apart read them backwards (review
+    round 2, NIT-2). Round 3 added the same guard one scale DOWN: below a full
+    KB the raw byte count prints, because ``1023 B`` reading ``0 KB`` repeats
+    the "did not fit in nothing" defect on the per-image share path the split
+    can genuinely reach (review round 3, NIT-2).
+    """
+
+    def as_bytes(rendered: str) -> float:
+        figure, unit = rendered.split()
+        return float(figure) * 1024 ** {"B": 0, "KB": 1, "MB": 2}[unit]
+
+    previous = -1.0
+    for size in range(0, 3 * 1024 * 1024, 311):
+        current = as_bytes(_megabytes(size))
+        assert current >= previous, (
+            f"{size} bytes rendered as {_megabytes(size)}, which is smaller than "
+            "the figure printed for fewer bytes"
+        )
+        previous = current
+
+    # The boundaries are whole units, so both sides of each read as the same
+    # quantity.
+    assert _megabytes(1023) == "1023 B"
+    assert _megabytes(1024) == "1 KB"
+    assert _megabytes(1024 * 1024 - 1) == "1024 KB"
+    assert _megabytes(1024 * 1024) == "1.0 MB"
+
+
+def test_the_text_bulk_refusal_compares_like_with_like() -> None:
+    """Design round 3, D17: the two figures the sentence compares share a unit.
+
+    "fills 1000 KB of the 1.0 MB limit" asked the user to convert units
+    mid-sentence between exactly the two figures the sentence exists to
+    compare. The text figure now renders in the limit's scale — MB — which is
+    safe ONLY because of where this sentence fires: the budget precondition
+    (under `_MIN_VIABLE_IMAGE_BUDGET_BYTES`, asserted below rather than
+    assumed) puts the overhead within a few KB of the whole limit, so its MB
+    figure can never round below 0.9 and the ``0.0 MB`` class `_megabytes`
+    exists to avoid is unreachable here. The ROOM figure keeps `_megabytes`'
+    own scale because it is genuinely small — KB is the honest unit for a few
+    KB, and "no room" already covers a sub-KB remainder.
+    """
+
+    def figures(overhead: int, budget: int) -> tuple[str, str]:
+        sentence = str(_text_is_the_bulk_refusal(overhead, budget))
+        text_figure = sentence.split(" fills ", 1)[1].split(" of the", 1)[0]
+        limit_figure = sentence.split("the ", 1)[1].split(" limit", 1)[0]
+        return text_figure, limit_figure
+
+    # The reachable band for this sentence, both edges: a budget just under
+    # the gate with the text a hair under the limit, and one past it.
+    for overhead, budget in ((1_000_000, 30_000), (1_011_713, 1_023), (1_100_000, 0)):
+        assert budget < _MIN_VIABLE_IMAGE_BUDGET_BYTES, (
+            f"the fixture ({overhead:,} overhead, {budget:,} budget) is not in "
+            "the band this sentence fires in, so the 0.9-MB-floor argument "
+            "does not hold for it"
+        )
+        text_figure, limit_figure = figures(overhead, budget)
+        both_mb = text_figure.endswith("MB") and limit_figure.endswith("MB")
+        assert both_mb, f"the compared figures mix units: {text_figure!r} vs {limit_figure!r}"
+
+
+@pytest.mark.asyncio
+async def test_only_a_downscale_is_reported_to_the_user(tmp_path: Path, monkeypatch) -> None:
+    """A codec swap keeps every pixel and must stay silent; a downscale must not.
+
+    The product call design round 1 (D2) argued rather than deferred: because the
+    composer bounds every paste to 1024px, the common rung is a re-encode at
+    unchanged dimensions, and a notice on that would be pure noise on a routine
+    gesture. Losing pixels is different in kind — measured at ~40% edge energy —
+    so that rung, and only that rung, is surfaced.
+
+    Asserted on ``downscaled``, which is the predicate the transcript row is
+    gated on, and measured from the DELIVERED bytes on both sides so a rung
+    change cannot make the two cases agree by accident.
+    """
+    from local_operator.mobile.attach_client import taken_refit_report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    registrant = RuntimeServer(_ImageRecordingHandle(), kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+
+        # Two composer-bounded screenshots: over the limit together, but the
+        # codec alone closes the gap, so every pixel survives.
+        await client.prompt("look", images=[_wire_image(1024, 576) for _ in range(2)])
+        codec_only = taken_refit_report()
+        assert not [entry for entry in codec_only if entry.downscaled], (
+            "a codec-only refit was reported as a downscale; the transcript "
+            f"would put a notice on a routine paste: {codec_only}"
+        )
+
+        # Far past what the codec can absorb, so pixels genuinely go.
+        await client.prompt("look", images=[_wire_image(1400, 1400) for _ in range(8)])
+        downscaled = [entry for entry in taken_refit_report() if entry.downscaled]
+        assert downscaled, "pixels were lost and nothing was reported"
+        for entry in downscaled:
+            assert entry.width * entry.height < entry.source_width * entry.source_height
+            assert entry.marker >= 1
+
+        # CONSUMED, not merely read: a stale report would caption the next,
+        # untouched message with this one's resize.
+        assert taken_refit_report() == ()
+    finally:
+        client.close()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_a_junk_scalar_frame_does_not_kill_the_connection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A frame that parses as a bare JSON scalar must be dropped, not fatal.
+
+    ``json.loads`` succeeds on any scalar, so a discarded oversized line whose
+    surviving tail happens to read ``12345``/``null``/``true``/``"s"``/``[1,2]``
+    reached ``_on_request`` and hit ``.get`` on an int/None/bool/str/list. The
+    resulting ``AttributeError`` escaped the reader loop's
+    ``ConnectionResetError``/``BrokenPipeError`` handler and the ``finally``
+    dropped the client — the exact session death this module exists to prevent,
+    made reachable by the new discard path (review round 1, MAJOR-2).
+
+    Driven over a REAL socket, and the assertion is not merely "still
+    connected": the NEXT message must be DELIVERED, which is what the operator
+    actually lost.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = _ImageRecordingHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        record = await _record(tmp_path)
+        await client.connect(record, "s1")
+        assert client._writer is not None
+
+        for raw in ("12345", "null", "true", '"str"', "[1,2]"):
+            # The fixture only tests what it claims if it really is a non-dict.
+            assert not isinstance(json.loads(raw), dict), f"{raw} is not a scalar frame"
+            client._writer.write(raw.encode() + b"\n")
+            await client._writer.drain()
+
+            assert (
+                await client.prompt(f"after {raw}") == "prompt ok"
+            ), f"a {raw} frame killed the connection; the next message was lost"
+            assert handle.received[-1][0] == f"after {raw}"
+            assert client.connected
+    finally:
+        client.close()
+        registrant.close()

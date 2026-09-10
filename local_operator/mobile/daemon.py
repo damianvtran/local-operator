@@ -1495,9 +1495,23 @@ class MobileDaemon:
         if entry is None or entry.writer is None:
             raise KeyError(f"session {pid} is not connected")
         req = entry.next_req()
+        # THE PHONE'S ROUTE TO THE SAME SOCKET, so it takes the same guard the
+        # attach client does: a prompt relayed from the web composer carries
+        # base64 images in one line, and an over-limit line makes the
+        # registrant's reader discard the frame — the message would simply never
+        # arrive. Shared helper rather than a second implementation, so the two
+        # producers cannot disagree about what fits.
+        #
+        # Fitted BEFORE the future is registered: `OversizedRequest` is a
+        # `ValueError`, which this module's HTTP layer already renders as a 422
+        # the composer shows while RETAINING the user's command — so a refusal
+        # must not leave a future parked in `_pending_reqs` for a frame that was
+        # never written.
+        from local_operator.mobile.attach_client import fit_request_frame
+
+        frame = await fit_request_frame({"op": op, "req": req, **fields})
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_reqs[(pid, req)] = future
-        frame = {"op": op, "req": req, **fields}
         try:
             entry.writer.write(json.dumps(frame).encode() + b"\n")
             await entry.writer.drain()
@@ -1711,13 +1725,13 @@ class MobileDaemon:
             # so a spawned child would be orphaned from its own control plane.
             raise RuntimeError("observer daemon cannot start sessions")
         from local_operator.interpreter import python_argv
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
 
         # A durable resume can already have an owner (including one started
         # by another surface). Acknowledge that verified owner, never the PID
         # of a losing speculative constructor.
-        existing, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+        existing, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
         if existing is not None:
             try:
                 async with asyncio.timeout(SESSION_START_TIMEOUT_S):
@@ -1768,7 +1782,7 @@ class MobileDaemon:
 
         async def ready() -> None:
             while True:
-                record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                record, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
                 if record is not None:
                     if record.pid != process.pid:
                         raise RuntimeError("another runtime acquired this session; retry resume")
@@ -1803,7 +1817,9 @@ class MobileDaemon:
                 async def retire_if_pristine() -> None:
                     from local_operator.mobile.attach_client import AttachClient
 
-                    record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                    record, _ = await asyncio.to_thread(
+                        find_runtime_record, config_dir(), session_id
+                    )
                     if record is None or record.pid != process.pid:
                         return
                     client = AttachClient(

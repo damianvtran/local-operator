@@ -535,3 +535,114 @@ async def test_a_sender_with_no_record_still_delivers(tmp_path, monkeypatch):
     rows = _peer_rows(session)
     assert rows[0].payload["details"]["sender"] == {"pid": 999999}
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_peer_message_does_not_start_the_session(tmp_path):
+    """A mailbox message landing on an unstarted session must NOT flip the
+    record's ``started`` bit: the flag marks a REAL turn, not a spooled note."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.receive_peer_message("quiet note", mode="mailbox", wake=False, sender={"pid": 42})
+
+    assert marks == [], "a spooled mailbox message ran no turn, so it must not start the session"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_first_real_turn_flips_started_once(tmp_path):
+    """A user prompt (and a wake-driven turn) each run a real turn; the hook
+    fires at the pipeline's choke point and the registrant de-duplicates, so the
+    first turn publishes exactly once and later turns republish nothing."""
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.prompt("first")
+    await session.prompt("second")
+
+    # The hook runs at the top of EVERY turn; the one-way dedupe lives in the
+    # registrant's set_record_started, so the session emits a mark per turn and
+    # the publish layer (not the session) is what collapses them to one write.
+    assert len(marks) == 2
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wake_peer_message_that_opens_the_first_turn_starts_the_session(tmp_path):
+    """A wake/steer delivery that itself runs the session's first turn DOES set
+    the flag: the session is now genuinely working."""
+    stream = ScriptedStream([[StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    marks: list[bool] = []
+    session._publish_session_started = lambda: marks.append(True)
+
+    await session.receive_peer_message("wake up", mode="mailbox", wake=True, sender={"pid": 42})
+    await wait_for(lambda: len(marks) == 1)
+
+    assert len(marks) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_first_real_turn_consumes_a_leftover_spool(tmp_path):
+    """Q1 belt-and-braces: rows already sitting in the session's inbox (written
+    by an older sender, or before a live record existed) are consumed by the
+    FIRST real turn itself — without anyone calling the boot drain. Before the
+    fix such rows stayed unread for as long as the session stayed open."""
+    from local_operator.session.runtime.inbox import (
+        InboxLine,
+        append_inbox,
+        drain_inbox,
+    )
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    # Two rows spooled for THIS session, written straight to its inbox the way
+    # ``deliver_peer_message``'s cold branch does. Delivery below must come
+    # from the turn pipeline, not from any direct drain call in this test.
+    directory = session._transcript.directory
+    assert append_inbox(
+        directory, InboxLine(text="leftover one", sender={"pid": 7}, mode="mailbox", written_at=0.0)
+    )
+    assert append_inbox(
+        directory, InboxLine(text="leftover two", sender={"pid": 7}, mode="mailbox", written_at=0.1)
+    )
+
+    await session.prompt("first real prompt")
+    await wait_for(lambda: bool(stream.requests))
+
+    # The spool is consumed by the turn, and both notes are durable peer rows
+    # in the transcript — delivered as quiet mailbox notes, no extra turn.
+    assert drain_inbox(directory) == []
+    delivered = sorted(
+        row.payload["details"]["body"] for row in _peer_rows(session) if row.payload["details"]
+    )
+    assert "leftover one" in delivered and "leftover two" in delivered
+    assert len(stream.requests) == 1, "a spool drain must not drive extra turns"
+
+    # Once per lifetime: a second turn does not re-attempt the drain (the
+    # flag short-circuits), and rows spooled LATER are left for the cold-open
+    # drain, exactly as before.
+    assert append_inbox(
+        directory, InboxLine(text="later note", sender={"pid": 7}, mode="mailbox", written_at=0.2)
+    )
+    await session.prompt("second prompt")
+    await wait_for(lambda: len(stream.requests) == 2)
+    assert [line.text for line in drain_inbox(directory)] == ["later note"]
+    await session.dispose()

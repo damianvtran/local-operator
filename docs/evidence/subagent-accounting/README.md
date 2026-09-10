@@ -2,7 +2,7 @@
 
 ## Acceptance contract
 
-C2 standard/pre-authorized reliability fix. A background owner's known child
+C2 standard/pre-authorized reliability fix. A background runtime's known child
 spend must reach a cold viewer without viewer-side provider discovery. Direct
 rows remain self/current-attempt only. The session total includes descendants,
 prior attempts and retention-swept work exactly once, including after restart.
@@ -17,18 +17,18 @@ historically unknown prices into invented dollar amounts.
 All execution used an isolated HOME and LOCAL_OPERATOR_CONFIG_DIR. The worktree
 has its own Python 3.12 editable venv. Production Session, child runner, bash,
 transcripts, OwnedSessionHandle, RuntimeServer TCP socket, RemoteSession and
-OperatorApp were exercised. Only provider events and owner model-listing prices
+OperatorApp were exercised. Only provider events and runtime model-listing prices
 were scripted; this proves application accounting, not vendor invoice accuracy.
 
 The original model shape was a dynamically listed Anthropic model, 57 token
-receipts and no provider USD receipts. The owner knew its price. The cold viewer
+receipts and no provider USD receipts. The runtime knew its price. The cold viewer
 ran `job_stats` in a worker thread; paint-cache refresh refuses an off-loop
 caller. Retrying therefore could never populate the cache. Explicit USD receipts
 worked throughout, ruling out blanket usage loss in transport.
 
-Independent QA ran separate owner and viewer processes. Before: owner and wire
-cost `.006`, viewer row `$—`, context `1200`. After: owner and viewer `.006`.
-The coder's real socket reproduction independently returned `.375` owner vs
+Independent QA ran separate runtime and viewer processes. Before: runtime and wire
+cost `.006`, viewer row `$—`, context `1200`. After: runtime and viewer `.006`.
+The coder's real socket reproduction independently returned `.375` runtime vs
 `None` cold viewer before, and `.375` on both after. Its screen and virtual size
 were both 118×38; no screen scrollbar appeared.
 
@@ -39,18 +39,18 @@ were both 118×38; no screen scrollbar appeared.
 | Mixed `.125` receipt plus unpriced call | row `$0.125+`; unknown amount not erased |
 | Estimated `.006` + mixed child | canonical and rendered footer `≥$0.131` |
 | Free vs unknown | `$0.0000` vs `$—` |
-| Offline reconstructed owner/viewer | estimate `.006`, mixed `.125+`, total `≥.131` retained |
-| Live nested work | manager, owner and socket viewer include running grandchild |
+| Offline reconstructed runtime/viewer | estimate `.006`, mixed `.125+`, total `≥.131` retained |
+| Live nested work | manager, runtime and socket viewer include running grandchild |
 | Sweep, restart, new billed work | lifetime survives instead of resetting to retained rows |
 | Failed and cancelled billed tool loops | prior `.125` retained; real bash wrote side-effect files |
 | Queued child | no provider request before promotion; promoted on capacity release |
-| Invalid resume, wrong owner, missing/invalid socket auth | rejected, no unauthorized control |
+| Invalid resume, wrong runtime, missing/invalid socket auth | rejected, no unauthorized control |
 
 The committed automated real-path guard is
 `tests/e2e/test_subagent_accounting_e2e.py`: a child requests real bash writing
 `billed`, reports `.125`, fails its next provider call, resumes to `.25`, is
 retention-swept, is reconstructed from disk, and spends another `.125` for `.375`
-lifetime. It asserts owner and socket-viewer totals and the actual sidecar.
+lifetime. It asserts runtime and socket-viewer totals and the actual sidecar.
 
 ```sh
 env -u NO_COLOR HOME=/tmp/accounting-validation \
@@ -72,7 +72,7 @@ SVG stills rendered to PNG and viewed. Independent QA captured consecutive
 settled frames. No layout, control or navigation change is intended.
 
 - [Before cold viewer](before-cold-viewer.png): row unknown despite priced footer.
-- [After cold viewer](after-cold-viewer.png): both show the owner's `.006`.
+- [After cold viewer](after-cold-viewer.png): both show the runtime's `.006`.
 - [Before mixed money](before-money.png): known mixed receipt omitted.
 - [After offline restart](after-offline.png): estimate, genuine zero, unknown and
   partial rows; footer uses the same authoritative `.131` lower bound.

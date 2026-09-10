@@ -69,7 +69,7 @@ from local_operator.mobile.attach_client import (
     RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
-    find_owner_record,
+    find_runtime_record,
 )
 from local_operator.mobile.types import (
     SLASH_ACTION_RECEIPTS,
@@ -143,7 +143,7 @@ COLD_FALLBACK_S = 8.0
 #: cosmetic flag: it is the state that REFUSES ``/model``, ``/goal``,
 #: ``/rename``, ``/effort``, ``/compact``, ``/fork`` and ``/credential`` with
 #: ``_RECONNECTING_SLASH_NOTICE``, and that PARKS ``prompt`` silently on
-#: ``_owner_ready`` with no message and no spinner resolution. Reported from
+#: ``_runtime_ready`` with no message and no spinner resolution. Reported from
 #: the field as a session whose model could not be switched by any number of
 #: retries or ``/resume``s.
 #:
@@ -161,13 +161,13 @@ COLD_FALLBACK_S = 8.0
 #: SCOPED TO A RECORD HAVING BEEN SEEN. This bound answers "an owner is there
 #: and will not answer", never "no owner is there": the latter is the DEAD
 #: shape, whose contract is to keep chasing a successor through the takeover
-#: arm, and it keeps that contract unchanged. ``_recover_owner`` tracks the
+#: arm, and it keeps that contract unchanged. ``_recover_runtime`` tracks the
 #: sighting across passes (``record_seen``) because the deadline is necessarily
 #: evaluated before the pass reads a record.
 #:
 #: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
-#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_owner``), so the
-#: transcript stays on screen, ``_owner_ready`` is set, and the next prompt
+#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_runtime``), so the
+#: transcript stays on screen, ``_runtime_ready`` is set, and the next prompt
 #: re-engages through ``_ensure_bound`` against this very same live record.
 #: That rebind is the whole repair, and it is why no user-facing copy was added
 #: for this state: a typed ``/model p/id`` on the resulting facade is diverted
@@ -175,7 +175,7 @@ COLD_FALLBACK_S = 8.0
 #: performs exactly that retry and reports its outcome.
 RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
 
-#: Backoff ceiling for ``_recover_owner``'s DIAL-FAILURE arm specifically.
+#: Backoff ceiling for ``_recover_runtime``'s DIAL-FAILURE arm specifically.
 #:
 #: That arm ``continue``s, which skips the sleep at the bottom of the loop, so
 #: its own ``sleep(delay)`` is the only pacing on the path — the ceiling has to
@@ -246,7 +246,7 @@ FRONTEND_SYNC_BACKSTOP_S = 120.0
 FRONTEND_SYNC_FOREGROUND_S = 15.0
 
 #: The envelope for a wait that BLOCKS the facade while it runs. Today that is
-#: ``_recover_owner``, whose ``_recovering`` flag refuses prompts, `/fork`,
+#: ``_recover_runtime``, whose ``_recovering`` flag refuses prompts, `/fork`,
 #: `/model` and every other mutation for as long as the wait lasts, and which
 #: is itself bounded by ``COLD_FALLBACK_S`` — going cold is its designed,
 #: non-failing outcome, after which the next prompt re-engages through
@@ -357,10 +357,10 @@ _MODEL_INTENT_PENDING = (
 #: ``_discard_rejected_client`` (see its docstring for the half-bound facade
 #: and the 272-eviction burst that discipline exists to prevent), so every
 #: attempt starts from a clean facade and no attach slot leaks against
-#: ``ATTACH_MAX_CLIENTS``. ``find_owner_record`` is re-run per attempt so a
+#: ``ATTACH_MAX_CLIENTS``. ``find_runtime_record`` is re-run per attempt so a
 #: runtime that retired and respawned between attempts is picked up rather
 #: than redialled at its dead pid. The backoff shape was originally copied from
-#: ``_recover_owner`` so the two redial loops behaved the same way; the CEILINGS
+#: ``_recover_runtime`` so the two redial loops behaved the same way; the CEILINGS
 #: have since deliberately diverged (``_RECOVERY_DIAL_CAP_S`` is 2.0 s) and this
 #: one is deliberately LEFT at 0.5. This loop is bounded to
 #: ``_BIND_RETRY_ATTEMPTS`` inside a wall-clock budget, so it cannot storm attach
@@ -594,8 +594,8 @@ class RemoteSession:
         #: those two the same way (it has no build to compare against) and
         #: distinguishes them by whether the facade is cold, not by this
         #: value. See ``app.py::_check_build_skew``.
-        self.owner_version: str = ""
-        self.owner_source_ref: str = ""
+        self.runtime_version: str = ""
+        self.runtime_source_ref: str = ""
         #: Why this viewer opened WITHOUT live state, when that was not the
         #: ordinary "no runtime was running" case. Set by the launcher when an
         #: attach to a live runtime failed and it fell back to cold; the TUI
@@ -613,7 +613,7 @@ class RemoteSession:
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
         #: Owner loss after THAT is the request landing, not a death:
-        #: ``_recover_owner`` must not take over the conversation a stop
+        #: ``_recover_runtime`` must not take over the conversation a stop
         #: just ended (it would republish a live record for a stopped
         #: session, and its next prompt would be refused against the
         #: ``stopped_at`` marker the stop stamped).
@@ -639,7 +639,7 @@ class RemoteSession:
         self._live_history: dict[str, Any] = {}
         self._display_window_requested = False
         self.saved_preview_partial = False
-        self._owner_record: SessionRecord | None = None
+        self._runtime_record: SessionRecord | None = None
         self._display_refresh_lock = asyncio.Lock()
         self._display_refresh_task: asyncio.Task[None] | None = None
         self._prompt_completion_waiters: set[asyncio.Future[AgentEndEvent]] = set()
@@ -734,7 +734,7 @@ class RemoteSession:
         # socket; on takeover it goes straight to the real Session after the
         # preserving adoption callback completes. Keystrokes remain editable in
         # the standard composer throughout — no attach/recovery UI state.
-        self._owner_ready = asyncio.Event()
+        self._runtime_ready = asyncio.Event()
         # Socket delivery can outrun the coroutine installing its initial sync.
         # Buffer that suffix until its epoch, rather than the cold disk epoch,
         # is authoritative. None means the canonical boundary is installed.
@@ -959,12 +959,12 @@ class RemoteSession:
                 read_saved_preview, config_dir / "sessions" / session_id
             )
         except FileNotFoundError:
-            from local_operator.mobile.attach_client import find_owner_record
+            from local_operator.mobile.attach_client import find_runtime_record
 
             # A speculative live owner can deliberately defer creating its
             # journal until its first write. Only an actual discoverable owner
             # proves that empty state; a stale catalog row proves nothing.
-            record, owner = await asyncio.to_thread(find_owner_record, config_dir, session_id)
+            record, owner = await asyncio.to_thread(find_runtime_record, config_dir, session_id)
             if record is None or owner is None:
                 raise FileNotFoundError("This conversation is no longer available") from None
             preview = SavedPreview([], False, record.cwd or cwd)
@@ -985,7 +985,7 @@ class RemoteSession:
             )
         )
         self._finish_sync()
-        self._owner_ready.set()
+        self._runtime_ready.set()
         return self
 
     @classmethod
@@ -1047,7 +1047,7 @@ class RemoteSession:
         # Nothing is queued behind an owner that will never arrive: a cold
         # viewer is READY, and it is _ensure_bound that supplies the runtime
         # when one is actually needed.
-        self._owner_ready.set()
+        self._runtime_ready.set()
         return self
 
     def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
@@ -1496,7 +1496,7 @@ class RemoteSession:
         even when an owner is already live: losing that owner must never move
         execution into the HTTP worker or start a replacement just for a reader.
         """
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
 
         # FOREGROUND: an HTTP request is waiting on this acquisition, so it
         # announces itself rather than silently inheriting whatever envelope a
@@ -1508,7 +1508,7 @@ class RemoteSession:
             if self._disposed or not self.is_cold:
                 return not self.is_cold
             record, _ = await asyncio.to_thread(
-                find_owner_record, self._config_dir, self._session_id
+                find_runtime_record, self._config_dir, self._session_id
             )
             if record is None or self._disposed:
                 return False
@@ -1685,7 +1685,7 @@ class RemoteSession:
 
         DURING OWNER RECOVERY it refuses, in the same words and for the same
         reason as ``route_shared_slash`` one seam over. A recovering viewer is
-        chasing a successor that ``_recover_owner`` will bind at whatever cwd
+        chasing a successor that ``_recover_runtime`` will bind at whatever cwd
         the owner's record names, so a "cold move" reported here is silently
         undone the moment that bind lands — the viewer would say it moved and
         then work somewhere else, which is the one divergence this method
@@ -1793,13 +1793,13 @@ class RemoteSession:
             self._cwd = cwd
             self._repoint_armed_wakes(cwd)
             return "cold"
-        # ``owner_idle`` is the SAME reading the build-refresh seam uses, and
+        # ``runtime_idle`` is the SAME reading the build-refresh seam uses, and
         # it already covers every term that matters here — streaming, a parked
         # approval/ask gate, and a running background job — so this asks one
         # question rather than reassembling the predicate and drifting from it.
         # The runtime re-checks on its own side anyway (``may_refresh``): a
         # retire that races work arriving is refused there and surfaces below.
-        if not self.owner_idle():
+        if not self.runtime_idle():
             raise RuntimeError(
                 "this session is working right now — /move again when the turn finishes"
             )
@@ -1915,7 +1915,7 @@ class RemoteSession:
         rather than the lock: handing over the lock would discard an
         authenticated dial and risk a second engage for one session's lease.
         """
-        # Recovery already owns its dial/sync and signals _owner_ready. A
+        # Recovery already owns its dial/sync and signals _runtime_ready. A
         # prompt or steer must wait on that promise, not start a competing
         # initial attachment merely because its connected socket is not ready.
         if not self._can_go_cold or self._disposed:
@@ -1984,7 +1984,7 @@ class RemoteSession:
             return
         if not self.is_cold:
             return
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.session.runtime.launch import (
             ActionableConnectionError,
             RuntimeStartupError,
@@ -2093,7 +2093,7 @@ class RemoteSession:
             # under a new pid, and redialling the dead one would burn every
             # remaining attempt on a socket that cannot answer.
             record, _owner = await asyncio.to_thread(
-                find_owner_record, self._config_dir, self._session_id
+                find_runtime_record, self._config_dir, self._session_id
             )
             if self._disposed:
                 # Same rule as the guard at the top of the loop: never
@@ -2221,13 +2221,13 @@ class RemoteSession:
             self._finish_sync()
             self._deliberate_stop = False
             self._stopped_announced = False
-            self._owner_ready.set()
+            self._runtime_ready.set()
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
             self._discard_rejected_client()
             if not self._recovering:
-                self._owner_ready.set()
+                self._runtime_ready.set()
             raise
 
     def _discard_rejected_client(self) -> None:
@@ -2246,7 +2246,7 @@ class RemoteSession:
         Closing the client makes ``is_cold`` honest again — the next
         ``_ensure_bound`` retries the whole engage and the TUI's own failure
         path can say why — and it releases the runtime's attach slot. Without
-        the release each retry of ``_recover_owner`` opened another connection
+        the release each retry of ``_recover_runtime`` opened another connection
         on top of the last, and the runtime's LRU cap evicted them in a burst
         (272 evictions logged in the minutes after one fork booted).
 
@@ -2283,11 +2283,11 @@ class RemoteSession:
         closes. The attribute is still assigned because ``_on_frontend_sync``
         resolves through it from the pump.
         """
-        self._owner_record = record
+        self._runtime_record = record
         # Freeze relay delivery until the canonical sync is installed ahead of
         # raw event frames that follow it on the same socket.
         self._ready_for_events = False
-        self._owner_ready.clear()
+        self._runtime_ready.clear()
         self._pending_frontend_updates = []
         self._runtime_pid = record.pid
         loop = asyncio.get_running_loop()
@@ -2318,8 +2318,8 @@ class RemoteSession:
         # compares these with its own build and names the skew (see
         # ``app.py::_check_build_skew``); nothing here decides anything, so a
         # missing stamp degrades to "unknown", never to a refused attach.
-        self.owner_version = getattr(record, "version", "") or ""
-        self.owner_source_ref = getattr(record, "source_ref", "") or ""
+        self.runtime_version = getattr(record, "version", "") or ""
+        self.runtime_source_ref = getattr(record, "source_ref", "") or ""
         # The runtime's working directory, kept so a viewer that was ATTACHED
         # (``connect``, the `lop --resume` path) can engage a successor after
         # its owner retires for a refresh. Only ``cold()`` used to set ``_cwd``;
@@ -2400,7 +2400,7 @@ class RemoteSession:
         not start frontend synchronization" refusal for a dial that was fine)
         and a concurrent redial replaces it, so the caller could end up awaiting
         a DIFFERENT dial's future. ``_ensure_bound`` holds ``_bind_lock`` but
-        ``_recover_owner`` never takes it, so the two are ordered only by the
+        ``_recover_runtime`` never takes it, so the two are ordered only by the
         ``_recovering`` flag — not by a lock. Threading the future through the
         call closes that seam by construction, which is why the ``None`` case
         below is an internal invariant rather than an owner fault.
@@ -2928,7 +2928,7 @@ class RemoteSession:
                 if client is None or not client.connected:
                     raise ConnectionError("history owner is unavailable")
                 self._ready_for_events = False
-                self._owner_ready.clear()
+                self._runtime_ready.clear()
                 self._pending_frontend_updates = []
                 # Cleared BEFORE the capture, so a degraded delta that lands
                 # while this pass is in flight (buffered here, replayed by
@@ -2985,7 +2985,7 @@ class RemoteSession:
                     self._drain_buffered_events()
                     raise
                 finally:
-                    self._owner_ready.set()
+                    self._runtime_ready.set()
 
     @property
     def history_before_token(self) -> str | None:
@@ -3331,7 +3331,7 @@ class RemoteSession:
             insert_at += 1
         self._buffered_events[insert_at:insert_at] = seeded
         self._ready_for_events = True
-        self._owner_ready.set()
+        self._runtime_ready.set()
         self._drain_buffered_events()
         self._maybe_start_gate()
 
@@ -3840,7 +3840,7 @@ class RemoteSession:
         # session ended on purpose, so there is no owner to recover and no
         # transcript lease to win. Stay a viewer showing the cold session —
         # the same shape bare /stop leaves an owner in. The record scan in
-        # `_recover_owner` would otherwise rediscover nothing and take over.
+        # `_recover_runtime` would otherwise rediscover nothing and take over.
         # The owner announced the stop on the wire before closing (the
         # ``stopping`` frame the client turns into this reason). That covers
         # the cases the local flag cannot: another TUI's /stop all, or a shell
@@ -3859,7 +3859,7 @@ class RemoteSession:
         if _reason == STOPPED_REASON:
             self._deliberate_stop = True
         if self._deliberate_stop:
-            self._owner_ready.set()  # prompts route to the stopped notice
+            self._runtime_ready.set()  # prompts route to the stopped notice
             # A stop ENDS the turn, exactly as a death does. Without this the
             # facade reports is_streaming forever — nothing else can clear it,
             # because every other writer of that flag is fed by the owner
@@ -3872,13 +3872,13 @@ class RemoteSession:
             self._notify_stopped()
             return
         self._recovering = True
-        self._owner_ready.clear()
+        self._runtime_ready.clear()
         # Do NOT end the turn here. A dropped socket says nothing about the
         # turn: the runtime is usually still running it (a send timeout under
         # a stalled TUI loop is the common cause). Recovery decides — see
         # ``_settle_suspect_turn``.
         self._suspect_generation = self._generation if self._streaming else None
-        self._recovery_task = asyncio.create_task(self._recover_owner())
+        self._recovery_task = asyncio.create_task(self._recover_runtime())
 
     def _end_turn_locally(
         self,
@@ -4028,7 +4028,7 @@ class RemoteSession:
         # The marker says stopped; confirm nobody re-opened it in the
         # meantime (an open clears ``stopped_at``). If an owner is live and
         # reachable, this is a re-open — recover normally.
-        record, _ = await asyncio.to_thread(find_owner_record, self._config_dir, self._session_id)
+        record, _ = await asyncio.to_thread(find_runtime_record, self._config_dir, self._session_id)
         return record is None
 
     def _unavailable_reason(self) -> str:
@@ -4048,7 +4048,7 @@ class RemoteSession:
         """Unbind from a runtime that is gone, keeping the conversation.
 
         The viewer stays exactly as it is on screen; only its binding drops.
-        ``_owner_ready`` is SET rather than left clear because a cold viewer is
+        ``_runtime_ready`` is SET rather than left clear because a cold viewer is
         ready — the next prompt engages a runtime through ``_ensure_bound``
         instead of waiting for one that is never coming back.
 
@@ -4088,7 +4088,7 @@ class RemoteSession:
         # Guarded like the two teardown steps that bracket it (the client
         # close above, the went-cold callback below): a handler that raises —
         # `EventController._handle_agent_end` flushes, prices usage and sums
-        # cost — must not propagate out of teardown and skip `_owner_ready`,
+        # cost — must not propagate out of teardown and skip `_runtime_ready`,
         # which would leave the prompt path waiting on an event nothing else
         # will set (review round 1, MINOR-1).
         if refresh:
@@ -4121,7 +4121,7 @@ class RemoteSession:
             # ``not _streaming``: a suspect recorded at the drop must not
             # outlive the verdict that the runtime is gone.
             self._suspect_generation = None
-        self._owner_ready.set()
+        self._runtime_ready.set()
         callback = self._refresh_callback if refresh else self._went_cold_callback
         if callback is None:
             return
@@ -4139,7 +4139,7 @@ class RemoteSession:
         """
         self._refresh_callback = callback
 
-    def owner_idle(self) -> bool:
+    def runtime_idle(self) -> bool:
         """Whether the bound runtime is doing nothing a refresh would lose.
 
         Read off the canonical snapshot rather than asked over the wire, so
@@ -4205,7 +4205,7 @@ class RemoteSession:
         # ``_end_turn_locally()`` immediately before this, so the call here is
         # a no-op for it (no ``force``, and ``_streaming`` is already False).
         # The path this exists for is the wake-marker inference inside
-        # ``_recover_owner``, which never passed through that branch and would
+        # ``_recover_runtime``, which never passed through that branch and would
         # otherwise leave the suspect turn open forever. Do NOT add ``force``
         # here without splitting the two callers: it would double-end the
         # first one (review round 1, MINOR-1).
@@ -4218,7 +4218,7 @@ class RemoteSession:
         except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
             logger.debug("stopped-session callback failed", exc_info=True)
 
-    async def _recover_owner(self) -> None:
+    async def _recover_runtime(self) -> None:
         if self._deliberate_stop:
             # The disconnect came from the stop this follower issued (or that
             # landed while it watched): the session is cold, not orphaned.
@@ -4227,7 +4227,7 @@ class RemoteSession:
             # would win the lease, republish a live record for a session the
             # user just stopped, and let a later `lop stop --all` SIGTERM
             # this terminal for a record it never made.
-            self._owner_ready.set()  # prompts route to the stopped notice
+            self._runtime_ready.set()  # prompts route to the stopped notice
             return
         delay = 0.1
         # Under the viewer model, owner loss has a THIRD outcome beside
@@ -4259,7 +4259,7 @@ class RemoteSession:
         # chasing a successor through the takeover arm. The check has to sit at
         # the top of the pass (that is where a deadline can be evaluated before
         # the pass spends its time on a dial that may block), which is BEFORE
-        # ``find_owner_record`` runs, so the exit cannot consult this pass's
+        # ``find_runtime_record`` runs, so the exit cannot consult this pass's
         # record. It consults the previous passes' instead: one sighting is
         # enough, because a record seen at all is what distinguishes "an owner
         # is there and silent" from "nothing is there". Without this the exit
@@ -4309,12 +4309,12 @@ class RemoteSession:
                     # LIVE BUT SILENT owner never reaches, because a record is
                     # found on every pass. So the chase had no terminal state:
                     # ``/model`` and every other mutation seam refused forever
-                    # and ``prompt`` parked silently on ``_owner_ready``.
+                    # and ``prompt`` parked silently on ``_runtime_ready``.
                     #
                     # SCOPED TO ``record_seen``, which is what makes the
                     # paragraph below true rather than merely intended. The
                     # condition cannot be "this pass found a record" — the
-                    # deadline is evaluated before ``find_owner_record`` runs —
+                    # deadline is evaluated before ``find_runtime_record`` runs —
                     # so it is "some pass did", which selects the same class:
                     # an owner that is discoverable at all is the live-but-
                     # silent shape, and one that never was is the dead shape the
@@ -4385,7 +4385,7 @@ class RemoteSession:
                         # latch again the next time an exit is added.
                         self._go_cold()
                         # ``finally`` clears ``_recovering``: the refusals lift
-                        # and the parked prompt is released by ``_owner_ready``.
+                        # and the parked prompt is released by ``_runtime_ready``.
                         return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
@@ -4394,11 +4394,11 @@ class RemoteSession:
                 # from resurrecting a session a kill switch just ended.
                 if not self._deliberate_stop and await self._session_was_stopped():
                     self._deliberate_stop = True
-                    self._owner_ready.set()  # prompts route to the stopped notice
+                    self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
                     return
                 record, _ = await asyncio.to_thread(
-                    find_owner_record, self._config_dir, self._session_id
+                    find_runtime_record, self._config_dir, self._session_id
                 )
                 if (
                     record is not None
@@ -4532,7 +4532,7 @@ class RemoteSession:
                             if inspect.isawaitable(result):
                                 await result
                             self._takeover_target = local
-                            self._owner_ready.set()
+                            self._runtime_ready.set()
                             return
                         # Adoption normally installed the callback before a
                         # disconnect can happen; if it did not, avoid leaking
@@ -5222,7 +5222,7 @@ class RemoteSession:
         generation contract, without a new scheduler or longer RPC timeout.
         """
         await self._ensure_bound()
-        await self._owner_ready.wait()
+        await self._runtime_ready.wait()
         if self._takeover_target is not None:
             await self.prompt(text, images=images, message_id=message_id)
             return
@@ -5309,7 +5309,7 @@ class RemoteSession:
         # session starts working in it here, which is the first moment a
         # runtime is actually owed. A no-op once attached.
         await self._ensure_bound()
-        await self._owner_ready.wait()
+        await self._runtime_ready.wait()
         target = self._takeover_target
         if target is not None:
             # A takeover means a real in-process Session now owns the
@@ -5351,7 +5351,7 @@ class RemoteSession:
     async def _send_steer_when_ready(self, message: Message) -> None:
         await self._ensure_bound()
         """Retain a queued steer across silent reattach/takeover."""
-        await self._owner_ready.wait()
+        await self._runtime_ready.wait()
         target = self._takeover_target
         if target is not None:
             target.steer_message(message)
@@ -5551,7 +5551,7 @@ class RemoteSession:
             if row.type == "task" and row.status == "running" and not row.queued
         )
 
-    def owner_model_catalogue(self) -> list[dict[str, Any]]:
+    def runtime_model_catalogue(self) -> list[dict[str, Any]]:
         """The owner's offerable model rows, as published canonical state.
 
         A follower's own provider controller describes the follower's
@@ -5682,5 +5682,22 @@ def _pending_request(state: Any) -> PendingRequest | None:
     )
 
 
-def _image_to_wire(image: ImageContent) -> dict[str, str]:
-    return {"data_b64": image.data, "mime_type": image.mime_type}
+def _image_to_wire(image: ImageContent) -> dict[str, Any]:
+    """One image block as the owner's control socket carries it.
+
+    ``marker`` rides along when the producer knows one, because the transport
+    can REFUSE an attachment and has to name the chip the user is looking at:
+    ``markers`` in ``attach_client._refit_images`` prefers it and falls back to
+    the wire position. Omitted rather than sent as ``null`` when there is none,
+    so a producer with no chips (the phone relay, a tool result) leaves the
+    fallback in charge and the frame stays the shape older owners parse.
+
+    Emitting it here is what makes the lookup reachable at all: the field is
+    ``exclude=True`` on :class:`ImageContent`, so no ``model_dump`` carries it
+    and this is the only seam that can (design round 2, D8 — the lookup shipped
+    while nothing populated it, and the refusal went on quoting the position).
+    """
+    block: dict[str, Any] = {"data_b64": image.data, "mime_type": image.mime_type}
+    if image.marker is not None:
+        block["marker"] = image.marker
+    return block

@@ -54,6 +54,13 @@ OPTIONAL_CAPABILITIES = {
     # Set by the registrant on itself, not implemented by the handle.
     "_frontend",
     "_install_interactivity_probe",
+    # Owned-handle instance state (assigned in ``OwnedSessionHandle.__init__``),
+    # not a class-declared capability, so the class-level ``hasattr`` cannot
+    # see it. Read once at record construction to seed ``started`` from the
+    # resumed conversation's durable history; a handle without one (the TUI's,
+    # a reduced test host) takes the conservative ``started=False`` a first
+    # real turn immediately corrects — a designed degradation, not a defect.
+    "_session",
 }
 
 

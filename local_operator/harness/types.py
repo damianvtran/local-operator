@@ -190,11 +190,29 @@ class TextContent(BaseModel):
 
 
 class ImageContent(BaseModel):
-    """An image block. ``data`` is base64-encoded bytes of ``mime_type``."""
+    """An image block. ``data`` is base64-encoded bytes of ``mime_type``.
+
+    ``marker`` is the number on the composer chip that cites this image —
+    ``1`` for ``[Image #1]`` — carried so a transport that has to REFUSE an
+    attachment can name the one the user can see. Marker numbers do not
+    renumber when an attachment is deleted, so after twenty pastes and one
+    backspace the chips read ``#2..#20`` while wire positions run ``0..18``,
+    and a refusal quoting the position pointed at a different chip than the
+    one it refused (design round 1 D4, round 2 D8).
+
+    ``exclude=True`` because this is a PRESENTATION fact, not conversation
+    content: it must not reach a provider, a transcript row or a context hash.
+    Excluded from every ``model_dump``, so persisted history stays
+    byte-identical and only in-process consumers — the wire encoder here — can
+    read it. ``None`` for every producer that has no chips to name (the phone
+    relay, tool results, compaction frames), which is what makes the wire
+    encoder's fallback to position the honest answer rather than a guess.
+    """
 
     type: Literal["image"] = "image"
     data: str = ""
     mime_type: str = "image/png"
+    marker: int | None = Field(default=None, exclude=True)
 
 
 Content = TextContent | ImageContent
@@ -313,7 +331,7 @@ class Message(BaseModel):
         could recover it.
 
         That is not hypothetical. ``harness/loop.py::_append_results`` stamped
-        the payload onto the message AFTER calling this, so the owner's rows
+        the payload onto the message AFTER calling this, so the runtime's rows
         carried it and everyone else's did not — and
         ``RemoteSession._remember_live`` builds the live row for a relayed
         ``tool_execution_end`` through exactly this constructor. The interval
@@ -649,11 +667,11 @@ class JobManagerProtocol(Protocol):
     of the cycle.
     """
 
-    def get(self, job_id: str, *, owner_id: str | None = None) -> Any: ...
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any: ...
 
-    def list(self, *, owner_id: str | None = None) -> list[Any]: ...
+    def list(self, *, registrant_id: str | None = None) -> list[Any]: ...
 
-    async def cancel(self, job_id: str, *, owner_id: str | None = None) -> bool: ...
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool: ...
 
     # Three methods are deliberately NOT declared here: ``settled_event``
     # (event-driven ``wait``) and ``append_output``/``read_output`` (the live
@@ -935,7 +953,7 @@ class ToolContext(BaseModel):
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.
     todos: dict[str, list[dict[str, str]]] | None = None
-    # Optional owner hook for canonical full-TUI state. Tools call it only after
+    # Optional host hook for canonical full-TUI state. Tools call it only after
     # a successful mutation, never on read-only view or validation failures.
     on_todos_changed: Callable[[], None] | None = None
     # Injected by the HOST (see BrowserSurface), not created by the tool: this
@@ -1276,7 +1294,7 @@ class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
     """Settled transcript rows that became durable while no frontend painted them.
 
     Emitted by a reconnecting follower for the durable gap between what it
-    painted before losing the owner and the fresh sync's cursor. It is a
+    painted before losing the runtime and the fresh sync's cursor. It is a
     HISTORY contract, not a live one: every row is already settled, so the
     consumer must project each row through the same role-aware settled-history
     renderer a cold resume uses — user rows as user rows, assistant prose and
@@ -1449,7 +1467,7 @@ class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
     """A message from ANOTHER local lop session (`lop send`) was delivered here.
 
     Fires the instant the message lands in this session's transcript/context,
-    even while the session is idle, so the owner TUI can paint the
+    even while the session is idle, so the attached TUI can paint the
     cross-session indicator immediately rather than waiting for the next turn
     render. Carries ``body`` (the raw text the human reads) and ``sender`` (the
     advisory pid/conversation/model identity for the indicator label).
@@ -1668,7 +1686,7 @@ class LoopConfig(BaseModel):
     # host (``Session._model``) and this config is a per-run value object: the
     # host would otherwise have to hold a reference to the config of whatever
     # run happens to be live and write through it. The loop asks instead, so
-    # the session stays the single owner of which model is current.
+    # the session stays the single authority on which model is current.
     #
     # The boundary is deliberately BETWEEN calls, never inside one. An
     # in-flight request keeps the spec it was issued with, so a switch cannot
@@ -1987,7 +2005,7 @@ class ChatRequest(BaseModel):
     #: the actual request until a counted boundary is available. ``0`` denotes
     #: an unrelated fresh one-shot prompt, whose own estimate should decide.
     context_tokens_hint: int | None = None
-    # Admission trusts a hint only after the conversation owner reconciles it
+    # Admission trusts a hint only after the loop that owns the conversation reconciles it
     # against this request and names the provider/model it measured. A fallback
     # to another model must use its own tokenizer estimate instead.
     context_tokens_hint_model: str | None = None

@@ -5099,3 +5099,38 @@ async def test_the_session_name_row_is_inert_while_notifications_are_off() -> No
         _select(view, "display.notification_session_name")
         await pilot.pause()
         assert "inert:" not in view.render_lines_for_test()[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_coercion_error_with_no_message_still_shows_something(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page's error slot must never be a warning glyph with nothing beside it.
+
+    ``settings_io.coerce`` composes its own messages today, so the reachable
+    blank is a future bare ``raise ValueError`` — the same class of bug as the
+    ``TimeoutError()`` that reached users through the aside card, and the
+    reason the fallback lives at the render site rather than in ``coerce``.
+    Driven through the real ``_commit_edit`` so this asserts about the arm the
+    page runs, and ``coerce`` is replaced only after the editor has been
+    seeded by the real one.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "retry.maxRetries")
+        view.action_activate()
+        await pilot.pause()
+        assert view.editing_key == "retry.maxRetries", "premise: the text editor opened"
+        view._buffer = "6"
+
+        def _blank(setting: Any, text: str) -> Any:
+            raise ValueError()
+
+        monkeypatch.setattr(settings_io, "coerce", _blank)
+        view._commit_edit()
+        await pilot.pause()
+
+        assert view._error, "a coercion failure left the error slot empty"
+        assert view._error == "ValueError"

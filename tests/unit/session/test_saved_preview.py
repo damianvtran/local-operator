@@ -42,7 +42,7 @@ async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path,
 
     record = SimpleNamespace(cwd="/synthetic-owner")
     monkeypatch.setattr(
-        "local_operator.mobile.attach_client.find_owner_record", lambda *args: (record, 12345)
+        "local_operator.mobile.attach_client.find_runtime_record", lambda *args: (record, 12345)
     )
 
     async def no_takeover():
@@ -65,7 +65,7 @@ async def test_absent_owner_and_journal_refuse_before_building_facade(tmp_path, 
     from local_operator.session.remote import RemoteSession
 
     monkeypatch.setattr(
-        "local_operator.mobile.attach_client.find_owner_record", lambda *args: (None, None)
+        "local_operator.mobile.attach_client.find_runtime_record", lambda *args: (None, None)
     )
 
     async def no_takeover():

@@ -129,7 +129,7 @@ async def test_a_move_while_a_live_runtime_is_resyncing_still_retires_it(
     client = FakeClient()
     _bind(session, client)
     session._ready_for_events = False  # mid-resync: cold by the old predicate
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
 
     assert session.is_cold, "the predicate that used to decide the branch"
     outcome = await session.set_working_directory("/usr")
@@ -155,7 +155,7 @@ async def test_a_bound_idle_session_retires_its_runtime_and_rebinds(cold_session
     session = await cold_session("/tmp")
     client = FakeClient()
     _bind(session, client)
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     assert await session.set_working_directory("/usr") == "rebound"
     assert client.ops == ["retire_now"]
     assert session._cwd == "/usr"
@@ -169,7 +169,7 @@ async def test_a_move_does_NOT_park_the_viewer_in_the_stopped_state(cold_session
     anyway, because the disconnect that sets it arrives after this returns."""
     session = await cold_session("/tmp")
     _bind(session, FakeClient())
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     await session.set_working_directory("/usr")
     assert session._deliberate_stop is False
 
@@ -183,7 +183,7 @@ async def test_a_busy_session_is_REFUSED_and_does_not_move(cold_session) -> None
     session = await cold_session("/tmp")
     client = FakeClient()
     _bind(session, client)
-    session.owner_idle = lambda: False  # type: ignore[method-assign]
+    session.runtime_idle = lambda: False  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="working right now"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -197,7 +197,7 @@ async def test_a_runtime_that_keeps_itself_rolls_the_directory_back(cold_session
     nothing moved so nothing is recorded as moved."""
     session = await cold_session("/tmp")
     _bind(session, FakeClient(answer="kept: busy"))
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="busy"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -214,7 +214,7 @@ async def test_a_version_skewed_runtime_gets_the_vetted_sentence(cold_session) -
     """
     session = await cold_session("/tmp")
     _bind(session, FakeClient(error=RuntimeError("unknown op: 'retire_now'")))
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="too old to be moved"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -225,7 +225,7 @@ async def test_any_other_transport_failure_rolls_the_directory_back(cold_session
     """A failure that is NOT version skew still refuses and restores the cwd."""
     session = await cold_session("/tmp")
     _bind(session, FakeClient(error=ConnectionError("socket closed")))
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="could not move"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -236,7 +236,7 @@ async def test_a_runtime_too_old_to_know_the_op_refuses_cleanly(cold_session) ->
     """Rather than moving anyway and leaving the runtime in the old directory."""
     session = await cold_session("/tmp")
     _bind(session, SimpleNamespace(connected=True))
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="too old"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -266,7 +266,7 @@ async def test_a_move_repoints_an_armed_wake_at_the_new_directory(
     )
     if bound:
         _bind(session, FakeClient())
-        session.owner_idle = lambda: True  # type: ignore[method-assign]
+        session.runtime_idle = lambda: True  # type: ignore[method-assign]
 
     await session.set_working_directory("/usr")
 
@@ -329,7 +329,7 @@ async def test_a_move_while_the_owner_is_recovering_is_REFUSED(cold_session) -> 
     ``route_shared_slash`` in the same file declines during recovery because a
     request/response command that blocks until a replacement owner arrives
     answers a question the user has stopped asking. A move that reported
-    success here would be worse than slow: ``_recover_owner`` binds the
+    success here would be worse than slow: ``_recover_runtime`` binds the
     successor at whatever cwd the owner's RECORD names, so the "cold move"
     is silently undone and the viewer works somewhere it said it had left
     (review MINOR-1).
@@ -346,7 +346,7 @@ async def test_a_move_while_the_owner_is_recovering_is_REFUSED(cold_session) -> 
     # `rebound` and issuing a real retire while recovery was in progress.
     client = FakeClient()
     _bind(session, client)
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(ConnectionError, match="reconnecting"):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp"
@@ -372,7 +372,7 @@ async def test_a_CANCELLED_move_rolls_the_directory_back(cold_session) -> None:
 
     # Cancelled inside the retire RPC: the widest window on the bound path.
     _bind(session, FakeClient(error=asyncio.CancelledError()))
-    session.owner_idle = lambda: True  # type: ignore[method-assign]
+    session.runtime_idle = lambda: True  # type: ignore[method-assign]
     with pytest.raises(asyncio.CancelledError):
         await session.set_working_directory("/usr")
     assert session._cwd == "/tmp", "a cancelled move left the directory moved"

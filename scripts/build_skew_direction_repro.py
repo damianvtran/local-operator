@@ -56,8 +56,8 @@ async def main() -> None:
         # NEWER than this window -- and it is idle. Its own refresh check
         # compares itself against disk, finds a match, and answers "kept".
         viewer = _BoundViewer(
-            owner_version="0.51.30",
-            owner_source_ref="d7f12d3a7",
+            runtime_version="0.51.30",
+            runtime_source_ref="d7f12d3a7",
             session_id="s1",
             conversation_name="Investigating suspicious pwned notification source",
             idle=True,

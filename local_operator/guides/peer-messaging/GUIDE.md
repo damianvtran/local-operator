@@ -115,7 +115,9 @@ Refusals are answers too, and each names its own fix:
 
 - An ambiguous `target` returns the candidate list — `2 sessions match; retry
   with pid=<n>:` followed by one `pid=<n>` line per session.
-- No match returns `no live session matches '<target>'`.
+- No match returns `no session matches '<target>' (searched live and stored
+  sessions)` — a name only a closed session had still resolves, so a miss
+  means neither the running fleet nor the store answered to it.
 - A session cannot send to itself; the tool refuses before it dials.
 - A body over the 256 KB cap is rejected with the measured size, not truncated.
 - If the ack is lost after the peer committed the message, the tool says the
@@ -147,6 +149,14 @@ HB_AGE`:
 - `UPTIME` — how long the session has been running.
 - `HB_AGE` — how long since its last heartbeat. A large `HB_AGE` on a `live`
   row is an early sign of a session going wedged.
+
+**Closed sessions are still reachable.** `lop sessions --all` adds `stored`
+rows — sessions that are not running — shown with `—` for RSS/UPTIME, sorted
+newest-first, capped by `--limit` (default 50). `send`'s `target` falls back
+to stored-session names when no live session matches: `wake=True` engages a
+runtime, a quiet mailbox drop spools to the inbox for the next open, and a
+steer on a stored session behaves as wake. A `NEEDS` row is a parked
+question; idle-vs-busy is `--json`'s `busy`, not the table.
 
 **The table does not show a session's `cwd`.** `cwd` and `session_id` are
 `--json`-only fields — which matters because `target` matches against the cwd

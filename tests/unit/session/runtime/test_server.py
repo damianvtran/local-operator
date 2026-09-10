@@ -1174,6 +1174,206 @@ class TestLiveStateReachesTheRecord:
         server._republish_detached()  # unchanged: no publish
         assert len(publishes) == 1
 
+    @pytest.mark.asyncio
+    async def test_a_new_runtime_reports_itself_unstarted(self) -> None:
+        """A fresh boot (a ``/new`` session in the composer) has run no turn."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        assert server._record.started is False
+
+    def _handle_over_transcript(self, tmp_path, name: str, rows: list[str]) -> FakeHandle:
+        """A FakeHandle whose owned session reads a transcript file on disk.
+
+        The boot-seed path probes ``handle._session`` (the owned-handle shape
+        — the daemon child and exec) and derives ``started`` from the
+        transcript FILE via the session's declared ``transcript_path``, so the
+        fake only needs the path to be real.
+        """
+        from types import SimpleNamespace
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        handle = FakeHandle()
+        handle._session = SimpleNamespace(transcript_path=path)  # type: ignore[attr-defined]
+        return handle
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_boot_seeds_started_from_durable_history(self, tmp_path) -> None:
+        """QA Q3: the daemon child behind ``lop --resume <sid>`` builds its
+        record at boot, and a conversation that already ran turns under an
+        earlier process must read ``started=True`` from the FIRST publish —
+        before the owner types anything in THIS process. Bookkeeping rows
+        (a persisted title) do not count; only a MESSAGE row does, exactly
+        as in ``TuiSessionHandle.rebind``'s re-seed."""
+        handle = self._handle_over_transcript(
+            tmp_path,
+            "resumed",
+            [
+                '{"id":"m1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                '{"id":"m2","ts":2,"type":"message","payload":{"role":"user"}}',
+            ],
+        )
+        server = RuntimeServer(handle, kind="daemon")
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_an_empty_session_directory_boots_unstarted(self, tmp_path) -> None:
+        """The composer gate survives the seed: a true ``/new`` — no message
+        rows, whether the transcript is empty or holds only bookkeeping —
+        must still publish ``started=False`` so peer broadcasts do not drive
+        a turn into a session whose owner has not typed yet."""
+        empty = self._handle_over_transcript(tmp_path, "empty", [])
+        bookkeeping_only = self._handle_over_transcript(
+            tmp_path,
+            "titled",
+            ['{"id":"t1","ts":3,"type":"custom","payload":{"custom_type":"title"}}'],
+        )
+        for handle in (empty, bookkeeping_only):
+            server = RuntimeServer(handle, kind="daemon")
+            assert server._started is False
+            assert server._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_peer_note_only_transcript_boots_unstarted(self, tmp_path) -> None:
+        """QA Q4: a quiet-dialled peer note persists as a MESSAGE row (kind
+        ``custom``, a ``peer_message`` CustomMessage) WITHOUT a turn running,
+        so a message row alone cannot seed ``started`` — that marks the
+        session started, after which a peer ``--wake`` or a broadcast drives
+        an assistant turn into a session the owner never typed in. Only a
+        plain ``Message`` row (kind ``message``, or a legacy row that
+        predates the marker) counts."""
+        peer_note = (
+            '{"id":"p1","ts":1,"type":"message","payload":{"kind":"custom",'
+            '"custom_type":"peer_message","attribution":"user","details":{"text":"hi"}}}'
+        )
+        peer_notes_only = self._handle_over_transcript(tmp_path, "noted", [peer_note, peer_note])
+        mixed = self._handle_over_transcript(
+            tmp_path,
+            "mixed",
+            [
+                peer_note,
+                '{"id":"m1","ts":4,"type":"message","payload":{"kind":"message","role":"user"}}',
+            ],
+        )
+        legacy = self._handle_over_transcript(
+            tmp_path,
+            "legacy",
+            ['{"id":"m2","ts":5,"type":"message","payload":{"role":"assistant"}}'],
+        )
+        server = RuntimeServer(peer_notes_only, kind="daemon")
+        assert server._started is False
+        assert server._record.started is False
+        for handle in (mixed, legacy):
+            server = RuntimeServer(handle, kind="daemon")
+            assert server._started is True
+            assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_started_is_one_way_and_deduplicated(self) -> None:
+        """The flag flips once and a repeat ``True`` (every turn after the
+        first) publishes nothing — and a ``False`` after ``True`` is IGNORED:
+        no code path un-runs a turn, so honouring it would let a mistake
+        un-publish a working session. Dropping the bit is reserved for a
+        session-identity swap (``reset_record_started``)."""
+        server = RuntimeServer(FakeHandle(), kind="daemon")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._started)  # type: ignore[method-assign]
+
+        server.set_record_started(True)
+        server.set_record_started(True)  # already started: must not republish
+        server.set_record_started(False)  # one-way: a started record ignores False
+
+        assert publishes == [True]
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_reset_record_started_reseeds_for_a_new_identity(self) -> None:
+        """The rebind path: a ``/new`` drops the bit (the composer window
+        returns) and a ``/resume`` raises it without ever having run a turn
+        in THIS process — both legal only because the identity changed."""
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        publishes: list[bool] = []
+        server._republish = lambda: publishes.append(server._started)  # type: ignore[method-assign]
+
+        server.set_record_started(True)  # the old conversation ran turns
+        server.reset_record_started(False)  # /new: fresh composer
+        assert server._started is False
+        assert server._record.started is False
+        server.reset_record_started(True)  # /resume of a session with history
+        assert server._started is True
+        assert server._record.started is True
+        # And the reset True is still one-way afterwards.
+        server.set_record_started(False)
+        assert server._started is True
+        assert publishes == [True, False, True]
+
+    @pytest.mark.asyncio
+    async def test_the_periodic_heartbeat_carries_started(self, tmp_path, monkeypatch) -> None:
+        """The timer heartbeat (the one that refreshes the record's IDENTITY
+        fields from the projection seed) must carry ``started`` explicitly.
+        Today the publish happens to survive on ``self._record is
+        publisher.record`` — an object-identity accident this pins away: a
+        rebuilt or copied record must not make a working session
+        broadcast-invisible one heartbeat later."""
+        import local_operator.session.runtime.server as server_module
+
+        monkeypatch.setattr(server_module, "HEARTBEAT_INTERVAL_S", 0.05)
+        # Isolated config dir: ``start_in_process`` constructs a real
+        # RecordPublisher before the recorder replaces it, and its writes
+        # must not touch the operator's live registry.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        timer_calls: list[dict[str, object]] = []
+
+        class _Recorder:
+            # Stands in for RecordPublisher on the timer path only; its call
+            # is told apart from ``_republish``'s by the identity fields,
+            # which only the timer passes. ``close`` because teardown joins
+            # the publisher it finds.
+            def heartbeat(self, **kwargs: object) -> None:
+                if "session_id" in kwargs:
+                    timer_calls.append(dict(kwargs))
+
+            def close(self) -> None:
+                pass
+
+        # In-process (the mobile child's own mode) so the heartbeat task
+        # shares THIS loop and the test can observe its ticks directly.
+        await server.start_in_process()
+        try:
+            # Point the loop at the recorder, flip the bit, and let a tick (or
+            # several — the loop is a 50 ms timer) pass.
+            server._publisher = _Recorder()  # type: ignore[assignment]
+            server.set_record_started(True)
+            deadline = asyncio.get_running_loop().time() + 5
+            while not timer_calls and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.02)
+            assert timer_calls, "the periodic heartbeat never fired"
+            assert all(call.get("started") is True for call in timer_calls)
+        finally:
+            server.close()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_started_survives_the_republish(self, tmp_path, monkeypatch) -> None:
+        """A heartbeat rewrite carries ``started`` forward rather than resetting
+        it — the field must stay True once set, or a working session would
+        become broadcast-invisible again on the next heartbeat."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        server = RuntimeServer(FakeHandle(), kind="tui")
+        server.start()
+        try:
+            await _wait_record()
+            server.set_record_started(True)
+            # A republish through the heartbeat path must keep the bit set.
+            server._republish()
+            found = registry.scan()
+            assert found and found[0][0].started is True
+        finally:
+            server.close()
+
 
 @pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:

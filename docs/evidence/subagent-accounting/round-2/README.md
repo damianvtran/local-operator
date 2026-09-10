@@ -9,7 +9,7 @@ legacy accounting leaves the checkpoint fallback; a valid empty ledger replaces
 it. Retained rows are not summed, so swept-only money survives.
 
 Independent QA ran real billed background children and ownerless RemoteSession,
-then reattached the same facade to a real owner. Actual before/after:
+then reattached the same facade to a real runtime. Actual before/after:
 
 | State | Before cold total | After cold / rendered / bound total |
 | --- | --- | --- |

@@ -24,10 +24,10 @@ its own ``settle`` path on the Textual loop, so the terminal screen comes down
 too and exactly one answer wins whichever front end got there first. When the
 picker settles by any route, :meth:`note_ask_settled` clears the phone card.
 
-Protocol-v4 full-TUI followers can answer approvals mounted by the owner TUI.
+Protocol-v4 full-TUI followers can answer approvals mounted by the host TUI.
 The approval is carried as follower-only pending state (never added to daemon
 projection frames, preserving the phone path byte-for-byte) and
-:meth:`approval_answer` resolves the owner's real ``ApprovalPrompt`` on the
+:meth:`approval_answer` resolves the host's real ``ApprovalPrompt`` on the
 Textual loop, so exactly one front end wins.
 """
 
@@ -50,6 +50,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import (
     SessionHandle,
+    has_durable_history,
     image_blocks,
     image_blocks_in_thread,
 )
@@ -102,6 +103,21 @@ class TuiSessionHandle(SessionHandle):
         session = app._session
         if session is None:
             raise RuntimeError("TUI session has not finished starting")
+        # Same wiring ``OwnedSessionHandle.__init__`` performs: the session
+        # flips the discovery record's ``started`` bit at the top of every
+        # real turn (``Session._run_turn_pipeline``), and the handle owns the
+        # publish. Without it a TUI-owned ``kind="tui"`` record would stay
+        # ``started=False`` for its whole life — permanently invisible to
+        # broadcasts and quietly mailbox-dialled on exact sends even after
+        # hundreds of turns. Guarded with ``hasattr`` so reduced hosts (test
+        # doubles standing in for a Session) keep constructing; the ignore
+        # matches the house pattern for duck-typed hooks
+        # (``RuntimeServer``'s ``handle._registrant`` assignment) — the
+        # protocol deliberately does not declare per-host hooks.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = (  # type: ignore[attr-defined]
+                self._publish_session_started
+            )
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,
@@ -137,7 +153,7 @@ class TuiSessionHandle(SessionHandle):
         # so this normally holds at most one entry, but a dict keeps pop-by-id
         # honest. Mutated ONLY on the Textual loop (mount/settle) and read there
         # too (``ask_answer`` hops onto it before touching this), so the
-        # single-winner race is decided by one owner, not by dict atomicity.
+        # single-winner race is decided by one loop, not by dict atomicity.
         self._ask_pending: dict[str, Any] = {}
         # Child transcripts can contain thousands of attachment-backed entries.
         # Keep their I/O off Textual's loop and bound work to one coalescing
@@ -227,6 +243,44 @@ class TuiSessionHandle(SessionHandle):
             self.subscribe(self._on_projection)
         if self._on_event is not None:
             self.subscribe_events(self._on_event)
+        # The registrant outlives the session object, so two pieces of
+        # per-session state must follow the swap. First, the started hook:
+        # the NEW session object must get it or (on a TUI-owned record) it
+        # would never flip. Second, the registrant's ``started`` bit itself,
+        # which cannot simply carry over — it describes the OLD conversation:
+        # a ``/new`` after a working conversation must drop back to ``False``
+        # (the composer window the flag exists for), while a ``/resume`` must
+        # read ``True`` because that conversation already ran turns and a
+        # peer wake could always reach it. Re-seeded from the NEW session's
+        # own durable history so both directions come out right.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = self._publish_session_started
+        registrant = getattr(self, "_registrant", None)
+        reseed = getattr(registrant, "reset_record_started", None)
+        if callable(reseed):
+            try:
+                reseed(has_durable_history(session))
+            except Exception:  # noqa: BLE001 — a stale bit must never break /new
+                logger.debug("could not re-seed the started bit on rebind", exc_info=True)
+
+    def _publish_session_started(self) -> None:
+        """Flip the record's ``started`` bit once this session runs a real turn.
+
+        The ``kind="tui"`` twin of ``OwnedSessionHandle``'s hook, called from
+        ``Session._run_turn_pipeline`` at the top of every turn; the
+        registrant's ``set_record_started`` de-duplicates so only the first
+        turn publishes. Defensive in the same shape as the owned hook: a
+        reduced host with no registrant, or one predating the setter, is a
+        no-op rather than a failed turn.
+        """
+        registrant = getattr(self, "_registrant", None)
+        setter = getattr(registrant, "set_record_started", None)
+        if not callable(setter):
+            return
+        try:
+            setter(True)
+        except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
+            logger.debug("could not publish the started state", exc_info=True)
 
     # -- SessionHandle -----------------------------------------------------------
 
@@ -426,11 +480,11 @@ class TuiSessionHandle(SessionHandle):
         wake: bool = False,
         sender: dict[str, Any] | None = None,
     ) -> str:
-        # Session.receive_peer_message is a COROUTINE that must run on the owner
+        # Session.receive_peer_message is a COROUTINE that must run on the host's
         # event loop (it touches _context.messages, the transcript, and may
         # spawn a turn). `_on_app` only runs SYNC callables on the Textual
         # thread, so we reuse the prompt() machinery: a sync shim scheduled on
-        # the app captures the owner loop and schedules the coroutine there with
+        # the app captures the host loop and schedules the coroutine there with
         # run_coroutine_threadsafe, and we await its result from this bridge
         # coroutine. Do NOT call the coroutine directly off-loop.
         sender = sender or {}
@@ -500,7 +554,7 @@ class TuiSessionHandle(SessionHandle):
             name = str(getattr(session, "conversation_name", "") or sid)
             self._app.run_worker(self._app._stop_local_session(), thread=False, group="session")
             # The follower's receipt: what ended and the way back, the same
-            # line the owner's own transcript paints.
+            # line the host's own transcript paints.
             reopen = f"/resume {sid}" if sid else "/resume"
             return f'stopping "{name}" — {reopen} reopens it'
 
@@ -561,8 +615,8 @@ class TuiSessionHandle(SessionHandle):
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
-        The owner-side backend for a follower's ``route_shared_slash``. Unlike
-        ``slash_images`` — which runs the command's UI in the OWNER's terminal
+        The host-side backend for a follower's ``route_shared_slash``. Unlike
+        ``slash_images`` — which runs the command's UI in the HOST's terminal
         and returns a ``ran /…`` receipt — this asks the app for a
         :class:`SlashResult` payload the INVOKING terminal renders locally, so
         ``/goal``/``/rename``/``/mcp``/``/context`` answer where they were
@@ -585,8 +639,8 @@ class TuiSessionHandle(SessionHandle):
         on ``OwnedSessionHandle``: a session can be hosted either by a detached
         runtime or by this app, and a follower must get the same answer from
         both. A viewer that does not consume action-carrying receipts has its
-        request completed HERE when this TUI is the owner, exactly as the
-        runtime would.
+        request completed HERE when this TUI is the host, exactly as the
+        runtime itself would.
         """
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
@@ -635,7 +689,7 @@ class TuiSessionHandle(SessionHandle):
         return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
 
     def cancel_subagents_count(self) -> int:
-        """Cancel every running subagent on the owner; return the REAL count."""
+        """Cancel every running subagent on the runtime; return the REAL count."""
         session = self._session()
         cancel = getattr(session, "cancel_subagents", None)
         if not callable(cancel):
@@ -663,7 +717,7 @@ class TuiSessionHandle(SessionHandle):
         return f"resumed {session_id}"
 
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
-        """Settle the owner's real ApprovalPrompt from another front end.
+        """Settle the host's real ApprovalPrompt from another front end.
 
         The prompt's ``resolve`` is idempotent and runs on Textual's loop, so
         terminal, phone and follower answers share one arbitration point. A
@@ -691,7 +745,7 @@ class TuiSessionHandle(SessionHandle):
         Called on the registrant/daemon loop, so the whole resolve hops ONTO
         the Textual loop via :meth:`_on_app`: the pending-map read, the
         single-winner guard, and the picker advance/settle all run there,
-        against the one owner that also mounts and settles the card. That is
+        against the one loop that also mounts and settles the card. That is
         what makes the race safe without locking — by the time this callback
         runs, either the picker is still live (answer it) or the terminal
         already answered (``settled`` is set / the entry is gone).
@@ -778,7 +832,7 @@ class TuiSessionHandle(SessionHandle):
     # -- approval / ask mirroring ---------------------------------------------
 
     def note_approval_pending(self, card: Any) -> None:
-        """Project the owner's real approval prompt to v4 followers.
+        """Project the host's real approval prompt to v4 followers.
 
         The request id is stored on the prompt itself because approvals are
         serialized and the prompt is the one arbitration object every answer
@@ -929,7 +983,7 @@ class TuiSessionHandle(SessionHandle):
             self._on_projection()
 
     def _publish_pending_gate(self, pending: PendingRequest | None) -> None:
-        """Publish the owner gate into the canonical full-TUI contract."""
+        """Publish the host gate into the canonical full-TUI contract."""
         session = self._session()
         store = getattr(session, "_frontend_state_store", None)
         if store is None:

@@ -136,8 +136,10 @@ from local_operator.slash_commands import (
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import job_cost, turn_cost
+from local_operator.tui.error_text import error_text
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
@@ -2226,6 +2228,88 @@ class Band(Chrome):
         self.post_message(self.BoxChanged())
 
 
+class ComposerDock(Container):
+    """The input's two containers, made clickable — a click anywhere is "focus me".
+
+    Textual routes a click to focus by walking UP from the widget under the
+    pointer: ``Screen._forward_event`` calls ``get_focusable_widget_at`` on
+    ``MouseDown`` (``screen.py:1933-1939``), which walks ``ancestors_with_self``
+    for the first node whose ``focusable`` is true (``screen.py:709-712``).
+    ``#input-dock`` and ``#input-shell`` were plain containers, neither
+    focusable, so the walk ran off the top and terminated at the screen with
+    ``None`` — and Textual does NOT call ``set_focus(None)`` on that path (it
+    only does that for ``NoWidget``). The click was swallowed in silence: no
+    focus change, no error, nothing on the frame.
+
+    The dead zone that produced is far wider than the shell's 1-cell padding.
+    Measured at 120x40 settled, dock and shell both ``Region(x=1, y=34, w=118,
+    h=5)`` with the editor body at ``Region(x=4, y=35, w=114, h=1)``: clicking
+    ``x = dock.region.x + 2`` on EVERY dock row left focus on the ToolCard —
+    rows 34, 35, 36 and 37 all dead, rows that focused the editor: NONE.
+    Columns 1..3 are dead on every row because the editor body starts at x=4,
+    and that includes the chevron cell. The chevron is the app's own "you are
+    focused" affordance, so the user clicked the exact glyph that means
+    "focused" and got nothing back. In the boot layout it is worse: the shell
+    is clamped to a centred card and the dock spans full width behind it, so
+    the whole gutter either side hits ``#input-dock`` directly and is dead too.
+
+    One class for both containers, because both are reachable by a click that
+    means the same thing.
+    """
+
+    def on_click(self, event) -> None:  # noqa: ANN001 - Textual event type
+        # No `event.stop()`, deliberately. `Click` BUBBLES from the child that
+        # was hit, so by the time it arrives here the editor's own mouse
+        # handling (`editor.py:4391/4405/4438`) has already run for a click on
+        # the body, and stopping it would be stopping an event somebody else
+        # owned. The guard is "focus only if nothing already took it", not
+        # "claim the event" — which is also why a body click is a harmless
+        # no-op below rather than a second, competing focus call.
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        # A surface with a legitimate claim on the keyboard keeps it, and the
+        # click route needs this as much as the Esc route does.
+        #
+        # `#prompt-host` is a CHILD of `#input-dock` (see `compose`), so a
+        # `Click` on a live question BUBBLES here and this handler is the LAST
+        # one to run. Measured at 120x40 with a live approval in
+        # `Region(x=1, y=16, w=118, h=14)`, tracing both handlers: a click on
+        # the card's own interior fired `AskPickerScreen.on_click` and then
+        # `ComposerDock.on_click`, and left `focused=Editor` with the `rm -rf`
+        # still unanswered.
+        #
+        # NOTHING in the prompt widgets protects them from this, and an earlier
+        # version of this comment wrongly said `ApprovalPrompt.on_click` called
+        # `event.stop()` and was therefore safe. It does not: `ApprovalPrompt`
+        # extends `AskPickerScreen` (`approval.py:980`) and INHERITS
+        # `AskPickerScreen.on_click` (`ask_picker.py:1117`), which calls
+        # `event.stop()` only after `_index_at` finds a row and returns without
+        # stopping when the click misses one. The `event.stop()` at
+        # `approval.py:465` belongs to `ApprovalBlock`, a DIFFERENT class that
+        # is not what the dock hosts. Traced on a card-interior click:
+        # `PROMPT done stopped_after=False` -> `DOCK(input-dock) recv
+        # stopped=False`. The guard below is the only thing protecting a live
+        # prompt from this handler.
+        #
+        # The predicate rather than an `#prompt-host` containment test, because
+        # it is the general answer: it already covers the approval, the picker,
+        # the aside, the full-page modes, the focused sidebar and any pushed
+        # screen, so a future surface hosted in the dock is protected by
+        # default instead of by someone remembering to extend a selector list.
+        # Shared with the transcript's three routes through
+        # `tui/composer_focus.py`, which is what makes "what must never be
+        # stolen from" one rule rather than four that can drift apart.
+        #
+        # Focus and nothing else: the caret is left exactly where the user put
+        # it. A click on the padding means "put me back in the input", not "put
+        # the caret here" — there is no document position that a padding cell
+        # maps to, and moving the caret would cost the user the place they were
+        # editing to buy them nothing.
+        return_focus_to_composer(self.app, editor)
+
+
 class TranscriptScreen(Screen[None]):
     """The default screen, with Textual's Ctrl+C copy taken back out.
 
@@ -4132,12 +4216,30 @@ class OperatorApp(App[None]):
         held, source.compaction.held_prompt = source.compaction.held_prompt, ""
         typed, source.compaction.held_typed = source.compaction.held_typed, ""
         images, source.compaction.held_images = source.compaction.held_images, {}
+        blocks, source.compaction.held_blocks = source.compaction.held_blocks, None
+        notice, source.compaction.held_notice = source.compaction.held_notice, None
         accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
         message_id, source.compaction.accepted_message_id = (
             source.compaction.accepted_message_id,
             "",
         )
+        # BEFORE the turn paints, so the queue's own row is gone by the time
+        # the prompt's echo appears under it — the notice narrates the hold,
+        # and the hold ends here (design round 3, D15). Same current-view
+        # guard as `_withdraw_user_echo_for`: a background source's notice
+        # lives in a view this app can no longer reach, and its teardown is
+        # the view's own business.
+        if notice is not None and self._is_current(source):
+            self._transcript_view().remove_block(notice)
         if held or images:
+            # HANDED TO THE TURN, so the rows this prompt painted at submit are
+            # withdrawable by the worker that dispatches it. Set BEFORE
+            # `_start_turn_for` for the reason the direct path gives: the worker
+            # it starts can reach its `except` before a later line would run,
+            # and an echo the worker cannot see is one it cannot withdraw. The
+            # worker's `finally` clears it on every path (review round 2,
+            # MAJOR-3).
+            source.turn.submitted_blocks = blocks
             self._start_turn_for(
                 source,
                 held,
@@ -4266,6 +4368,167 @@ class OperatorApp(App[None]):
         source.turn.pending_echoes[:] = [
             held for held in source.turn.pending_echoes if held is not entry
         ]
+
+    def _report_wire_refit_for(self, source: SessionInteraction) -> None:
+        """Say so when the transport had to COST the user pixels to send.
+
+        SILENT ON THE COMMON CASE, deliberately. The composer already bounds
+        every paste to ``IMAGE_INGEST_MAX_EDGE`` (1024px), so an ordinary
+        message meets the refit's first rung — a re-encode at unchanged
+        dimensions — and every pixel survives. How far past that the silence
+        holds depends on CONTENT and SHAPE, not on a count: measured on
+        composer-bounded continuous-tone captures, a 16:9 retina screenshot
+        stays a codec swap through five attachments, a 4:3 capture through
+        four and a square through three, so the common one-or-two-image paste
+        is silent and the row below is reachable from six mixed screenshots
+        on. Silence is a predicate on ``downscaled``, never on a count, so
+        this cannot mislead — but a count in this note would. (Earlier
+        versions claimed "one to six", then "one and two"; both were
+        square-fixture artifacts — design round 2 and round 3, D16.) A row on
+        every paste would be pure noise on a routine gesture (design round 1,
+        D2).
+
+        THE DOWNSCALE RUNG IS DIFFERENT IN KIND. Once the ladder gives up
+        pixels the loss is not subtle — measured at ~40% edge energy at 768px,
+        enough that `1234553` reads as `1?34553`. A screenshot pasted BECAUSE
+        it contains a number, silently made to contain a different number, with
+        the model answering confidently about the wrong one, is the exact
+        failure the user cannot detect for themselves. So that rung, and only
+        that rung, gets a row.
+
+        IN THE VOCABULARY THE APP ALREADY OWNS: ``editor.RESIZED_MARK`` is the
+        ``↓`` the composer puts on a marker whose image was downscaled at
+        ingest, and its comment says it exists to answer "why is this not the
+        size I pasted?" — which is verbatim the question the wire refit
+        provokes. Reusing the glyph means one idiom for one fact rather than a
+        second convention for the same event two files apart.
+
+        ONE ROW, GROUPED BY DELIVERED SIZE, and that shape is the finding
+        rather than a preference. Enumerating a clause per image spent 220
+        characters on two facts — six of eight clauses were the identical
+        string — and cost 3 rows of 28 at 100x30 and **5 of 20 at 60x22**, a
+        quarter of a narrow user's scrollback for a note about a message that
+        was delivered fine. Worse, the clauses came out in ``_refit_images``'
+        internal smallest-first walk (``#4, #2, #7, #3 …``): deterministic, and
+        meaningless on screen, so a user scanning for "what happened to #1"
+        read six clauses before finding it (design round 2, D9).
+
+        NO GLYPH ON THIS ROW AT ALL (design round 3, D14; round 2's D10 had
+        bound it to the count). The chips carry their own ``↓`` for the INGEST
+        bound, and this row's ``↓`` named the TRANSPORT refit — two different
+        shrinks sharing one glyph, and on a partial refit they collided a row
+        apart: five chips marked ``↓`` by ingest while the caption read
+        ``2 images ↓ resized`` about the two the transport touched, with
+        nothing on screen to say which count was which. ``resized to fit``
+        does the work the glyph was doing, and the mark stays where it is
+        unambiguous — on the chips, next to the size it qualifies.
+
+        COUNTS RATHER THAN MARKERS, which is what makes the row a bounded
+        cost. Naming the chips reads better at eight attachments and grows
+        without bound past it — measured, a marker list is 3 rows at 100 cols
+        and 4 at 60 by 28 attachments, which is the same defect one step
+        smaller.
+
+        THE BOUND IS RUNGS x ASPECT RATIOS, not rungs alone, and an earlier
+        version of this note claimed the latter. A rung caps the LONG edge and
+        the refit preserves aspect ratio, so grouping on the exact delivered
+        ``WxH`` splits once per distinct SHAPE in the paste — and an
+        operator's paste is 16:9 windows, 9:19.5 phone shots, square crops
+        and 3:2 captures at once. The test that pinned the false claim built
+        every fixture as a square, so ``(w, h)`` collapsed onto the rung count
+        by construction and passed vacuously (review round 3, MAJOR-5).
+
+        Measured through the real fitter over a five-aspect composer-bounded
+        paste, n=10 to 30: **4-9 clauses, 97-168 characters, 1-2 rows at 100
+        cols and 2-3 at 60**. The count does not trend upward with n — it
+        moves within that envelope (8 clauses at 24, 7 at 28, 8 at 30) because
+        which rung each shape lands on depends on the per-image budget, not on
+        how many attachments there are. The round-3 reviewer's twelve-aspect
+        mix measured the same class: 9 clauses, 165 characters, 2 rows at 100
+        and 4 at 60. Against the marker list's 28 clauses at n=28, that is the
+        difference between a bounded note and one that eats the scrollback.
+
+        THE COMMON PASTE IS NARROWER STILL: a run of same-shape screenshots
+        reaches one clause per rung, so 1 row at 100 cols and 2 at 60 at any
+        count — QA round 3 measured it holding to 300 attachments. That is
+        because a composer-bounded paste can never be downscaled TO the 1024
+        rung (the ingest bound already applied), leaving only the three below
+        it in ``IMAGE_WIRE_REFIT_EDGES``. The dependency is named here rather
+        than left implicit: raise ``IMAGE_INGEST_MAX_EDGE`` and the reachable
+        rung count rises with it (QA round 3, Q2).
+
+        The chips themselves are on screen directly above this row, so "which
+        of mine" is answerable by looking; "how much did I lose" is not, and
+        that is what this says.
+
+        At ``note`` weight, not ``warning``: nothing is wrong and nothing needs
+        acting on — the message was delivered — but it answers something the
+        user just did, which is exactly the role ``NoticeBlock`` documents for
+        that tier.
+        """
+        # Function-local for the reason the other `attach_client` references in
+        # this file give: the startup path must not import the transport.
+        from local_operator.mobile.attach_client import taken_refit_report
+
+        # CONSUMED whatever the outcome, so a report never outlives its send:
+        # reading it without taking it would let the next, untouched message
+        # inherit this one's caption.
+        lost = [entry for entry in taken_refit_report() if entry.downscaled]
+        if not lost:
+            return
+        # BY DELIVERED SIZE, in the order the user's own chips run: sorting by
+        # marker first means a group appears at the position of its lowest chip
+        # number, so the row reads the way the composer does rather than in
+        # `_refit_images`' internal smallest-first walk (design round 2, D9).
+        grouped: dict[tuple[int, int], int] = {}
+        for entry in sorted(lost, key=lambda item: item.marker):
+            grouped[(entry.width, entry.height)] = grouped.get((entry.width, entry.height), 0) + 1
+        # "down" on the FIRST clause only, carrying the verb the count needs
+        # now that the glyph is gone (design round 3, D14); the ellipsis on
+        # the rest is how English reads a list of parallel clauses.
+        clauses = [
+            f"{count} {'down ' if not index else ''}to {width}x{height}"
+            for index, ((width, height), count) in enumerate(grouped.items())
+        ]
+        plural = "s" if len(lost) != 1 else ""
+        self._notice_for(
+            source,
+            f"{len(lost)} image{plural} resized to fit this message: " + ", ".join(clauses),
+            "note",
+        )
+
+    def _withdraw_user_echo_for(self, source: SessionInteraction) -> None:
+        """Take the painted prompt rows back off the transcript.
+
+        FOR A MESSAGE THAT WAS NEVER SENT, and only for that. The echo is
+        painted at submit so the app answers the keystroke immediately, which is
+        right for every path where the prompt does reach the session. A refused
+        send is the one path where it does not, and there the row is a durable
+        lie: identical styling to a delivered message — same rule, same weight,
+        same full-width thumbnail — so a scroll-back a week later cannot tell it
+        from a real turn. Worse after the user complies than before: they follow
+        the refusal's advice, resend, and the transcript now shows the message
+        twice with an attachment that never left the machine (design round 1,
+        D3).
+
+        REMOVED rather than dimmed or struck through. The draft is back in the
+        composer by the time this runs and is about to be echoed again by the
+        resend, so a marked-up copy would leave the user reading two rows for
+        one message and deciding which is real. The same reasoning
+        ``_recall_queued_steers`` gives for lifting a recalled steer's rows, and
+        the removal is the same call it makes.
+
+        Only touches the CURRENT view's transcript, because that is the only
+        one holding widgets: a background source's rows were never mounted, and
+        its restored draft is carried by ``source.unsent`` instead.
+        """
+        held, source.turn.submitted_blocks = source.turn.submitted_blocks, None
+        if held is None or not self._is_current(source):
+            return
+        user_block, image_blocks = held
+        transcript = self._transcript_view()
+        for block in (*image_blocks, user_block):
+            transcript.remove_block(block)
 
     def _post_turn_abandoned_for(
         self,
@@ -4428,7 +4691,7 @@ class OperatorApp(App[None]):
     async def _lease_sidebar_source(
         self, session_id: str, *, speculative: bool
     ) -> SessionInteraction:
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
         from local_operator.session.remote import RemoteSession
 
@@ -4451,7 +4714,7 @@ class OperatorApp(App[None]):
                 takeover_factory=no_takeover,
             )
         else:
-            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
+            record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
                 raise RuntimeError("The prepared owner is no longer active")
             remote = await RemoteSession.connect(
@@ -4543,7 +4806,7 @@ class OperatorApp(App[None]):
             # never to a click waiting for its first useful viewport.
             #
             # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
-            # v0.52.16 (#849) bounds `_recover_owner` at 90s, so a
+            # v0.52.16 (#849) bounds `_recover_runtime` at 90s, so a
             # `RemoteSession` can reach a TERMINAL cold state on a path that
             # used to retry forever; a speculative prepare can therefore meet
             # `is_cold` for real rather than only in transit. Verified by
@@ -6131,7 +6394,7 @@ class OperatorApp(App[None]):
                 #
                 # Checked here rather than by giving the bind a
                 # `require_bound=True`: its other callers deliberately tolerate
-                # the silent return (a prompt waits on `_owner_ready` instead),
+                # the silent return (a prompt waits on `_runtime_ready` instead),
                 # so the postcondition is this call site's, not the method's.
                 # `is_cold` is a declared `ViewerSessionProtocol` member, so
                 # this postcondition reads through the same declared surface as
@@ -6745,7 +7008,7 @@ class OperatorApp(App[None]):
                 # never be overdrawn or pushed off-screen by the editor, and it travels
                 # with the input when the panel becomes a card. One row does double duty
                 # — zero extra height (D3/D17).
-                with Container(id="input-dock"):
+                with ComposerDock(id="input-dock"):
                     # The prompt host: where a question the turn is PARKED ON lives.
                     #
                     # Above the band and inside the dock, and both halves of that are
@@ -6774,7 +7037,7 @@ class OperatorApp(App[None]):
                         yield self._subagent_panel
                         yield self._wake_panel
                         yield self._todo_panel
-                    with Container(id="input-shell"):
+                    with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
                         editor = Editor(commands=SLASH_COMMANDS)
                         with Horizontal(id="input-row"):
@@ -9869,6 +10132,14 @@ class OperatorApp(App[None]):
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
         typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
         held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
+        # DROPPED, never dispatched: this is the hand-back, and `clear_blocks()`
+        # below removes the very rows the tuple points at. Carrying it past here
+        # would leave a later refusal holding widgets that are no longer mounted
+        # (review round 2, MAJOR-3). The held notice is dropped for the same
+        # reason — reference only, no removal: `clear_blocks()` takes the row
+        # with the whole view (design round 3, D15).
+        self._interaction.compaction.held_blocks = None
+        self._interaction.compaction.held_notice = None
         if held:
             # The TYPED line goes back, not the payload: handing a user the
             # expanded body of a `$skill` they invoked would make them delete a
@@ -10662,7 +10933,7 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.resume import (
             RESUME_LATEST,
-            live_session_owner,
+            live_runtime_pid,
             resolve_resume_id,
         )
 
@@ -10674,7 +10945,7 @@ class OperatorApp(App[None]):
         except Exception:
             concrete = resume_id
         if concrete != RESUME_LATEST:
-            owner = live_session_owner(config_dir(), concrete)
+            owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
                 # Discovery scans the filesystem; run it as a worker so the
                 # UI thread never blocks on it, and settle attach-vs-refuse
@@ -10818,7 +11089,7 @@ class OperatorApp(App[None]):
                 # No id at all is the same known-local fact by another route:
                 # nothing could have published a record for it.
                 return False
-            # ``registry.scan`` rather than ``find_owner_record``: the latter
+            # ``registry.scan`` rather than ``find_runtime_record``: the latter
             # deliberately excludes the CALLING process, which is the right
             # answer for "who else owns this" and the wrong one here — the
             # question is whether a record exists on this machine at all.
@@ -10990,10 +11261,10 @@ class OperatorApp(App[None]):
         deliberately deleted, so a mixed-version owner gets a precise upgrade
         refusal rather than silently falling back to a divergent UI.
         """
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.session.remote import RemoteSession
 
-        record, found_owner = await asyncio.to_thread(find_owner_record, config_root, concrete)
+        record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
         if record is None or found_owner != owner or record.protocol < 4:
             self._system_notice(
                 f"session {concrete} is open in an older Local Operator process "
@@ -14028,14 +14299,14 @@ class OperatorApp(App[None]):
         """
         logger.debug("runtime retired for a newer build; re-engaging")
         session = self._session
-        version = str(getattr(session, "owner_version", "") or "")
+        version = str(getattr(session, "runtime_version", "") or "")
         if version:
             from local_operator.update import BuildStamp
 
             self._refreshed_from = (
                 BuildStamp(
                     version=version,
-                    source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+                    source_ref=str(getattr(session, "runtime_source_ref", "") or ""),
                 ),
                 _session_subject(session),
                 # WHICH session retired. The subject alone cannot answer this:
@@ -14111,14 +14382,14 @@ class OperatorApp(App[None]):
                 getattr(session, "session_id", "") or "<none>",
             )
             return
-        version = str(getattr(session, "owner_version", "") or "")
+        version = str(getattr(session, "runtime_version", "") or "")
         if not version:
             return
         from local_operator.update import BuildStamp
 
         after = BuildStamp(
             version=version,
-            source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+            source_ref=str(getattr(session, "runtime_source_ref", "") or ""),
         )
         if after == before:
             return
@@ -14367,7 +14638,7 @@ class OperatorApp(App[None]):
                 self._warm_engage_started = False
                 # "could not start a runtime for this session" was wrong on
                 # both halves for the common case: a runtime very likely DID
-                # start (``engage_runtime`` returned, ``find_owner_record``
+                # start (``engage_runtime`` returned, ``find_runtime_record``
                 # found it, the socket authenticated) and the session is not
                 # broken — the bind ran out of its envelope while the owner's
                 # authoritative loop was busy. Reporting that as a boot failure
@@ -14436,7 +14707,7 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            # The bind resolved, so ``owner_version`` now holds the runtime's
+            # The bind resolved, so ``runtime_version`` now holds the runtime's
             # own stamp: this is the first moment the owner-skew comparison
             # has anything to compare. Before the command runs, because a
             # routed command is exactly what skew distorts.
@@ -15045,6 +15316,129 @@ class OperatorApp(App[None]):
         if picker is not None and not picker.settled and picker.is_attached:
             return picker
         return None
+
+    def _focus_is_claimed(self) -> bool:
+        """Whether some surface has a claim on the keyboard the composer must not take.
+
+        READ-ONLY, and that is load-bearing: it runs on keystroke and click
+        paths, so it must not move focus, mount, unmount, or mutate anything.
+        Callers ask it before reasserting composer focus; if asking the question
+        changed the answer, the reassertion would be racing itself.
+
+        Every branch is guarded individually and the degrade direction is
+        ``True`` — "something might be claiming it". Refusing to steal focus is
+        always the safe failure: the cost of a wrong ``True`` is the user
+        pressing a key that does nothing, while the cost of a wrong ``False`` is
+        the composer pulling focus off a live surface mid-answer. A stripped
+        harness with no composer therefore reads as claimed rather than raising
+        out of a focus path.
+
+        ``_live_prompt`` is CALLED rather than reimplemented: the
+        approval/ask conditions (answered, settled, attached) are subtle enough
+        that a second copy would drift, and this predicate wants exactly the
+        prompt that method already defines.
+        """
+        # An unanswered approval or an unsettled ask owns the keys the composer
+        # would otherwise swallow.
+        try:
+            if self._live_prompt() is not None:
+                return True
+        except Exception:  # noqa: BLE001 — defensive, see the docstring
+            return True
+        try:
+            if self._aside_is_open():
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The three full-page modes and the login prompt: each hides the
+        # transcript or is the only thing on the frame the user can answer.
+        try:
+            if (
+                self._subagent_view is not None
+                or self._org_chart_view is not None
+                or self._settings_view is not None
+                or self._key_prompt is not None
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        try:
+            if self._session_sidebar.has_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # The catch-all, and the reason a future overlay is safe by DEFAULT
+        # rather than by someone remembering to extend the list above: any
+        # pushed Screen is a modal route (`/resume`'s session picker is one —
+        # `conftest.py:352`), and the composer is not even on that frame.
+        try:
+            if len(self.screen_stack) > 1:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        # Read-only subsumes `_set_composer_read_only` here rather than at each
+        # call site: that method drops `can_focus` precisely so nothing lands a
+        # caret in a field that refuses every key.
+        try:
+            if not self._editor().can_focus:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+        return False
+
+    def _return_focus_to_composer(self) -> None:
+        """Put the keyboard back in the composer unless something claims it.
+
+        The guard is :meth:`_focus_is_claimed`, and it is the whole safety
+        mechanism: a live approval or ask picker that pulled focus deliberately
+        keeps it, or the one question the routed keys cannot reach becomes
+        unanswerable. Never unconditional.
+
+        TWO call sites in :meth:`action_stop`, deliberately, and they are not
+        collapsible into one. The reported defect is Esc from a focused tool
+        card on an IDLE app, and that case measures ``pending=False
+        streaming=False children=0`` — it leaves through the nothing-to-stop
+        return partway down the method and never reaches the tail. A single
+        call at the end of ``action_stop`` would therefore fix nothing for the
+        case the fix exists for, while a single call at the nothing-to-stop
+        return would miss Esc during a live turn. Both, or half the fix.
+
+        THREE call sites in :meth:`action_stop`, and the third is the
+        bang-mode abort — see that branch for why it is not collapsible into
+        the sibling return two lines below it.
+
+        The other early returns are NOT a single category, and an earlier
+        version of this docstring claimed they were: it said they "either
+        restore focus themselves or hand the key to a surface that is supposed
+        to keep it", which is false for at least one of them and was measured
+        false during review. A docstring asserting an invariant the code does
+        not hold is how the next person ships the same defect, so what follows
+        states only what was measured.
+
+        Restoring or handing off, as the old blanket described: the aside and
+        the three close paths (subagent view, org chart, settings) all end on
+        the editor; the ``SubagentRow`` navigation exit returns to the
+        draft-bearing composer; the ask picker's ``esc skip`` settles a
+        question whose answer the user is still owed.
+
+        NOT restoring, deliberately: the ``_allow_source_command`` refusal
+        (measured with focus on a ``ToolCard`` and ``_focus_is_claimed()``
+        False — focus stays on the card). That return is not a stop at all. It
+        posted a "commands unavailable until connected" notice and declined to
+        act, and a press the app has just refused should not also move the
+        user's keyboard; the disconnect is transient and the composer is not
+        read-only during it, so the restoration WOULD fire if it were called
+        here. Revisit this if the refusal ever stops posting a notice — then
+        the press really would be silent, and silence in the ledger is the
+        defect this method exists to fix.
+        """
+        if self._focus_is_claimed():
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        editor.focus()
 
     def _sync_composer_focus(self) -> None:
         """Mark the input dock while the composer — and only it — has focus.
@@ -15839,8 +16233,33 @@ class OperatorApp(App[None]):
             # streaming test so a live turn still takes the first press —
             # the command is local and cheap to re-run, the turn is not.
             if self._abort_shell_command():
+                # ...and come home from here too. This return sits one line
+                # above its sibling below, inside the same block and reached by
+                # the same idle measurement, so the case it covers — a `!`
+                # command in flight while the user reads a tool card — was the
+                # reported defect with an extra condition on it. Measured
+                # before this line, with a real `! sleep 30` running and the
+                # branch traced: `focused=ToolCard claimed=False` ->
+                # `_abort_shell_command->True` -> focus still `ToolCard`.
+                #
+                # Aborting the command is not a surface that wants the
+                # keyboard: the card it marks interrupted is a ledger row, not
+                # an input, so there is nothing here for Esc to hand the key
+                # to. `_return_focus_to_composer` is still guarded, so a
+                # command aborted while an approval is up leaves the approval
+                # holding focus.
+                self._return_focus_to_composer()
                 return
             # Nothing to stop. Explicitly NOT clearing the composer.
+            #
+            # But DO come home: this is the return the reported defect leaves
+            # through. Esc from a focused tool card on an idle app measures
+            # `pending=False streaming=False children=0`, so it exits here and
+            # never reaches the call at the end of this method. Measured before
+            # the fix: Esc from a focused card left `focused=ToolCard` with
+            # `_focus_is_claimed()` False — the app's one "get me out of here"
+            # key left the user stranded in the ledger.
+            self._return_focus_to_composer()
             return
 
         if pending or streaming:
@@ -15891,6 +16310,13 @@ class OperatorApp(App[None]):
         else:
             self._stop_offered_at = None
             self._stop_offer_count = 0
+
+        # The live-turn half of the same behaviour: Esc that actually stopped
+        # something also brings the keyboard home. Last, so every branch above
+        # that legitimately owns the key has already returned — the docstring's
+        # rule is that Esc means one thing wherever focus happens to be, and
+        # landing back in the composer is the rest of that promise.
+        self._return_focus_to_composer()
 
     def _expire_stop_offer(self, armed_at: float) -> None:
         """Drop the escalation promise from a standing offer once it lapses.
@@ -19763,6 +20189,14 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
+            # THE ECHO RIDES THE HOLD, for the same reason the attachments do:
+            # this prompt is dispatched by `_consume_compaction_input` minutes
+            # later, through the same worker and the same
+            # `except OversizedRequest` a direct submit uses. Without the rows
+            # travelling with it, a refusal on this route had nothing to
+            # withdraw and left the transcript asserting a message that never
+            # went (review round 2, MAJOR-3).
+            self._interaction.compaction.held_blocks = (user_block, image_blocks)
             self._interaction.compaction.accepted_draft = self._interaction.turn.submitted_draft
             self._interaction.compaction.accepted_message_id = self._echo_message_id(session.prompt)
             user_block.navigation_anchor_id = self._interaction.compaction.accepted_message_id
@@ -19784,9 +20218,22 @@ class OperatorApp(App[None]):
             # so re-reading it here saw an empty map and queued the prompt
             # without its screenshot (review round 19).
             self._images_held_for_compaction = dict(attachments or {})
-            self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
+            # The queued NOTICE travels with the hold for the same reason the
+            # blocks do: its message ("sends when compaction finishes") is only
+            # true while the hold has the prompt, so the dispatch that ends the
+            # hold also ends the notice — see `CompactionInteraction.held_notice`
+            # (design round 3, D15).
+            queued_notice = NoticeBlock("queued — sends when compaction finishes", "note")
+            self._append_block(queued_notice)
+            self._interaction.compaction.held_notice = queued_notice
             self._maybe_name_conversation(named)
             return
+        # HELD ACROSS THE DISPATCH so a refusal can take the echo back down.
+        # Set before `_start_turn` rather than after: the worker it starts can
+        # reach its `except` before this line would otherwise run, and an echo
+        # the worker cannot see is one it cannot withdraw. Cleared by the
+        # worker's `finally` on every path (see `_start_turn_for`).
+        self._interaction.turn.submitted_blocks = (user_block, image_blocks)
         echo = self._start_turn(sent, images)
         if isinstance(echo, _PendingUserEcho):
             user_block.navigation_anchor_id = echo.message_id
@@ -19868,6 +20315,10 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
+                # DELIVERED — so if the transport had to shrink an attachment to
+                # get it here, this is the moment the user can be told. See
+                # `_report_wire_refit_for`.
+                self._report_wire_refit_for(source)
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
                 # `CancelledError` is a `BaseException`, so it slides straight
@@ -19880,6 +20331,11 @@ class OperatorApp(App[None]):
                 aborted = True
                 raise
             except Exception as error:  # surface, never crash the app
+                # Lazy, matching the other two references to this module here:
+                # `attach_client` is imported on the owned-resume branch only,
+                # and the startup path stays light.
+                from local_operator.mobile.attach_client import OversizedRequest
+
                 error_text = str(error)
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
@@ -19893,6 +20349,45 @@ class OperatorApp(App[None]):
                 ):
                     text_line, kind = self._no_session_notice(unsent=True)
                     self._notice_for(source, text_line, kind)
+                elif isinstance(error, OversizedRequest):
+                    # THE MESSAGE WAS NEVER SENT, and that is the whole reason
+                    # this branch exists rather than falling through to the
+                    # bare-error one below. `OversizedRequest` is raised
+                    # INSTEAD of the socket write (see `fit_request_frame`), so
+                    # unlike every other failure here the composer's content is
+                    # not merely un-answered — it is un-delivered, and the only
+                    # copy of it is the one this worker is holding. Printing the
+                    # error alone would leave the user with a refusal notice and
+                    # no text and no attachment: their work, gone, for a
+                    # transport limit they cannot see.
+                    #
+                    # So the draft goes back the same way a dead runtime returns
+                    # it, and the error's own sentence is the notice — it
+                    # already names the size, the ceiling that applied, and
+                    # which attachment to drop, which is what makes the refusal
+                    # actionable.
+                    #
+                    # AND THE ECHO COMES DOWN WITH IT, before anything is said,
+                    # so the refusal is not printed under a prompt row the
+                    # transcript is about to retract.
+                    self._withdraw_user_echo_for(source)
+                    self._notice_for(
+                        source,
+                        # The neighbouring runtime-stopped notice tells the user
+                        # their text survived and this one did not, so the user
+                        # was told to act without being told they still had
+                        # anything to act with (design round 1, D7).
+                        f"{error} — your message is back in the composer",
+                        "warning",
+                    )
+                    # AFTER the explanation. `_restore_unsent_for` can append a
+                    # `DraftRecoveryNotice`, and appending it first put the
+                    # offer to restore ABOVE the reason anything needs restoring
+                    # — the transcript read effect-then-cause (design round 1,
+                    # D5). On the common branch it loads the composer directly
+                    # and appends nothing, so this only reorders the case that
+                    # has two rows to order.
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -19933,6 +20428,12 @@ class OperatorApp(App[None]):
             finally:
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
+                # The echo is only withdrawable while the send's outcome is
+                # unknown. Past this point the prompt was either delivered (the
+                # row is true and permanent) or already withdrawn above, and a
+                # stale reference would let a LATER refusal remove the rows of
+                # an earlier, successfully delivered message.
+                source.turn.submitted_blocks = None
                 source.active_workers -= 1
                 self.call_later(self._source_frontend_changed, source)
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong
@@ -21765,7 +22266,20 @@ class OperatorApp(App[None]):
         restore = self._org_chart_focus_restore
         self._org_chart_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # The `or` alone was not enough, and the `except` was not catching
+            # what it looked like it caught: a widget removed while the mode was
+            # up is not None, so `or` does not fire, and `.focus()` on a DETACHED
+            # widget is a silent NO-OP rather than a raise (measured: stale card
+            # is_attached=False display=False, .focus() raised nothing and left
+            # focus exactly where it was). The close path therefore left focus
+            # stranded on whatever held it. Same guard as
+            # `_close_subagent_view`, which already had this right.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
@@ -21976,7 +22490,16 @@ class OperatorApp(App[None]):
         restore = self._settings_focus_restore
         self._settings_focus_restore = None
         try:
-            (restore or self._editor()).focus()
+            # Stale-target guard, for the reason `_close_org_chart_view` records:
+            # `.focus()` on a detached widget is a silent no-op, so neither the
+            # `or` nor the `except` below caught a restore target that had been
+            # removed while the page was up.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
         except Exception:
             pass  # the widget that had focus is gone; the mode still closed
         return True
@@ -23095,8 +23618,8 @@ class OperatorApp(App[None]):
         # report every cold session as a prehistoric runtime.
         if bool(getattr(session, "is_cold", False)):
             return
-        owner_version = str(getattr(session, "owner_version", "") or "")
-        owner_ref = str(getattr(session, "owner_source_ref", "") or "")
+        runtime_version = str(getattr(session, "runtime_version", "") or "")
+        runtime_ref = str(getattr(session, "runtime_source_ref", "") or "")
         # The subject of an owner notice is the SESSION, so the debounce is
         # keyed by it: "once per session per process", which is what design
         # §6.7 and this method's own contract say. Keyed on the session id
@@ -23114,7 +23637,9 @@ class OperatorApp(App[None]):
         subject = _session_subject(session)
         from local_operator.update import BuildStamp
 
-        owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
+        owner = (
+            BuildStamp(version=runtime_version, source_ref=runtime_ref) if runtime_version else None
+        )
         if owner is not None and owner == loaded:
             return
         # WHICH SIDE IS STALE? A difference alone does not say, and this branch
@@ -23175,9 +23700,9 @@ class OperatorApp(App[None]):
         # is literally the condition the runtime waits for, and it is the one
         # that is also true of a session sitting at an empty prompt (design
         # review round 1, D3).
-        idle_probe = getattr(session, "owner_idle", None)
+        idle_probe = getattr(session, "runtime_idle", None)
         ask = getattr(session, "request_refresh", None)
-        owner_idle = bool(idle_probe()) if callable(idle_probe) else False
+        runtime_idle = bool(idle_probe()) if callable(idle_probe) else False
 
         def announce_stale() -> None:
             """C\u2032: this session is on an older build and will switch on its own.
@@ -23278,7 +23803,7 @@ class OperatorApp(App[None]):
                 notice_kind="note",
             )
 
-        if owner_idle and callable(ask):
+        if runtime_idle and callable(ask):
             logger.debug(
                 "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
                 reason,
@@ -26752,16 +27277,16 @@ class OperatorApp(App[None]):
         # credential store — crossed out or dropped every row the session
         # could actually switch to (D3, review round 2).
         session = self._session
-        owner_catalogue = getattr(session, "owner_model_catalogue", None)
-        if callable(owner_catalogue):
-            owner_rows: list[dict[str, Any]] = []
+        runtime_catalogue = getattr(session, "runtime_model_catalogue", None)
+        if callable(runtime_catalogue):
+            runtime_rows: list[dict[str, Any]] = []
             try:
-                fetched = owner_catalogue()
+                fetched = runtime_catalogue()
                 if isinstance(fetched, list):
-                    owner_rows = fetched
+                    runtime_rows = fetched
             except Exception:
-                owner_rows = []
-            if owner_rows:
+                runtime_rows = []
+            if runtime_rows:
                 from local_operator.providers.controller import CatalogueEntry
 
                 known = {entry.selector for entry in entries}
@@ -26784,16 +27309,18 @@ class OperatorApp(App[None]):
                         # router reaches a follower through this path at all.
                         routed=bool(row.get("routed", False)),
                     )
-                    for row in owner_rows
+                    for row in runtime_rows
                     if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
                 ]
-                owner_usable = {
-                    str(row.get("provider", "") or "") for row in owner_rows if row.get("connected")
+                runtime_usable = {
+                    str(row.get("provider", "") or "")
+                    for row in runtime_rows
+                    if row.get("connected")
                 }
                 # The owner's usable set EXTENDS, never replaces: the local
                 # store may name providers the owner's static catalogue did
                 # not (aggregators enumerate only live).
-                usable = owner_usable | (usable or set())
+                usable = runtime_usable | (usable or set())
         rows = [
             ModelRow(
                 provider=entry.provider,
@@ -28848,12 +29375,12 @@ class OperatorApp(App[None]):
                 if not accepts():
                     return
                 if self._is_current(source) and panel.accepts(generation):
-                    panel.fail_answer(generation, str(error))
+                    panel.fail_answer(generation, error_text(error))
                     if not self._editor().text.strip():
                         self._editor().load_text(question)
                     self._sync_aside_fork_hint()
                 else:
-                    target.fail(str(error))
+                    target.fail(error_text(error))
                     if not source.draft.text.strip():
                         source.draft.text = question
                 return
@@ -34974,11 +35501,11 @@ def _owner_is_not_behind_this_window(owner: Any, loaded: Any, on_disk: Any) -> b
         return True
     from local_operator.update import parse_version
 
-    owner_parsed = parse_version(owner.version)
+    runtime_parsed = parse_version(owner.version)
     loaded_parsed = parse_version(loaded.version)
-    if owner_parsed is None or loaded_parsed is None:
+    if runtime_parsed is None or loaded_parsed is None:
         return False
-    return owner_parsed > loaded_parsed
+    return runtime_parsed > loaded_parsed
 
 
 def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
@@ -35010,7 +35537,7 @@ def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
     """
     from local_operator.update import parse_version
 
-    owner_parsed = parse_version(owner.version)
+    runtime_parsed = parse_version(owner.version)
     loaded_parsed = parse_version(loaded.version)
     # An unparseable side whose string DIFFERS from the other is unrankable
     # outright: ``0.51.31rc1`` vs ``0.51.30`` can be compared only by ordering,
@@ -35020,9 +35547,9 @@ def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
     # same-version ref drift, which disk can rank below.) Without this early
     # exit the equal-ref term promoted an unparseable rc to rankable (R2-3,
     # second shape).
-    if owner.version != loaded.version and (owner_parsed is None or loaded_parsed is None):
+    if owner.version != loaded.version and (runtime_parsed is None or loaded_parsed is None):
         return False
-    if owner_parsed is not None and loaded_parsed is not None and owner_parsed != loaded_parsed:
+    if runtime_parsed is not None and loaded_parsed is not None and runtime_parsed != loaded_parsed:
         return True
     if owner.source_ref == loaded.source_ref:
         return True

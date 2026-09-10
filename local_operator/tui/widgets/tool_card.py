@@ -216,6 +216,33 @@ def _category_element(tool_name: str) -> str:
     return _TOOL_CATEGORY.get(tool_name.strip().lower(), "tool.row.name_settled")
 
 
+#: Cells of LEFT inset on an action row's summary, so the icon does not sit
+#: flush against the left wall of the card's own fill.
+#:
+#: The row already reserves two cells for breathing room (`_build_row`:
+#: `width - 2`, the kit's one-cell-each-side rule), but it wrote the summary
+#: starting at column 0 — so both cells were spent on the right and the status
+#: column was inset while the icon and name were not. On a background-filled
+#: card that asymmetry is what a reader sees as "the text is touching the
+#: edge"; every other block in the transcript renders on the transcript's own
+#: ground, where there is no wall to touch.
+#:
+#: Drawn here rather than as `padding-left` in the stylesheet for two reasons.
+#: The sheet cannot branch on width, and this cell has to be GIVEN UP when the
+#: ledger is narrow (see :data:`ROW_INDENT_MIN_WIDTH`). And a `padding` on a
+#: `ToolCard` selector would have to be restated by every `.comfortable-rows`
+#: rule — Textual resolves `padding` as one declaration per rule — which is
+#: three more places for the value to drift.
+ROW_INDENT = 1
+
+#: Below this content width the indent is dropped. Breathing room is the first
+#: thing a narrow ledger should spend: at 30 columns the builder is already
+#: shedding the tool name a character at a time, and taking one more cell
+#: pushes it past the rung where the `⟨∅⟩` answer slot survives — the one
+#: thing `test_activating_an_inert_row_changes_the_painted_frame` protects,
+#: because it is what answers a click on a row with nothing to show.
+ROW_INDENT_MIN_WIDTH = 30
+
 NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
@@ -1776,8 +1803,29 @@ class ToolCard(ExpandableActionBlock):
         and it is the thing standing between a copied stderr and a paste that
         goes straight into a bug report — or, for a diff, between ``+ added``
         and something ``git apply`` will not read.
+
+        The summary row's field also carries :data:`ROW_INDENT`, the cell that
+        keeps the icon off the left wall of the card's own fill. It is layout
+        for exactly the same reason the icon is — drawn by this widget, meaning
+        nothing outside it — so it leaves with the icon rather than turning up
+        as a leading space in a pasted receipt. It is read back off the built
+        row rather than assumed, because the indent is given up on a narrow
+        ledger (:data:`ROW_INDENT_MIN_WIDTH`) and a gutter that over-counts
+        would eat the first character of the tool's name.
         """
-        return self.ICON_COLS if index == 0 else OUTPUT_INDENT
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + self.ICON_COLS
+
+    def _row_indent(self) -> int:
+        """Cells of left inset on the summary row AS BUILT.
+
+        One derivation, shared by the row builder and the copy gutter, so a
+        gutter can never disagree with the row it is measured against — an
+        over-count eats the first character of the tool's name, an under-count
+        pastes a leading space into a bug report.
+        """
+        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
 
     # -- rendering ----------------------------------------------------------
     def refresh_row(self) -> None:
@@ -2194,7 +2242,16 @@ class ToolCard(ExpandableActionBlock):
         )
         summary_element = "tool.row.summary_running" if running else "tool.row.summary_settled"
         summary_style = bindings.style(summary_element)
-        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+        # The LEFT inset is taken off the budget before anything is measured,
+        # so every rung below — the name column, the D8 status cap, the narrow
+        # degradation ladder — sizes itself against the column it will really
+        # be drawn in. Taking it later would let a rung fit itself to a width
+        # the row no longer has and clip on the right.
+        # Same threshold the copy gutter reads (`_row_indent`), against the
+        # width being BUILT rather than the last one built, because this runs
+        # before `_built_width` is updated.
+        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
@@ -2225,6 +2282,8 @@ class ToolCard(ExpandableActionBlock):
             # Too narrow for even a shrunken name: degrade to icon + status
             # so the outcome column survives. This is the last rung.
             row = _row_text()
+            if indent:
+                row.append(" " * indent, style=dim)
             row.append(icon + " ", style=dim)
             if status_runs:
                 used = cell_len(row.plain)
@@ -2330,6 +2389,8 @@ class ToolCard(ExpandableActionBlock):
             summary = truncate_cells(self._summary, budget)
 
         row = _row_text()
+        if indent:
+            row.append(" " * indent, style=dim)
         # See `bindings.BY_ELEMENT["tool.row.icon_running"].note`.
         #
         # A SETTLED icon takes the name's own category ink rather than one

@@ -116,9 +116,9 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
             # The assembled test owns this in-process Session; production's
             # process launcher writes the same claim marker before publishing.
             (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
-            from local_operator.mobile.attach_client import find_owner_record
+            from local_operator.mobile.attach_client import find_runtime_record
 
-            record, _ = find_owner_record(root, sid)
+            record, _ = find_runtime_record(root, sid)
             assert record is not None
             terminal = AttachClient(lambda _: None, lambda _: None)
             await terminal.connect(record, sid)

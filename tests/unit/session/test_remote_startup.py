@@ -70,7 +70,7 @@ async def test_initial_sync_blocks_mutations_and_replays_new_epoch_updates(
             await reached.wait()
             assert viewer._client is not None and viewer._client.connected
             assert viewer.is_cold, "a connected socket must not advertise canonical readiness"
-            assert not viewer._owner_ready.is_set()
+            assert not viewer._runtime_ready.is_set()
 
             entered = [asyncio.Event() for _ in range(3)]
 
@@ -98,7 +98,7 @@ async def test_initial_sync_blocks_mutations_and_replays_new_epoch_updates(
             await asyncio.gather(*tasks)
             assert engagements == 1
             assert not viewer.is_cold
-            assert viewer._owner_ready.is_set()
+            assert viewer._runtime_ready.is_set()
             assert viewer.frontend_state.epoch == handle.frontend_state_seed.epoch
             assert viewer.goal == "new owner state"
             assert [call[0] for call in handle.calls] == ["prompt", "run_slash_authoritative"]
@@ -171,7 +171,7 @@ async def test_interrupted_initial_sync_closes_socket_and_retries(
                 monkeypatch.setattr(viewer, "_load_history", original)
                 await viewer._ensure_bound()
                 assert not viewer.is_cold
-                assert viewer._owner_ready.is_set()
+                assert viewer._runtime_ready.is_set()
     finally:
         release.set()
         if not binding.done():
@@ -231,7 +231,7 @@ async def test_recovery_sync_is_the_only_binding_for_waiting_turns(
             await reached.wait()
             assert viewer._recovering
             assert viewer.is_cold
-            assert not viewer._owner_ready.is_set()
+            assert not viewer._runtime_ready.is_set()
             with pytest.raises(ConnectionError, match="reconnect"):
                 await viewer.route_shared_slash("goal", "do not queue during recovery")
 

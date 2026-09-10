@@ -2133,11 +2133,11 @@ async def execute_bash(
                 # delivery sink, and nothing in this codebase calls
                 # ``register_delivery_sink`` — so setting one guarantees the
                 # opposite of what it looks like: the completion is
-                # DEAD-LETTERED ("no live sink for owner ...") and the caller
-                # is never told its background job finished, which is the whole
-                # point of running it detached. Revisit together with a sink
-                # implementation, not before.
-                owner_id=None,
+                # DEAD-LETTERED ("no live sink for registrant ...") and the
+                # caller is never told its background job finished, which is
+                # the whole point of running it detached. Revisit together
+                # with a sink implementation, not before.
+                registrant_id=None,
                 on_cancel=_kill_unstarted,
             )
         except Exception:  # noqa: BLE001 — no manager slot: kill, don't leak
@@ -5623,11 +5623,12 @@ class SendParams(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            "Peer to message: case-insensitive substring of the conversation name, "
-            "session id, or cwd basename (`lop sessions` lists what is running). "
-            "ALTERNATIVE to pid/session, not a companion — pass exactly one way of "
-            "addressing the peer; target together with pid or session is refused as "
-            "an ambiguous recipient."
+            "Peer to message: case-insensitive substring of the conversation "
+            "name, session id, or cwd basename (live only). Live sessions "
+            "match first, then stored ones (`lop sessions --all`); "
+            "disambiguate with pid=/session=. ALTERNATIVE to pid/session, "
+            "not a companion — passing target with either is refused as an "
+            "ambiguous recipient."
         ),
     )
     pid: int | None = Field(
@@ -5734,8 +5735,10 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
             "(exact), or `session` (exact session id) — they are alternatives, and "
             "passing a `target` together with a `pid`/`session` is refused as an "
             "ambiguous recipient rather than resolved. `lop sessions` lists what is "
-            "running. By default the message lands in the peer's mailbox AND wakes the peer if it "
-            "is idle, so an idle peer responds right away; `wake=False` is the quiet "
+            "running; `lop sessions --all` also lists stored ones, and `target` "
+            "matches them by name. By default the message lands in the peer's "
+            "mailbox AND wakes the peer if it is idle, so an idle peer responds "
+            "right away; `wake=False` is the quiet "
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "
             "peer received it."
@@ -5815,6 +5818,7 @@ async def execute_send(
 
     from local_operator.mobile.peer_send import (
         candidate_lines,
+        live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
         validate_peer_body,
@@ -5854,7 +5858,50 @@ async def execute_send(
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
         cold_session_id = cold_session_id or ""
+    if (
+        not cold_session_id
+        and not candidates
+        and params.target
+        and record is None
+        and live_scan_found_nothing(error)
+    ):
+        # The substring found no LIVE record. Fall back to the STORED store
+        # before refusing, so a note addressed by the name a session had before
+        # its terminal was closed still delivers. The resolver decides WHO;
+        # delivery below is the unchanged cold path (spool / engage), so live
+        # still wins over stored for the same substring.
+        #
+        # Entry requires the live error's NO-MATCH form, not a bare
+        # ``record is None``: the resolver also returns no record for a
+        # conflicting target+selector pair (BLOCKER-1) and for a unique match
+        # that is wedged (MAJOR-1). Both are refusals about a live session the
+        # call DID reach — falling through here would deliver to a stored
+        # session that merely shares the name, or spool behind a wedged
+        # process that still owns the target. See
+        # ``peer_send.live_scan_found_nothing``.
+        from local_operator.mobile.peer_send import (
+            resolve_stored_target,
+            stored_candidate_lines,
+        )
+
+        stored_id, stored_candidates, _stored_error = await asyncio.to_thread(
+            resolve_stored_target, params.target
+        )
+        # ``_stored_error`` is deliberately unread: the resolver returns ""
+        # for a no-match by contract (see its docstring) and the refusal that
+        # reaches the user is composed below, where the live miss is known.
+        if stored_candidates:
+            lines = [
+                f"{len(stored_candidates)} stored sessions match; drop `target` and "
+                "retry with session=<id> instead (passing both is refused):"
+            ]
+            lines.extend(stored_candidate_lines(stored_candidates, indent="  ", prefix="session="))
+            return _error(tool_call_id, "send", "\n".join(lines))
+        if stored_id:
+            cold_session_id = stored_id
     if not cold_session_id and (error or record is None):
+        if error and live_scan_found_nothing(error):
+            error = f"no session matches {params.target!r} (searched live and stored sessions)"
         return _error(tool_call_id, "send", error or "no target resolved")
 
     # Self-send guard: the tool runs INSIDE the sender's session process, so
@@ -9970,9 +10017,9 @@ async def execute_jobs(
         # Deliberately NOT owner-scoped, and the same choice ``op="list"``
         # already makes. Scoping these by ``context.job_id`` looked like
         # defence in depth and was a regression: ``run_subagent`` registers
-        # every ``task`` job with ``owner_id=None``, so inside a child session
-        # a scoped lookup misses its own grandchildren — the tool listed a job
-        # and then called that same id "unknown job". The isolation it was
+        # every ``task`` job with ``registrant_id=None``, so inside a child
+        # session a scoped lookup misses its own grandchildren — the tool
+        # listed a job and then called that same id "unknown job". The isolation it was
         # meant to add is structural rather than per-call anyway: each
         # ``Session`` builds its own ``AsyncJobManager`` and nothing reassigns
         # a child's, so a child's manager never holds its parent's rows and

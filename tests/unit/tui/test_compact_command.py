@@ -694,3 +694,160 @@ async def test_the_pass_ends_and_the_held_prompt_is_sent_with_its_image(tmp_path
 
     assert sent, "the pass ended without sending the held prompt"
     assert len(sent[0][1]) == 1, "the pass ended and sent the words without the screenshot"
+
+
+@pytest.mark.asyncio
+async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -> None:
+    """Review round 2, MAJOR-3. The withdrawal has to reach the compaction route.
+
+    The echo is painted at submit so the app answers the keystroke, and a send
+    the transport REFUSES is the one path where that row is a durable lie: same
+    styling as a delivered message, still standing after the user follows the
+    refusal's advice and resends, so the transcript shows one message twice
+    with an attachment that never left the machine (design round 1, D3).
+
+    Round 1 fixed that for a direct submit by holding the blocks on
+    ``turn.submitted_blocks`` — but set them PAST the compaction branch's own
+    ``return``, so a prompt held through a pass and dispatched minutes later
+    ran the same ``except OversizedRequest`` with nothing to withdraw and
+    reproduced D3's exact symptom on that route. Reachability is ordinary: a
+    pass runs for minutes, the hold exists because users keep typing, and the
+    hold deliberately carries the attachments.
+
+    Driven through the real hold and the real dispatch, and asserted in BOTH
+    directions in the sibling below — a withdrawal that fires when the send
+    SUCCEEDS would eat a real turn, which is the worse failure.
+    """
+    from PIL import Image
+
+    from local_operator.mobile.attach_client import OversizedRequest
+    from local_operator.tui.widgets.editor import Editor
+    from local_operator.tui.widgets.image_block import ImageBlock
+
+    path = tmp_path / "a.png"
+    Image.new("RGB", (30, 40), "red").save(path)
+
+    class RefusingCompaction(SlowCompaction):
+        async def prompt(self, text: str, images=None, **kwargs) -> None:  # type: ignore[override]
+            raise OversizedRequest("image 1 is too large to send; remove it and send again")
+
+    app = OperatorApp(lambda: _factory(RefusingCompaction()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app.post_message(events.Paste(str(path)))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(editor.referenced_images()) == 1, "the fixture never attached"
+
+        editor.insert("what does this show")
+        app._compacting = True
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._prompt_held_for_compaction, "the prompt was not held"
+
+        def _rows() -> tuple[int, int]:
+            blocks = app.query_one(TranscriptView).blocks()
+            return (
+                sum(1 for block in blocks if isinstance(block, UserBlock)),
+                sum(1 for block in blocks if isinstance(block, ImageBlock)),
+            )
+
+        assert _rows() == (1, 1), f"the echo was never painted: {_rows()}"
+
+        def _queued_notice() -> NoticeBlock | None:
+            return next(
+                (
+                    block
+                    for block in app.query_one(TranscriptView).blocks()
+                    if isinstance(block, NoticeBlock)
+                    and block._text == "queued — sends when compaction finishes"
+                ),
+                None,
+            )
+
+        # The queued notice is ON the transcript while the hold has the prompt
+        # — the state D15 filed against must be reached before its fix is
+        # asserted, or the withdrawal below would pass vacuously.
+        assert _queued_notice() is not None, "the fixture never painted the queued notice"
+
+        # The pass ends and the held prompt is dispatched — into a refusal.
+        app._compacting = False
+        app._consume_compaction_input(app._interaction)
+        for _ in range(40):
+            await pilot.pause()
+            await asyncio.sleep(0.05)
+            if _rows() == (0, 0):
+                break
+
+        assert _rows() == (0, 0), (
+            "the refused prompt's rows are still on the transcript, so the "
+            f"scroll-back asserts a message that never went: {_rows()}"
+        )
+        # And the QUEUED notice went with them (design round 3, D15): a row
+        # announcing a send that will never happen, sitting where the message
+        # it described used to be, is the same durable lie the withdrawal
+        # exists to remove.
+        assert _queued_notice() is None, (
+            "the queued notice outlived the refusal it was narrating; the "
+            "transcript still promises a send that will not happen"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_held_prompt_that_is_delivered_keeps_its_echo(tmp_path) -> None:
+    """The control for the test above: a DELIVERED hold must keep its rows.
+
+    The withdrawal is only correct if it fires exactly on the refusal path. A
+    version that cleared the rows whenever a held prompt was dispatched would
+    pass its sibling and silently erase every successful post-compaction turn,
+    which is a strictly worse bug than the lie it removes.
+    """
+    from PIL import Image
+
+    from local_operator.tui.widgets.editor import Editor
+    from local_operator.tui.widgets.image_block import ImageBlock
+
+    path = tmp_path / "a.png"
+    Image.new("RGB", (30, 40), "red").save(path)
+
+    app = OperatorApp(lambda: _factory(SlowCompaction()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app.post_message(events.Paste(str(path)))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(editor.referenced_images()) == 1, "the fixture never attached"
+
+        editor.insert("what does this show")
+        app._compacting = True
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._prompt_held_for_compaction, "the prompt was not held"
+
+        app._compacting = False
+        app._consume_compaction_input(app._interaction)
+        for _ in range(40):
+            await pilot.pause()
+            await asyncio.sleep(0.05)
+
+        blocks = app.query_one(TranscriptView).blocks()
+        users = sum(1 for block in blocks if isinstance(block, UserBlock))
+        images = sum(1 for block in blocks if isinstance(block, ImageBlock))
+        assert (users, images) == (1, 1), (
+            "a delivered post-compaction turn lost its transcript rows: " f"{(users, images)}"
+        )
+        # The CONTROL for the notice withdrawal: the message's own row is the
+        # receipt, so the `queued` row must be gone here too — a removal that
+        # only fired on the refusal path would leave it announcing a send the
+        # message below it already proved happened (design round 3, D15).
+        assert not any(
+            isinstance(block, NoticeBlock)
+            and block._text == "queued — sends when compaction finishes"
+            for block in blocks
+        ), "the queued notice still narrates a hold that ended in delivery"

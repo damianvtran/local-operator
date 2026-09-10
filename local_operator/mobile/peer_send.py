@@ -23,10 +23,22 @@ import asyncio
 import os
 import subprocess
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
 
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
+
+#: How much of a stored session store the send-side fallback scans while
+#: hunting for a substring match. Discovery over the WHOLE store would pay one
+#: bounded name read per directory (hundreds exist on a well-used machine) on
+#: a path whose whole job is to answer quickly; the mtime-ordered scan
+#: underneath (:func:`resume._scan_sessions`) visits every directory anyway,
+#: so this caps the ROW-BUILDING half, not the scan. A target that matches
+#: nothing in the newest window is answered with the no-match error naming
+#: ``--session`` — an exact id always resolves, so no message is made
+#: undeliverable by the cap, only un-findable by NAME.
+STORED_DISCOVERY_LIMIT = 200
 
 #: Peer messaging body cap. Well under the registrant's 1 MB line limit so a huge
 #: paste is rejected with a clear message here rather than becoming a silently
@@ -56,12 +68,12 @@ def resolve_peer_target(
     record has that pid does the digit string fall through to the substring
     match, so a session id or name that happens to be numeric still works.
 
-    Only ``live`` records are eligible (a ``wedged`` owner will not service
+    Only ``live`` records are eligible (a ``wedged`` runtime will not service
     the socket promptly; ``stale`` is dead) — unless ``include_wedged``,
     which the kill switch passes: a wedged session is exactly the one a user
     needs to be able to STOP, and the stop ladder's signal rungs are built
-    for an owner that will not answer. A send never wants that; a message to
-    a wedged owner is a message nobody reads.
+    for a runtime that will not answer. A send never wants that; a message to
+    a wedged runtime is a message nobody reads.
 
     A selector (``pid``/``session``) alongside a ``target`` substring is REFUSED
     rather than resolved. The two name different sessions, and the precedence
@@ -153,6 +165,19 @@ def resolve_peer_target(
     needle = needle_source.lower()
     matches: list[Any] = []
     for rec, _state in live:
+        # A session that has never run a turn (``/new``, owner still composing
+        # the first prompt) is excluded from a BROADCAST/substring match: an
+        # interrupt there would drive a turn into a session whose owner has not
+        # started it. An EXACT ``--pid``/``--session`` send still resolves to it
+        # (the sender deliberately named that session); delivery then degrades
+        # to a quiet mailbox dial that drives no turn — see
+        # ``deliver_peer_message``. The default True keeps a record that simply
+        # lacks the attribute (a test double, a hand-built record) eligible; a
+        # pre-field binary's record round-trips through ``from_json``, which
+        # reads the ABSENT key as True (old peer behaviour preserved) — see the
+        # mixed-version note there.
+        if not getattr(rec, "started", True):
+            continue
         haystacks = [
             rec.conversation_name or "",
             rec.session_id or "",
@@ -196,9 +221,10 @@ def resolve_cold_session(session: str) -> "str | None":
     publish, so before this a note to a session whose terminal was closed had
     no target at all — the very case the quiet mailbox mode is for. An exact
     session id is the only accepted form here on purpose: a substring match
-    against on-disk directories has no conversation name to match on and could
-    silently pick the wrong transcript, and picking the wrong recipient is the
-    one failure this whole path must not have.
+    against on-disk directories needs the conversation names that only the
+    picker path reads, which is what :func:`resolve_stored_target` adds.
+    Picking the wrong recipient is the one failure this whole path must not
+    have.
 
     Returns the id when its session directory exists, else None.
     """
@@ -209,6 +235,163 @@ def resolve_cold_session(session: str) -> "str | None":
         return session if directory.is_dir() else None
     except OSError:
         return None
+
+
+class StoredCandidate(NamedTuple):
+    """One stored session a substring target could mean.
+
+    The fields mirror the live :class:`SessionRecord`'s identity fields
+    (``session_id``/``conversation_name``/``cwd``) so the caller's
+    disambiguation code can treat live and stored matches alike. There is no
+    ``pid`` — nothing is running — which is exactly why
+    :func:`stored_candidate_lines` exists rather than the shared
+    :func:`candidate_lines`: a ``pid=`` hint against a stored session is an
+    address that can never resolve.
+    """
+
+    session_id: str
+    conversation_name: str
+    cwd: str = ""
+
+
+#: A stored session's ``cwd`` is deliberately an EMPTY string. There is no
+#: cheap on-disk record of where a session was last opened — the only writer
+#: is the transcript's ``session`` entry, whose head a bounded scan can miss
+#: and whose parse would drag the engine onto an import-guarded path. The
+#: exact-id stored resolution (:func:`resolve_cold_session`) already resolves
+#: with no cwd and delivers correctly; matching by cwd-basename would be a
+#: marginal convenience bought with a fragile scan, so stored candidates match
+#: on name and id only.
+
+
+def live_scan_found_nothing(error: str) -> bool:
+    """True only for the live resolver's "no match anywhere" refusal.
+
+    The stored fallback (:func:`resolve_stored_target`'s callers) runs on this
+    predicate and NOTHING looser. Every OTHER no-record outcome of
+    :func:`resolve_peer_target` is a refusal ABOUT a live session the caller
+    did reach — a conflicting ``target``+selector pair, a unique match that is
+    wedged, a selector naming a dead session — and each of those must stand as
+    the answer: delivering anyway, to a stored session that merely shares the
+    name, would send the message to a recipient the call never named
+    (review round 1, BLOCKER-1) or spool it behind a wedged process that
+    still owns the session (MAJOR-1). ``record is None`` cannot tell those
+    apart; only this error form means the live scan genuinely came up empty
+    and a stored search is a NEW question rather than a second try at a
+    refused one.
+    """
+    return "no live session matches" in error
+
+
+def resolve_stored_target(
+    needle: str,
+    *,
+    live_ids: "set[str] | None" = None,
+    limit: int = STORED_DISCOVERY_LIMIT,
+    root: "Path | None" = None,
+) -> "tuple[str | None, list[StoredCandidate], str]":
+    """Match a substring against STORED sessions the live scan did not claim.
+
+    The fallback half of send-side discovery: :func:`resolve_peer_target`
+    searches discovery records, which only RUNNING sessions publish, so a note
+    addressed to a session by the name it had before its terminal was closed
+    found nothing at all. This searches the session store the same way the
+    ``/resume`` picker lists it — :func:`resume.recent_session_rows` for the
+    id/name ordering, one bounded read per row, subagent scratch sessions
+    excluded — and applies the same case-insensitive substring rule the live
+    path does, over name and session id (a stored session has no recoverable
+    cwd — see :class:`StoredCandidate`).
+
+    ``live_ids`` is an optional exclusion for callers that know which session
+    ids already have a runtime; it exists for the id-collision case, where a
+    stored row's id belongs to a live session and a cold delivery would queue
+    behind a process that could have been dialled. The CLI and the tool pass
+    none: they enter this fallback only on :func:`live_scan_found_nothing`, so
+    no live NAME match can have survived to here, and a stored row and its
+    live session read their name from the same transcript — a collision that
+    differs by name is a rename-timing edge, not a case worth a second
+    registry scan on every stored send to catch.
+
+    Returns ``(session_id, candidates, error)`` shaped like
+    :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
+    difference: ``error`` is ALWAYS empty. A plain no-match is not this
+    function's fact to report — the caller just watched the live scan miss,
+    so the refusal it owes the user names BOTH searches ("searched live and
+    stored sessions"), a sentence only the caller can say. The first or the
+    second element is meaningful, never both; the resolved id feeds the
+    EXISTING :func:`resolve_cold_session` / :func:`deliver_peer_message`
+    path — this function decides WHO, never HOW a message is delivered.
+    """
+    from local_operator.resume import recent_session_rows
+
+    directory = config_dir() if root is None else root
+    try:
+        rows = recent_session_rows(directory, limit)
+    except Exception:  # noqa: BLE001 — discovery must never refuse a send
+        return None, [], ""
+    needle_folded = needle.strip().lower()
+    if not needle_folded:
+        return None, [], ""
+    excluded = live_ids or set()
+    matches: list[StoredCandidate] = []
+    for row in rows:
+        if row.id in excluded:
+            continue
+        candidate = StoredCandidate(session_id=row.id, conversation_name=row.name)
+        haystacks = [candidate.conversation_name, candidate.session_id]
+        if any(needle_folded in field.lower() for field in haystacks):
+            matches.append(candidate)
+    if not matches:
+        return None, [], ""
+    if len(matches) > 1:
+        return None, matches, ""
+    return matches[0].session_id, [], ""
+
+
+def stored_candidate_lines(
+    candidates: "list[StoredCandidate]", *, indent: str = "", prefix: str = "session"
+) -> "list[str]":
+    """One disambiguation line per ambiguous STORED candidate.
+
+    The stored sibling of :func:`candidate_lines`, which prints ``pid=`` hints
+    a stored session can never satisfy — there is no pid. Same layout, same
+    caller-controlled separator convention, but the address shown is the
+    session id: the one form of a stored session's name that always resolves.
+    """
+    lines: list[str] = []
+    gap = "" if prefix.endswith("=") else " "
+    id_w = max(len(c.session_id) for c in candidates)
+    for c in candidates:
+        name = c.conversation_name or "(unnamed)"
+        lines.append(f"{indent}{prefix}{gap}{c.session_id:>{id_w}}  {name}  (not running)")
+    return lines
+
+
+async def _spool_quiet_note(
+    session_id: str, *, text: str, mode: str, sender: "dict[str, Any]"
+) -> str:
+    """Spool one message for a session with NO live runtime. Returns receipt.
+
+    The single spool writer for ``deliver_peer_message``'s cold branch (and
+    historically its unstarted branch): one ``O_APPEND`` row under the
+    session's directory, consumed by the runtime child's boot drain
+    (``process._drain_inbox_into``) the next time that session actually opens
+    a runtime. A spool is ONLY for a session nobody has open — the drain runs
+    once at child boot, so a session that is already live would never read
+    it, which is why a live-but-unstarted target is dialled quietly instead
+    (see ``deliver_peer_message``).
+    """
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    directory = config_dir() / "sessions" / session_id
+    written = await asyncio.to_thread(
+        append_inbox,
+        directory,
+        InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+    )
+    if not written:
+        raise RuntimeError("could not spool the message for that session")
+    return "spooled (will be read when the session next opens)"
 
 
 async def deliver_peer_message(
@@ -223,9 +406,17 @@ async def deliver_peer_message(
 ) -> str:
     """Hand one message to a peer session, running or not. Returns the receipt.
 
-    Three cases, and the split between them is the whole point:
+    Four cases, and the split between them is the whole point:
 
-    - **A live record** — dial it, exactly as before.
+    - **A live, started record** — dial it, exactly as before.
+    - **A live, UNSTARTED record** (``/new``, owner still composing) — dial it
+      in the quiet mailbox shape (``mailbox`` + no wake) so the receive side
+      paints the peer card and persists the row WITHOUT driving a turn. A
+      spool would be wrong here: a live record means the session is already
+      open, and the only inbox consumer is the runtime child's boot drain, so
+      a spooled note would sit unread for that session's whole life while the
+      receipt claimed otherwise. Degrading wake/steer to the quiet dial is
+      the deliverable form of "never drive a turn into an unstarted session".
     - **No runtime, quiet note** (``wake=False`` and mailbox mode) — SPOOL it.
       Starting a runtime here would contradict what the sender asked for:
       ``wake=False`` means "read this on your next turn", not "start one now",
@@ -238,20 +429,28 @@ async def deliver_peer_message(
     from local_operator.mobile.peer_client import send_peer_message
 
     if record is not None:
+        if not getattr(record, "started", True):
+            # Belt-and-braces with the resolver's broadcast exclusion: an
+            # exact-address send (or any caller that bypassed resolution) must
+            # NEVER drive a turn into a session whose owner is still composing
+            # their first prompt — so whatever mode/wake the sender asked for,
+            # the dial uses the record-only shape (``mailbox`` + no wake). The
+            # receive side's record-only branch persists the row and paints the
+            # peer card but spawns no turn, which makes the message visible to
+            # the already-open session NOW; a spool cannot (its only consumer
+            # is the runtime child's boot drain, and this session is past
+            # that). The default True is a defence against a NON-standard
+            # record that simply lacks the attribute (a test double, a
+            # hand-built record); a record a PRE-FIELD binary wrote round-trips
+            # through ``from_json``, which reads the absent key as ``True`` —
+            # old peer behaviour preserved — so an old working session is
+            # dialled normally, never degraded.
+            await send_peer_message(record, text=text, mode="mailbox", wake=False, sender=sender)
+            return "delivered to the mailbox (session not started yet; no turn driven)"
         return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
 
     if not wake and mode == "mailbox":
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
-
-        directory = config_dir() / "sessions" / session_id
-        written = await asyncio.to_thread(
-            append_inbox,
-            directory,
-            InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
-        )
-        if not written:
-            raise RuntimeError("could not spool the message for that session")
-        return "spooled (will be read when the session next opens)"
+        return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)
 
     from local_operator.session.runtime.launch import PeerMessageErrand, engage_runtime
 

@@ -27,6 +27,7 @@ class _Record:
         conversation_name: str = "peer",
         model_label: str = "test/model",
         cwd: str = "/tmp",
+        started: bool = True,
     ) -> None:
         self.pid = pid
         self.session_id = session_id
@@ -35,6 +36,7 @@ class _Record:
         self.cwd = cwd
         self.control_port = 1
         self.control_key = "k"
+        self.started = started
 
 
 def _scan(records: "list[tuple[Any, str]]"):
@@ -200,10 +202,180 @@ def test_only_live_records_are_eligible(fake_scan) -> None:
     assert "not responding" in error
 
 
+def test_a_broadcast_substring_skips_an_unstarted_session(fake_scan) -> None:
+    """A ``/new`` session sitting in the composer (``started=False``) is
+    invisible to a substring/broadcast match: an interrupt there would drive a
+    turn into a session whose owner has not started it."""
+    fresh = _Record(10, conversation_name="release", started=False)
+    working = _Record(20, conversation_name="release cutter", started=True)
+    fake_scan([(fresh, "live"), (working, "live")])
+    record, candidates, error = peer_send.resolve_peer_target(target="release")
+    assert record is working
+    assert candidates == []
+    assert error == ""
+
+
+def test_a_broadcast_matching_only_unstarted_sessions_finds_nothing(fake_scan) -> None:
+    fresh = _Record(10, conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(target="release")
+    assert record is None
+    assert "no live session matches" in error
+
+
+def test_an_exact_pid_send_still_resolves_an_unstarted_session(fake_scan) -> None:
+    """The sender deliberately NAMED this session by pid, so it resolves — the
+    delivery layer spools rather than drives a turn (see deliver_peer_message)."""
+    fresh = _Record(10, conversation_name="release", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(pid=10)
+    assert record is fresh
+    assert error == ""
+
+
+def test_an_exact_session_send_still_resolves_an_unstarted_session(fake_scan) -> None:
+    fresh = _Record(10, session_id="fresh-id", started=False)
+    fake_scan([(fresh, "live")])
+    record, _c, error = peer_send.resolve_peer_target(session="fresh-id")
+    assert record is fresh
+    assert error == ""
+
+
 def test_no_target_is_a_clean_error(fake_scan) -> None:
     fake_scan([])
     _r, _c, error = peer_send.resolve_peer_target()
     assert "no target given" in error
+
+
+# --- Stored-session discovery (resolve_stored_target) ----------------------
+#
+# A note addressed by the name a session had before its terminal was closed
+# must still deliver. These pin the fallback's contract: live wins, ambiguity
+# refuses with candidates, and a single stored match resolves to the id that
+# feeds the unchanged cold-delivery path. The store is faked by patching
+# ``resume.recent_session_rows`` — the same scan the picker uses — so the test
+# pins the matching rule, not the filesystem walk.
+
+
+class _StoredRow:
+    """The ``SessionRow`` fields ``resolve_stored_target`` reads."""
+
+    def __init__(self, session_id: str, name: str, mtime: float = 0.0) -> None:
+        self.id = session_id
+        self.name = name
+        self.mtime = mtime
+
+
+def _stored(monkeypatch, rows):
+    monkeypatch.setattr(
+        "local_operator.resume.recent_session_rows",
+        lambda directory, limit=None: rows,
+    )
+
+
+def test_stored_match_by_name_resolves_when_no_live_record(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Improve /credential skill")])
+    session_id, candidates, error = peer_send.resolve_stored_target("credential")
+    assert error == ""
+    assert candidates == []
+    assert session_id == "abc123def456"
+
+
+def test_stored_match_is_case_insensitive(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("abc123def456", "Release Cutter")])
+    session_id, _c, _e = peer_send.resolve_stored_target("release cutter")
+    assert session_id == "abc123def456"
+
+
+def test_live_ids_exclude_a_running_session_s_own_stored_row(monkeypatch, fake_scan) -> None:
+    """The exclusion is by ID, not by name, and exists for the id collision.
+
+    The fallback is entered only after the live scan matched nothing (see
+    ``live_scan_found_nothing``), so a live session sharing the stored row's
+    NAME cannot be what this guards: both read their name from the same
+    transcript. What the exclusion exists for is a stored row whose ID belongs
+    to a session that currently has a runtime — delivering cold to it would
+    queue behind a process that could have been dialled. Review round 1,
+    MINOR-3: an earlier draft of this test passed a live NAME and asserted the
+    stored row still returned, which pinned nothing the production callers
+    exercise.
+    """
+    live = _Record(10, session_id="shared-id", conversation_name="live name")
+    fake_scan([(live, "live")])
+    _stored(monkeypatch, [_StoredRow("shared-id", "old name"), _StoredRow("other-id", "old name")])
+    session_id, candidates, error = peer_send.resolve_stored_target(
+        "old name", live_ids={"shared-id"}
+    )
+    assert error == ""
+    assert candidates == []
+    # The live-owned row is skipped; the distinct stored row still resolves.
+    assert session_id == "other-id"
+
+
+def test_ambiguous_stored_matches_are_refused_with_candidates(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(
+        monkeypatch,
+        [_StoredRow("id1", "multi one"), _StoredRow("id2", "multi two")],
+    )
+    session_id, candidates, error = peer_send.resolve_stored_target("multi")
+    assert session_id is None
+    assert error == ""
+    assert [c.session_id for c in candidates] == ["id1", "id2"]
+    lines = peer_send.stored_candidate_lines(candidates, indent="  ", prefix="session")
+    assert lines == [
+        "  session id1  multi one  (not running)",
+        "  session id2  multi two  (not running)",
+    ]
+
+
+def test_no_stored_match_is_a_clean_no_match(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+    _stored(monkeypatch, [_StoredRow("id1", "something else")])
+    session_id, candidates, error = peer_send.resolve_stored_target("nothing-here")
+    assert (session_id, candidates, error) == (None, [], "")
+
+
+def test_an_unreadable_store_never_refuses_a_send(monkeypatch, fake_scan) -> None:
+    fake_scan([])
+
+    def _boom(directory, limit=None):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("local_operator.resume.recent_session_rows", _boom)
+    session_id, candidates, error = peer_send.resolve_stored_target("anything")
+    assert (session_id, candidates, error) == (None, [], "")
+
+
+def test_stored_resolution_flows_into_spool_delivery(monkeypatch, tmp_path) -> None:
+    """A stored substring match delivers through the EXISTING cold path.
+
+    ``resolve_stored_target`` decides WHO; ``deliver_peer_message`` still owns
+    HOW. This pins that a resolved stored id spools to the inbox on a quiet
+    mailbox (wake=False) exactly as an exact-id cold send does — the fallback
+    does not rebuild delivery.
+    """
+    import asyncio
+
+    sid = "deadbeef0123"
+    directory = tmp_path / "sessions" / sid
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
+
+    receipt = asyncio.run(
+        peer_send.deliver_peer_message(
+            None,
+            session_id=sid,
+            text="hello from the past",
+            mode="mailbox",
+            wake=False,
+            sender={},
+        )
+    )
+    assert receipt == "spooled (will be read when the session next opens)"
+    assert (directory / "inbox.jsonl").is_file()
 
 
 def test_validate_body_rejects_empty_and_oversized() -> None:
@@ -493,3 +665,147 @@ def test_a_non_dict_sender_cannot_escape_the_handler(monkeypatch) -> None:
             raise RuntimeError("hostile keys")
 
     assert peer_send.resolve_sender_identity(_HostileMapping()) == {}
+
+
+# --- ``started`` gating on the DELIVERY path ---------------------------------
+#
+# ``resolve_peer_target`` excludes an unstarted session from a broadcast, but
+# an exact-address send still resolves to it. The quiet-mailbox dial below is
+# the belt-and-braces that makes "no turn is ever driven into an unstarted
+# session" hold even for a caller that bypassed resolution — a DIAL, not a
+# spool, because a live record means an open session whose only inbox
+# consumer is the runtime child's boot drain (Q1: a spooled note was never
+# read while that session stayed open).
+
+
+def _unstarted_record(session_id: str = "fresh-id") -> registry.SessionRecord:
+    return registry.SessionRecord(
+        pid=4242,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="fresh",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unstarted_live_session_is_dialled_quietly_never_spooled(
+    monkeypatch, tmp_path
+) -> None:
+    """An exact send to a LIVE unstarted session DIALS in the record-only
+    shape (mailbox + no wake) whatever the sender asked for, so the peer card
+    is painted and the row persisted for the already-open session without
+    driving a turn — and nothing is spooled, because no live session would
+    ever drain it."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    record = _unstarted_record()
+    dials: list[tuple[str, bool]] = []
+
+    async def _dial(
+        rec: Any, *, text: str, mode: str, wake: bool, sender: Any
+    ) -> str:  # noqa: ANN401
+        assert rec is record
+        dials.append((mode, wake))
+        return "delivered to the mailbox (will be read on the next turn)"
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
+
+    for mode, wake in (("mailbox", False), ("mailbox", True), ("steer", False), ("steer", True)):
+        detail = await peer_send.deliver_peer_message(
+            record,
+            session_id=record.session_id,
+            text=f"note-{mode}-{wake}",
+            mode=mode,
+            wake=wake,
+            sender={"pid": 1},
+        )
+        assert (
+            detail == "delivered to the mailbox (session not started yet; no turn driven)"
+        ), f"mode={mode} wake={wake}"
+
+    # Every requested mode/wake combination degraded to the quiet dial: a
+    # turn-driving shape (wake=True or a steer) must never reach the socket.
+    assert dials == [("mailbox", False)] * 4
+    # And nothing was spooled: a live unstarted session would only drain an
+    # inbox row at a future cold open, which is exactly the invisibility the
+    # dial exists to avoid. The delivery touched the socket, not the file.
+    assert not (tmp_path / "sessions" / record.session_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
+    """The new branch must not change the normal path: a started session is
+    dialled with the sender's own mode/wake and its ack detail is returned
+    verbatim."""
+    record = _unstarted_record()
+    record.started = True
+
+    async def _dial(rec: Any, *, text: str, mode: str, wake: bool, sender: Any) -> str:
+        assert rec is record
+        return "delivered and woke the session" if wake else "delivered to the mailbox"
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", _dial, raising=True)
+    detail = await peer_send.deliver_peer_message(
+        record,
+        session_id=record.session_id,
+        text="hi",
+        mode="mailbox",
+        wake=True,
+        sender={"pid": 1},
+    )
+    assert detail == "delivered and woke the session"
+
+
+def test_a_record_without_the_started_key_reads_as_started() -> None:
+    """Mixed-version: a record an OLDER (pre-field) binary wrote has no
+    ``started`` key, and such a session had no composer gate — so the absent
+    key reads True and old-peer behaviour is preserved (broadcasts reach a
+    working old runtime; exact sends dial it). A CONSTRUCTED record keeps the
+    dataclass default False. See ``SessionRecord.from_json``."""
+    record = registry.SessionRecord.from_json(
+        {
+            "pid": 4242,
+            "kind": "tui",
+            "session_id": "old-id",
+            "conversation_name": "old",
+            "cwd": "/tmp",
+            "model_label": "test/model",
+            "control_port": 1,
+            "control_key": "k",
+        }
+    )
+    assert record.started is True
+    # The dataclass default is untouched: a fresh this-binary record (the
+    # composer window) is still constructed unstarted.
+    assert (
+        registry.SessionRecord(
+            pid=4242,
+            kind="tui",
+            session_id="new-id",
+            conversation_name="new",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+        ).started
+        is False
+    )
+    # An explicit False on the wire still round-trips as False.
+    explicit = registry.SessionRecord.from_json(
+        {
+            "pid": 4242,
+            "kind": "tui",
+            "session_id": "fresh-wire",
+            "conversation_name": "fresh",
+            "cwd": "/tmp",
+            "model_label": "test/model",
+            "control_port": 1,
+            "control_key": "k",
+            "started": False,
+        }
+    )
+    assert explicit.started is False

@@ -1,4 +1,4 @@
-"""Opt-in display pages of the owner's canonical durable replay.
+"""Opt-in display pages of the runtime's canonical durable replay.
 
 The journal may contain hundreds of MB of ignored host checkpoints while its
 conversation is only a few KB. Reuse the resident canonical replay, not a second
@@ -16,7 +16,7 @@ import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.transcript import (
@@ -33,20 +33,20 @@ if TYPE_CHECKING:
 DISPLAY_HISTORY_CAPABILITY = "display-history-window-v1"
 
 #: Separate from the capability above, and it MUST stay separate. That one is a
-#: presence flag with no version handshake, so it cannot express "this owner
+#: presence flag with no version handshake, so it cannot express "this runtime
 #: also pages pre-compaction history". :class:`DisplayHistoryWindow` forbids
-#: extra fields, so an owner that emitted ``audit``/``audit_available`` to a
+#: extra fields, so a runtime that emitted ``audit``/``audit_available`` to a
 #: viewer built before those fields existed would fail that viewer's validation
 #: and turn into a FAILED ATTACH — not a degraded one. Mixed builds against one
 #: sessions directory are routine here (the global uv-tool runtime is updated
 #: independently of a repo checkout's venv), so this is a live rollout hazard
-#: rather than a theoretical one. The owner emits the new fields only to a
+#: rather than a theoretical one. The runtime emits the new fields only to a
 #: viewer that negotiated this string.
 DISPLAY_HISTORY_AUDIT_CAPABILITY = "display-history-audit-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
 
-# Per OWNER, not per viewer: a fleet of sessions must not retain a full replay
+# Per RUNTIME, not per viewer: a fleet of sessions must not retain a full replay
 # per speculative attach. Admission examines only the already bounded page,
 # never walks the whole canonical history merely to decide whether to cache it.
 DISPLAY_PAGE_CACHE_ENTRIES = 4
@@ -59,7 +59,18 @@ class DisplayHistoryWindow(BaseModel):
 
     status: Literal["ok", "reset", "full_required"] = "ok"
     conversation_id: str
-    owner_epoch: str
+    # Wire compat for the ``owner_epoch`` → ``runtime_epoch`` rename. Reads
+    # accept BOTH keys, but the wire keeps emitting ``owner_epoch`` this
+    # release: the DTO is ``extra="forbid"`` and crosses the socket, a
+    # pre-rename viewer's DTO knows only ``owner_epoch``, and mixed-version
+    # attach is supported — emitting the new key would fail that viewer's
+    # ``model_validate`` on every page and break the attach outright (worse
+    # than the degrade the rename was hedging against). The field therefore
+    # stays named ``owner_epoch`` — ``model_dump`` emits the field name on
+    # every wire route — and flips to ``runtime_epoch`` (name, emit, and
+    # dropping the old validation choice together) in the release after this
+    # PR, once no pre-rename viewer can attach.
+    owner_epoch: str = Field(validation_alias=AliasChoices("owner_epoch", "runtime_epoch"))
     history_generation: int
     through_id: str | None
     messages: list[AgentMessage] = Field(default_factory=list)
@@ -85,6 +96,19 @@ class DisplayHistoryWindow(BaseModel):
     #: phase drains, rather than claiming the conversation starts there.
     audit_available: bool = False
 
+    @property
+    def runtime_epoch(self) -> str:
+        """Runtime-internal name for the epoch while the wire key is held back.
+
+        The wire emits ``owner_epoch`` this release (see the field above), so
+        the FIELD carries the old name while the rename's internal callers —
+        the capture path's parameter and claims, plus the tests — already use
+        ``runtime_epoch``. This bridge keeps both names readable until the
+        flip release swaps the field name and drops this property. Drop after
+        the release that follows this PR.
+        """
+        return self.owner_epoch
+
 
 #: Fields the audit capability introduced. Stripped for a viewer that did not
 #: negotiate :data:`DISPLAY_HISTORY_AUDIT_CAPABILITY`; see its comment for why
@@ -106,7 +130,7 @@ def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[
 
     Stripping in only some of them yields a viewer that attaches cleanly and
     then fails later — on its first scroll up, or on the first refresh after
-    the owner appends a row — which is a worse failure than any single route
+    the runtime appends a row — which is a worse failure than any single route
     breaking on its own. Round 1 review found the third route unstripped after
     this docstring had asserted there were two: if a fourth is ever added,
     update this list in the same commit.
@@ -189,7 +213,7 @@ def _retained_size(value: object, limit: int) -> int | None:
     Deliberately an OVER-estimate: ``sys.getsizeof`` charges per-object CPython
     overhead (measured ~7.5x a pickled page — 91,960 accounted against 12,172
     serialized), so the effective retention ceiling is well under the nominal
-    2 MiB. That direction is the safe one for a per-owner budget multiplied
+    2 MiB. That direction is the safe one for a per-runtime budget multiplied
     across a fleet, but anyone re-tuning the constant should size it against
     ACCOUNTED bytes rather than expecting a wire-sized figure.
     The fixed allowance covers the four LRU nodes and bookkeeping. Framework
@@ -231,6 +255,10 @@ def display_window(
     transcript: Transcript,
     *,
     conversation_id: str,
+    # Held at ``owner_epoch`` for one release: the runtime-side callers pass
+    # this by keyword from ``session.py``, whose owner is the remaining
+    # owner→runtime identifier pass, not this wire-compat PR. The value flows
+    # into the ``runtime_epoch`` DTO field and token claims below.
     owner_epoch: str,
     through_id: str | None,
     before: str | None = None,
@@ -259,7 +287,7 @@ def display_window(
         # the signed ``before`` token, which is already keyed here, and the two
         # phases mint structurally different token payloads. So a context page
         # and an audit page can never collide on one key, and — because the
-        # phase is only ever read from a signature this owner minted — a viewer
+        # phase is only ever read from a signature this runtime minted — a viewer
         # cannot ask for audit rows without having been handed a cursor to them.
         before,
         anchor,
@@ -273,7 +301,7 @@ def display_window(
     page = _capture_display_window(
         transcript,
         conversation_id=conversation_id,
-        owner_epoch=owner_epoch,
+        runtime_epoch=owner_epoch,
         through_id=through_id,
         before=before,
         anchor=anchor,
@@ -483,7 +511,7 @@ def _capture_display_window(
     transcript: Transcript,
     *,
     conversation_id: str,
-    owner_epoch: str,
+    runtime_epoch: str,
     through_id: str | None,
     before: str | None = None,
     anchor: str = "",
@@ -500,7 +528,7 @@ def _capture_display_window(
     generation = transcript._history_generation
     envelope: dict[str, Any] = dict(
         conversation_id=conversation_id,
-        owner_epoch=owner_epoch,
+        runtime_epoch=runtime_epoch,
         history_generation=generation,
         through_id=through_id,
     )
@@ -509,10 +537,15 @@ def _capture_display_window(
         claims = _verify(before, transcript._history_page_key)
         if claims.get("conversation_id") != conversation_id:
             raise ValueError("history token belongs to another conversation")
-        if (
-            claims.get("owner_epoch") != owner_epoch
-            or claims.get("history_generation") != generation
-        ):
+        # Wire compat: tokens minted before the ``owner_epoch`` →
+        # ``runtime_epoch`` rename carry the old claims key, and a mismatch
+        # here reads as status="reset" — a silent window reset plus a
+        # full-replay refetch, not an error — so read old-then-new. Drop the
+        # ``owner_epoch`` read after the release that follows this PR.
+        claims_epoch = claims.get("owner_epoch")
+        if claims_epoch is None:
+            claims_epoch = claims.get("runtime_epoch")
+        if claims_epoch != runtime_epoch or claims.get("history_generation") != generation:
             return DisplayHistoryWindow(status="reset", **envelope)
         through_id = claims.get("through_id")
         envelope["through_id"] = through_id

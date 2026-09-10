@@ -412,10 +412,10 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
         if spawned_child is not None:
             from local_operator.mobile.attach_client import (
                 AttachClient,
-                find_owner_record,
+                find_runtime_record,
             )
 
-            record, _ = await asyncio.to_thread(find_owner_record, root, spawned_child)
+            record, _ = await asyncio.to_thread(find_runtime_record, root, spawned_child)
             if record is not None:
                 child_client = AttachClient(lambda _: None, lambda _: None)
                 await child_client.connect(record, spawned_child)

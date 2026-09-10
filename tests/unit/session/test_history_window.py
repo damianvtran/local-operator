@@ -1,10 +1,13 @@
 """Canonical display pages never substitute a truncated context for history."""
 
 import asyncio
+import base64
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from local_operator.harness.types import (
     CustomMessage,
@@ -15,8 +18,11 @@ from local_operator.harness.types import (
 )
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
+    DisplayHistoryWindow,
     _audit_entry_cursor,
+    _sign,
     display_window,
+    wire_payload,
 )
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
@@ -138,6 +144,104 @@ async def test_signed_page_scope_and_anchor_validation(tmp_path: Path) -> None:
         == "reset"
     )
     assert window(transcript, before=first.snapshot_token, anchor="missing-id").status == "reset"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_keeps_the_old_epoch_key_and_reads_both(
+    tmp_path: Path,
+) -> None:
+    """A pre-rename viewer must keep attaching while the rename lands.
+
+    The DTO is ``extra="forbid"`` and crosses the socket, and a pre-rename
+    viewer's DTO knows only ``owner_epoch`` — so the wire must keep EMITTING
+    the old key this release or that viewer's ``model_validate`` fails on
+    every page and the mixed-version attach breaks outright. Reads accept
+    both keys, so a page from the flipped emit direction validates too.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    page = window(transcript)
+    fresh = wire_payload(page, audit_capable=True)
+    # The wire key stays ``owner_epoch`` this release; ``runtime_epoch`` on
+    # the wire is exactly what a pre-rename ``extra="forbid"`` viewer rejects.
+    assert "runtime_epoch" not in fresh
+    assert fresh["owner_epoch"] == "synthetic-epoch"
+    # ``sync_wire_payload`` nests this same ``model_dump`` field-name emit in
+    # the attach sync frame and the ``frontend_sync`` RPC, so pin the dump
+    # key directly rather than only the audit-stripped wrapper.
+    dumped = page.model_dump(mode="json")
+    assert "runtime_epoch" not in dumped
+    assert dumped["owner_epoch"] == "synthetic-epoch"
+    # Reads accept BOTH keys: old wire pages keep validating, and so does a
+    # page from a runtime that already flipped the emit to ``runtime_epoch``.
+    legacy = wire_payload(page, audit_capable=True)
+    legacy["runtime_epoch"] = legacy.pop("owner_epoch")
+    restored = DisplayHistoryWindow.model_validate(legacy)
+    assert restored.owner_epoch == "synthetic-epoch"
+    assert restored.runtime_epoch == "synthetic-epoch"
+
+
+@pytest.mark.asyncio
+async def test_a_pre_rename_viewer_still_accepts_the_wire_page(tmp_path: Path) -> None:
+    """The exact attach break round 1 flagged, held shut by a fixture viewer.
+
+    A pre-rename build's DTO knows ``owner_epoch`` only and is
+    ``extra="forbid"``; this double recreates it field-for-field (minus the
+    audit fields, which that viewer negotiates away). If the emit ever flips
+    before pre-rename viewers are gone, THIS validate raises first — instead
+    of the viewer's attach dying on every page.
+    """
+
+    class _PreRenameViewerWindow(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        status: str
+        conversation_id: str
+        owner_epoch: str
+        history_generation: int
+        through_id: str | None
+        messages: list[dict[str, Any]]
+        before_token: str | None = None
+        snapshot_token: str | None = None
+        has_more: bool = False
+        total_message_count: int = 0
+        theme_turn_count: int = 0
+        opener_text: str = ""
+        start: int = 0
+        durable_seed_ids: list[str] = []
+        durable_seed_tool_ids: list[str] = []
+
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    page = window(transcript)
+    accepted = _PreRenameViewerWindow.model_validate(wire_payload(page, audit_capable=False))
+    assert accepted.owner_epoch == "synthetic-epoch"
+
+
+@pytest.mark.asyncio
+async def test_a_before_token_minted_with_the_old_claims_key_still_verifies(
+    tmp_path: Path,
+) -> None:
+    """HMAC page tokens outlive the claims-key rename.
+
+    A token whose claims carry ``owner_epoch`` must keep verifying as ``ok``:
+    a mismatch here reads as ``status="reset"`` — a silent window reset plus
+    a full-replay refetch, never an error.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_messages([Message.user(str(i)) for i in range(130)])
+    first = window(transcript)
+    assert first.before_token
+    header = first.before_token.split(".")[0]
+    claims = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+    assert claims["runtime_epoch"] == "synthetic-epoch"
+    legacy_claims = {**claims, "owner_epoch": claims.pop("runtime_epoch")}
+    legacy_token = _sign(legacy_claims, transcript._history_page_key)
+    assert window(transcript, before=legacy_token).status == "ok"
+    # The dual read must not swallow a genuine mismatch: a stale epoch still
+    # resets, so this compat read cannot mask a cross-epoch replay.
+    stale = _sign({**legacy_claims, "owner_epoch": "gone"}, transcript._history_page_key)
+    assert window(transcript, before=stale).status == "reset"
 
 
 @pytest.mark.asyncio

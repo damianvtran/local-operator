@@ -946,11 +946,12 @@ async def _run_in_background(
             f"eval: {code.strip().splitlines()[0][:60] if code.strip() else 'code'}",
             _runner,
             # Unowned ON PURPOSE — see the matching note in bash's
-            # ``_detach_to_job``. An ``owner_id`` without a registered delivery
-            # sink (nothing calls ``register_delivery_sink``) dead-letters the
-            # completion instead of scoping it, so a subagent would never be
-            # told its own background job had finished.
-            owner_id=None,
+            # ``_detach_to_job``. A ``registrant_id`` without a registered
+            # delivery sink (nothing calls ``register_delivery_sink``)
+            # dead-letters the completion instead of scoping it, so a
+            # subagent would never be told its own background job had
+            # finished.
+            registrant_id=None,
             on_cancel=_kill_unstarted_kernel,
         )
     except Exception:  # noqa: BLE001 — no slot for the job: kill, don't leak

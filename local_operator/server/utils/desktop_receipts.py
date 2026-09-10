@@ -1,9 +1,9 @@
 """Durable at-most-once receipts for desktop control requests.
 
-The owner already reserves natural prompt IDs across process replacement. Slash
+The runtime already reserves natural prompt IDs across process replacement. Slash
 controls do not have that property, so an HTTP retry must not re-run a side
 effect merely because its response was lost. A pending receipt after a crash is
-explicitly indeterminate; only replay-safe owner admissions may resume it. No
+explicitly indeterminate; only replay-safe runtime admissions may resume it. No
 secret input or raw request body is journalled here.
 """
 
@@ -73,7 +73,7 @@ class DesktopReceipts:
         fingerprint = hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        # Coalesce retries of THIS request, not unrelated sessions: an owner
+        # Coalesce retries of THIS request, not unrelated sessions: a runtime
         # compaction can wait on a provider, and must not block another session's
         # prompt admission. Cross-process races still use the SQLite transaction.
         lock, users = self.locks.get(key, (asyncio.Lock(), 0))

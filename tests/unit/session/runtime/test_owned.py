@@ -228,6 +228,32 @@ def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
     assert handle.session_projection_seed.conversation_name == ""
 
 
+def test_the_started_hook_reaches_the_registrant() -> None:
+    """``_publish_session_started`` (wired onto the session and called from
+    ``_run_turn_pipeline``) flips the registrant's record bit, and is a no-op
+    for a host that never grew one."""
+    handle, _ = make_handle()
+    started_calls: list[bool] = []
+
+    class _Registrant:
+        def set_record_started(self, started: bool) -> None:
+            started_calls.append(started)
+
+    handle._registrant = _Registrant()
+    handle._publish_session_started()
+    assert started_calls == [True]
+
+    # A reduced host with no registrant must not fail the turn.
+    handle._registrant = None  # type: ignore[attr-defined]
+    handle._publish_session_started()
+    assert started_calls == [True]
+
+    # A registrant that predates the setter (a reduced test double) is skipped.
+    handle._registrant = object()
+    handle._publish_session_started()
+    assert started_calls == [True]
+
+
 @pytest.mark.asyncio
 async def test_full_auto_approves_inline_without_a_card() -> None:
     """With the owner's saved default at full-auto, the gate answers True
@@ -1698,10 +1724,10 @@ async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
     # failure `_cancel_job_quietly` swallows by design.
     real_cancel = session.jobs.cancel
 
-    async def flaky_cancel(job_id, *, owner_id=None):  # noqa: ANN001, ANN202
+    async def flaky_cancel(job_id, *, registrant_id=None):  # noqa: ANN001, ANN202
         if job_id in (ids[1], ids[2]):
             raise RuntimeError("child refuses to die")
-        return await real_cancel(job_id, owner_id=owner_id)
+        return await real_cancel(job_id, registrant_id=registrant_id)
 
     session.jobs.cancel = flaky_cancel  # type: ignore[assignment]
 

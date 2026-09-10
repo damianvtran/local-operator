@@ -213,6 +213,22 @@ class SessionRecord:
     #: A turn is running right now. The picker's liveness marker, and the
     #: difference between a session that is working and one merely resident.
     busy: bool = False
+    #: This session has run at least one REAL turn (a user prompt, a wake
+    #: delivery, a resume catch-up — anything through ``_run_turn_pipeline``).
+    #: ``False`` marks the window after ``/new`` when the record is already
+    #: published but the owner is still composing their first prompt, so a
+    #: peer broadcast or an exact-address wake/steer must not drive a turn
+    #: into it. One-way per session identity: once a real turn has run it
+    #: stays True. Two paths other than a turn set it — a TUI ``/new``
+    #: rebind re-seeds it for the NEW identity (see
+    #: ``RuntimeServer.reset_record_started``), and a boot that RESUMED a
+    #: history-bearing conversation seeds True at record construction (see
+    #: ``RuntimeServer.__init__``) so the idle session is peer-visible
+    #: before any turn runs in the new process. Every heartbeat/republish
+    #: carries it forward so it is never reset by a later write.
+    #: Deserialization overrides the default for pre-field records —
+    #: see ``from_json``.
+    started: bool = False
     #: No front end is attached. A working session with nobody watching is
     #: exactly what this release makes possible, so it is worth naming.
     detached: bool = False
@@ -228,7 +244,7 @@ class SessionRecord:
     # is required to read.
     #
     # The record IS the version channel between a viewer and a runtime. An
-    # attach client reads it before dialing (``find_owner_record``) and holds
+    # attach client reads it before dialing (``find_runtime_record``) and holds
     # it at bind, so one comparison there is complete — a runtime's build
     # cannot change while the process lives.
 
@@ -283,5 +299,26 @@ class SessionRecord:
         # Tolerate unknown keys (a NEWER binary's record read by an older
         # daemon mid-upgrade): forward-compat here is what lets a restart
         # rolling-upgrade the daemon without the phone losing sessions.
+        #
+        # ``started`` is the one field whose ABSENT key carries meaning: this
+        # binary always serializes it (``to_json`` is ``asdict``), so a record
+        # without the key was written by a PRE-field binary — and a pre-field
+        # session had no composer gate at all, so to it "started" can only
+        # mean True. Reading absent-as-True restores old-peer behaviour
+        # exactly: broadcasts still reach a working old runtime (it keeps
+        # heartbeating its key-less record until it restarts, which for
+        # daemon/cmux sessions is days, not an upgrade window), and an exact
+        # send dials it rather than spooling into an inbox only a boot-time
+        # drain ever reads. The honest cost is the mirror image: an OLD
+        # binary's fresh ``/new`` composer stays wakeable — but that is
+        # precisely the old binary's own behaviour, unfixable from here until
+        # it restarts, so True is the only default that does not penalise the
+        # working old sessions for a bug they do not have. The dataclass
+        # default stays ``False`` because a CONSTRUCTED record is a fresh
+        # this-binary session (the composer window the field exists for);
+        # only a deserialized key-less record is assumed pre-field.
         known = {f for f in SessionRecord.__dataclass_fields__}
-        return SessionRecord(**{k: v for k, v in data.items() if k in known})
+        fields = {k: v for k, v in data.items() if k in known}
+        if "started" not in data:
+            fields["started"] = True
+        return SessionRecord(**fields)

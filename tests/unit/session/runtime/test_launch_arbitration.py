@@ -941,10 +941,10 @@ async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
         control_key="k" * 16,
     )
     # A record IS present and the lease IS held by a live pid: construction is
-    # over and this runtime is simply unreachable. `find_owner_record` is a
+    # over and this runtime is simply unreachable. `find_runtime_record` is a
     # function-local import in the loop, so it is patched at its source module.
     monkeypatch.setattr(
-        "local_operator.mobile.attach_client.find_owner_record",
+        "local_operator.mobile.attach_client.find_runtime_record",
         lambda config_dir, session_id: (record, os.getpid()),
     )
     monkeypatch.setattr(launch_module, "_lease_holder", lambda config_dir, session_id: os.getpid())
