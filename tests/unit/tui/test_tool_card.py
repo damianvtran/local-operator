@@ -1731,9 +1731,26 @@ async def test_a_focused_row_is_marked_on_the_ground_distinctly_from_hover() -> 
 
 @pytest.mark.asyncio
 async def test_shift_tab_out_of_the_composer_lands_on_the_last_action() -> None:
-    """The keyboard's way IN. Tab is spoken for inside the composer (it
-    indents, TUI-013), so Shift+Tab is the door, and it opens onto the most
-    recent action rather than the oldest."""
+    """Pins the HARNESS's reverse-tab order, not a route the product has.
+
+    Read this before citing it. In `_ComposerApp` — a stripped harness with a
+    transcript and an editor and nothing else — Shift+Tab out of the composer
+    does reach the most recent action rather than the oldest, and that ordering
+    is what this test still guards.
+
+    In the shipped `OperatorApp` it does not happen at all: `shift+tab` is
+    bound to `cycle_effort` with `priority=True` (`app.py`), and Textual
+    matches priority bindings before the focused widget ever sees the key.
+    Verified against the real app — Shift+Tab from the composer leaves focus on
+    the Editor and cycles the effort tier.
+
+    So there is currently NO keyboard route into the ledger, which leaves
+    `ToolCard.can_focus` (justified below by exactly this route) reachable only
+    by mouse. Closing that gap needs a new key chosen against an already
+    crowded keymap, so it is deliberately out of scope here and tracked
+    separately; the docstring is corrected rather than the test moved, because
+    a test asserting a route the product does not have is worse than no test.
+    """
     app = _ComposerApp()
     async with app.run_test(size=(90, 16)) as pilot:
         view = app.query_one(TranscriptView)
