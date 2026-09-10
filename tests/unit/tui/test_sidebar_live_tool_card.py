@@ -721,6 +721,61 @@ async def test_a_gate_parked_call_keeps_its_waiting_row_on_a_live_projection() -
 
 
 @pytest.mark.asyncio
+async def test_a_live_waiting_card_is_not_doubled_by_the_gated_projection() -> None:
+    """Round 2 Q-R2-1: the fold's mount consults the already-painted registry.
+
+    The MAJOR-1 test above drives a FakeSession whose gate answers WITHOUT any
+    live card ever mounted, so the fold's append is the only row and a double
+    mount cannot show. On the REAL path — ``/resume`` onto a gated turn, or a
+    sidebar switch back to one — the turn's own ``ToolStarted`` mounted a
+    clocked card during adoption, and the gate-free seed subtraction correctly
+    declines to skip the held call: the fold then appended a SECOND ``waiting``
+    row beside the live one, and ``_paint_skipped_live_tool_rows`` had nothing
+    to reconcile because the skip list was empty. The one-row rule the live-skip
+    arm enforces now covers this arm too: a call id with a card already on
+    screen mounts nothing, and the pending scan re-marks the EXISTING row.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Gated(FakeSession):
+        """Both accessors answer with the held call: a gated turn is streaming."""
+
+        def pending_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+    session = Gated()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+
+        # The live turn mounted its card when ToolStarted fired: clocked and
+        # registered, exactly as adoption leaves it when the projection runs.
+        live_card = ToolCard("call-gated", PARKING_TOOL, {"job_id": "j1"})
+        app._append_block(live_card)
+        app._tool_cards["call-gated"] = live_card
+
+        app._project_settled_rows(_history_with_one_call("call-gated"))
+        cards = [
+            b
+            for b in app._transcript_view().blocks()
+            if isinstance(b, ToolCard) and b.tool_call_id == "call-gated"
+        ]
+        assert len(cards) == 1, (
+            "the projection mounted a second row beside the live card — "
+            "one call has exactly one visible row on the gated path too"
+        )
+        assert cards[0] is live_card, "the surviving row must be the live one"
+        assert (
+            cards[0]._state == "waiting"
+        ), "the pending scan still owns the state correction: waiting, not running"
+
+
+@pytest.mark.asyncio
 async def test_a_painted_skipped_row_settles_success_through_the_controller() -> None:
     """Round 1 Q-1: the adopt path registers the row it paints.
 

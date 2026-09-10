@@ -1079,6 +1079,15 @@ def replay_tool_call(
             # knows whether a card is already on screen.
             self._projection_skipped_live.append(call)
             return
+        # The gate-free seed answered "not live", but the seed is a snapshot:
+        # a call parked at an approval gate is subtracted out of it (so the
+        # row paints `waiting`, not `running`) while the live ToolStarted
+        # already mounted a card during adoption. Mounting a second row here
+        # is the same duplicate the live-skip above prevents, one arm over —
+        # consult the already-painted registry exactly as the outcome branch
+        # does (QA round 2, Q-R2-1).
+        if self._painted_tool_card(call_id) is not None:
+            return
     card = ToolCard(
         call_id,
         getattr(call, "name", "") or "",
