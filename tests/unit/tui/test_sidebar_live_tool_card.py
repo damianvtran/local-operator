@@ -49,7 +49,13 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import AgentTool, TextContent, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Message,
+    TextContent,
+    ToolCall,
+    ToolResult,
+)
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
@@ -655,3 +661,188 @@ async def test_a_replayed_running_row_never_starts_its_clock() -> None:
         OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
         assert len(app._tool_cards) == 1
         assert len([b for b in view.blocks() if isinstance(b, ToolCard)]) == 1
+
+
+def _history_with_one_call(call_id: str, tool_name: str = PARKING_TOOL) -> list[Message]:
+    """A tail whose last assistant message asks for exactly one call.
+
+    The shape every live-projection test needs: the call has no result yet,
+    so whether the replay settles it, skips it, or the pending scan re-marks
+    it is exactly what each test asserts on.
+    """
+    return [
+        user_message("run the thing"),
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id=call_id, name=tool_name, arguments={"job_id": "j1"})],
+            stop_reason="toolUse",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_gate_parked_call_keeps_its_waiting_row_on_a_live_projection() -> None:
+    """Round 1 MAJOR-1: the projection seed subtracts the pending set.
+
+    A turn parked at an approval gate is ALSO a streaming one, so both
+    live-id accessors answer with exactly the call the gate holds. Seeding
+    the skip set with the un-subtracted answer skipped that call out of the
+    replay, and the painter then showed it `running` while it waited on the
+    user — the documented "waiting wins" rule of `_mark_pending_tool_rows`
+    could not fire, because no replayed row existed to re-mark. The seed is
+    the gate-free set, so the held call takes the mount → `mark_waiting`
+    route that predates this PR.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Gated(FakeSession):
+        """Both accessors answer with the held call: a gated turn is streaming."""
+
+        def pending_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+    session = Gated()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-gated"))
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1, "one row for the held call, mounted by the replay"
+        assert cards[0]._state == "waiting"
+        assert "tool-running" not in cards[0].classes
+        # A waiting row owns no clock either: nothing started executing.
+        assert cards[0]._started is None
+
+
+@pytest.mark.asyncio
+async def test_a_painted_skipped_row_settles_success_through_the_controller() -> None:
+    """Round 1 Q-1: the adopt path registers the row it paints.
+
+    The skipped call's ToolStarted predates this process's subscription, so
+    the controller never knew the call: the real ToolEnded buffered as an
+    orphan and turn-end retirement stamped a genuinely successful call
+    `interrupted`. The projection now registers the painted ids with the
+    controller — the same seam the presentation-commit path uses — so the
+    end pairs with the painted card and the receipt reads success.
+    """
+    from local_operator.harness.types import ToolExecutionEndEvent, ToolResult
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Live(FakeSession):
+        def pending_display_tool_ids(self) -> set[str]:
+            return set()
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-live"}
+
+    session = Live()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-live"))
+        card = app._tool_cards["call-live"]
+        assert card._state == "running"
+
+        # The end takes the route a real session's end takes: through the
+        # controller, not straight to the card. Registered at paint time, it
+        # pairs here instead of buffering behind a start nobody saw.
+        end = ToolExecutionEndEvent(
+            tool_call_id="call-live",
+            tool_name=PARKING_TOOL,
+            result=ToolResult(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                content=[TextContent(text="The job finished.")],
+                duration_s=2.4,
+            ),
+            duration_s=2.4,
+        )
+        controller = app._controller
+        assert controller is not None
+        controller._on_event(end)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._state == "success", "a real success must not read interrupted"
+        assert card._duration == 2.4, "the executor's measured interval is the receipt"
+        # Settled through the ordinary path: the registry released the card,
+        # so turn death has nothing left to retire as interrupted.
+        assert "call-live" not in app._tool_cards
+        assert app._retire_live_tool_cards() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_re_delivered_start_never_rearms_the_withheld_clock() -> None:
+    """Round 1 U1/U2: re-entry preserves the withheld clock, settle stays honest.
+
+    `/resume` onto a parked turn, and a switch away and back, both re-deliver
+    the still-in-flight ToolStarted to the card the projection painted.
+    `begin_running` used to restart `_started` at that instant: `0s` on
+    arrival, a clock ticking from the RESUME, and a receipt settled to the
+    time since the command. A restored card cannot date itself, so the
+    re-entry must not arm a clock; the settle falls back to the executor's
+    measured interval — the only number that is about the call.
+    """
+    from local_operator.harness.types import (
+        ToolExecutionEndEvent,
+        ToolExecutionStartEvent,
+        ToolResult,
+    )
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Live(FakeSession):
+        def pending_display_tool_ids(self) -> set[str]:
+            return set()
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-live"}
+
+    session = Live()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-live"))
+        card = app._tool_cards["call-live"]
+        assert card._state == "running"
+        assert card._started is None
+
+        # The re-delivered start — the exact re-entry `/resume` and a return
+        # visit produce when the owner's live seed replays through the
+        # controller.
+        controller = app._controller
+        assert controller is not None
+        controller._on_event(
+            ToolExecutionStartEvent(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                args={"job_id": "j1"},
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._started is None, "re-entry must not date a card that cannot know"
+        assert card._elapsed() is None, "no elapsed time exists to paint or settle from"
+
+        end = ToolExecutionEndEvent(
+            tool_call_id="call-live",
+            tool_name=PARKING_TOOL,
+            result=ToolResult(tool_call_id="call-live", tool_name=PARKING_TOOL, duration_s=6.0),
+            duration_s=6.0,
+        )
+        controller._on_event(end)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._state == "success"
+        assert card._duration == 6.0, "the measured interval, not time since re-delivery"

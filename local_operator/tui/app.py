@@ -186,6 +186,7 @@ from local_operator.tui.session_presentation import (
     OlderHistoryNotice,
     PreparedReplay,
     SessionPresentation,
+    live_projection_call_ids,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
@@ -4793,13 +4794,15 @@ class OperatorApp(App[None]):
             # An offscreen presentation has no `_session` the projection could
             # ask, so the caller hands the in-flight answer in: a call still
             # executing on the session being prepared must not grow a second
-            # settled row beside the live one.
-            executing = getattr(session, "executing_display_tool_ids", None)
+            # settled row beside the live one. The seed is the gate-free set
+            # (`live_projection_call_ids`) so the pending scan below keeps a
+            # gate-parked call `waiting` instead of the painter showing it
+            # `running`.
             replay.prepare(
                 history,
                 bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
-                live_call_ids=cast(set[str], executing()) if callable(executing) else None,
+                live_call_ids=live_projection_call_ids(session),
             )
             preview_unavailable = (
                 not replay.blocks
@@ -8949,13 +8952,13 @@ class OperatorApp(App[None]):
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
-        executing = getattr(session, "executing_display_tool_ids", None)
         # Snapshot the in-flight calls BEFORE the fold: the answer can change
-        # mid-projection, and replay reads only this set (its own session
-        # fallback finds nothing because the app is not the session).
-        self._projection_live_call_ids = (
-            cast(set[str], executing()) if callable(executing) else set()
-        )
+        # mid-projection, and replay reads only this set. The seed is the
+        # gate-free set (`live_projection_call_ids` documents the pending
+        # subtraction), so a gate-parked call keeps its `waiting` row from
+        # `_mark_pending_tool_rows` below; the fold's own fallback re-asks the
+        # same subtracted question for a target that never seeded.
+        self._projection_live_call_ids = live_projection_call_ids(session)
         try:
             projected = project_settled_rows(self, history, bound=bound)
             # The visible transcript, so the app's own registry is the right
@@ -8964,9 +8967,20 @@ class OperatorApp(App[None]):
             self._mark_pending_tool_rows(
                 self._transcript_view().blocks(), self._session, self._tool_cards
             )
-            self._paint_skipped_live_tool_rows(
+            painted = self._paint_skipped_live_tool_rows(
                 self._transcript_view(), self._tool_cards, self._projection_skipped_live
             )
+            if painted and self._controller is not None:
+                # The adopt path's settle seam. The skipped call's
+                # `ToolStarted` predates this process's subscription, so the
+                # controller never registered it: the eventual `ToolEnded`
+                # would be buffered as an orphan and dropped at turn end, and
+                # `_retire_live_tool_cards` would stamp a REAL success
+                # `interrupted`. Registering the painted ids — what the
+                # presentation-commit path does for its replayed rows — makes
+                # the controller pair the end with this card, and drains an
+                # end that already arrived while the card was being painted.
+                self._controller.register_restored_tools(set(painted))
             self._refresh_working_activity()
             return projected
         finally:
@@ -8981,8 +8995,14 @@ class OperatorApp(App[None]):
         calls: list[Any],
         *,
         collect: list[Any] | None = None,
-    ) -> None:
+    ) -> list[str]:
         """Paint the ONE row for a still-executing call the replay skipped.
+
+        Returns the ids it actually painted, so the caller can hand them to
+        the settle seam: the visible path registers them with the event
+        controller (`register_restored_tools`) because no `ToolStarted` will
+        ever pair their `ToolEnded`; the prepare path ignores the return and
+        registers at commit, where its presentation becomes the app's.
 
         The replay drops the settled row for an in-flight call so the live
         path owns it — but on a LOCAL resume the turn's ``ToolStarted`` fired
@@ -9003,6 +9023,7 @@ class OperatorApp(App[None]):
         caller's bulk mount rather than to the (unmountable) view. The visible
         path leaves it ``None`` and appends to the live view directly.
         """
+        painted: list[str] = []
         for call in calls:
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
@@ -9030,6 +9051,8 @@ class OperatorApp(App[None]):
             # count it, and so `_retire_live_tool_cards` settles it if the
             # owner dies rather than returning a result.
             live_cards[call_id] = card
+            painted.append(call_id)
+        return painted
 
     def on_history_page_notice_requested(self, message: HistoryPageNotice.Requested) -> None:
         message.stop()
