@@ -1,7 +1,7 @@
 """Additive HTTP response models over the canonical runtime's own state schema.
 
 Keep FrontendSync and SlashResult shared with attach clients. A parallel HTTP
-projection would drop new owner fields and turn unknown accounting into zeros.
+projection would drop new runtime fields and turn unknown accounting into zeros.
 """
 
 from typing import Any, Literal
@@ -126,7 +126,7 @@ class AttentionState(BaseModel):
     kind: Literal["complete", "error", "interrupted"] | None
     unseen: bool
     #: ``[published, acknowledged]`` -- monotonic per conversation, and
-    #: independent of the owner epoch, so it orders a conversation's own states
+    #: independent of the runtime epoch, so it orders a conversation's own states
     #: rather than depending on arrival order.
     #:
     #: NOT a merge key: a heal deliberately REPUBLISHES a corrected state under
@@ -136,5 +136,5 @@ class AttentionState(BaseModel):
     #: reads this field; it is a diagnostic ordering hint, and any future
     #: consumer must treat an equal pair as "possibly changed", never as stale.
     revision: list[int]
-    #: Absent on the cold list path; only a live owner can answer it.
+    #: Absent on the cold list path; only a live runtime can answer it.
     supported: bool | None = None

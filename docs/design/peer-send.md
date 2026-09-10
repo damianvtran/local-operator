@@ -163,7 +163,7 @@ Add before the final `raise`:
 if op == "peer_message":
     receive = getattr(h, "receive_peer_message", None)
     if not callable(receive):
-        # An owner host that predates peer messaging. Same optional-capability
+        # A host runtime that predates peer messaging. Same optional-capability
         # pattern as recall_steer (registrant.py:657).
         raise ValueError("this session cannot receive peer messages")
     typed = cast(
@@ -231,9 +231,9 @@ async def receive_peer_message(
 ### 2.3 `TuiSessionHandle.receive_peer_message`
 
 `local_operator/mobile/tui_handle.py` (add after `steer`, ~L306). This handle
-bridges to the app's live `Session` via `self._on_app(...)` / the owner loop.
+bridges to the app's live `Session` via `self._on_app(...)` / the host loop.
 Follow the `steer` shape (`tui_handle.py:272-306`): run the session mutation on
-the owner loop, then fold + notify:
+the host loop, then fold + notify:
 
 ```python
 async def receive_peer_message(
@@ -251,7 +251,7 @@ async def receive_peer_message(
         )
     )
     # session.receive_peer_message is async; _on_app runs sync callables on the
-    # Textual thread. Prefer scheduling the coroutine on the owner loop the same
+    # Textual thread. Prefer scheduling the coroutine on the host loop the same
     # way TuiSessionHandle.prompt does (tui_handle.py:256) via
     # run_coroutine_threadsafe, then awaiting the future. See implementation
     # note below.
@@ -262,9 +262,9 @@ async def receive_peer_message(
 ```
 
 **Implementation note for the coder:** `Session.receive_peer_message` is a
-coroutine that must run on the owner event loop (it touches `_context.messages`,
+coroutine that must run on the host event loop (it touches `_context.messages`,
 the transcript, and may spawn a turn). `TuiSessionHandle` already has the exact
-machinery for "run a coroutine on the owner loop and await it from the
+machinery for "run a coroutine on the host loop and await it from the
 registrant's bridge coroutine" — see `prompt` (`tui_handle.py:231-270`) using
 `asyncio.run_coroutine_threadsafe(run_turn(), owner_loop)` and `_await_future`.
 Reuse that pattern rather than `_on_app` (which is for *sync* callables on the
@@ -406,13 +406,13 @@ that are *not* LLM-visible (wake schedules, checkpoints) — wrong tool here.
 
 Add `PeerMessageDeliveredEvent` to `harness/types.py` beside `WakeDeliveredEvent`
 (`harness/types.py:997`), carrying `body: str` and `sender: dict`. Emit it in the
-record-only branch (§2.4) so the owner TUI paints the indicator the instant the
+record-only branch (§2.4) so the host TUI paints the indicator the instant the
 message lands, even while idle. For the wake/steer branches the row appears
 through the normal turn render, but still emit the receipt so the *indicator* is
 consistent. (Model this on `WakeDeliveredEvent`, which fires *before* the turn
 spawn — `session.py:5599-5610`.)
 
-### 3.3 TUI rendering (owner terminal)
+### 3.3 TUI rendering (host terminal)
 
 Two paths, both in `local_operator/tui/`:
 
@@ -556,7 +556,7 @@ target selector accepts, in priority order:
    candidates (the `sessions` table, §4.4) and exit non-zero asking the user to
    disambiguate with `--pid`. If zero, error.
 
-Only `state == "live"` records are eligible targets (a `wedged` record's owner
+Only `state == "live"` records are eligible targets (a `wedged` record's runtime
 is stuck and will not service the socket promptly; `stale` is dead). If the best
 match is `wedged`, say so explicitly rather than hanging on a dial.
 
@@ -908,7 +908,7 @@ by the unit test if a live old binary is unavailable).
   not try to forbid it.
 - **Target mid-restart (wedged).** `scan` returns `wedged` for a live pid whose
   heartbeat is stale (`registry.py:116`). The socket may still answer, but the
-  owner is stuck. Policy: refuse to dial a `wedged` target with a clear message
+  runtime is stuck. Policy: refuse to dial a `wedged` target with a clear message
   ("target pid N is not responding (heartbeat 90s old); try again"), rather than
   hang. `live` only.
 - **Stale pid reuse.** A `stale` record's pid is gone (`registry.py:110`); `scan`

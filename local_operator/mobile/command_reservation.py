@@ -1,4 +1,4 @@
-"""Owner-loop command identity reservations for mobile continuation input."""
+"""Runtime-loop command identity reservations for mobile continuation input."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _CommandKind = Literal["prompt", "steer"]
 
 
 class CommandReservations:
-    """Bounded undurable identities, mutated only on the session owner's loop.
+    """Bounded undurable identities, mutated only on the session runtime's loop.
 
     The transcript's append-only index is the lifetime authority.  This map
     closes only the pre-append gap, so durable callbacks remove entries without

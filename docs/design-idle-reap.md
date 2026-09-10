@@ -168,7 +168,7 @@ Bare EOF is worse than it looks for exactly the sources we care about.
 `_lease_sidebar_source` calls `RemoteSession.connect` (`app.py:4056-4062`)
 without a `surface` argument, so it defaults to `"terminal"`
 (`remote.py:782`) and `_can_go_cold` is **False**. A parked source that sees
-EOF therefore enters owner-death recovery and, per
+EOF therefore enters runtime-death recovery and, per
 `remote.py:3768-3798`, chases a record for `COLD_FALLBACK_S = 8.0`
 (`remote.py:129`) and then — because it cannot go cold — keeps retrying
 forever while the legacy contract tries to **take over** the session
@@ -252,7 +252,7 @@ using the same method that produced the `app.py:1360-1362` numbers. If the
 p90 lands near the 246 ms cold figure on conversations the user actually
 alternates between, do (B) as a follow-up. My prior is that it will matter
 less than the raw number suggests, because a released source's rebuild no
-longer competes with 11 sibling sockets delivering owner deltas — but that
+longer competes with 11 sibling sockets delivering runtime deltas — but that
 is a prior, not a measurement, and I would not ship (B) on it.
 
 A cheaper middle path worth pricing during implementation: keep a **small**

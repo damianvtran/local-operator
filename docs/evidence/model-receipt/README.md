@@ -7,8 +7,8 @@ the cold-viewer refusal that keeps that receipt honest when nothing is bound.
 Captured with `shot.py.txt`, which imports the SAME `_AsyncLabelSession` the
 regression tests in `tests/unit/tui/test_app_pilot.py` assert against — a
 fake whose `set_model` records the request and never moves the label, which is
-how `RemoteSession` reads for a terminal attached to another owner's session
-until the owner's frontend-state sync arrives. Run from anywhere; the script
+how `RemoteSession` reads for a terminal attached to another runtime's session
+until the runtime's frontend-state sync arrives. Run from anywhere; the script
 locates the repo root from its own path:
 
 ```sh
@@ -30,11 +30,11 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
   for every command that changed nothing (`_system_notice`). Two other cold
   shapes answer differently and are pinned by tests rather than frames: a
   viewer `/stop` ended answers `this session was stopped; /resume <id> reopens
-  it` ahead of the routing seam, and one redialing a dead owner answers
+  it` ahead of the routing seam, and one redialing a dead runtime answers
   `session owner is reconnecting; try /model again in a moment`.
 
 The status band is unchanged between each pair on purpose: it repaints from
-the owner's frontend-state sync, which the fake never delivers. The band's cwd
+the runtime's frontend-state sync, which the fake never delivers. The band's cwd
 is `/private/tmp` because the script `chdir`s there before painting, so no
 worktree path lands in a committed frame. The script stubs the update check
 and waits for the splash's model row to settle, so two runs paint the same

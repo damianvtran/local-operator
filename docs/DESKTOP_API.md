@@ -108,7 +108,7 @@ it is not a cross-process compare-and-swap guarantee.
 
 The existing runtime attach protocol remains `client: "attach"`; desktop
 adapters additionally send `surface: "desktop"` only after discovering
-`desktop-watch-v1` in the runtime record's capabilities. An old owner is refused
+`desktop-watch-v1` in the runtime record's capabilities. An old runtime is refused
 before dialing, since it would otherwise mistake the HTTP proxy for a person at
 a terminal. Terminal and phone handshakes retain their existing defaults.
 
@@ -123,8 +123,8 @@ restores parked-gate OS fallback. A valid desktop notification lease suppresses
 that fallback, so one gate does not produce both an Electron and runtime toast.
 
 `RemoteSession(surface="desktop")` carries this metadata through its existing
-owner binding/recovery path. It goes cold rather than taking over an owner in
-the HTTP process; reconnect does not resurrect an expired desktop lease. Its
+runtime binding/recovery path. It goes cold rather than becoming the runtime
+in the HTTP process; reconnect does not resurrect an expired desktop lease. Its
 `bind_runtime`, `update_desktop_watch`, and identity-checked `answer_gate` helpers
 are host adapters, not another session daemon. Detach still closes only the
 viewer, never the canonical runtime.
@@ -161,38 +161,38 @@ falling back to the parent of the config root when no cwd was retained.
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
-| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | owner receipt; stale owner/request/question409 |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | runtime receipt; stale runtime/request/question409 |
 | GET `.../{id}/events` | optional `epoch`, `after_seq` | authenticated SSE, `data: <DesktopSessionFrame>` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
 
 Create/message/command `request_id` is a canonical lowercase UUID string, reused
 for a retry of the **same** operation. Answer `request_id` is instead the pending
-gate's opaque ID, and answer `epoch` is the **owner** epoch from frontend state,
+gate's opaque ID, and answer `epoch` is the **runtime** epoch from frontend state,
 not the HTTP stream epoch. Approval booleans and question indices are strict.
 Answer bodies are never retained in the HTTP receipt journal or echoed back.
 
 Images use the runtime's `{data_b64,mime_type}` shape (png/jpeg/gif/webp), at most8;
 the encoded message/command body must fit900,000bytes. Empty prompts without an
-image, invalid base64 and slash text on `/messages` return422 before owner binding.
+image, invalid base64 and slash text on `/messages` return422 before runtime binding.
 The existing Electron request transport currently has a smaller262,144byte body
 budget: this checkpoint does not claim larger native image uploads work.
 
 The command endpoint now accepts every shared canonical command and alias.
-Owner controls return actual SlashResult data; native/interactive controls return
+Runtime controls return actual SlashResult data; native/interactive controls return
 typed destination, arguments and form/source/submit metadata, never fake execution
 success. See [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) for all 35 rows and explicit
 frontend responsibilities. On a `team_attached` or `agent_attached` result, the
-owner's `data.request` plus images is admitted **once by the bridge**
+runtime's `data.request` plus images is admitted **once by the bridge**
 under the original request UUID; an added `result.admission` records that fact.
 The renderer must not independently re-submit that consumed request.
 
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
-that the model succeeded or the turn completed. The owner's canonical events
+that the model succeeded or the turn completed. The runtime's canonical events
 and durable history are the authority for completion and side effects. Explicit
 mutations use `RemoteSession.bind_runtime` / existing `engage_runtime` lease
-arbitration. A cold read or stream attaches only to an already-live owner.
+arbitration. A cold read or stream attaches only to an already-live runtime.
 HTTP shutdown/last-reader cleanup only disposes the viewer; it never stops work.
 
 The private0600 `desktop-receipts.db` stores request fingerprints and completed
@@ -201,9 +201,9 @@ changed input returns409. A completed receipt survives HTTP restart. A control
 interrupted between durable reservation and result commit is **indeterminate**:
 a retry returns409 and requires state reconciliation, not another side effect.
 Only natural prompt/steer admissions can retry an indeterminate receipt, because
-the owner already reserves those UUIDs durably. This is at-most-once control
+the runtime already reserves those UUIDs durably. This is at-most-once control
 execution with honest crash ambiguity, not a claim of transactional exactly-once
-execution across the HTTP worker and canonical owner. Receipts currently follow
+execution across the HTTP worker and the canonical runtime. Receipts currently follow
 the retained session lifetime; no automatic deletion/expiry is claimed.
 
 ### Stream ordering and lifecycle
@@ -223,7 +223,7 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
 4. New frames continue in receipt order: `frontend.update` is a canonical field
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
-   Preserve owner sequence/epoch checks independently of semantic event dedupe.
+   Preserve runtime sequence/epoch checks independently of semantic event dedupe.
 
 A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
 cursor requires a gap snapshot. One live shared bridge retains at most256frames
@@ -236,9 +236,9 @@ retrieval is not exposed by this HTTP checkpoint yet.
 Watch ownership belongs to an active SSE subscription, not an arbitrary window
 ID. Visibility and native-notification delivery are aggregated independently
 across its unexpired leases. Renew while the surface is genuinely alive; no
-heartbeat automatically grants presence. Expiry clears owner presence, and ASGI
+heartbeat automatically grants presence. Expiry clears runtime presence, and ASGI
 disconnect cleanup is shielded from the cancelled request scope so lease revoke
-and detach actually reach the owner. A stream alone means neither visible nor
+and detach actually reach the runtime. A stream alone means neither visible nor
 notification-capable. Electron must set can_notify=false until native delivery
 really exists; its gate/turn notification dedupe/click behavior is not implemented
 by these backend routes.
@@ -248,7 +248,7 @@ by these backend routes.
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
 Session/OwnedSessionHandle/RuntimeServer/AttachClient with only the provider
 stream scripted: same-session terminal controls, consumed team prompt, durable
-single admission, actual owner ask/approval futures, invalid/stale answers,
+single admission, actual runtime ask/approval futures, invalid/stale answers,
 ordered replay, session isolation, disconnect/watch cleanup and reopen.
 `tests/e2e/test_desktop_spawn.py` additionally executes the real detached process
 launcher using the built-in test provider, then recreates the HTTP lifespan and

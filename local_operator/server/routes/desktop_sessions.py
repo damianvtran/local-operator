@@ -83,7 +83,7 @@ class Input(BaseModel):
 
 class Seen(Input):
     # A durable completion UUID is the only admission: timestamps or a caller's
-    # owner epoch could accidentally acknowledge a later, unseen outcome.
+    # runtime epoch could accidentally acknowledge a later, unseen outcome.
     completion_token: RequestID
 
 
@@ -212,7 +212,7 @@ async def errors() -> AsyncIterator[None]:
             503, "Read state is busy right now. It will catch up on its own."
         ) from None
     except ConnectionError as error:
-        # A cold session that cannot start an owner reports WHY -- but only when
+        # A cold session that cannot start a runtime reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
         # what certifies the message as one of the vetted configuration
         # sentences (`launch._ACTIONABLE_STARTUP_REASONS`).
@@ -461,7 +461,7 @@ async def command(session_id: str, body: Command, request: Request):
             consumed = outcome.data.get("request", "")
             attached = outcome.data.get("type") in {"team_attached", "agent_attached"}
             if attached and (consumed or body.images):
-                # The owner returns attachment metadata, not a started turn.
+                # The runtime returns attachment metadata, not a started turn.
                 # Match its typed discriminator rather than blindly submitting
                 # any string a listing/picker happens to call a request.
                 detail, duplicate = await bridge.remote.admit_prompt(
