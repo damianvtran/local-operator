@@ -28,14 +28,18 @@ from local_operator.tui.app import (
     CREDENTIAL_ARMED_NOTICE,
     CREDENTIAL_HELD_NOTICE,
     CREDENTIAL_PLACEHOLDER,
+    CREDENTIAL_TYPING_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
     ATTACHMENT_MARKER,
     CREDENTIAL_KEY_PREFIX,
+    CREDENTIAL_MASK_CHAR,
     Attachment,
+    CredentialUnredacted,
     Editor,
+    EditorSubmitted,
     Marked,
     PastedCredential,
     PastedText,
@@ -1371,13 +1375,20 @@ async def test_a_flag_disarm_clears_the_pickers_armed_notice() -> None:
         for _ in range(4):
             await pilot.pause()
         assert editor.credential_armed()
-        assert CREDENTIAL_ARMED_NOTICE in _painted(app), "precondition: the row is up"
+        # Typed through the space, so the capture is open and the row carries
+        # the masking notice rather than the bare armed one.
+        assert CREDENTIAL_TYPING_NOTICE in _painted(app), "precondition: the row is up"
 
         await pilot.press("-")
         for _ in range(8):
             await pilot.pause()
         assert not editor.credential_armed()
-        assert CREDENTIAL_ARMED_NOTICE not in _painted(app), "the promise went with the state"
+        painted = _painted(app)
+        assert CREDENTIAL_ARMED_NOTICE not in painted, "the promise went with the state"
+        # The typed-capture promise must go with it for the same reason: a `-`
+        # means the operator is addressing the COMMAND, so nothing may still
+        # claim their keystrokes are being masked.
+        assert CREDENTIAL_TYPING_NOTICE not in painted, "nor the masking promise"
 
         # And it STAYS cleared: the operator pastes into the disarmed composer,
         # which is the moment the stale row would have lied about.
@@ -1399,9 +1410,27 @@ async def _capture_leaving_a_leftover_token(pilot, app, editor) -> None:
     therefore sits on the EARLIER token, the marker splices there, and the
     token the operator typed at the caret is left in the buffer, unarmed and
     with an empty argument slot.
+
+    THE ``escape`` IS THE PROSE AUTHOR'S KEYSTROKE, and it is what the typed
+    capture makes necessary. The space after that first mention now opens a
+    masked span, so ``command`` is taken as a secret and rendered as bullets —
+    loudly and immediately, which is the point. Esc unredacts it back to the
+    word the operator typed and ends the capture, leaving exactly the prose
+    draft this helper is about. That is the intended cost of the mode: a false
+    positive is visible on the frame and one keystroke to undo, where the false
+    negative it replaces put a plaintext secret in scrollback for good.
     """
-    for char in "fix the /credential command /credential ":
+    for char in "fix the /credential command":
         await pilot.press(char)
+    for _ in range(4):
+        await pilot.pause()
+    # Back out of the capture the prose opened; the masked word returns as text.
+    await pilot.press("escape")
+    for _ in range(4):
+        await pilot.pause()
+    assert "command" in editor.text, "Esc gave the prose back"
+    for char in " /credential ":
+        await pilot.press("space" if char == " " else char)
     for _ in range(4):
         await pilot.pause()
     app.post_message(events.Paste(SECRET))
@@ -1613,7 +1642,12 @@ async def test_a_second_capture_still_arms_while_the_first_chip_is_held() -> Non
             await pilot.pause()
         assert editor.credential_armed(), "the second gesture still arms"
         painted = _painted(app)
-        assert CREDENTIAL_ARMED_NOTICE in painted, "mid-gesture, the armed notice wins"
+        # The separating space also OPENS the typed capture, so the row shows
+        # the more specific of the two mid-gesture notices: the operator's next
+        # keystroke is being masked, which is what they need told. The HELD
+        # notice is what must not win here, and that is the property this line
+        # has always guarded.
+        assert CREDENTIAL_TYPING_NOTICE in painted, "mid-gesture, the capture notice wins"
         assert CREDENTIAL_HELD_NOTICE not in painted, "and the two do not both show"
 
         app.post_message(events.Paste("second-secret-value"))
@@ -1621,3 +1655,885 @@ async def test_a_second_capture_still_arms_while_the_first_chip_is_held() -> Non
             await pilot.pause()
         assert editor.text.count("[Credential #") == 2, "both captures are chipped"
         assert "second-secret-value" not in _painted(app)
+
+
+# ---------------------------------------------------------------------------
+# THE TYPED capture.
+#
+# Everything above this line is about the PASTED gesture. `/credential` shipped
+# in v0.53.0 with a clipboard path and no typed path at all, so the obvious
+# human gesture — typing `/credential 12345` — fell through to the legacy
+# `/credential <KEY>` command with the SECRET as its key argument, and landed in
+# the transcript in plaintext with no chip and no warning. These tests pin the
+# typed path and, more importantly, the several ways it can silently stop
+# masking. Each one is a reproduced failure, not a hypothetical.
+# ---------------------------------------------------------------------------
+
+#: A value shaped like a REAL credential: punctuation, mixed case, digits. The
+#: alphanumeric secrets used above cannot catch the punctuation leak below,
+#: which is exactly how that bug survived its first implementation.
+TYPED_SECRET = "zQ7-TYPED.canary_4417/x+y"
+
+
+async def _type_secret(pilot, editor: Editor, secret: str, prefix: str = "") -> None:
+    """Type ``prefix``, the token, the opening SPACE, then ``secret``.
+
+    No paste anywhere — this is the gesture the operator actually made. The
+    picker is dismissed the way a user does it, so the hand-typed route is
+    measured rather than the completion route.
+    """
+    for char in f"{prefix}/credential":
+        await pilot.press("space" if char == " " else char)
+    await pilot.pause()
+    if editor._picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    await pilot.press("space")
+    await pilot.pause()
+    for char in secret:
+        await pilot.press("space" if char == " " else char)
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_secret_never_enters_the_document() -> None:
+    """THE HEADLINE. Typing the secret masks it and mints the same chip a paste does.
+
+    The reproduction of the reported defect: `/credential 12345` typed by hand
+    produced no chip and put the secret in the submitted text.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, TYPED_SECRET)
+        assert TYPED_SECRET not in editor.text, "the buffer must never hold it"
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * len(TYPED_SECRET)
+        assert editor.credential_typing(), "the capture is open"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == f"[Credential #1, {len(TYPED_SECRET)} chars] "
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert len(payloads) == 1
+        assert payloads[0].value == TYPED_SECRET, "the stored value is exactly what was typed"
+
+
+@pytest.mark.asyncio
+async def test_every_printable_character_is_masked_not_only_alphanumerics() -> None:
+    """The punctuation leak, pinned.
+
+    Textual spells punctuation keys as WORDS (`minus`, `full_stop`), so a
+    handler gated on ``len(event.key) == 1`` masks letters and digits and lets
+    every punctuation character fall through into the document. Measured, the
+    canary rendered as ``•••-TYPED-LEAK-CANARY-4417``: the first hyphen ended
+    the masking and the rest of the secret was typed in plaintext and submitted.
+    Real credentials are mostly punctuation, so that gate leaked nearly every
+    actual secret while passing against an alphanumeric test value.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        # Deliberately not LEADING with `-`: that is the documented flag
+        # escape (`--forget-all`). Every other punctuation character, and a
+        # hyphen in a non-leading position, must be masked.
+        punctuation = "a-_.+/=:@!~"
+        await _type_secret(pilot, editor, punctuation)
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * len(punctuation)
+        for char in punctuation:
+            assert char not in editor.text[len("/credential ") :], f"{char!r} reached the buffer"
+
+
+@pytest.mark.asyncio
+async def test_the_separating_space_is_not_counted_in_the_length() -> None:
+    """``K`` counts the secret, never the delimiter that opened the span.
+
+    The operator can never see the value again, so a length that disagreed with
+    it by one is a receipt they cannot check.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "12345")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "[Credential #1, 5 chars]" in editor.text, "5, not 6"
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == "12345"
+        assert not payloads[0].value.startswith(" ")
+
+
+@pytest.mark.asyncio
+async def test_a_space_inside_the_span_is_part_of_the_secret() -> None:
+    """Passphrases contain spaces; Enter is the terminator, not the space.
+
+    Terminating on the space would truncate a passphrase and type its remainder
+    in PLAINTEXT — this feature's own defect, reappearing inside its fix.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        phrase = "correct horse battery staple"
+        await _type_secret(pilot, editor, phrase)
+        assert phrase not in editor.text
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == phrase, "every space was kept"
+        assert f"{len(phrase)} chars" in editor.text
+
+
+@pytest.mark.asyncio
+async def test_enter_ends_the_secret_and_leaves_the_operator_in_the_composer() -> None:
+    """Enter mints the chip; it does NOT submit.
+
+    The gesture is specified as "hand over a secret and then describe it", so an
+    Enter that also sent the message would make the description impossible to
+    write.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        submitted: list[str] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, EditorSubmitted):
+                submitted.append(message.text)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        await _type_secret(pilot, editor, "12345")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not submitted, "the first Enter must not send the message"
+        for char in "the staging key":
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        assert editor.text == "[Credential #1, 5 chars] the staging key"
+
+
+@pytest.mark.asyncio
+async def test_escape_unredacts_the_typed_characters() -> None:
+    """Esc gives the operator their text back rather than discarding it.
+
+    Retyping a secret from memory is precisely what an operator cannot do, so
+    the recoverable reading is the only safe one. It also ENDS the arm: the
+    operator has visibly backed out, so the next paste must not still be
+    swallowed.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "12345")
+        assert "12345" not in editor.text
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "/credential 12345", "the characters came back"
+        assert not editor.credential_typing()
+        assert not editor.credential_armed(), "Esc ends the gesture too"
+
+
+@pytest.mark.asyncio
+async def test_a_typed_capture_never_routes_to_the_legacy_command() -> None:
+    """The reported defect, at the seam where it did its damage.
+
+    The typed line used to reach `_dispatchable_slash` as
+    ``/credential <secret>``, which the legacy command reads as a KEY NAME — so
+    the app prompted "Paste the value for 12345" with the secret rendered as the
+    key, in the transcript, in plaintext.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        submitted: list[str] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, EditorSubmitted):
+                submitted.append(message.text)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        await _type_secret(pilot, editor, TYPED_SECRET)
+        await pilot.press("enter")  # mints the chip
+        await pilot.pause()
+        await pilot.press("enter")  # sends the message
+        for _ in range(8):
+            await pilot.pause()
+        assert submitted, "the second Enter sends"
+        assert TYPED_SECRET not in " ".join(submitted)
+        assert "[Credential #1," in " ".join(submitted), "the chip goes instead"
+        assert TYPED_SECRET not in _painted(app), "and nothing paints it"
+
+
+@pytest.mark.asyncio
+async def test_bare_credential_with_a_key_still_dispatches_as_the_command() -> None:
+    """The shipped command is untouched when no capture is open.
+
+    ``/credential MY_API_KEY`` arriving as TEXT (a recalled prompt, a restored
+    draft) has passed through no arming gesture, so it must still reach the
+    legacy handler exactly as it always has.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        submitted: list[str] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, EditorSubmitted):
+                submitted.append(message.text)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        editor.load_text("/credential MY_API_KEY")
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        assert not editor.credential_armed(), "arriving text never arms"
+        assert not editor.credential_typing()
+        if editor._picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert submitted == ["/credential MY_API_KEY"], "dispatched unchanged"
+
+
+@pytest.mark.asyncio
+async def test_a_leading_flag_escapes_the_mask_so_the_verbs_stay_typable() -> None:
+    """``--forget-all`` must survive the opening space.
+
+    The credential verbs are flag-shaped precisely so they cannot collide with a
+    key (keys normalize to ``[A-Z0-9_]``). Without the escape the opening space
+    masked them and Enter minted a chip instead of forgetting anything, which
+    regresses the shipped command.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential":
+            await pilot.press(char)
+        await pilot.pause()
+        if editor._picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("space")
+        for char in "--forget-all":
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.text == "/credential --forget-all", "typed verbatim"
+        assert not editor.credential_typing(), "a flag is the command, not a secret"
+        assert not editor.credential_armed()
+
+
+@pytest.mark.asyncio
+async def test_a_hyphen_inside_a_secret_is_masked_like_any_character() -> None:
+    """The flag escape is scoped to the FIRST character only.
+
+    ``-`` is common inside real keys (base64url), so once any character has been
+    typed the operator is entering a value and the flag reading is gone.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "abc-def")
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * len("abc-def")
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == "abc-def"
+
+
+@pytest.mark.asyncio
+async def test_the_caret_leaving_the_span_ends_the_capture_without_disclosing() -> None:
+    """A caret move is not a request for the plaintext back.
+
+    The mask is positional, so a capture left open after the caret moved would
+    append to the value in one place while inserting its cell in another. Asked
+    on ``watch_selection`` because `move_cursor`, a mouse click and an
+    app-set selection all move the caret WITHOUT a caret key being pressed.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "12345")
+        editor.move_cursor((0, 0))
+        await pilot.pause()
+        assert not editor.credential_typing(), "the capture ended"
+        assert "12345" not in editor.text, "and did not write the secret out"
+
+
+@pytest.mark.asyncio
+async def test_the_caret_returning_to_the_token_re_opens_the_capture() -> None:
+    """The span is POSITIONAL: open exactly while the caret is in it.
+
+    Without the reopen, leaving and coming back left an armed token whose next
+    typed character landed in PLAINTEXT — the capture only ever opened on the
+    edit that inserted the space, and that space had already been typed.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential":
+            await pilot.press(char)
+        await pilot.pause()
+        if editor._picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        editor.move_cursor((0, 0))
+        await pilot.pause()
+        assert not editor.credential_typing()
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        assert editor.credential_typing(), "back in the span, masking again"
+        for char in "9999":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "9999" not in editor.text
+
+
+@pytest.mark.asyncio
+async def test_an_empty_secret_mints_nothing() -> None:
+    """``/credential `` + Enter advertises no key.
+
+    A zero-length credential would name a key to the model that can never hold
+    anything, and `store_credential` refuses a blank value regardless.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential":
+            await pilot.press(char)
+        await pilot.pause()
+        if editor._picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "[Credential #" not in editor.text
+        assert not credential_payloads(editor.text, editor._attachments)
+
+
+@pytest.mark.asyncio
+async def test_backspacing_the_delimiting_space_backs_out_of_the_gesture() -> None:
+    """Erasing the span and then the space un-terminates the token.
+
+    The two counters cannot disagree about the length: a backspace inside the
+    span retracts the held character AND its cell together.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "12345")
+        for _ in range(5):
+            await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.text == "/credential ", "the cells went with the characters"
+        assert editor.credential_typing(), "still open, just empty"
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert editor.text == "/credential"
+        assert not editor.credential_typing(), "the gesture is withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_typed_capture_is_dropped_when_the_buffer_is_replaced() -> None:
+    """History recall, a restored draft and `/clear` must not reveal it.
+
+    Abandoned rather than cancelled: restoring the plaintext into a buffer the
+    operator is navigating AWAY from is the one thing that must never happen.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, TYPED_SECRET)
+        editor.clear_content()
+        await pilot.pause()
+        assert not editor.credential_typing()
+        assert TYPED_SECRET not in editor.text
+        assert TYPED_SECRET not in repr(getattr(editor, "_history", []))
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_picker_row_with_enter_arms_and_masks() -> None:
+    """Route 2: Enter accepts the completion; it must not submit the command.
+
+    TWO DIFFERENT ENTERS in one gesture, separated by STATE rather than timing:
+    the picker's accept can only happen while no capture is open, and the mint
+    only once one is. Before this, the accepting Enter ran the command, cleared
+    the buffer, and the operator's next keystrokes were typed into an ordinary
+    unmasked composer.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        submitted: list[str] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, EditorSubmitted):
+                submitted.append(message.text)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        for char in "/credential":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor._picker.is_open(), "precondition: the row is offered"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not submitted, "accepting a completion must not send"
+        assert editor.text == "/credential ", "the token and its space are inserted"
+        assert editor.credential_typing(), "and that space armed the mask"
+        for char in "12345":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "12345" not in editor.text
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == "[Credential #1, 5 chars] "
+        assert not submitted, "the mint Enter does not send either"
+
+
+@pytest.mark.asyncio
+async def test_accepting_the_picker_row_with_tab_arms_and_masks() -> None:
+    """Route 2, Tab. Both keys insert the same completion, so both must arm."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        editor = app._editor()
+        editor.focus()
+        for char in "/credential":
+            await pilot.press(char)
+        for _ in range(4):
+            await pilot.pause()
+        assert editor._picker.is_open()
+        await pilot.press("tab")
+        await pilot.pause()
+        assert editor.text == "/credential "
+        assert editor.credential_typing(), "Tab arms identically to Enter"
+        for char in "12345":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "12345" not in editor.text
+        await pilot.press("enter")
+        await pilot.pause()
+        assert editor.text == "[Credential #1, 5 chars] "
+
+
+@pytest.mark.asyncio
+async def test_pasting_while_armed_still_chips_instantly_in_place() -> None:
+    """The v0.53.0 gesture must not regress.
+
+    The opening space now starts a capture immediately, so a plain
+    ``/credential `` + paste arrives with an OPEN but EMPTY span. That still
+    mints in place rather than being appended and left masked until a further
+    Enter.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        for char in "/credential":
+            await pilot.press(char)
+        await pilot.pause()
+        if editor._picker.is_open():
+            await pilot.press("escape")
+            await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        app.post_message(events.Paste(SECRET))
+        await pilot.pause()
+        await pilot.pause()
+        assert editor.text == f"[Credential #1, {len(SECRET)} chars] ", "chipped in place"
+        assert SECRET not in editor.text
+
+
+@pytest.mark.asyncio
+async def test_pasting_into_a_partly_typed_span_appends_to_the_same_secret() -> None:
+    """One value, one chip: typing a prefix and pasting the rest is ordinary.
+
+    Two chips would split one credential into two the model cannot recombine.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "abc")
+        app.post_message(events.Paste("def"))
+        await pilot.pause()
+        await pilot.pause()
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * 6
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert len(payloads) == 1, "one credential, not two"
+        assert payloads[0].value == "abcdef"
+
+
+# -- the exits, and editing inside the span -----------------------------------
+#
+# Every test below covers a state the 95 tests above passed straight through.
+# The empty-span Esc is the sharpest instance: `test_escape_unredacts_the_typed_
+# characters` types "12345" FIRST, so the zero-character case — the one where
+# the cancel had nothing to replace and re-armed itself — was never reached
+# (review round 1, R1). A guard that cannot go red is worse than no guard.
+
+
+@pytest.mark.asyncio
+async def test_escape_on_an_empty_span_actually_ends_the_capture() -> None:
+    """Esc BEFORE any character is typed must exit, not silently re-arm.
+
+    The regression: `_cancel_credential_typing`'s own `replace()` re-entered the
+    edit funnel, which re-derived the arm from a buffer still ending in
+    `/credential ` with the caret still at its end, and re-opened the capture the
+    cancel had just closed. Esc was inert on the exact key the on-screen notice
+    advertises — measured, three presses changed nothing.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        assert editor.credential_typing(), "precondition: the span is open and empty"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not editor.credential_typing(), "Esc ends the capture"
+        assert not editor.credential_armed(), "and the arm with it"
+        assert editor.text == "/credential ", "the token is left as inert text"
+
+
+@pytest.mark.asyncio
+async def test_prose_after_an_empty_span_escape_is_not_captured() -> None:
+    """The consequence the inert Esc had, pinned at the seam it did damage.
+
+    An operator who armed the mode, changed their mind and pressed Esc had their
+    next sentence swallowed: `is broken please fix` became a stored credential
+    and the message never reached the model.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+        for char in "is broken please fix":
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        assert editor.text == "/credential is broken please fix", "typed as ordinary prose"
+        assert CREDENTIAL_MASK_CHAR not in editor.text, "nothing was masked"
+        assert not credential_payloads(editor.text, editor._attachments), "and nothing minted"
+
+
+@pytest.mark.asyncio
+async def test_escape_with_characters_typed_announces_the_plaintext() -> None:
+    """The unredact is the one exit that ENDS with the secret in the buffer.
+
+    It restores by design (retyping a secret from memory is what an operator
+    cannot do), but the frame after it looks completely ordinary — the amber
+    marker reverts, the masking notice goes — while the next Enter re-commits the
+    original leak. So the exit has to say what it did (design round 1, D1).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        announced: list[int] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, CredentialUnredacted):
+                announced.append(message.length)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        await _type_secret(pilot, editor, "12345")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert editor.text == "/credential 12345", "the characters came back"
+        assert announced == [5], "and the operator is told they are now plaintext"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retry",
+    [
+        # The shape UX walked: the operator explains themselves, then re-arms.
+        "actually /credential",
+        # Straight back to the gesture with nothing in between.
+        "/credential",
+        # Words first, token last — the commonest mid-prose arm.
+        "ok now /credential",
+    ],
+)
+async def test_retrying_the_gesture_after_an_escape_masks_again(retry: str) -> None:
+    """U6 — the cancel's OWN flow: retry on the same line and it must mask.
+
+    Making Esc real (R1/U2) created the state this fails in, so it is the
+    remediation's own regression. Typing a SECOND token walks through spellings
+    (`/crede`, `/creden`, …) that are not tokens, so the latched arm found no
+    match at its anchor and the nearest-match tie-break MIGRATED it back onto
+    the first token earlier in the line. The migration is one-way — the anchor
+    moved with it — so the arm never came home, the caret-at-span-end gate never
+    fired, and the secret typed next was painted in the CLEAR and then parsed as
+    a credential NAME, which is the half the model does learn (UX round 2, U6).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not editor.credential_typing(), "precondition: the cancel landed"
+
+        for char in retry:
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert editor.credential_typing(), f"the retry re-opens the capture after {retry!r}"
+
+        for char in SECRET:
+            await pilot.press(char)
+        await pilot.pause()
+        assert SECRET not in editor.text, "the retyped secret is masked, not painted"
+        assert editor.text.count(CREDENTIAL_MASK_CHAR) == len(SECRET), "one cell per character"
+        assert editor._credential_typed == SECRET, "and the held value is the one typed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "word",
+    [
+        # Longer words that merely START WITH the token must stay prose. The
+        # typed-through rule is PREFIX-OF, not starts-with, precisely so these
+        # cannot inherit an arm.
+        "/credentials",
+        "/credentialx",
+        # Shortened BELOW the `/cred` floor is the operator withdrawing the
+        # gesture, which is the visible way out and must keep working.
+        "/cre",
+        "/credx",
+        # An unrelated command, and ordinary prose.
+        "/help",
+        "notes about the deploy",
+    ],
+)
+async def test_the_retry_rule_does_not_arm_anything_but_the_token(word: str) -> None:
+    """U6's fix must widen the masked set ONLY onto the operator's own gesture.
+
+    The counterpart to the test above, and the one that stops it being satisfied
+    by masking everything: a rule that re-armed on any word at the anchor would
+    swallow prose as a secret, which is the unrecoverable direction. So each
+    word here is typed into exactly the post-cancel state U6 lives in and must
+    leave the following text as PLAIN TEXT.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        for char in word:
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert not editor.credential_typing(), f"{word!r} must not arm a capture"
+
+        for char in "PLAINTEXT_STAYS_VISIBLE":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "PLAINTEXT_STAYS_VISIBLE" in editor.text, "it stays readable"
+        assert CREDENTIAL_MASK_CHAR not in editor.text, "and nothing was masked"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_escape_announces_nothing() -> None:
+    """No characters restored, no warning owed — the notice must not cry wolf."""
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        announced: list[int] = []
+        original = editor.post_message
+
+        def _spy(message):  # type: ignore[no-untyped-def]
+            if isinstance(message, CredentialUnredacted):
+                announced.append(message.length)
+            return original(message)
+
+        editor.post_message = _spy  # type: ignore[method-assign]
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert announced == [], "nothing came back, so nothing is announced"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys, typed, expected",
+    [
+        # Arrow back two, type two: the obvious way to fix a typo mid-token.
+        (("left", "left"), "xy", "ABCDEFxyGH"),
+        # One arrow back, one character.
+        (("left",), "z", "ABCDEFGzH"),
+        # Home, then a character: the whole span jumped, not one cell.
+        (("home",), "0", None),
+    ],
+)
+async def test_typing_inside_the_span_lands_where_the_operator_sees_it(
+    keys: tuple[str, ...], typed: str, expected: str | None
+) -> None:
+    """The held value is a POSITIONAL MIRROR of the mask cells, not an append.
+
+    The regression (UX round 1, U1): the bullet was inserted AT THE CARET while
+    the value appended to the END, and the capture deliberately stays open
+    anywhere inside the span — so the interaction invited the edit and then
+    mis-applied it. Measured, typed `ABCDEFGH` + `←←` + `xy` stored
+    `ABCDEFGHxy` for an intended `ABCDEFxyGH`: the chip reported the RIGHT
+    length with the WRONG order, so the documented integrity check passed on a
+    value that can never be displayed again to catch it.
+
+    ``expected`` is ``None`` where the caret leaves the span entirely: that is a
+    departure, and the capture closes rather than mis-applying the edit.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "ABCDEFGH")
+        for key in keys:
+            await pilot.press(key)
+        await pilot.pause()
+        if expected is None:
+            assert not editor.credential_typing(), "leaving the span ends the capture"
+            return
+        for char in typed:
+            await pilot.press(char)
+        await pilot.pause()
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * len(expected)
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == expected, "the stored value is the one typed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keys, expected",
+    [
+        # Backspace mid-span drops the character BEFORE the caret, not the last.
+        (("left", "left", "backspace"), "ABCDEGH"),
+        # Forward delete drops the one UNDER it.
+        (("left", "left", "delete"), "ABCDEFH"),
+        # Backspace at the end is the ordinary case, and still works.
+        (("backspace",), "ABCDEFG"),
+        # A selection dragged over two cells and deleted takes exactly those two.
+        (("shift+left", "shift+left", "backspace"), "ABCDEF"),
+    ],
+)
+async def test_deleting_inside_the_span_removes_the_character_under_the_caret(
+    keys: tuple[str, ...], expected: str
+) -> None:
+    """Deletion is positional too, by the same mirror and not a second rule.
+
+    Backspace used to drop the LAST held character wherever the caret was, so a
+    backspace between F and G removed H. `delete` and select-and-delete had no
+    handler at all: the mask cell went and the held value did not, leaving the
+    buffer and the value disagreeing about the secret's LENGTH.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "ABCDEFGH")
+        for key in keys:
+            await pilot.press(key)
+        await pilot.pause()
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * len(expected)
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == expected, "the stored value is the one left on screen"
+
+
+@pytest.mark.asyncio
+async def test_selecting_inside_the_span_and_typing_replaces_those_characters() -> None:
+    """Select-and-replace is one edit, and the mirror applies it as one.
+
+    `insert()` ignores the selection, so a printable key over a selection left
+    the selected mask cells in the buffer and appended a third — the buffer and
+    the held value then disagreed on LENGTH, not merely order.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "ABCDEFGH")
+        await pilot.press("shift+left")
+        await pilot.press("shift+left")
+        await pilot.press("Z")
+        await pilot.pause()
+        assert editor.text == "/credential " + CREDENTIAL_MASK_CHAR * 7
+        await pilot.press("enter")
+        await pilot.pause()
+        payloads = credential_payloads(editor.text, editor._attachments)
+        assert payloads[0].value == "ABCDEFZ", "GH was replaced by Z, in place"
+
+
+@pytest.mark.asyncio
+async def test_the_typing_notice_keeps_its_way_out_at_every_width() -> None:
+    """The exit is kept by a LADDER, not by a comment asserting it must be.
+
+    `CREDENTIAL_TYPING_NOTICE`'s own docstring said "Esc cancels" was "exactly
+    the half that must not be the part that crops" — and measured on the real
+    app it was the FIRST thing to crop, lost at 68 columns while `chip` went at
+    56 (design round 1, D2; UX round 1, U3; review round 1, R3). Prose asserting
+    an invariant is not a mechanism enforcing it, so this pins the mechanism at
+    the widths the sweep named.
+    """
+    session = FakeSession()
+    for width in (45, 56, 60, 66, 68, 69, 80, 120):
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            await _boot(pilot, app)
+            editor = app._editor()
+            editor.focus()
+            await _type_secret(pilot, editor, "hunter2-typed-test")
+            for _ in range(3):
+                await pilot.pause()
+            painted = _painted(app).replace("\xa0", " ")
+            assert "Esc cancels" in painted, f"the way out crops at {width} columns"
+            assert (
+                "Enter chips" in painted or "Enter turns it into a chip" in painted
+            ), f"and the key that ENDS the entry is gone at {width} columns"
