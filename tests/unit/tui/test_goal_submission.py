@@ -174,4 +174,14 @@ async def test_goal_submits_cited_image_and_keeps_pasted_lookalikes_out_of_resol
         await pilot.pause()
         assert session.goal == f"Check {payload} against {marker}"
         assert session.prompts == [session.goal]
-        assert session.prompt_images == [[image]]
+        # The PAYLOAD, not the model: `resolve_markers` stamps the chip number
+        # onto a copy of the image so the transport can name the right
+        # attachment in a refusal (design round 2, D8), so the object sent is
+        # equal to the draft's in every field a provider sees but is not `==`
+        # to it. Asserting the bytes keeps this test about WHICH image was
+        # resolved rather than about that presentation field.
+        sent = session.prompt_images[0]
+        assert [(block.data, block.mime_type) for block in sent] == [(image.data, image.mime_type)]
+        assert [block.marker for block in sent] == [
+            2
+        ], "the cited chip number did not ride the image the composer sent"

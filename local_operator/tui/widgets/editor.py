@@ -1034,14 +1034,27 @@ def resolve_markers(text: str, attachments: Mapping[int, Marked]) -> list[ImageC
     itself. Filtered on the PAYLOAD TYPE rather than on the marker's ``kind``,
     so this stays one predicate - a map entry either holds an image or it does
     not, whatever its marker happens to read.
+
+    THE MARKER NUMBER RIDES THE IMAGE from here, because this is the one walk
+    that still knows it: past this point an image is a positional entry in a
+    list and the chip it came from is unrecoverable. The transport needs it to
+    name the right attachment when it has to refuse one - markers do not
+    renumber on delete, so wire position 2 can be the chip labelled `#3`
+    (design round 1 D4, round 2 D8). Stamped on a COPY: the map's own
+    `ImageContent` is shared with the chip, the aside stash and the compaction
+    hold, and mutating it here would write presentation state into objects
+    those round trips compare.
     """
     cited = [
-        (span[0], attachment.image)
+        (span[0], index, attachment.image)
         for index, attachment in attachments.items()
         if isinstance(attachment, Attachment)
         and (span := cite(text, index, attachment)) is not None
     ]
-    return [image for _, image in sorted(cited, key=lambda item: item[0])]
+    return [
+        image.model_copy(update={"marker": index})
+        for _, index, image in sorted(cited, key=lambda item: item[0])
+    ]
 
 
 def expand_pastes(text: str, attachments: Mapping[int, Marked]) -> str:

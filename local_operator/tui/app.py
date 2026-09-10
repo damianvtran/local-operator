@@ -4132,12 +4132,30 @@ class OperatorApp(App[None]):
         held, source.compaction.held_prompt = source.compaction.held_prompt, ""
         typed, source.compaction.held_typed = source.compaction.held_typed, ""
         images, source.compaction.held_images = source.compaction.held_images, {}
+        blocks, source.compaction.held_blocks = source.compaction.held_blocks, None
+        notice, source.compaction.held_notice = source.compaction.held_notice, None
         accepted, source.compaction.accepted_draft = source.compaction.accepted_draft, None
         message_id, source.compaction.accepted_message_id = (
             source.compaction.accepted_message_id,
             "",
         )
+        # BEFORE the turn paints, so the queue's own row is gone by the time
+        # the prompt's echo appears under it — the notice narrates the hold,
+        # and the hold ends here (design round 3, D15). Same current-view
+        # guard as `_withdraw_user_echo_for`: a background source's notice
+        # lives in a view this app can no longer reach, and its teardown is
+        # the view's own business.
+        if notice is not None and self._is_current(source):
+            self._transcript_view().remove_block(notice)
         if held or images:
+            # HANDED TO THE TURN, so the rows this prompt painted at submit are
+            # withdrawable by the worker that dispatches it. Set BEFORE
+            # `_start_turn_for` for the reason the direct path gives: the worker
+            # it starts can reach its `except` before a later line would run,
+            # and an echo the worker cannot see is one it cannot withdraw. The
+            # worker's `finally` clears it on every path (review round 2,
+            # MAJOR-3).
+            source.turn.submitted_blocks = blocks
             self._start_turn_for(
                 source,
                 held,
@@ -4266,6 +4284,167 @@ class OperatorApp(App[None]):
         source.turn.pending_echoes[:] = [
             held for held in source.turn.pending_echoes if held is not entry
         ]
+
+    def _report_wire_refit_for(self, source: SessionInteraction) -> None:
+        """Say so when the transport had to COST the user pixels to send.
+
+        SILENT ON THE COMMON CASE, deliberately. The composer already bounds
+        every paste to ``IMAGE_INGEST_MAX_EDGE`` (1024px), so an ordinary
+        message meets the refit's first rung — a re-encode at unchanged
+        dimensions — and every pixel survives. How far past that the silence
+        holds depends on CONTENT and SHAPE, not on a count: measured on
+        composer-bounded continuous-tone captures, a 16:9 retina screenshot
+        stays a codec swap through five attachments, a 4:3 capture through
+        four and a square through three, so the common one-or-two-image paste
+        is silent and the row below is reachable from six mixed screenshots
+        on. Silence is a predicate on ``downscaled``, never on a count, so
+        this cannot mislead — but a count in this note would. (Earlier
+        versions claimed "one to six", then "one and two"; both were
+        square-fixture artifacts — design round 2 and round 3, D16.) A row on
+        every paste would be pure noise on a routine gesture (design round 1,
+        D2).
+
+        THE DOWNSCALE RUNG IS DIFFERENT IN KIND. Once the ladder gives up
+        pixels the loss is not subtle — measured at ~40% edge energy at 768px,
+        enough that `1234553` reads as `1?34553`. A screenshot pasted BECAUSE
+        it contains a number, silently made to contain a different number, with
+        the model answering confidently about the wrong one, is the exact
+        failure the user cannot detect for themselves. So that rung, and only
+        that rung, gets a row.
+
+        IN THE VOCABULARY THE APP ALREADY OWNS: ``editor.RESIZED_MARK`` is the
+        ``↓`` the composer puts on a marker whose image was downscaled at
+        ingest, and its comment says it exists to answer "why is this not the
+        size I pasted?" — which is verbatim the question the wire refit
+        provokes. Reusing the glyph means one idiom for one fact rather than a
+        second convention for the same event two files apart.
+
+        ONE ROW, GROUPED BY DELIVERED SIZE, and that shape is the finding
+        rather than a preference. Enumerating a clause per image spent 220
+        characters on two facts — six of eight clauses were the identical
+        string — and cost 3 rows of 28 at 100x30 and **5 of 20 at 60x22**, a
+        quarter of a narrow user's scrollback for a note about a message that
+        was delivered fine. Worse, the clauses came out in ``_refit_images``'
+        internal smallest-first walk (``#4, #2, #7, #3 …``): deterministic, and
+        meaningless on screen, so a user scanning for "what happened to #1"
+        read six clauses before finding it (design round 2, D9).
+
+        NO GLYPH ON THIS ROW AT ALL (design round 3, D14; round 2's D10 had
+        bound it to the count). The chips carry their own ``↓`` for the INGEST
+        bound, and this row's ``↓`` named the TRANSPORT refit — two different
+        shrinks sharing one glyph, and on a partial refit they collided a row
+        apart: five chips marked ``↓`` by ingest while the caption read
+        ``2 images ↓ resized`` about the two the transport touched, with
+        nothing on screen to say which count was which. ``resized to fit``
+        does the work the glyph was doing, and the mark stays where it is
+        unambiguous — on the chips, next to the size it qualifies.
+
+        COUNTS RATHER THAN MARKERS, which is what makes the row a bounded
+        cost. Naming the chips reads better at eight attachments and grows
+        without bound past it — measured, a marker list is 3 rows at 100 cols
+        and 4 at 60 by 28 attachments, which is the same defect one step
+        smaller.
+
+        THE BOUND IS RUNGS x ASPECT RATIOS, not rungs alone, and an earlier
+        version of this note claimed the latter. A rung caps the LONG edge and
+        the refit preserves aspect ratio, so grouping on the exact delivered
+        ``WxH`` splits once per distinct SHAPE in the paste — and an
+        operator's paste is 16:9 windows, 9:19.5 phone shots, square crops
+        and 3:2 captures at once. The test that pinned the false claim built
+        every fixture as a square, so ``(w, h)`` collapsed onto the rung count
+        by construction and passed vacuously (review round 3, MAJOR-5).
+
+        Measured through the real fitter over a five-aspect composer-bounded
+        paste, n=10 to 30: **4-9 clauses, 97-168 characters, 1-2 rows at 100
+        cols and 2-3 at 60**. The count does not trend upward with n — it
+        moves within that envelope (8 clauses at 24, 7 at 28, 8 at 30) because
+        which rung each shape lands on depends on the per-image budget, not on
+        how many attachments there are. The round-3 reviewer's twelve-aspect
+        mix measured the same class: 9 clauses, 165 characters, 2 rows at 100
+        and 4 at 60. Against the marker list's 28 clauses at n=28, that is the
+        difference between a bounded note and one that eats the scrollback.
+
+        THE COMMON PASTE IS NARROWER STILL: a run of same-shape screenshots
+        reaches one clause per rung, so 1 row at 100 cols and 2 at 60 at any
+        count — QA round 3 measured it holding to 300 attachments. That is
+        because a composer-bounded paste can never be downscaled TO the 1024
+        rung (the ingest bound already applied), leaving only the three below
+        it in ``IMAGE_WIRE_REFIT_EDGES``. The dependency is named here rather
+        than left implicit: raise ``IMAGE_INGEST_MAX_EDGE`` and the reachable
+        rung count rises with it (QA round 3, Q2).
+
+        The chips themselves are on screen directly above this row, so "which
+        of mine" is answerable by looking; "how much did I lose" is not, and
+        that is what this says.
+
+        At ``note`` weight, not ``warning``: nothing is wrong and nothing needs
+        acting on — the message was delivered — but it answers something the
+        user just did, which is exactly the role ``NoticeBlock`` documents for
+        that tier.
+        """
+        # Function-local for the reason the other `attach_client` references in
+        # this file give: the startup path must not import the transport.
+        from local_operator.mobile.attach_client import taken_refit_report
+
+        # CONSUMED whatever the outcome, so a report never outlives its send:
+        # reading it without taking it would let the next, untouched message
+        # inherit this one's caption.
+        lost = [entry for entry in taken_refit_report() if entry.downscaled]
+        if not lost:
+            return
+        # BY DELIVERED SIZE, in the order the user's own chips run: sorting by
+        # marker first means a group appears at the position of its lowest chip
+        # number, so the row reads the way the composer does rather than in
+        # `_refit_images`' internal smallest-first walk (design round 2, D9).
+        grouped: dict[tuple[int, int], int] = {}
+        for entry in sorted(lost, key=lambda item: item.marker):
+            grouped[(entry.width, entry.height)] = grouped.get((entry.width, entry.height), 0) + 1
+        # "down" on the FIRST clause only, carrying the verb the count needs
+        # now that the glyph is gone (design round 3, D14); the ellipsis on
+        # the rest is how English reads a list of parallel clauses.
+        clauses = [
+            f"{count} {'down ' if not index else ''}to {width}x{height}"
+            for index, ((width, height), count) in enumerate(grouped.items())
+        ]
+        plural = "s" if len(lost) != 1 else ""
+        self._notice_for(
+            source,
+            f"{len(lost)} image{plural} resized to fit this message: " + ", ".join(clauses),
+            "note",
+        )
+
+    def _withdraw_user_echo_for(self, source: SessionInteraction) -> None:
+        """Take the painted prompt rows back off the transcript.
+
+        FOR A MESSAGE THAT WAS NEVER SENT, and only for that. The echo is
+        painted at submit so the app answers the keystroke immediately, which is
+        right for every path where the prompt does reach the session. A refused
+        send is the one path where it does not, and there the row is a durable
+        lie: identical styling to a delivered message — same rule, same weight,
+        same full-width thumbnail — so a scroll-back a week later cannot tell it
+        from a real turn. Worse after the user complies than before: they follow
+        the refusal's advice, resend, and the transcript now shows the message
+        twice with an attachment that never left the machine (design round 1,
+        D3).
+
+        REMOVED rather than dimmed or struck through. The draft is back in the
+        composer by the time this runs and is about to be echoed again by the
+        resend, so a marked-up copy would leave the user reading two rows for
+        one message and deciding which is real. The same reasoning
+        ``_recall_queued_steers`` gives for lifting a recalled steer's rows, and
+        the removal is the same call it makes.
+
+        Only touches the CURRENT view's transcript, because that is the only
+        one holding widgets: a background source's rows were never mounted, and
+        its restored draft is carried by ``source.unsent`` instead.
+        """
+        held, source.turn.submitted_blocks = source.turn.submitted_blocks, None
+        if held is None or not self._is_current(source):
+            return
+        user_block, image_blocks = held
+        transcript = self._transcript_view()
+        for block in (*image_blocks, user_block):
+            transcript.remove_block(block)
 
     def _post_turn_abandoned_for(
         self,
@@ -9869,6 +10048,14 @@ class OperatorApp(App[None]):
         held, self._prompt_held_for_compaction = self._prompt_held_for_compaction, ""
         typed, self._typed_held_for_compaction = self._typed_held_for_compaction, ""
         held_images, self._images_held_for_compaction = self._images_held_for_compaction, {}
+        # DROPPED, never dispatched: this is the hand-back, and `clear_blocks()`
+        # below removes the very rows the tuple points at. Carrying it past here
+        # would leave a later refusal holding widgets that are no longer mounted
+        # (review round 2, MAJOR-3). The held notice is dropped for the same
+        # reason — reference only, no removal: `clear_blocks()` takes the row
+        # with the whole view (design round 3, D15).
+        self._interaction.compaction.held_blocks = None
+        self._interaction.compaction.held_notice = None
         if held:
             # The TYPED line goes back, not the payload: handing a user the
             # expanded body of a `$skill` they invoked would make them delete a
@@ -19763,6 +19950,14 @@ class OperatorApp(App[None]):
             # minutes and then sent the words without the screenshot would be
             # worse than not queueing at all.
             self._prompt_held_for_compaction = sent
+            # THE ECHO RIDES THE HOLD, for the same reason the attachments do:
+            # this prompt is dispatched by `_consume_compaction_input` minutes
+            # later, through the same worker and the same
+            # `except OversizedRequest` a direct submit uses. Without the rows
+            # travelling with it, a refusal on this route had nothing to
+            # withdraw and left the transcript asserting a message that never
+            # went (review round 2, MAJOR-3).
+            self._interaction.compaction.held_blocks = (user_block, image_blocks)
             self._interaction.compaction.accepted_draft = self._interaction.turn.submitted_draft
             self._interaction.compaction.accepted_message_id = self._echo_message_id(session.prompt)
             user_block.navigation_anchor_id = self._interaction.compaction.accepted_message_id
@@ -19784,9 +19979,22 @@ class OperatorApp(App[None]):
             # so re-reading it here saw an empty map and queued the prompt
             # without its screenshot (review round 19).
             self._images_held_for_compaction = dict(attachments or {})
-            self._append_block(NoticeBlock("queued — sends when compaction finishes", "note"))
+            # The queued NOTICE travels with the hold for the same reason the
+            # blocks do: its message ("sends when compaction finishes") is only
+            # true while the hold has the prompt, so the dispatch that ends the
+            # hold also ends the notice — see `CompactionInteraction.held_notice`
+            # (design round 3, D15).
+            queued_notice = NoticeBlock("queued — sends when compaction finishes", "note")
+            self._append_block(queued_notice)
+            self._interaction.compaction.held_notice = queued_notice
             self._maybe_name_conversation(named)
             return
+        # HELD ACROSS THE DISPATCH so a refusal can take the echo back down.
+        # Set before `_start_turn` rather than after: the worker it starts can
+        # reach its `except` before this line would otherwise run, and an echo
+        # the worker cannot see is one it cannot withdraw. Cleared by the
+        # worker's `finally` on every path (see `_start_turn_for`).
+        self._interaction.turn.submitted_blocks = (user_block, image_blocks)
         echo = self._start_turn(sent, images)
         if isinstance(echo, _PendingUserEcho):
             user_block.navigation_anchor_id = echo.message_id
@@ -19868,6 +20076,10 @@ class OperatorApp(App[None]):
             try:
                 async with source.turn.provider_lock:
                     await session.prompt(text, images, **echo.prompt_kwargs())
+                # DELIVERED — so if the transport had to shrink an attachment to
+                # get it here, this is the moment the user can be told. See
+                # `_report_wire_refit_for`.
+                self._report_wire_refit_for(source)
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
                 # `CancelledError` is a `BaseException`, so it slides straight
@@ -19880,6 +20092,11 @@ class OperatorApp(App[None]):
                 aborted = True
                 raise
             except Exception as error:  # surface, never crash the app
+                # Lazy, matching the other two references to this module here:
+                # `attach_client` is imported on the owned-resume branch only,
+                # and the startup path stays light.
+                from local_operator.mobile.attach_client import OversizedRequest
+
                 error_text = str(error)
                 # A message typed into a STOPPED viewer gets the same sentence
                 # the owner's own path gives, not the facade's bare clause:
@@ -19893,6 +20110,45 @@ class OperatorApp(App[None]):
                 ):
                     text_line, kind = self._no_session_notice(unsent=True)
                     self._notice_for(source, text_line, kind)
+                elif isinstance(error, OversizedRequest):
+                    # THE MESSAGE WAS NEVER SENT, and that is the whole reason
+                    # this branch exists rather than falling through to the
+                    # bare-error one below. `OversizedRequest` is raised
+                    # INSTEAD of the socket write (see `fit_request_frame`), so
+                    # unlike every other failure here the composer's content is
+                    # not merely un-answered — it is un-delivered, and the only
+                    # copy of it is the one this worker is holding. Printing the
+                    # error alone would leave the user with a refusal notice and
+                    # no text and no attachment: their work, gone, for a
+                    # transport limit they cannot see.
+                    #
+                    # So the draft goes back the same way a dead runtime returns
+                    # it, and the error's own sentence is the notice — it
+                    # already names the size, the ceiling that applied, and
+                    # which attachment to drop, which is what makes the refusal
+                    # actionable.
+                    #
+                    # AND THE ECHO COMES DOWN WITH IT, before anything is said,
+                    # so the refusal is not printed under a prompt row the
+                    # transcript is about to retract.
+                    self._withdraw_user_echo_for(source)
+                    self._notice_for(
+                        source,
+                        # The neighbouring runtime-stopped notice tells the user
+                        # their text survived and this one did not, so the user
+                        # was told to act without being told they still had
+                        # anything to act with (design round 1, D7).
+                        f"{error} — your message is back in the composer",
+                        "warning",
+                    )
+                    # AFTER the explanation. `_restore_unsent_for` can append a
+                    # `DraftRecoveryNotice`, and appending it first put the
+                    # offer to restore ABOVE the reason anything needs restoring
+                    # — the transcript read effect-then-cause (design round 1,
+                    # D5). On the common branch it loads the composer directly
+                    # and appends nothing, so this only reorders the case that
+                    # has two rows to order.
+                    self._restore_unsent_for(source, text, images, accepted=accepted)
                 elif _is_runtime_gone(error):
                     # THE RUNTIME DIED UNDER US (crash, OOM, kill -9). What
                     # the user got was `✗ owner socket unreachable: [Errno 61]
@@ -19933,6 +20189,12 @@ class OperatorApp(App[None]):
             finally:
                 if source.turn.submitted_draft is accepted:
                     source.turn.submitted_draft = None
+                # The echo is only withdrawable while the send's outcome is
+                # unknown. Past this point the prompt was either delivered (the
+                # row is true and permanent) or already withdrawn above, and a
+                # stale reference would let a LATER refusal remove the rows of
+                # an earlier, successfully delivered message.
+                source.turn.submitted_blocks = None
                 source.active_workers -= 1
                 self.call_later(self._source_frontend_changed, source)
                 # THE TWO-MECHANISM HAZARD, and why these two lines belong
