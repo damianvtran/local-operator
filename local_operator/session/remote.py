@@ -2644,16 +2644,12 @@ class RemoteSession:
         self._display_revision += 1
         task = self._display_refresh_task
         if task is None or task.done():
-            task = asyncio.create_task(self._refresh_display_history())
-            self._display_refresh_task = task
-
-            def finished(done: asyncio.Task[None]) -> None:
-                if not done.cancelled() and done.exception() is not None:
-                    # Keep the invalidation fence closed. Selection awaits this
-                    # task and reports the failure instead of painting stale rows.
-                    logger.warning("canonical display refresh failed: %s", done.exception())
-
-            task.add_done_callback(finished)
+            # Through the shared slot filler, NOT a private task with a
+            # log-only callback. This path and the degrade path share
+            # ``_display_refresh_task`` and ``_frontend_resync_pending``, so a
+            # pass started here can swallow a degrade debt (review round 2, B2)
+            # and must be able to retry it.
+            self._start_display_refresh(prior_delay=0.0)
 
     def _resync_after_degraded_delta(self) -> None:
         """Force a canonical re-snapshot after the owner shed a delta's body.
@@ -2706,9 +2702,14 @@ class RemoteSession:
         task = self._display_refresh_task
         if task is not None and not task.done():
             # A refresh is already running; it re-reads the flag above under its
-            # lock and folds this frame into at most one further pass.
+            # lock and folds this frame into at most one further pass. Dropping
+            # the timer just above is safe BECAUSE every filler of that slot now
+            # carries the debt-aware callback: whoever owns the running pass
+            # re-arms and reschedules if it fails. That was not true when only
+            # this method's own task did, which is how the debt was orphaned
+            # here (review round 2, B2).
             return
-        self._start_degraded_resync(prior_delay=0.0)
+        self._start_display_refresh(prior_delay=0.0)
 
     def _cancel_degraded_resync_retry(self) -> None:
         """Drop a scheduled retry that a fresh attempt supersedes."""
@@ -2717,18 +2718,40 @@ class RemoteSession:
             retry.cancel()
         self._degraded_resync_retry_task = None
 
-    def _start_degraded_resync(self, *, prior_delay: float) -> None:
-        """Run one re-sync pass NOW, re-arming and scheduling a retry if it fails.
+    def _start_display_refresh(self, *, prior_delay: float) -> None:
+        """Fill the refresh SLOT — always with the debt-aware failure callback.
+
+        THE RETRY BELONGS TO THE SLOT, NOT TO ONE CREATOR'S TASK (review round
+        2, B2). The first version of this attached the retrying callback only to
+        the task ``_resync_after_degraded_delta`` created, while
+        ``_invalidate_display_history`` filled the SAME slot with a log-only
+        one. A degraded frame arriving while that pass was in flight took the
+        early return above and handed its debt to a task that re-armed nothing —
+        the original defect, one route over, reachable in production from a
+        ``history_generation`` move and from ``CompactionEndEvent``. Reproduced
+        on that tree with a 1,528,060-byte delta: live socket, sequence 22/22 so
+        the gap check agrees forever, follower title stuck at its pre-degrade
+        value through 20 later healthy deltas, catalogue 0 rows against the
+        owner's 5000, and ``ensure_display_current`` re-raising the stored error
+        on every call. A cached task holding a FAILURE is not a cache, it is a
+        latch.
+
+        So every filler of ``_display_refresh_task`` goes through here, and the
+        callback READS the debt flag rather than assuming who armed it: a pass
+        started for display drift that happens to consume a degrade debt retries
+        it, and a pass with no debt outstanding still only logs, exactly as the
+        display-invalidation path always did.
 
         The failure path is the whole point. ``_frontend_resync_pending`` is
         cleared BEFORE the capture inside ``_refresh_display_history`` (so a
-        frame racing the snapshot earns another pass), and that method re-raises
-        on failure — so without re-arming here, a single transient failure
-        leaves the flag false, the debt forgotten, and the follower showing
-        stale fields behind a gap check that agrees with the owner forever.
-        Reproduced: one injected ``ConnectionError`` left a live socket at
-        sequence 11/11 with the follower's title stuck at its pre-degrade value
-        through ten subsequent healthy deltas.
+        frame racing the snapshot earns another pass), and that method restores
+        what it consumed when it re-raises — so the flag read below is an honest
+        statement of whether canonical fields are still owed. Without the retry,
+        a single transient failure leaves the debt forgotten and the follower
+        showing stale fields behind a gap check that agrees with the owner
+        forever. Reproduced: one injected ``ConnectionError`` left a live socket
+        at sequence 11/11 with the follower's title stuck at its pre-degrade
+        value through ten subsequent healthy deltas.
 
         ``prior_delay`` is the backoff this attempt already waited out. It is
         bookkeeping for the NEXT delay only — the pass itself never sleeps, so
@@ -2742,6 +2765,13 @@ class RemoteSession:
             if done.cancelled() or done.exception() is None:
                 return
             error = done.exception()
+            if not self._frontend_resync_pending:
+                # Display drift alone. Keep the invalidation fence closed:
+                # selection awaits this task and reports the failure instead of
+                # painting stale rows. Nothing canonical is owed, so a retry
+                # here would only add RPCs to a surface that already reports.
+                logger.warning("canonical display refresh failed: %s", error)
+                return
             client = self._client
             if self._disposed or client is None or not client.connected:
                 # A reconnect re-syncs from scratch, so the debt dies with the
@@ -2749,8 +2779,7 @@ class RemoteSession:
                 logger.warning("canonical re-sync after a degraded delta failed: %s", error)
                 return
             # The socket is still up, so this follower is now the dangerous
-            # case: connected and quietly wrong. Re-arm the debt and retry.
-            self._frontend_resync_pending = True
+            # case: connected and quietly wrong. Retry the outstanding debt.
             next_delay = (
                 _DEGRADED_RESYNC_RETRY_INITIAL_S
                 if prior_delay <= 0
@@ -2761,6 +2790,14 @@ class RemoteSession:
                 error,
                 next_delay,
             )
+            # AT MOST ONE TIMER, always. Now that display invalidation fills the
+            # slot too, a pass can start and fail while an older backoff is
+            # still sleeping — and that path never cancelled it the way
+            # ``_resync_after_degraded_delta`` does. Two live timers would each
+            # clear the single handle and fire their own pass, which is the
+            # double-attempt the round-1 measurements (peak 1 concurrent retry)
+            # rule out.
+            self._cancel_degraded_resync_retry()
             self._degraded_resync_retry_task = asyncio.create_task(
                 self._retry_degraded_resync(next_delay)
             )
@@ -2778,7 +2815,11 @@ class RemoteSession:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
-        self._degraded_resync_retry_task = None
+        # Only clear the handle if it is still OURS. A newer timer may have
+        # replaced it while this one slept, and blanking that registration would
+        # hide a live task from ``dispose``.
+        if self._degraded_resync_retry_task is asyncio.current_task():
+            self._degraded_resync_retry_task = None
         if self._disposed or not self._frontend_resync_pending:
             return
         client = self._client
@@ -2786,9 +2827,14 @@ class RemoteSession:
             return
         task = self._display_refresh_task
         if task is not None and not task.done():
-            # A pass is running already and re-reads the flag under its lock.
+            # A pass is running already and re-reads the flag under its lock —
+            # and, if it fails, re-arms and reschedules through the same
+            # ``finished`` callback this one was started with, because the slot
+            # owns that callback rather than the caller. Yielding here without
+            # that guarantee is what dropped a quiescent follower's debt (QA
+            # round 2, Q3).
             return
-        self._start_degraded_resync(prior_delay=delay)
+        self._start_display_refresh(prior_delay=delay)
 
     async def ensure_display_current(self) -> None:
         task = self._display_refresh_task
@@ -2819,6 +2865,13 @@ class RemoteSession:
                 # ``_install_frontend``) re-arms the flag and earns another
                 # pass. Clearing it after would swallow exactly the frame that
                 # raced the snapshot it is not covered by.
+                #
+                # Remembered because clearing it makes THIS pass the only holder
+                # of the debt: a failure below must hand it back rather than
+                # consume it, whichever caller filled the slot. That is what
+                # makes the flag an honest debt marker for the done-callback in
+                # ``_start_display_refresh`` to read.
+                owed_canonical_resync = self._frontend_resync_pending
                 self._frontend_resync_pending = False
                 try:
                     frontend = FrontendSync.model_validate(await client.frontend_sync())
@@ -2844,6 +2897,14 @@ class RemoteSession:
                         self._display_invalidated = True
                     self._finish_sync()
                 except BaseException:
+                    # Hand the consumed debt back. ORed rather than assigned: a
+                    # degraded frame that landed during the capture has already
+                    # set the flag for a debt this pass did not cover, and
+                    # overwriting it with this pass's older value would drop the
+                    # newer one.
+                    self._frontend_resync_pending = (
+                        self._frontend_resync_pending or owed_canonical_resync
+                    )
                     # The transport remains usable even when this read fails.
                     # Preserve its ordered updates and surface the history error
                     # to navigation, without cancelling source work or its gates.
