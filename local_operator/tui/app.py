@@ -4418,6 +4418,19 @@ class OperatorApp(App[None]):
             self._sidebar_sources[session_id] = source
             source.controller = EventController(remote, self)
             self._event_sources[source.controller] = source
+            # PARKED BEFORE SUBSCRIBING, never after. A lease reached from
+            # prewarm is speculative by construction -- it exists to make a
+            # future CLICK fast, and until that click every delta it receives
+            # is discarded by `_reduce_hidden_session_event`. Parking first
+            # means the very first relayed token is already declined rather
+            # than paid for in the window between the two calls.
+            #
+            # The subscription itself STAYS: `_emit_or_buffer` buffers rather
+            # than drops when no handler is registered, so an unsubscribed
+            # parked source silently accumulates its owner's whole stream (8k+
+            # events in 25 s across 12 sources, measured) and then delivers it
+            # in one drain at commit. See `EventController.set_parked`.
+            source.controller.set_parked(True)
             source.controller.subscribe()
             self._watch_source_frontend(source)
             return source
@@ -6819,6 +6832,14 @@ class OperatorApp(App[None]):
         # a source leased by prewarm and later adopted would otherwise keep the
         # stamp it was born with and be swept while on screen.
         source.parked_at = None
+        # THE SINGLE PLACE A SOURCE BECOMES CURRENT, and therefore the one
+        # place its event stream must go live again. A prewarmed source was
+        # muted for delta-grade events while speculative (see
+        # `_lease_sidebar_source` and `EventController.set_parked`); from here
+        # its tokens are painted, so the mute has to lift BEFORE the commit
+        # path below replays the owner's live seed through the same controller.
+        if source.controller is not None:
+            source.controller.set_parked(False)
         self._watch_source_frontend(source)
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):
