@@ -27,6 +27,21 @@ from local_operator.providers.usage_cache import (
     account_backoff_ms,
 )
 
+#: Why every ``fake_login`` double in this file takes ``**_kwargs``.
+#:
+#: ``ProviderController.login`` forwards ``signal=`` to EVERY login callable so
+#: a host can offer a cancel without knowing which flavour of provider it is
+#: talking to. A double that pins the older, narrower signature therefore
+#: raises ``TypeError`` inside the controller — and the surfaces above it
+#: report that as an ordinary "login failed", so the assertion misreads as a
+#: real provider failure rather than as a stale test. Stated once here and
+#: referenced from each double (agent review round 1, nit-2).
+LOGIN_DOUBLE_SIGNATURE_NOTE = (
+    "ProviderController.login forwards signal= to every login callable; a "
+    "double with a narrower signature raises TypeError and misreads as a "
+    "provider failure."
+)
+
 
 class FakeAuthStore:
     """Minimal stand-in for the AuthStore credential surface."""
@@ -1459,8 +1474,7 @@ class TestPerAccountLastKnown:
         # The same identity logs in again: the fake's upsert appends rather
         # than replacing, so pin the fingerprint to prove the key is unchanged
         # and the drop below is the login's own doing, not a key move.
-        # ``**_kwargs``: the controller passes ``signal=`` to every login so a
-        # host can offer a cancel; a narrower double raises TypeError.
+        # ``**_kwargs``: see LOGIN_DOUBLE_SIGNATURE_NOTE.
         async def fake_login(_callbacks, **_kwargs):
             return {
                 "access_token": "t2",
@@ -1894,8 +1908,7 @@ async def test_logging_in_drops_the_cached_listing(controller, store, monkeypatc
         lambda provider_id: dropped.append(provider_id) or 1,
     )
 
-    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
-    # host can offer a cancel; a narrower double raises TypeError.
+    # ``**_kwargs``: see LOGIN_DOUBLE_SIGNATURE_NOTE.
     async def fake_login(_callbacks, **_kwargs):
         return {"access_token": "t", "refresh_token": "r", "email": "you@example.com"}
 
@@ -1929,8 +1942,7 @@ async def test_an_api_key_login_drops_the_listing_under_the_storage_id(
         lambda provider_id: dropped.append(provider_id) or 1,
     )
 
-    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
-    # host can offer a cancel; a narrower double raises TypeError.
+    # ``**_kwargs``: see LOGIN_DOUBLE_SIGNATURE_NOTE.
     async def fake_login(_callbacks, **_kwargs):
         return "xai-key"
 
@@ -1977,8 +1989,7 @@ async def test_a_failed_invalidation_never_fails_a_successful_login(
 
     monkeypatch.setattr("local_operator.providers.controller.invalidate_listing", boom)
 
-    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
-    # host can offer a cancel; a narrower double raises TypeError.
+    # ``**_kwargs``: see LOGIN_DOUBLE_SIGNATURE_NOTE.
     async def fake_login(_callbacks, **_kwargs):
         return "sk-ant"
 
@@ -2012,8 +2023,7 @@ async def test_login_and_logout_drop_the_in_process_model_info_memo(
         lambda: cleared.append("memo"),
     )
 
-    # ``**_kwargs``: the controller passes ``signal=`` to every login so a
-    # host can offer a cancel; a narrower double raises TypeError.
+    # ``**_kwargs``: see LOGIN_DOUBLE_SIGNATURE_NOTE.
     async def fake_login(_callbacks, **_kwargs):
         return "sk-ant"
 

@@ -86,6 +86,28 @@ CHOICES: tuple[tuple[str, str], ...] = (
     ("esc", "cancel"),
 )
 
+#: The hint row for a prompt whose ESC does NOT end the login (``sole_path``
+#: false — Anthropic, where the loopback callback is still listening and a
+#: declined paste re-parks by design).
+#:
+#: Two keys that do genuinely different things must not both be called
+#: "cancel". On this prompt ESC dismisses the PASTE and leaves the login
+#: running — the port stays bound and the receipt says "still waiting for the
+#: browser" — while ctrl+C ends the LOGIN. Advertising only ``esc cancel``
+#: sent the user in the reported scenario (a browser that never came back) to
+#: press the one key that does not get them out, landing them somewhere
+#: strictly worse: the prompt gone, so the only affordance on screen gone with
+#: it, and the listener still bound (UX round 1, U2).
+#:
+#: Ordered so the shed-from-the-right rule keeps the useful ones longest:
+#: ``enter`` submits, then ``ctrl+c`` — which is the escape that WORKS here —
+#: and ``esc`` sheds first because it is the narrowest in meaning.
+BROWSER_FLOW_CHOICES: tuple[tuple[str, str], ...] = (
+    ("enter", "submit"),
+    ("ctrl+c", "cancel login"),
+    ("esc", "skip paste"),
+)
+
 #: Below this width the two-cell spine indent is given up, matching
 #: ``approval.SPINE_FLOOR_WIDTH``: an alignment edge that only some blocks
 #: honour is not an edge, so the whole transcript sheds it together.
@@ -607,9 +629,15 @@ class KeyPromptBlock(TranscriptBlock):
         # what the row helper alone would do. ``CHOICES`` is ordered so the key
         # that SUBMITS survives longest: a prompt that only tells you how to
         # give up is one you cannot get past.
+        # Which keys this prompt actually offers depends on whether ESC ends
+        # the login (see ``BROWSER_FLOW_CHOICES``). Not for the ``credential``
+        # prompt, which is `/credential <KEY>` reusing this block and is not a
+        # login at all — there is no listener to cancel and no ctrl+C rung
+        # waiting for it, so advertising one would name a key that does nothing.
+        choices = BROWSER_FLOW_CHOICES if (not self.sole_path and not self.credential) else CHOICES
         hint_parts: list[tuple[str, Style]] = []
         used = 0
-        for index, (key, label) in enumerate(CHOICES):
+        for index, (key, label) in enumerate(choices):
             separator = HINT_SEPARATOR if index else ""
             width_needed = cell_len(separator) + cell_len(key) + cell_len(f" {label}")
             if used + width_needed > body:

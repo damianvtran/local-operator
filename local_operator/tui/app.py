@@ -14428,6 +14428,25 @@ class OperatorApp(App[None]):
         # rendered "ctrl+c again to exit" while the login stayed pending, so the
         # reflex was already live and already loaded.
         if self._cancel_pending_login():
+            # RETURN TO THE CONVERSATION FIRST, exactly as the exit-ladder tail
+            # below does and for its stated reason: the card floats over the
+            # transcript at one elevation step, so a notice appended behind it
+            # is drawn where it cannot be read. This rung appends precisely
+            # such a notice — the "login cancelled … retry with /login <x>"
+            # receipt — and on a LOOPBACK-ONLY provider no `KeyPromptBlock`
+            # mounts, so `_request_login_key`'s own `_close_aside()` never runs
+            # and nothing else closes the card. The user pressed ctrl+C, the
+            # login really was cancelled, and the only evidence landed out of
+            # sight: "nothing appeared to happen", which is the very state the
+            # retry wording exists to answer.
+            #
+            # Ordinary ctrl+C already closes these; a login-cancelling ctrl+C
+            # that did not would be a behavioural split with no reason a user
+            # could infer (agent review round 1, major-2).
+            self._close_subagent_view()
+            self._close_org_chart_view()
+            self._close_settings_view()
+            self._close_aside()
             # Same two lines the draft and barren-click rungs run for the same
             # reason: the press was absorbed, so a live "ctrl+c again to exit"
             # would promise an exit the next press does not make.
@@ -15465,32 +15484,55 @@ class OperatorApp(App[None]):
         pending, so the press falls through to the rungs below EXACTLY as it
         did before this rung existed.
 
-        Aborting the signal is the whole action, and everything else follows
-        from the layers that already handle it:
+        THE TWO ACTIONS BELOW ARE BOTH LOAD-BEARING, and which one actually
+        ends a given login depends on the provider. Saying "aborting the signal
+        is the whole action" was true only for the loopback flows, and a
+        docstring that names one mechanism while a second is silently required
+        is how the next change here removes the wrong line (agent review round
+        1, minor-2):
 
-        * `OAuthCallbackFlow._await_code` is racing an abort watcher against
-          its capture futures, so it raises `LoginCancelledError` immediately
-          rather than sitting out the 300 s timeout;
-        * `run()`'s `finally: await self._stop_server()` tears the loopback
-          listener down, which releases the port (54545 for Anthropic, 1455 for
-          OpenAI) so an immediately retried `/login` can bind it again;
-        * `_login_flow`'s own `finally` releases `_login_lock` and clears
-          `_login_signal`, which is what stops the retry being refused with "a
-          login is already in progress".
+        * **The abort** is what ends a LOOPBACK flow.
+          `OAuthCallbackFlow._await_code` is racing an abort watcher against
+          its capture futures, so it raises `LoginCancelledError` at once
+          rather than sitting out the 300 s timeout; `run()`'s `finally: await
+          self._stop_server()` then tears the listener down, releasing the port
+          (54545 for Anthropic, 1455 for OpenAI) so an immediately retried
+          `/login` can bind it again.
+        * **Settling the prompt** is what ends a PASTE-ONLY flow and the
+          `local_setup` path. `create_api_key_login` takes `signal` through
+          `**_kwargs` and never reads it, and `_configure_local` does not watch
+          it either — those flows are parked on the prompt future, so resolving
+          it to None is the thing that unblocks them
+          (`create_api_key_login` turns the None into `LoginCancelledError`,
+          and `_configure_local` does the same for a declined field).
 
-        The key prompt is settled here as well, and not left to `_interrupt`.
-        This rung returns before that runs, and a prompt left mounted and
-        focused for a login that has just been cancelled owns the keyboard for
-        a flow that no longer exists — which is the same class of bug as the
-        one being fixed. `_settle_key_prompt` is idempotent, so the ordinary
-        interrupt path settling it too is harmless.
+        Either way `_login_flow`'s own `finally` releases `_login_lock` and
+        clears `_login_signal`, which is what stops the retry being refused
+        with "a login is already in progress".
+
+        Settling here rather than leaving it to `_interrupt` is deliberate on
+        both counts: this rung returns before that runs, and a prompt left
+        mounted and focused for a login that has just been cancelled owns the
+        keyboard for a flow that no longer exists. `_settle_key_prompt` is
+        idempotent, so the ordinary interrupt path settling it too is harmless.
         """
         signal = self._login_signal
-        if signal is None or signal.aborted:
-            # An already-aborted signal is NOT this rung's press to take: the
-            # flow is unwinding, and claiming the key again would swallow a
-            # second press that should reach the rungs below.
+        if signal is None:
             return False
+        if signal.aborted:
+            # An abort already requested. Deliberately still TAKING the press
+            # rather than declining it, because `abort()` only asks: for the
+            # paste-only and `local_setup` flows nothing reads the signal, so
+            # between the first press and the flow actually unwinding the
+            # signal is burned while `_login_signal` is still set. Declining
+            # here handed that press to the rungs below — which would clear the
+            # user's draft, or arm the exit ladder, on a press they aimed at a
+            # login that is still on screen (agent review round 1, minor-1).
+            #
+            # Re-settling the prompt is what makes the repeat useful rather
+            # than merely absorbed, and it is idempotent.
+            self._settle_key_prompt(superseded=True)
+            return True
         # The reason travels to the user: `_await_code` raises
         # `LoginCancelledError(signal.reason)`, so this string is what a host
         # without the TUI's own notice would print.
@@ -29213,6 +29255,23 @@ class OperatorApp(App[None]):
             ]
             if instructions:
                 lines.append(Text(instructions, style=Style(color=theme_mod.semantic_color("dim"))))
+            # NAME THE ESCAPE AT THE MOMENT THE WAIT BEGINS. A rescue key
+            # nobody knows about rescues nobody, and this block is the only
+            # surface a loopback-only login puts on screen — no paste prompt
+            # mounts for it, so without this line the pending state advertises
+            # no way out at all. The user this is for is watching a browser
+            # that landed somewhere unexpected; the alternative to knowing
+            # about ctrl+C is the 300 s timeout (UX round 1, U4).
+            #
+            # `dim` and last: it is a standing affordance, not an event, and
+            # must not compete with the URL directly above it — which is still
+            # the thing the user came here to act on.
+            lines.append(
+                Text(
+                    "waiting for the browser — ctrl+c to cancel this login",
+                    style=Style(color=theme_mod.semantic_color("dim")),
+                )
+            )
             self._append_block(RichBlock(Group(*lines)))
 
         def on_progress(message: str) -> None:
@@ -29443,6 +29502,23 @@ class OperatorApp(App[None]):
         # two pieces of pending-login state are always set together.
         signal = AbortSignal()
         self._login_signal = signal
+        # RETIRE AN ALREADY-ARMED EXIT HINT, because from this moment ctrl+C
+        # means something else. If the user interrupted something just before
+        # starting the login, the transcript reads "· ctrl+c again to exit"
+        # directly above "· logging in to <provider>…" — and that line is now
+        # FALSE: the next press cancels the login and the app keeps running.
+        #
+        # It is false in the direction that does the damage. A user whose
+        # browser never came back reads "again to exit", believes the rescue
+        # key will quit their session, and does not press it — which leaves
+        # them in the 300 s wait this whole change exists to end. The rung
+        # already disarms the ladder when it TAKES a press; this is the
+        # symmetric half, disarming it when the press changes meaning (UX
+        # round 1, U3).
+        self._last_interrupt_at = 0.0
+        if self._exit_hint is not None:
+            self._transcript_view().remove_block(self._exit_hint)
+            self._exit_hint = None
         try:
             self._providers.set_login_callbacks(self._login_callbacks)
             message = await self._providers.login(provider, signal=signal)

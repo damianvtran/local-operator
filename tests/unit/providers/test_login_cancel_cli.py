@@ -359,3 +359,72 @@ def test_ctrl_c_really_exits_the_command(provider: str, tmp_path: Any) -> None:
         except (ProcessLookupError, ChildProcessError):
             pass
         os.close(fd)
+
+
+def test_the_terminal_guard_restores_attributes_it_snapshotted(monkeypatch) -> None:
+    """Agent review round 1, major-1: a cancel must not leave ECHO disabled.
+
+    The paste prompt reads through `getpass`, which turns ECHO off and restores
+    it in its own `finally` — on the daemon reader thread, which is never
+    joined (that is what fixes the 300 s executor join). So when a cancel exits
+    the process with the reader still parked, the restore never runs and the
+    user is returned to a shell where their typing is invisible.
+
+    Driven at the guard rather than through a pty here: the pty form is real
+    evidence but needs a controlling terminal, which the suite does not have.
+    The under-test property is "whatever the terminal looked like on the way in
+    is what it looks like on the way out", which is exactly what this asserts,
+    including that it survives an exception.
+    """
+    calls: list[tuple[str, Any]] = []
+    sentinel = ["saved-attrs"]
+
+    class _Termios:
+        TCSADRAIN = 2
+
+        @staticmethod
+        def tcgetattr(fd):
+            calls.append(("get", fd))
+            return sentinel
+
+        @staticmethod
+        def tcsetattr(fd, when, attrs):
+            calls.append(("set", (fd, when, attrs)))
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 7
+
+    monkeypatch.setitem(sys.modules, "termios", _Termios)
+    monkeypatch.setattr(sys, "stdin", _Tty())
+
+    with auth_cli._terminal_state_restored():
+        pass
+    assert calls[0] == ("get", 7)
+    assert calls[-1] == ("set", (7, _Termios.TCSADRAIN, sentinel)), calls
+
+    # And on the path that matters: the cancel raises through the guard.
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        with auth_cli._terminal_state_restored():
+            raise RuntimeError("cancelled")
+    assert calls[-1] == ("set", (7, _Termios.TCSADRAIN, sentinel)), calls
+
+
+def test_the_terminal_guard_is_inert_without_a_tty(monkeypatch) -> None:
+    """Piped stdin and CI have no terminal to restore, and a guard that tried
+    would raise on every non-interactive login."""
+
+    class _Pipe:
+        def isatty(self):
+            return False
+
+        def fileno(self):  # pragma: no cover - must not be reached
+            raise AssertionError("fileno must not be consulted for a non-tty")
+
+    monkeypatch.setattr(sys, "stdin", _Pipe())
+    with auth_cli._terminal_state_restored():
+        pass  # no exception is the assertion

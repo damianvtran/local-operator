@@ -408,3 +408,145 @@ async def test_escape_still_cancels_from_the_prompt(tmp_path: Path, no_browser: 
 
         assert await _settle(lambda: any("cancelled" in n for n in _notices(app))), _notices(app)
         assert not any("failed" in note for note in _notices(app)), _notices(app)
+
+
+# -- loopback-only providers: the state every other test here cannot reach ----
+#
+# Every ordering test above uses a provider that mounts a `KeyPromptBlock`, and
+# that block closes the aside and the floating views on mount. So none of them
+# can observe what a LOOPBACK-ONLY login does — no prompt is ever mounted for
+# one — and both majors of agent review round 1 lived in exactly that gap.
+
+
+async def test_a_loopback_login_cancels_with_no_prompt_mounted(
+    tmp_path: Path, no_browser: None
+) -> None:
+    """The baseline for the two tests below: openai mounts NO prompt.
+
+    Asserted rather than assumed, because it is the precondition that makes
+    them meaningful — if a prompt did mount, they would be re-testing the
+    paste-provider path under a different name.
+    """
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _start_login(pilot, app, "openai")
+        assert await _settle(lambda: app._login_signal is not None), "no login was pending"
+        assert not list(app.query(KeyPromptBlock)), "openai must not mount a paste prompt"
+
+        await pilot.press("ctrl+c")
+
+        assert await _settle(lambda: any("login cancelled" in n for n in _notices(app))), _notices(
+            app
+        )
+        assert app._login_signal is None
+
+
+async def test_cancelling_a_loopback_login_returns_to_the_conversation(
+    tmp_path: Path, no_browser: None
+) -> None:
+    """Agent review round 1, major-2: the receipt must not be drawn out of sight.
+
+    The aside floats over the transcript at one elevation step, so a notice
+    appended behind it is drawn where it cannot be read — the rule the exit
+    ladder's own tail states and honours. The cancel appends exactly such a
+    notice, and on a loopback-only provider nothing else closes the card, so
+    the user pressed ctrl+C, the login really cancelled, and the only evidence
+    landed behind the aside: "nothing appeared to happen".
+
+    The CONTROL is the point of the test: an ordinary ctrl+C closes the aside,
+    so a login-cancelling one that did not would be a behavioural split with no
+    reason a user could infer.
+    """
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _start_login(pilot, app, "openai")
+        assert await _settle(lambda: app._login_signal is not None), "no login was pending"
+        assert not list(app.query(KeyPromptBlock)), "precondition: no prompt closes the aside"
+
+        app._open_aside()
+        await pilot.pause()
+        assert app._aside_is_open(), "precondition: the aside is open over the transcript"
+
+        await pilot.press("ctrl+c")
+        assert await _settle(lambda: any("login cancelled" in n for n in _notices(app)))
+
+        assert not app._aside_is_open(), (
+            "the cancel receipt was appended behind the floating aside, where the "
+            "user cannot read it"
+        )
+
+        # Control: the ordinary interrupt rung closes it too, so the two presses
+        # agree.
+        app._open_aside()
+        await pilot.pause()
+        assert app._aside_is_open() and app._login_signal is None
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert not app._aside_is_open(), "control: ordinary ctrl+C should close the aside"
+
+
+async def test_starting_a_login_retires_an_armed_exit_hint(
+    tmp_path: Path, no_browser: None
+) -> None:
+    """UX round 1, U3: the screen must not say ctrl+C exits while a login is up.
+
+    Interrupt something first and the transcript carries "ctrl+c again to
+    exit". Start a login and that line is now FALSE — the next press cancels
+    the login and the app keeps running. It is false in the direction that
+    costs the user the feature: they read "again to exit", believe the rescue
+    key will quit their session, and sit out the 300 s wait instead.
+    """
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app._last_interrupt_at != 0.0, "precondition: the exit ladder is armed"
+        assert app._exit_hint is not None, "precondition: the hint is on screen"
+        assert any("again to exit" in note for note in _notices(app)), _notices(app)
+
+        await _start_login(pilot, app, "openai")
+        assert await _settle(lambda: app._login_signal is not None)
+
+        assert app._exit_hint is None, "the stale exit hint survived into the pending login"
+        assert app._last_interrupt_at == 0.0
+        assert not any(
+            "again to exit" in note for note in _notices(app)
+        ), "the screen still tells the user ctrl+c exits, which is now false"
+
+        # And the press it was contradicting does the right thing.
+        await pilot.press("ctrl+c")
+        assert await _settle(lambda: any("login cancelled" in n for n in _notices(app)))
+        assert app.is_running, "the login-cancelling press must not quit the app"
+
+
+async def test_the_browser_wait_names_the_key_that_cancels_it(
+    tmp_path: Path, no_browser: None
+) -> None:
+    """UX round 1, U4: a rescue key nobody knows about rescues nobody.
+
+    For a loopback-only login this block is the ONLY surface the pending state
+    puts on screen, so without this line the frame advertises no way out at
+    all — and the user it is for is watching a browser that landed somewhere
+    unexpected.
+    """
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _start_login(pilot, app, "openai")
+        assert await _settle(lambda: app._login_signal is not None)
+
+        from tests.unit.tui.test_app_pilot import _transcript_text
+
+        rendered = _transcript_text(app)
+        assert "ctrl+c" in rendered, f"the pending frame names no escape key:\n{rendered}"
+
+        await pilot.press("ctrl+c")
+        await _settle(lambda: app._login_signal is None)
