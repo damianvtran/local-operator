@@ -550,3 +550,97 @@ async def test_the_browser_wait_names_the_key_that_cancels_it(
 
         await pilot.press("ctrl+c")
         await _settle(lambda: app._login_signal is None)
+
+
+async def test_a_repeat_press_inside_the_aborted_but_still_pending_window(
+    tmp_path: Path, no_browser: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, minor-1 — the window its own regression test could not see.
+
+    `abort()` only REQUESTS cancellation. The paste-only and `local_setup`
+    flows never read the signal (`create_api_key_login` swallows it through
+    `**_kwargs`), so they end when the prompt future resolves, not when the
+    signal fires. Between the two there is a window in which `signal.aborted`
+    is already True while `_login_signal` is still set — and the old predicate
+    (`signal is None or signal.aborted`) DECLINED the press there, handing it
+    to the rungs below, where it cleared the user's composer on a keystroke
+    they aimed at a login still on screen.
+
+    WHY THIS TEST HAS TO GATE THE FLOW. Against a real `alibaba` login the
+    abort and the unwind land in the same pump, so the window closes before a
+    second press can be delivered and the state is never observed. QA proved
+    the consequence: with the fix reverted, all fifteen other tests in this
+    file — including `test_a_second_press_after_the_cancel_reaches_the_draft_rung`,
+    which was written for this finding — stayed GREEN (QA round 2, Q5). A test
+    that cannot fail against the bug it names is not a regression guard, so the
+    login is parked on an event the test controls and the window is held open
+    deliberately.
+
+    The gate replaces only the provider's own login coroutine. Everything under
+    test — the rung, the predicate, `_login_signal`'s lifetime, the draft — is
+    the real app's.
+    """
+    import dataclasses
+
+    import local_operator.providers.controller as controller_module
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition("alibaba")
+    assert definition is not None
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_login(callbacks: Any, **kwargs: Any) -> str:
+        # Parks exactly like a paste-only flow awaiting its prompt future, and
+        # deliberately never consults `signal`: that indifference is the whole
+        # reason the window exists.
+        entered.set()
+        await release.wait()
+        return "sk-never-reached"
+
+    patched = dataclasses.replace(definition, login=parked_login)
+    monkeypatch.setattr(
+        controller_module,
+        "get_provider_definition",
+        lambda pid: patched if pid == "alibaba" else get_provider_definition(pid),
+    )
+
+    controller = _controller(tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _start_login(pilot, app, "alibaba")
+        assert await _settle(entered.is_set), "the gated login never started"
+        assert app._login_signal is not None
+
+        draft = "QA890 draft that must survive"
+        editor = app.query_one(Editor)
+        editor.text = draft
+        await pilot.pause()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        # THE PRECONDITION, asserted rather than assumed: without both halves
+        # of this the test would be exercising the ordinary already-unwound
+        # path and would pass against the bug.
+        signal = app._login_signal
+        assert signal is not None, "the flow unwound; the window was not held open"
+        assert signal.aborted, "the first press did not abort the signal"
+
+        # The press under test, delivered INSIDE that window.
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert editor.text == draft, (
+            "a repeat press inside the aborted-but-still-pending window fell "
+            "through to the draft rung and destroyed the user's composer"
+        )
+        assert not any("draft cleared" in note for note in _notices(app)), _notices(app)
+        # Nor may it arm the exit ladder: the user is still aiming at a login.
+        assert app._last_interrupt_at == 0.0, "the repeat press armed the exit ladder"
+        assert app._exit_hint is None
+
+        # Let the gated flow finish so teardown is clean.
+        release.set()
+        await _settle(lambda: app._login_signal is None)
