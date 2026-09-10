@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.session.frontend_state import SlashResult as _SlashResult
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -38,6 +39,15 @@ class FakeSession:
     owns_runtime = True
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
+
+    #: Declared, deliberately UNASSIGNED: the naming tests set these per-case,
+    #: and `_title_refresh_slash` probes the public one with
+    #: `getattr(session, "conversation_name_state", None)`. A default here
+    #: would make the attribute exist on every fake and silently move those
+    #: tests onto the other branch, so the annotation states the surface this
+    #: fake stands in for without creating it.
+    _name_state: ConversationName
+    conversation_name_state: ConversationName
 
     def __init__(self) -> None:
         self.session_id = "sess-1"
@@ -848,8 +858,6 @@ async def test_title_refresh_retitles_a_detached_session_and_republishes() -> No
     what keeps ``lop sessions`` and the resume picker from listing the session
     under the name it just stopped having.
     """
-    from local_operator.session.naming import ConversationName
-
     handle, session = make_handle()
     session.conversation_name = "Fix the login flow"
     session._name_state = ConversationName(text="Fix the login flow", user_set=True)
@@ -880,8 +888,6 @@ async def test_title_refresh_retitles_a_detached_session_and_republishes() -> No
 async def test_title_refresh_that_changes_nothing_keeps_the_name_and_the_latch() -> None:
     """A refresh is not a rename: "the name still fits" must leave both the
     title and the user's claim on it exactly as they were."""
-    from local_operator.session.naming import ConversationName
-
     handle, session = make_handle()
     session.conversation_name = "Ledger reconciliation"
     session._name_state = ConversationName(text="Ledger reconciliation", user_set=True)
