@@ -528,7 +528,11 @@ async def test_oauth_failure_is_redacted_and_browser_opener_is_per_flow(desktop,
     client, _ = desktop
     observed = []
 
-    async def login(callbacks, *, open_browser):
+    # ``**_kwargs``: the controller passes ``signal=`` to every login callable
+    # so a host can cancel a pending flow. Without it this double raises
+    # TypeError before recording anything, and the assertion below reads as
+    # "the browser opener was never injected".
+    async def login(callbacks, *, open_browser, **_kwargs):
         observed.append(open_browser)
         await asyncio.sleep(0)
         raise RuntimeError("raw-provider-access-token-do-not-return")

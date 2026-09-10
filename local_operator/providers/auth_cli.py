@@ -8,12 +8,21 @@ from an interactive terminal (exec/headless mode never calls them).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import signal
+import sys
+import threading
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, Callable
 
-from local_operator.providers.oauth.callback_server import LoginCallbacks, LoginError
+from local_operator.providers.oauth.callback_server import (
+    LoginCallbacks,
+    LoginCancelledError,
+    LoginError,
+)
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
     ProviderDefinition,
@@ -97,8 +106,78 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
         return input(prompt)
 
     async def on_manual_code_input() -> str | None:
+        """Read a pasted value without making the process unkillable.
+
+        A DAEMON thread we own, deliberately NOT ``asyncio.to_thread``. The
+        difference only shows up on Ctrl+C, and there it is the whole
+        behaviour: ``to_thread`` runs on the loop's default
+        ``ThreadPoolExecutor``, and ``asyncio.run`` shuts that executor down by
+        JOINING its workers with ``THREAD_JOIN_TIMEOUT``, which is 300 s. The
+        worker is blocked in ``input()``/``getpass()`` on a terminal read that
+        nothing interrupts, so it never finishes and the join never returns.
+
+        Measured on the pre-change tree, driving the real CLI under a pty and
+        sending a real Ctrl+C: the interrupt is delivered and ``run_login``'s
+        ``except KeyboardInterrupt`` is reached, and then the process sits in
+        ``Runner.close()`` for the full five minutes. From the user's side the
+        cancel simply does not work — which is the same 300 s wait this change
+        exists to remove, arrived at from the other direction.
+
+        A daemon thread is not joined at interpreter exit, so the blocked read
+        stops being able to hold the process open. The value is handed back
+        through a loop-thread callback, and the future is checked for
+        cancellation first: by the time a late paste arrives the flow it was
+        feeding may already be gone.
+
+        THE WORKER OUTLIVES THIS CALL ON EVERY PATH, not just the cancel one.
+        A successful Anthropic login finishes when the loopback callback wins
+        the race, and this reader is still parked in `input()`/`getpass()` with
+        a `read()` outstanding on the terminal until the process exits. That is
+        why the terminal's own state is snapshotted and restored by the
+        COMMAND (`_terminal_state_restored`) rather than by the reader, and why
+        anything the CLI does after a successful login would be competing for
+        stdin with this thread. Nothing does today; a future caller that wants
+        to read from the terminal after a login has to reckon with it (agent
+        review round 1, minor-3).
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+
+        def deliver(setter: Callable[[], None]) -> None:
+            # The future is resolved from the LOOP thread; a cancelled future
+            # (the login ended while the user was still typing) is left alone
+            # rather than raising InvalidStateError into a dead flow.
+            if not future.done():
+                setter()
+
+        def worker() -> None:
+            try:
+                value = read_line()
+            except Exception as raised:  # noqa: BLE001 — reported, not swallowed
+                # Bound to a local BEFORE the lambda closes over it: Python
+                # deletes an `except ... as` name when the clause exits, so a
+                # lambda that referenced it directly would raise NameError on
+                # the loop thread instead of delivering the error.
+                error = raised
+                loop.call_soon_threadsafe(deliver, lambda: future.set_exception(error))
+            except BaseException:
+                # `SystemExit`/`KeyboardInterrupt` raised INSIDE this reader
+                # belong to interpreter teardown on this thread, not to the
+                # awaiting flow. Delivering one into the future would re-raise
+                # it on the loop thread, in a context its author never meant —
+                # a `SystemExit` from a reader would surface as the login's
+                # outcome. The flow has its own answer for a cancel (the abort
+                # signal and the `_login_or_cancel` race), so leaving the
+                # future unresolved lets that answer win (agent review round 1,
+                # nit-1). EOF still arrives as the `EOFError` handled below.
+                logger.debug("login paste reader exited during teardown", exc_info=True)
+            else:
+                read = value
+                loop.call_soon_threadsafe(deliver, lambda: future.set_result(read))
+
+        threading.Thread(target=worker, daemon=True, name="lo-login-paste").start()
         try:
-            value = await asyncio.to_thread(read_line)
+            value = await future
         except (EOFError, KeyboardInterrupt):
             return None
         return value.strip() or None
@@ -107,6 +186,118 @@ def _callbacks_interactive(definition: ProviderDefinition) -> LoginCallbacks:
     return LoginCallbacks(
         on_auth_url=on_auth_url, on_progress=on_progress, on_manual_code_input=manual_input
     )
+
+
+async def _login_or_cancel(login: Any, callbacks: LoginCallbacks, aborted: Any) -> Any:
+    """Run a login, and give up on it the moment the abort signal fires.
+
+    The signal is passed down as well, because a provider that WATCHES it can
+    unwind itself cleanly — the loopback flows stop their callback server in
+    their own `finally`, which is what frees the port for a retry, and that is
+    strictly better than being cancelled from outside.
+
+    But not every login watches it. The paste-a-key providers
+    (`create_api_key_login`) are nothing but an `on_manual_code_input` await:
+    they accept `signal` through `**_kwargs` and ignore it, so an abort alone
+    would leave `local-operator login alibaba` blocked on a prompt read until
+    the user found another way out. Verified under a pty before this race
+    existed: Ctrl+C printed nothing and the process had to be SIGKILLed.
+
+    Racing here covers both shapes with one rule, and the ordering keeps the
+    better outcome when it is available: a flow that raises
+    `LoginCancelledError` for itself wins the race normally, and the losing
+    task is cancelled and reaped so no login continues detached from the
+    command that started it.
+    """
+    login_task = asyncio.ensure_future(login(callbacks, signal=aborted))
+    abort_task = asyncio.ensure_future(aborted.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {login_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if login_task in done:
+            return login_task.result()
+        raise LoginCancelledError(aborted.reason or "Login cancelled")
+    finally:
+        for task in (login_task, abort_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(login_task, abort_task, return_exceptions=True)
+
+
+@contextlib.contextmanager
+def _terminal_state_restored() -> Iterator[None]:
+    """Put the terminal back the way it was found, whatever happens inside.
+
+    The paste prompt reads through ``getpass`` for an API key, which disables
+    ECHO via ``termios`` and restores it in its own ``finally`` — on the reader
+    thread. That thread is deliberately a DAEMON (see
+    ``on_manual_code_input``): not joining it is what stops a blocked terminal
+    read holding the process open for the 300 s executor join. The cost is that
+    when a cancel exits the process while the reader is still parked inside
+    ``getpass``, its ``finally`` never runs and the user is returned to a shell
+    with ECHO off — typing nothing they can see, with no way to diagnose it
+    short of blind-typing ``stty sane``.
+
+    So the restore cannot live on the reader. It belongs to whoever owns the
+    terminal for the duration of the login, which is this command. Snapshotting
+    before the flow starts and restoring on every exit makes it independent of
+    which thread was reading, whether it was interrupted, and whether
+    ``getpass`` ever ran at all.
+
+    Reproduced under a real pty with the precondition asserted (ECHO on before,
+    off at the prompt): ``alibaba`` left ECHO off after a cancel while
+    ``anthropic`` — whose ``read_line`` uses plain ``input()`` — restored it,
+    which is what isolates this to the ``getpass`` branch and its 10-11
+    ``paste_prompt_required`` providers (agent review round 1, major-1).
+
+    A no-op when stdin is not a tty (piped input, CI) or the platform has no
+    ``termios`` (Windows), and it never raises: failing to restore a terminal
+    must not turn a completed login into an error.
+    """
+    saved = None
+    # The DESCRIPTOR, captured once, not the stream object: ``sys.stdin`` can
+    # be rebound or closed while the login runs, and the restore has to name
+    # the same terminal the snapshot came from.
+    fd: int | None = None
+    try:
+        stream = sys.stdin
+        if stream is not None and stream.isatty():
+            import termios
+
+            descriptor = stream.fileno()
+            saved = termios.tcgetattr(descriptor)
+            fd = descriptor
+    except Exception:  # pragma: no cover - no tty, or a platform without termios
+        saved = None
+        fd = None
+    try:
+        yield
+    finally:
+        if saved is not None and fd is not None:
+            try:
+                import termios
+
+                # TCSADRAIN, not TCSANOW: let whatever the flow already wrote
+                # drain before the mode flips, so the restore cannot cut into
+                # the cancel receipt being printed.
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except Exception:  # pragma: no cover - terminal vanished under us
+                logger.debug("could not restore terminal attributes", exc_info=True)
+
+
+def _cancelled_message(definition: ProviderDefinition) -> str:
+    """What the terminal says when a login is cancelled.
+
+    Same sentence the TUI's notice carries, for the same reason: the user
+    cancelled because nothing appeared to happen (a browser that landed in the
+    provider's portal instead of coming back to the loopback redirect), so
+    "cancelled" alone leaves them unsure whether something is still listening
+    on the port and how to try again. The listener clause is conditional so it
+    stays true — a paste-a-key provider never started a server.
+    """
+    stopped = "local sign-in listener stopped; " if definition.callback_port is not None else ""
+    return f"\nLogin cancelled. {stopped}retry with: local-operator login {definition.id}"
 
 
 def run_login(
@@ -140,16 +331,63 @@ def run_login(
     callbacks = _callbacks_interactive(definition)
 
     async def _run() -> str | dict[str, Any]:
-        return await login(callbacks)
+        # A Ctrl+C during a PENDING login has to cancel the login, not merely
+        # unwind the interpreter. The flow is parked in `asyncio.wait` on the
+        # loopback callback, so the signal is turned into an abort the flow is
+        # already watching for -- the same AbortSignal the TUI's Ctrl+C rung
+        # feeds -- which makes it raise `LoginCancelledError` at once instead
+        # of sitting out the 300 s `DEFAULT_TIMEOUT_SECONDS`, and lets
+        # `run()`'s `finally` stop the loopback server so the port is free for
+        # an immediate retry.
+        #
+        # `add_signal_handler` and not `signal.signal`, because the default
+        # KeyboardInterrupt lands wherever the main thread happens to be and
+        # unwinds the flow WITHOUT running its cleanup; scheduling on the loop
+        # makes the cancel a normal, orderly outcome of the flow itself.
+        from local_operator.harness.types import AbortSignal
 
+        aborted = AbortSignal()
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_signal_handler(signal.SIGINT, lambda: aborted.abort("Login cancelled"))
+        except (NotImplementedError, RuntimeError):
+            # Windows event loops do not implement add_signal_handler, and it
+            # also raises off the main thread. The bare KeyboardInterrupt path
+            # below still catches the interrupt there; it just cannot be as
+            # tidy about the teardown.
+            pass
+        try:
+            return await _login_or_cancel(login, callbacks, aborted)
+        finally:
+            # The handler outlives the flow otherwise, and a later Ctrl+C would
+            # abort a signal nobody is watching instead of interrupting.
+            try:
+                loop.remove_signal_handler(signal.SIGINT)
+            except (NotImplementedError, RuntimeError):
+                pass
+
+    # Wraps the WHOLE flow, not just the cancel branch: the reader thread can
+    # still be parked inside `getpass` on a successful loopback login too (see
+    # `on_manual_code_input`), so every way out of here owes the user the
+    # terminal they arrived with.
     try:
-        result = asyncio.run(_run())
+        with _terminal_state_restored():
+            result = asyncio.run(_run())
     except LoginError as exc:
+        # A cancel is an OUTCOME, not a failure, so it must not be reported as
+        # "Login failed:" — LoginCancelledError is a LoginError subclass and
+        # would otherwise be caught by the clause below.
+        if isinstance(exc, LoginCancelledError):
+            print(_cancelled_message(definition))
+            return 130
         print(f"Login failed: {exc}")
         return 1
     except KeyboardInterrupt:
-        print("Login cancelled.")
-        return 1
+        # The fallback for a host where the loop-level handler could not be
+        # installed (see `_run`), and for an interrupt outside the flow's own
+        # wait.
+        print(_cancelled_message(definition))
+        return 130
 
     storage_provider = credential_provider_id(definition.id)
     if isinstance(result, str):
