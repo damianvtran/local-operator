@@ -20,27 +20,31 @@
 # syntax against GitHub's own CODEOWNERS validator
 # (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
 # validates the default branch; the pre-change baseline on `main` returned an
-# empty error list). The three owners added 2026-09-10 were NOT yet in that
-# collaborators list at the time of writing -- see the pending-invite caveat
-# below.
+# empty error list). Of the three owners added 2026-09-10, only
+# `sherman-tsui` had reached the collaborators list by end of that day; the
+# other two had not -- see the pending-invite caveat below for the split.
 #
 # PENDING-INVITE CAVEAT -- `SanaKetabchi`, `olafagbemi` and `sherman-tsui`
 # were added as owners on 2026-09-10 by explicit operator decision, and on the
 # same date (15:54 UTC) each was invited as a collaborator with `write`
-# permission: invitation ids 332543898 (SanaKetabchi), 332543900 (olafagbemi),
-# 332543903 (sherman-tsui). The invitations are PENDING as of 2026-09-10.
-# Until each person accepts, they are not collaborators, and per the
-# documented rule above GitHub silently ignores their handles here -- the
-# exact failure mode this file exists to fix, knowingly accepted for a
-# bounded window. It does not
-# recreate the 2026-09-05 unsatisfiable-control state: the `*` rule still
-# resolves through `damianvtran` and `bbqben`, who are active write-access
-# collaborators, and an approval from ANY listed owner satisfies the
-# requirement, so `main`'s code-owner review stays satisfiable throughout.
-# If these three handles ever appear not to resolve, the fix is acceptance of
-# the invite -- or re-invitation, since GitHub invitations expire seven days
-# after creation (2026-09-17 for these) -- NOT editing this file. Re-check
-# state with `gh api repos/damianvtran/local-operator/collaborators` and
+# permission. As of 2026-09-10 the split between accepted and pending is:
+# `sherman-tsui` has ACCEPTED (invitation 332543903 consumed; confirmed via
+# `gh api repos/damianvtran/local-operator/collaborators/sherman-tsui/permission`
+# returning `write`), so that handle in the `*` line is already effective;
+# the other two invitations remain PENDING as of 2026-09-10 -- invitation
+# ids 332543898 (SanaKetabchi) and 332543900 (olafagbemi). Until each of
+# those two accepts, they are not collaborators, and per the documented
+# rule above GitHub silently ignores their handles here -- the exact
+# failure mode this file exists to fix, knowingly accepted for a bounded
+# window. It does not recreate the 2026-09-05 unsatisfiable-control state:
+# the `*` rule still resolves through `damianvtran` and `bbqben`, who are
+# active write-access collaborators, and an approval from ANY listed owner
+# satisfies the requirement, so `main`'s code-owner review stays
+# satisfiable throughout. If either pending handle still does not resolve
+# after a wait, the fix is acceptance of the invite -- or re-invitation,
+# since GitHub invitations expire seven days after creation (2026-09-17
+# for these) -- NOT editing this file. Re-check state with
+# `gh api repos/damianvtran/local-operator/collaborators` and
 # `gh api repos/damianvtran/local-operator/invitations`.
 #
 # Handle verification for the three additions, in the same evidence-first
