@@ -288,9 +288,20 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
       shape is validated in the path declaration rather than inside the handler
       where a later edit could route around it. FastAPI answers a non-matching
       path with 422 before any disk access.
-    - **Immutable caching.** The digest IS the sha256 of the content, so the
-      bytes behind a URL can never change. A renderer that holds a blob for a
-      scrolled-away row re-requests it for free.
+    - **No HTTP caching, deliberately.** The digest IS the sha256 of the
+      content, so an ``immutable`` response would be correct about the BYTES —
+      and it is still the wrong header here. ``managed_desktop_boundary``
+      applies ``Cache-Control: no-store`` to everything under ``/v1/desktop/``
+      because these responses are bearer-gated session data, and a route that
+      set ``public, max-age=31536000`` would either be silently overridden (it
+      was: measured ``no-store`` on the wire) or, if the middleware were
+      carved out for it, would invite a shared cache to retain one user's
+      screenshots. The mobile daemon's equivalent route can afford
+      ``immutable`` because it is a different process behind different auth;
+      copying the header without the surrounding argument would not be reuse.
+      Dedup belongs to the client, which already holds a digest-keyed cache
+      for exactly this reason — and the digest being content-addressed is what
+      makes that cache safe.
 
     A missing attachment is 404, never 500: the store's contract is that an
     unresolvable reference is ordinary (interrupted write, hand-pruned store)
@@ -298,11 +309,7 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     """
     async with errors():
         data, mime_type = await host(request).attachment(session_id, digest)
-    return Response(
-        content=data,
-        media_type=mime_type,
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
+    return Response(content=data, media_type=mime_type)
 
 
 @router.post(

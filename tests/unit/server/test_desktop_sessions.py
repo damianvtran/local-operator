@@ -532,3 +532,44 @@ def test_attachment_digest_shape_is_enforced_by_the_route_declaration():
     assert "application/json" not in schema["paths"][path]["get"]["responses"]["200"].get(
         "content", {}
     )
+
+
+@pytest.mark.asyncio
+async def test_attachment_bytes_are_not_cached_by_any_shared_cache(tmp_path, monkeypatch):
+    """The digest is content-addressed, and the response is still `no-store`.
+
+    An `immutable` header would be correct about the BYTES and wrong about the
+    RESPONSE: `managed_desktop_boundary` marks everything under `/v1/desktop/`
+    no-store because it is bearer-gated session data. An earlier draft of this
+    route set `public, max-age=31536000, immutable` and it never reached the
+    wire -- measured `no-store` against a live server -- so the header was a
+    claim the system did not honour. Asserting the effective value keeps the
+    route honest about which layer owns caching (the client, keyed by digest).
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    raw = b"\x89PNG\r\n\x1a\nbytes"
+    ref = AttachmentStore(tmp_path / ATTACHMENTS_DIRNAME).put(
+        base64.b64encode(raw).decode("ascii"), "image/png"
+    )
+    assert ref is not None
+    session = tmp_path / "sessions" / "0123456789ab"
+    session.mkdir(parents=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/v1/desktop/sessions/0123456789ab/attachments/{ref.digest}",
+            headers={"Authorization": "Bearer token"},
+        )
+    assert response.status_code == 200
+    assert response.content == raw
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "no-store"
