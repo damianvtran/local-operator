@@ -183,7 +183,10 @@ class KeyPromptBlock(TranscriptBlock):
         "a login is already in progress".
 
         ``credential`` is the ``/credential <KEY>`` prompt, which reuses this
-        block for its masked paste. The value is a session secret named by the
+        block for its masked paste. It is reached by a PASTED whole line rather
+        than a typed one — typing the form opens the inline masked capture
+        instead (QA round 1, Q1) — and is the route a viewer hands a secret to
+        its owner on. The value is a session secret named by the
         user — a database password, a deploy token — not a provider's API key,
         and nothing about it is a LOGIN. The label is the key name, so the
         prompt says "paste the value for DB_PASSWORD" and the cancel receipt

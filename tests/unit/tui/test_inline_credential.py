@@ -2281,6 +2281,103 @@ async def test_escape_with_characters_typed_announces_the_plaintext() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retry",
+    [
+        # The shape UX walked: the operator explains themselves, then re-arms.
+        "actually /credential",
+        # Straight back to the gesture with nothing in between.
+        "/credential",
+        # Words first, token last — the commonest mid-prose arm.
+        "ok now /credential",
+    ],
+)
+async def test_retrying_the_gesture_after_an_escape_masks_again(retry: str) -> None:
+    """U6 — the cancel's OWN flow: retry on the same line and it must mask.
+
+    Making Esc real (R1/U2) created the state this fails in, so it is the
+    remediation's own regression. Typing a SECOND token walks through spellings
+    (`/crede`, `/creden`, …) that are not tokens, so the latched arm found no
+    match at its anchor and the nearest-match tie-break MIGRATED it back onto
+    the first token earlier in the line. The migration is one-way — the anchor
+    moved with it — so the arm never came home, the caret-at-span-end gate never
+    fired, and the secret typed next was painted in the CLEAR and then parsed as
+    a credential NAME, which is the half the model does learn (UX round 2, U6).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not editor.credential_typing(), "precondition: the cancel landed"
+
+        for char in retry:
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert editor.credential_typing(), f"the retry re-opens the capture after {retry!r}"
+
+        for char in SECRET:
+            await pilot.press(char)
+        await pilot.pause()
+        assert SECRET not in editor.text, "the retyped secret is masked, not painted"
+        assert editor.text.count(CREDENTIAL_MASK_CHAR) == len(SECRET), "one cell per character"
+        assert editor._credential_typed == SECRET, "and the held value is the one typed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "word",
+    [
+        # Longer words that merely START WITH the token must stay prose. The
+        # typed-through rule is PREFIX-OF, not starts-with, precisely so these
+        # cannot inherit an arm.
+        "/credentials",
+        "/credentialx",
+        # Shortened BELOW the `/cred` floor is the operator withdrawing the
+        # gesture, which is the visible way out and must keep working.
+        "/cre",
+        "/credx",
+        # An unrelated command, and ordinary prose.
+        "/help",
+        "notes about the deploy",
+    ],
+)
+async def test_the_retry_rule_does_not_arm_anything_but_the_token(word: str) -> None:
+    """U6's fix must widen the masked set ONLY onto the operator's own gesture.
+
+    The counterpart to the test above, and the one that stops it being satisfied
+    by masking everything: a rule that re-armed on any word at the anchor would
+    swallow prose as a secret, which is the unrecoverable direction. So each
+    word here is typed into exactly the post-cancel state U6 lives in and must
+    leave the following text as PLAIN TEXT.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await _type_secret(pilot, editor, "")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        for char in word:
+            await pilot.press("space" if char == " " else char)
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        assert not editor.credential_typing(), f"{word!r} must not arm a capture"
+
+        for char in "PLAINTEXT_STAYS_VISIBLE":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "PLAINTEXT_STAYS_VISIBLE" in editor.text, "it stays readable"
+        assert CREDENTIAL_MASK_CHAR not in editor.text, "and nothing was masked"
+
+
+@pytest.mark.asyncio
 async def test_an_empty_escape_announces_nothing() -> None:
     """No characters restored, no warning owed — the notice must not cry wolf."""
     app = Host()

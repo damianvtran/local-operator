@@ -578,6 +578,37 @@ CREDENTIAL_ARM = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)[ \t]*$", re.IGNO
 #: draws: ``/credential`` and ``/cred`` are the token, ``/credentials`` is not.
 CREDENTIAL_TOKEN = re.compile(r"(?:^|(?<=\s))/(?:credential|cred)(?!\S)", re.IGNORECASE)
 
+#: The word at a latched anchor, used ONLY to ask "is the operator still typing
+#: this same token?" — never to arm.
+#:
+#: ``/cred`` is a token and ``/credential`` is a token, but the five spellings
+#: BETWEEN them are not: an operator typing a second ``/credential`` passes
+#: through ``/crede``, ``/creden``, ``/credent``, ``/credenti``, ``/credentia``,
+#: none of which match :data:`CREDENTIAL_TOKEN`. During that window the latched
+#: arm had no match at its own anchor, so the nearest-match tie-break handed it
+#: to a DIFFERENT token earlier on the line — and it never came back, because
+#: from then on the anchor was the earlier token and "nearest" kept choosing it.
+#: The caret-at-span-end gate in :meth:`Editor._open_credential_typing` then
+#: could not fire (the arm covered a span the caret was not in), the opening
+#: space was just a space, and the secret typed next landed in the CLEAR
+#: (UX round 2, U6).
+#:
+#: The rule is a PREFIX-OF relation, not a starts-with one, and the difference
+#: is the whole containment argument. ``/credentials`` starts with the token but
+#: is NOT a prefix of it, so it stays disarmed exactly as it is today — a
+#: starts-with test would have widened the armed set onto a word the gesture
+#: has never covered. ``/cre`` is below the token floor and also fails, which is
+#: correct: shortening past ``/cred`` is the operator deleting the gesture, the
+#: visible way to withdraw it.
+CREDENTIAL_TOKEN_WORD = re.compile(r"(?:^|(?<=\s))(/[A-Za-z]*)", re.IGNORECASE)
+
+#: The shortest spelling that still reads as the token (``/cred``). Below this,
+#: a word at the anchor is a deletion rather than a gesture in progress.
+CREDENTIAL_TOKEN_FLOOR = "/cred"
+
+#: The full spelling the typed-through window walks toward.
+CREDENTIAL_TOKEN_FULL = "/credential"
+
 #: What DISARMS a latched capture: a flag-shaped argument on the token's own
 #: line. Nothing else does — see :meth:`Editor._sync_credential_arm`.
 #:
@@ -5904,6 +5935,18 @@ class Editor(TextArea):
         (review round 2, R6b/R6c).
         """
         anchor = self._credential_arm[0] if self._credential_arm is not None else 0
+        # THE ANCHOR'S OWN WORD WINS BEFORE ANY TIE-BREAK RUNS. While the
+        # operator types the token out — `/cred` -> `/crede` -> … ->
+        # `/credential` — the middle spellings do not match CREDENTIAL_TOKEN,
+        # so without this the latched arm found no match at its anchor and the
+        # nearest-match tie-break below migrated it onto a different token
+        # earlier in the line. That migration is one-way: the anchor moved with
+        # it, so "nearest" kept choosing the earlier token and the arm never
+        # came home. Held in place instead, the arm re-anchors normally on the
+        # very next keystroke that completes the token (UX round 2, U6).
+        typed_through = self._token_being_typed_at(anchor)
+        if typed_through is not None:
+            return typed_through
         nearest: tuple[int, int] | None = None
         best = -1
         for match in CREDENTIAL_TOKEN.finditer(self.text):
@@ -5916,6 +5959,36 @@ class Editor(TextArea):
                 # shrinking every later match is further away still.
                 break
         return nearest
+
+    def _token_being_typed_at(self, anchor: int) -> tuple[int, int] | None:
+        """The word at ``anchor`` when it is this token MID-TYPING, else ``None``.
+
+        Answers one question for :meth:`_relocate_armed_token`: is the word
+        sitting at the latched offset the operator's own gesture, caught partly
+        typed? ``/crede`` is — it is a prefix of ``/credential`` and at or above
+        the ``/cred`` floor — so the arm stays on it rather than migrating.
+
+        DELIBERATELY NOT AN ARMING RULE. Arming still asks
+        :data:`CREDENTIAL_ARM` at the caret and nothing else, so this cannot
+        arm a token that merely arrived in the buffer; it only keeps an arm the
+        operator already made. It also cannot widen the armed set sideways: the
+        test is PREFIX-OF the token, so ``/credentials`` (a longer word that
+        merely starts with it) fails here exactly as it fails
+        ``CREDENTIAL_TOKEN``, and a word shortened past ``/cred`` fails too
+        because that is the operator deleting the gesture.
+        """
+        if self._credential_arm is None:
+            return None
+        match = CREDENTIAL_TOKEN_WORD.match(self.text, anchor)
+        if match is None:
+            return None
+        word = match.group(1)
+        lowered = word.lower()
+        if len(lowered) < len(CREDENTIAL_TOKEN_FLOOR):
+            return None
+        if not CREDENTIAL_TOKEN_FULL.startswith(lowered):
+            return None
+        return match.start(1), match.end(1)
 
     def _credential_arm_span(self) -> tuple[int, int] | None:
         """Buffer offsets of the ``/credential`` token arming the next paste.
@@ -5963,9 +6036,13 @@ class Editor(TextArea):
           submitted text beginning with ``/credential``, which
           ``_dispatchable_slash`` routes to the masked-paste command with the
           marker as its KEY argument. Consuming the token means the leading and
-          the mid-line gestures behave identically, and bare
-          ``/credential <KEY>`` (no paste, so no capture) still dispatches
-          exactly as it always has.
+          the mid-line gestures behave identically, and a bare
+          ``/credential <KEY>`` line that arrives with no capture open — a
+          PASTED whole line, a recalled prompt, a restored draft — still
+          dispatches exactly as it always has. TYPING that line no longer
+          reaches the command: the space after the token opens a capture, so
+          the key name is minted as a short secret instead (QA round 1, Q1).
+          The form is retired for typing, not removed.
         """
         offset = self._caret_offset()
         before = self.text[:offset]
@@ -6126,11 +6203,27 @@ class Editor(TextArea):
         """The held secret after ``edit``, or ``None`` to leave it alone.
 
         THE HELD VALUE IS A MIRROR OF THE MASK CELLS, and this is the one place
-        the two are kept in step. Every buffer mutation funnels through
-        :meth:`edit`, so an edit that moves, removes or splits mask cells is
-        applied to :attr:`_credential_typed` at the SAME index — which makes
-        arrow-then-type, backspace, delete and select-and-replace all correct by
-        one rule instead of four agreeing key handlers.
+        the two are kept in step. Every buffer mutation the OPERATOR makes
+        funnels through :meth:`edit`, so an edit that moves, removes or splits
+        mask cells is applied to :attr:`_credential_typed` at the SAME index —
+        which makes arrow-then-type, backspace, delete and select-and-replace
+        all correct by one rule instead of four agreeing key handlers.
+
+        UNDO AND REDO ARE THE FUNNEL'S ONE EXCEPTION, and the claim is stated
+        with it rather than without it. Textual's ``undo()``/``redo()`` call
+        ``edit.undo(self)``/``edit.do(self)`` DIRECTLY (``_text_area.py``), so
+        they bypass this override and the mirror never runs for them — measured
+        with a positive control: eight typed characters produce eight ``edit()``
+        calls and eight mirror calls, while ``ctrl+z``/``ctrl+y`` produce zero
+        of each. The reachable outcome is inert (``ctrl+z`` mid-capture empties
+        buffer and value together; ``ctrl+y`` repaints mask cells with an empty
+        held value — bullets that stand for nothing), nothing leaks and no
+        payload is minted, and the behaviour is byte-identical on the
+        pre-remediation tree, so this is pre-existing rather than introduced by
+        the mirror. It is named here because this codebase's own standard is
+        that prose asserting an invariant is not a mechanism enforcing it, and
+        the mirror's correctness argument should not rest on a funnel claim with
+        an unstated exception (review round 2, R6).
 
         Why a mirror and not an append (UX round 1, U1). The mask cell was
         always inserted AT THE CARET while the value appended to the END, and
@@ -6718,14 +6811,22 @@ class Editor(TextArea):
 
     # -- command completion -------------------------------------------------
     def edit(self, edit: Edit) -> EditResult:
-        """Every buffer mutation funnels through here — resync the picker.
+        """Every operator buffer mutation funnels through here — resync the picker.
 
-        Hooking the two mutation funnels (:meth:`edit` for inserts/deletes/
-        undo, :meth:`load_text` for whole-buffer replacement) keeps the picker
-        exact for keystrokes, pastes, and history navigation alike, and does
-        it synchronously. Listening for ``TextArea.Changed`` instead would put
-        the picker one message-loop tick behind the buffer, which is the tick
-        in which Enter decides whether to complete.
+        Hooking the two mutation funnels (:meth:`edit` for inserts and deletes,
+        :meth:`load_text` for whole-buffer replacement) keeps the picker exact
+        for keystrokes, pastes, and history navigation alike, and does it
+        synchronously.
+
+        NOT undo/redo: Textual calls ``edit.undo``/``edit.do`` directly and
+        never reaches this override, so neither the picker nor the credential
+        mirror runs for them. Measured, not assumed, and unchanged from before
+        the credential work (review round 2, R6). This docstring previously
+        listed ``undo`` as one of the things it hooks, which was never true.
+
+        Listening for ``TextArea.Changed`` instead would put the picker one
+        message-loop tick behind the buffer, which is the tick in which Enter
+        decides whether to complete.
         """
         # Only a REMOVAL can uncite an attachment, and only the attachments it
         # touched. Both halves are measured BEFORE the edit, because afterwards

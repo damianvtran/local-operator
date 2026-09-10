@@ -1620,11 +1620,22 @@ CREDENTIAL_ARMED_NOTICE = "armed — add a space, then type or paste the secret"
 #: geometry. Prose asserting an invariant is not a mechanism enforcing it.
 #:
 #: So the rungs below are tried WIDEST-FIRST against the row's real budget by
-#: :func:`credential_typing_notice`, which is the same overflow-ladder idiom the
-#: status band and the info panel use. Every rung names BOTH keys; what degrades
-#: is the description of the mode, which the amber marker and the visible mask
-#: cells already carry. The narrowest rung is 22 cells, so the exit survives
-#: every width the picker paints at.
+#: :meth:`~local_operator.tui.widgets.command_picker.CommandPicker.set_notice_rungs`
+#: and resolved at paint time by ``CommandPicker._fitted_notice``, which is the
+#: same overflow-ladder idiom the status band and the info panel use. Every rung
+#: names BOTH keys; what degrades is the description of the mode, which the
+#: amber marker and the visible mask cells already carry.
+#:
+#: THE NARROWEST RUNG IS 25 CELLS, and with the row's own gutter and margin
+#: (``_GUTTER_CELLS=3``, ``_EDGE_MARGIN=2``) that needs 30 screen columns to
+#: paint at all — but ``truncate_cells`` takes the exit apart word by word
+#: below 34, so the honest claim is that the exit survives every width AT OR
+#: ABOVE 34 COLUMNS and the backstop truncate applies under it (design round 2,
+#: D8). The previous wording said 22 cells and "every width the picker paints
+#: at"; both were false, which is the D2 defect — prose asserting an invariant
+#: the code does not enforce — reappearing in the very docstring that names it.
+#: 24-33 columns is not a real terminal, so no rung is added for it; the
+#: guard test pins the range from 45 up.
 CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
     "masked as you type — Enter turns it into a chip, Esc cancels",
     "masked as you type — Enter chips it, Esc cancels",
@@ -1650,13 +1661,25 @@ CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
 #: because the operator's hand is already moving toward Enter. The length comes
 #: from the message and never the value.
 #:
+#: "EXPOSE" RATHER THAN "SEND", because the consequence is SHAPE-DEPENDENT and
+#: the warning must be true for both. Mid-prose (``deploy with /credential …``)
+#: Enter genuinely sends the line to the model. But when the capture was the
+#: WHOLE line, Enter re-dispatches to the legacy ``<KEY>`` prompt instead, which
+#: puts the NORMALISED secret (``HUNTER2_TYPED_TEST``) in the transcript as a
+#: credential name — nothing reaches the model that turn, so "Enter will send
+#: them" read as false there, and it also understated the case: a name in the
+#: transcript is what the model is documented to learn on a later turn. That
+#: second behaviour is pre-existing and identical on base (QA round 2, Q6); this
+#: string is only what makes it visible, so the copy is what changes here and
+#: not the route.
+#:
 #: One line at every ordinary width. The notice block FOLDS rather than crops
 #: (``NoticeBlock.body_budget``), so nothing is lost when it does wrap — but the
 #: sentence is kept inside ~78 cells so the warning reads as one statement on a
 #: single row at 80 columns and up, which is where an operator scanning for what
 #: just happened will find it.
 CREDENTIAL_UNREDACTED_NOTICE = (
-    "{length} characters are now PLAIN TEXT in the composer — Enter will send them"
+    "{length} characters are now PLAIN TEXT in the composer — Enter will expose them"
 )
 
 
@@ -29019,12 +29042,26 @@ class OperatorApp(App[None]):
             # locally (a key no tool could read: the exact leak
             # `_FRONTEND_LOCAL_SLASHES` documents) the capture DEGRADES
             # LOUDLY: the secret is dropped here, the operator is told, and the
-            # model is told nothing was stored. `/credential <KEY>` still
-            # routes to the owner over the dedicated op and remains the
-            # supported way to hand a secret over from a viewer.
+            # model is told nothing was stored. The `/credential <KEY>` command
+            # still routes to the owner over the dedicated op and remains the
+            # supported way to hand a secret over from a viewer — but it is
+            # only reachable by PASTING the whole line, which is what the
+            # notice below has to say.
+            #
+            # IT MUST NAME THE PASTE, NOT THE TYPING. Typing `/credential KEY`
+            # cannot reach that command any more: the space after the token
+            # opens a masked capture, so the KEY NAME is minted as a short
+            # secret and nothing is handed to the owner. Advice that cannot be
+            # followed is worse than none here, because this notice fires on
+            # the submit seam — the chip the retyping mints is itself a
+            # payload, so the next submit re-enters this branch and reprints
+            # the same advice, and the operator LOOPS (review round 2, R5; QA
+            # round 2, Q5). A pasted whole line arms no capture and does reach
+            # the owner's prompt, so that is the route named.
             self._system_notice(
                 "inline /credential needs the session that runs the tools; "
-                "use /credential <KEY> here and the secret is stored on the owner",
+                "paste the whole line /credential <KEY> here "
+                "and the secret is stored on the owner",
                 "warning",
             )
             return self._mark_credentials_unstored(text, attachments)

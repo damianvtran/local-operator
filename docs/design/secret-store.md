@@ -952,6 +952,19 @@ the `--persist` advice both name the inline gesture and the generated
 `LOP_SECRET_` name instead. Usage text and behaviour have to agree (QA round 1,
 Q1).
 
+**The arm stays on its own token while that token is being typed out.** `/cred`
+is a token and `/credential` is a token, but the five spellings between them are
+not — so an operator re-arming on the same line (the state the now-working Esc
+leaves them in) walked the latched arm through a window where it matched nothing
+at its own anchor, and the nearest-match tie-break migrated it back onto the
+FIRST token earlier in the line. The migration is one-way, because the anchor
+moves with it: the arm never came home, the caret-at-span-end gate never fired,
+and the secret typed next was painted in the clear and then parsed as a
+credential NAME — the half the model does learn on a later turn (UX round 2,
+U6). `_token_being_typed_at` answers the anchor's own word first, and the test
+is PREFIX-OF the token rather than starts-with, so `/credentials` cannot inherit
+an arm and a word shortened past `/cred` still reads as withdrawing the gesture.
+
 **A leading `-` escapes the mask**, so `--forget-all` stays typable. The
 credential verbs are flag-shaped precisely so they cannot collide with a key
 (keys normalize to `[A-Z0-9_]`), which is the same partition `CREDENTIAL_ARGUMENT`

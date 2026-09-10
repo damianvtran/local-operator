@@ -8,8 +8,10 @@ worthless, and this series has produced false-passing harnesses repeatedly.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+import re
 import shlex
 import sys
 import threading
@@ -18,6 +20,7 @@ from typing import Any
 
 import pytest
 
+import local_operator
 from local_operator.harness.types import AbortSignal, ToolContext
 from local_operator.secrets.promote import promote_session_credential
 from local_operator.secrets.protocol import PROTOCOL_VERSION
@@ -641,6 +644,75 @@ def test_promote_of_an_unknown_key_advises_a_gesture_that_still_works(isolated: 
     assert "NOPE" in result.message, "it still names the key they asked for"
     assert "/credential" in result.message, "and the command that hands one over"
     assert "/credential NOPE" not in result.message, "but never the untypable form"
+
+
+#: Advice that tells the operator to TYPE the retired ``/credential <KEY>``
+#: form. The verb is what makes it advice rather than a description, and the
+#: argument is what makes it the RETIRED form rather than the live gesture.
+#:
+#: THE KEY HALF IS DELIBERATELY CASE-SENSITIVE. Compiling the whole pattern
+#: with ``re.IGNORECASE`` makes ``[A-Z]`` match lowercase too, and the rule then
+#: fires on ordinary prose like "run /credential from the owner session" — which
+#: it did on the first draft of this guard. Only the VERBS are spelled both
+#: ways.
+_TYPE_THE_RETIRED_FORM = re.compile(
+    r"(?:[Uu]se|[Tt]ype|[Rr]un|[Ee]nter|[Tt]ry|[Ss]ay)\s+(?:the\s+)?[`'\"]*"
+    r"/credential\s+(?!--)(?:<[A-Za-z_]+>|[A-Z][A-Z0-9_]{2,})"
+)
+
+
+def test_no_shipped_string_tells_the_operator_to_type_the_retired_form() -> None:
+    """The RETIREMENT SWEEP itself, as a mechanism rather than a grep somebody ran.
+
+    Q1 retired the typed ``/credential <KEY>`` form and corrected the usage
+    text, the ``--persist`` advice and the design doc. A live viewer notice was
+    missed, and the miss was found INDEPENDENTLY by the reviewer and by QA on
+    the same line (review round 2, R5; QA round 2, Q5) — two agents finding one
+    site means the sweep was the defect, not just the site. So the sweep is
+    pinned here and runs on every commit.
+
+    Why it matters more than a stale string usually would: following that advice
+    mints the operator's KEY NAME as a short secret, and on the viewer path it
+    fires on the submit seam, so the chip the retyping mints re-enters the same
+    branch and reprints the same advice — the operator LOOPS.
+
+    Scoped to shipped strings under ``local_operator/`` — tests and design docs
+    describe the retired form deliberately, and a guard that forbade naming it
+    would forbid explaining why it was retired.
+    """
+    package = Path(local_operator.__file__).parent
+    offenders: list[str] = []
+    scanned = 0
+    for path in sorted(package.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError):  # pragma: no cover - unreadable file
+            continue
+        scanned += 1
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            found = _TYPE_THE_RETIRED_FORM.search(node.value)
+            if found is not None:
+                offenders.append(
+                    f"{path.relative_to(package.parent)}:{node.lineno}: {found.group(0)!r}"
+                )
+
+    # A ZERO FROM A DEAD INSTRUMENT READS EXACTLY LIKE A PASS, and this rule is
+    # narrow enough to break silently, so the detector is proven live in the
+    # same run against the exact string that was missed.
+    missed = (
+        "inline /credential needs the session that runs the tools; "
+        "use /credential <KEY> here and the secret is stored on the owner"
+    )
+    assert _TYPE_THE_RETIRED_FORM.search(missed), "the detector is dead; its zero means nothing"
+    assert scanned > 100, f"the sweep only reached {scanned} modules"
+
+    assert not offenders, (
+        "these shipped strings tell the operator to TYPE the retired "
+        "`/credential <KEY>` form, which mints their key name as a secret:\n  "
+        + "\n  ".join(offenders)
+    )
 
 
 def test_credential_command_parses_the_persist_verb() -> None:
