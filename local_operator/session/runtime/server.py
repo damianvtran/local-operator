@@ -820,7 +820,7 @@ class RuntimeServer:
         if loop is None or loop.is_closed():
             return
         frame = {"op": "stopping", "session_id": self._record.session_id}
-        if self._on_owner_loop():
+        if self._on_runtime_loop():
             # An in-process runtime shares the TUI's loop, so the owner's own
             # /stop arrives HERE, from a synchronous caller whose very next
             # statement tears the sockets down. Awaiting a drain is therefore
@@ -934,7 +934,7 @@ class RuntimeServer:
             return
         if loop is None or loop.is_closed():
             return
-        if self._on_owner_loop():
+        if self._on_runtime_loop():
             self._ensure_shutdown_task()
             return
         shutdown = self._shutdown_on_loop()
@@ -955,7 +955,7 @@ class RuntimeServer:
         the cross-thread closed flag is not proof that loop-owned work ended.
         """
         self._request_close()
-        if not self._on_owner_loop():
+        if not self._on_runtime_loop():
             raise RuntimeError("RuntimeServer.aclose() must run on its owning event loop")
         await self._shutdown_on_loop()
 
@@ -977,7 +977,7 @@ class RuntimeServer:
                 logger.debug("runtime event unsubscribe failed", exc_info=True)
             self._unsubscribe_events = None
 
-    def _on_owner_loop(self) -> bool:
+    def _on_runtime_loop(self) -> bool:
         try:
             return asyncio.get_running_loop() is self._loop
         except RuntimeError:

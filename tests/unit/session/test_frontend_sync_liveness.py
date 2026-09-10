@@ -56,9 +56,9 @@ async def _never():
 
 
 def _claim(tmp_path: Path) -> None:
-    """Make ``find_owner_record`` resolve this test's in-process server.
+    """Make ``find_runtime_record`` resolve this test's in-process server.
 
-    ``find_owner_record`` starts from ``live_session_owner``, which reads the
+    ``find_runtime_record`` starts from ``live_runtime_pid``, which reads the
     session directory's ``.session.pid`` marker — a real TUI writes it when it
     claims the directory. The tests below run the ``RuntimeServer`` inside the
     test process, so this process IS the owner.
@@ -357,7 +357,7 @@ async def test_the_wait_uses_the_dials_own_future_not_the_current_attribute(
     make a healthy wait fail with "owner did not start frontend
     synchronization" (the reported sentence's sibling) or silently await a
     DIFFERENT dial's future. ``_ensure_bound`` holds ``_bind_lock`` and
-    ``_recover_owner`` does not take it at all, so nothing else orders them.
+    ``_recover_runtime`` does not take it at all, so nothing else orders them.
 
     This is a fact about DATA FLOW, not about timing.
     """
@@ -533,7 +533,9 @@ async def test_a_vanished_record_does_not_discard_an_earlier_attempts_reason(
             lookups += 1
             return (record, None) if lookups == 1 else (None, None)
 
-        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", vanishing_find)
+        monkeypatch.setattr(
+            "local_operator.mobile.attach_client.find_runtime_record", vanishing_find
+        )
 
         async def fail_with_reason(record, *, sync_timeout, preempt=None):
             raise ConnectionError("the pump's own words")
@@ -581,7 +583,9 @@ async def test_the_retry_rediscovers_the_record_each_attempt(tmp_path: Path, mon
             lookups += 1
             return record, None
 
-        monkeypatch.setattr("local_operator.mobile.attach_client.find_owner_record", counting_find)
+        monkeypatch.setattr(
+            "local_operator.mobile.attach_client.find_runtime_record", counting_find
+        )
 
         async def always_fail(record, *, sync_timeout, preempt=None):
             raise ConnectionError(remote_module._SYNC_UNRESPONSIVE_REASON)

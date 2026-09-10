@@ -165,7 +165,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
         )
 
     app = OperatorApp(lambda: resume("origin"), resume_factory=resume)
-    with patch("local_operator.mobile.attach_client.find_owner_record", find_owner):
+    with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):
         async with app.run_test(size=(120, 36)) as pilot:
             await wait_for_adoption(app, pilot)
             await asyncio.wait_for(app._sidebar_navigation.select("target"), 30)
@@ -276,7 +276,7 @@ async def test_a_plain_socket_loss_reconnects_with_no_attach_pressure(
     def find_owner(_config_dir, requested):
         return (server._record, server._record.pid) if requested == session_id else (None, None)
 
-    with patch("local_operator.mobile.attach_client.find_owner_record", find_owner):
+    with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):
         viewer = await RemoteSession.saved_preview(
             session_id,
             config_dir=config,

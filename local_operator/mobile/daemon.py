@@ -1725,13 +1725,13 @@ class MobileDaemon:
             # so a spawned child would be orphaned from its own control plane.
             raise RuntimeError("observer daemon cannot start sessions")
         from local_operator.interpreter import python_argv
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
 
         # A durable resume can already have an owner (including one started
         # by another surface). Acknowledge that verified owner, never the PID
         # of a losing speculative constructor.
-        existing, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+        existing, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
         if existing is not None:
             try:
                 async with asyncio.timeout(SESSION_START_TIMEOUT_S):
@@ -1782,7 +1782,7 @@ class MobileDaemon:
 
         async def ready() -> None:
             while True:
-                record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                record, _ = await asyncio.to_thread(find_runtime_record, config_dir(), session_id)
                 if record is not None:
                     if record.pid != process.pid:
                         raise RuntimeError("another runtime acquired this session; retry resume")
@@ -1817,7 +1817,9 @@ class MobileDaemon:
                 async def retire_if_pristine() -> None:
                     from local_operator.mobile.attach_client import AttachClient
 
-                    record, _ = await asyncio.to_thread(find_owner_record, config_dir(), session_id)
+                    record, _ = await asyncio.to_thread(
+                        find_runtime_record, config_dir(), session_id
+                    )
                     if record is None or record.pid != process.pid:
                         return
                     client = AttachClient(

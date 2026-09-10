@@ -1105,7 +1105,7 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     return resume_dir(config_dir, requested).name
 
 
-def live_session_owner(config_dir: Path, session_id: str) -> int | None:
+def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     """Pid of the process currently hosting ``session_id``, or ``None``.
 
     Two writers on one transcript is how a TUI ``/resume`` of a phone-started

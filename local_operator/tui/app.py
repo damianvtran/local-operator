@@ -4607,7 +4607,7 @@ class OperatorApp(App[None]):
     async def _lease_sidebar_source(
         self, session_id: str, *, speculative: bool
     ) -> SessionInteraction:
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
         from local_operator.session.remote import RemoteSession
 
@@ -4630,7 +4630,7 @@ class OperatorApp(App[None]):
                 takeover_factory=no_takeover,
             )
         else:
-            record, owner = await asyncio.to_thread(find_owner_record, directory, session_id)
+            record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
                 raise RuntimeError("The prepared owner is no longer active")
             remote = await RemoteSession.connect(
@@ -4722,7 +4722,7 @@ class OperatorApp(App[None]):
             # never to a click waiting for its first useful viewport.
             #
             # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
-            # v0.52.16 (#849) bounds `_recover_owner` at 90s, so a
+            # v0.52.16 (#849) bounds `_recover_runtime` at 90s, so a
             # `RemoteSession` can reach a TERMINAL cold state on a path that
             # used to retry forever; a speculative prepare can therefore meet
             # `is_cold` for real rather than only in transit. Verified by
@@ -6310,7 +6310,7 @@ class OperatorApp(App[None]):
                 #
                 # Checked here rather than by giving the bind a
                 # `require_bound=True`: its other callers deliberately tolerate
-                # the silent return (a prompt waits on `_owner_ready` instead),
+                # the silent return (a prompt waits on `_runtime_ready` instead),
                 # so the postcondition is this call site's, not the method's.
                 # `is_cold` is a declared `ViewerSessionProtocol` member, so
                 # this postcondition reads through the same declared surface as
@@ -10849,7 +10849,7 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.resume import (
             RESUME_LATEST,
-            live_session_owner,
+            live_runtime_pid,
             resolve_resume_id,
         )
 
@@ -10861,7 +10861,7 @@ class OperatorApp(App[None]):
         except Exception:
             concrete = resume_id
         if concrete != RESUME_LATEST:
-            owner = live_session_owner(config_dir(), concrete)
+            owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
                 # Discovery scans the filesystem; run it as a worker so the
                 # UI thread never blocks on it, and settle attach-vs-refuse
@@ -11005,7 +11005,7 @@ class OperatorApp(App[None]):
                 # No id at all is the same known-local fact by another route:
                 # nothing could have published a record for it.
                 return False
-            # ``registry.scan`` rather than ``find_owner_record``: the latter
+            # ``registry.scan`` rather than ``find_runtime_record``: the latter
             # deliberately excludes the CALLING process, which is the right
             # answer for "who else owns this" and the wrong one here — the
             # question is whether a record exists on this machine at all.
@@ -11177,10 +11177,10 @@ class OperatorApp(App[None]):
         deliberately deleted, so a mixed-version owner gets a precise upgrade
         refusal rather than silently falling back to a divergent UI.
         """
-        from local_operator.mobile.attach_client import find_owner_record
+        from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.session.remote import RemoteSession
 
-        record, found_owner = await asyncio.to_thread(find_owner_record, config_root, concrete)
+        record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
         if record is None or found_owner != owner or record.protocol < 4:
             self._system_notice(
                 f"session {concrete} is open in an older Local Operator process "
@@ -14554,7 +14554,7 @@ class OperatorApp(App[None]):
                 self._warm_engage_started = False
                 # "could not start a runtime for this session" was wrong on
                 # both halves for the common case: a runtime very likely DID
-                # start (``engage_runtime`` returned, ``find_owner_record``
+                # start (``engage_runtime`` returned, ``find_runtime_record``
                 # found it, the socket authenticated) and the session is not
                 # broken — the bind ran out of its envelope while the owner's
                 # authoritative loop was busy. Reporting that as a boot failure
@@ -23358,7 +23358,7 @@ class OperatorApp(App[None]):
         if bool(getattr(session, "is_cold", False)):
             return
         owner_version = str(getattr(session, "owner_version", "") or "")
-        owner_ref = str(getattr(session, "owner_source_ref", "") or "")
+        runtime_ref = str(getattr(session, "owner_source_ref", "") or "")
         # The subject of an owner notice is the SESSION, so the debounce is
         # keyed by it: "once per session per process", which is what design
         # §6.7 and this method's own contract say. Keyed on the session id
@@ -23376,7 +23376,7 @@ class OperatorApp(App[None]):
         subject = _session_subject(session)
         from local_operator.update import BuildStamp
 
-        owner = BuildStamp(version=owner_version, source_ref=owner_ref) if owner_version else None
+        owner = BuildStamp(version=owner_version, source_ref=runtime_ref) if owner_version else None
         if owner is not None and owner == loaded:
             return
         # WHICH SIDE IS STALE? A difference alone does not say, and this branch
@@ -27016,14 +27016,14 @@ class OperatorApp(App[None]):
         session = self._session
         owner_catalogue = getattr(session, "owner_model_catalogue", None)
         if callable(owner_catalogue):
-            owner_rows: list[dict[str, Any]] = []
+            runtime_rows: list[dict[str, Any]] = []
             try:
                 fetched = owner_catalogue()
                 if isinstance(fetched, list):
-                    owner_rows = fetched
+                    runtime_rows = fetched
             except Exception:
-                owner_rows = []
-            if owner_rows:
+                runtime_rows = []
+            if runtime_rows:
                 from local_operator.providers.controller import CatalogueEntry
 
                 known = {entry.selector for entry in entries}
@@ -27046,16 +27046,18 @@ class OperatorApp(App[None]):
                         # router reaches a follower through this path at all.
                         routed=bool(row.get("routed", False)),
                     )
-                    for row in owner_rows
+                    for row in runtime_rows
                     if f"{row.get('provider', '')}/{row.get('model_id', '')}" not in known
                 ]
-                owner_usable = {
-                    str(row.get("provider", "") or "") for row in owner_rows if row.get("connected")
+                runtime_usable = {
+                    str(row.get("provider", "") or "")
+                    for row in runtime_rows
+                    if row.get("connected")
                 }
                 # The owner's usable set EXTENDS, never replaces: the local
                 # store may name providers the owner's static catalogue did
                 # not (aggregators enumerate only live).
-                usable = owner_usable | (usable or set())
+                usable = runtime_usable | (usable or set())
         rows = [
             ModelRow(
                 provider=entry.provider,
@@ -35236,11 +35238,11 @@ def _owner_is_not_behind_this_window(owner: Any, loaded: Any, on_disk: Any) -> b
         return True
     from local_operator.update import parse_version
 
-    owner_parsed = parse_version(owner.version)
+    runtime_parsed = parse_version(owner.version)
     loaded_parsed = parse_version(loaded.version)
-    if owner_parsed is None or loaded_parsed is None:
+    if runtime_parsed is None or loaded_parsed is None:
         return False
-    return owner_parsed > loaded_parsed
+    return runtime_parsed > loaded_parsed
 
 
 def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
@@ -35272,7 +35274,7 @@ def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
     """
     from local_operator.update import parse_version
 
-    owner_parsed = parse_version(owner.version)
+    runtime_parsed = parse_version(owner.version)
     loaded_parsed = parse_version(loaded.version)
     # An unparseable side whose string DIFFERS from the other is unrankable
     # outright: ``0.51.31rc1`` vs ``0.51.30`` can be compared only by ordering,
@@ -35282,9 +35284,9 @@ def _skew_direction_is_knowable(owner: Any, loaded: Any, on_disk: Any) -> bool:
     # same-version ref drift, which disk can rank below.) Without this early
     # exit the equal-ref term promoted an unparseable rc to rankable (R2-3,
     # second shape).
-    if owner.version != loaded.version and (owner_parsed is None or loaded_parsed is None):
+    if owner.version != loaded.version and (runtime_parsed is None or loaded_parsed is None):
         return False
-    if owner_parsed is not None and loaded_parsed is not None and owner_parsed != loaded_parsed:
+    if runtime_parsed is not None and loaded_parsed is not None and runtime_parsed != loaded_parsed:
         return True
     if owner.source_ref == loaded.source_ref:
         return True

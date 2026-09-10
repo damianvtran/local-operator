@@ -141,7 +141,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
 
         app = OperatorApp(lambda: resume("origin"), resume_factory=resume)
         with (
-            patch("local_operator.mobile.attach_client.find_owner_record", find),
+            patch("local_operator.mobile.attach_client.find_runtime_record", find),
             patch.object(OperatorApp, "_check_for_update", lambda self: None),
         ):
             async with app.run_test(size=(120, 36)) as pilot:

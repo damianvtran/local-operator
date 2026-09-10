@@ -304,7 +304,7 @@ async def test_different_owner_is_never_acknowledged_as_spawned_pid(
             1,
         )
 
-    monkeypatch.setattr(attach_client, "find_owner_record", swapped_owner)
+    monkeypatch.setattr(attach_client, "find_runtime_record", swapped_owner)
     daemon = MobileDaemon(password="pw")
     try:
         async with asyncio.timeout(10):
