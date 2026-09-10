@@ -1684,20 +1684,14 @@ that refresh serviced the orphaned debt the test existed to catch. It passed
 because the harness was broken in a way that repaired the defect.
 
 That beats all three defences above: the instrument is live and
-discriminating, the mutation does land, and the pre-fix tree goes green too,
-because the harness cures the old tree as readily as the new one. A
-both-sides green reads as "already fixed" or "the test does not
-discriminate", never as "my fixture is repairing the bug".
+discriminating, the mutation lands, and the pre-fix tree goes green because
+the cure operates there too. Both sides green reads as "already fixed" or "the
+test does not discriminate", never "my fixture is repairing the bug".
 
 The defence is a precondition on the precondition: **assert the fixture's
-starting state is one the system can actually reach**, not merely that it is
-set. `history_generation=1` over snapshot state 0 is a state production never
-produces. It can drift there rather than be mis-set, too — a "known-bad"
-session artifact kept as a reproduction had healed past its failure mode
-(15,171 entries against the 14,905 it was captured at) and binds happily on
-the unfixed tree. This is the query rule below applied to fixtures: a
-fixture's state is part of its basis, so assert it at use time rather than
-inheriting it from when it was captured.
+starting state is production-reachable**, at use time rather than at capture —
+state drifts out of a failure condition as readily as it is mis-set into one
+production never produces.
 
 Two rules sit beside this one, each earned the hard way:
 
