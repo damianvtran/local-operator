@@ -1760,6 +1760,15 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 #: does paint in the deciding frame (UX round 1, U5).
 CREDENTIAL_ARMED_NOTICE = "armed — add a space, then type or paste the secret"
 
+#: How long the submit seam will wait for one inline-credential store to
+#: answer. A live round-trip is milliseconds (an in-memory store write behind
+#: a loopback socket), so anything that takes this long is a hung or dead
+#: connection — and because this wait sits on the submit seam, the honest
+#: answer to a hung one is the loud degrade, not a parked composer. Generous
+#: relative to the real cost for the same reason the connect envelope is: it
+#: is a backstop, not a target.
+CREDENTIAL_STORE_TIMEOUT_S = 5.0
+
 #: Shown in the same row once the operator has STARTED TYPING a secret and the
 #: composer is masking their keystrokes.
 #:
@@ -14546,8 +14555,22 @@ class OperatorApp(App[None]):
         del message
         self._warm_runtime_for_draft()
 
-    def on_editor_submitted(self, message: EditorSubmitted) -> None:
-        """Slash commands run synchronously BEFORE any prompt is sent."""
+    async def on_editor_submitted(self, message: EditorSubmitted) -> None:
+        """Slash commands run synchronously BEFORE any prompt is sent.
+
+        ASYNC, and deliberately so. The one seam that must await is the
+        inline-credential store: the verb belongs to the session, and for an
+        attached session it crosses a socket to the runtime that runs the
+        tools. Textual's App pump awaits each message handler to completion
+        before dispatching the next message (verified by probe in this repo's
+        e2e suite, not assumed), so the await preserves the ordering of every
+        branch below: a keystroke or a second submit that arrives during the
+        round-trip queues behind this handler exactly as it queued behind the
+        synchronous version. The alternative — keeping this sync and parking
+        the rest of submit in a spawned task — would NOT hold that property:
+        a task yields the pump, and the aside/shell/slash branches would
+        interleave with the next message.
+        """
         if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
@@ -14581,7 +14604,7 @@ class OperatorApp(App[None]):
         # credential citation any further than the name — the transcript row,
         # the history entry, the journal and the model all read the substituted
         # form, and the value exists only in the store.
-        text = self._capture_inline_credentials(text, message.attachments)
+        text = await self._capture_inline_credentials(text, message.attachments)
         # The aside owns the composer while it is up. EVERYTHING goes to it,
         # slash-shaped lines included: the card is a MODE, its footer says so
         # (`esc close · enter ask again`) and its placeholder says so, and a
@@ -29905,7 +29928,9 @@ class OperatorApp(App[None]):
             "as an environment variable; the agent cannot read the value."
         )
 
-    def _capture_inline_credentials(self, text: str, attachments: Mapping[int, Marked]) -> str:
+    async def _capture_inline_credentials(
+        self, text: str, attachments: Mapping[int, Marked]
+    ) -> str:
         """Store every credential ``text`` cites; return the text to send on.
 
         The submit-side half of the inline ``/credential`` gesture. The
@@ -29917,86 +29942,60 @@ class OperatorApp(App[None]):
         Returns ``text`` unchanged when nothing was captured, which is the
         overwhelmingly common case and costs one dict scan.
 
+        ASYNC because storing is a session capability that may ROUTE: the
+        store the agent's tools read from lives with the turn loop, which for
+        this product is another process, and the verb crosses a socket
+        (``credential_op``). This method runs inside the awaited message
+        handler (``on_editor_submitted``), and the Textual App pump awaits each
+        handler to completion before dispatching the next message — a property
+        this repo verified by probe rather than assumed — so the await cannot
+        let a second submit or keystroke interleave ahead of the six
+        early-return branches below it.
+
         WHY THE SUBSTITUTION HAPPENS EVEN WHEN THE STORE REFUSES: a marker left
         in the outgoing text would tell the model a credential exists that
         nothing holds. Every failure path below therefore rewrites the citation
         too — to an explicit "not stored" phrase — so the model is never handed
         a name it cannot use, which is the silent failure the viewer split in
-        ``_FRONTEND_LOCAL_SLASHES`` exists to prevent.
-
-        PER CREDENTIAL, not per submit. That invariant is only true if each
-        citation reflects ITS OWN payload's outcome, and an aggregate guard
-        cannot deliver it: guarding on "did anything store" rewrote every
-        citation to the confident form whenever ONE payload landed, so a
-        message carrying a refused credential beside a stored one advertised
-        ``$LOP_SECRET_…`` for a key ``credential_env()`` does not contain
-        (review round 1 R1, QA round 1 Q1 — two independent derivations of the
-        same defect).
+        ``_FRONTEND_LOCAL_SLASHES`` documents and review round 1 R1/Q1 pinned:
+        the rewrite has to be able to say "this one did not land" for a
+        SPECIFIC marker, so the outcomes below are keyed by the payload's own
+        key.
 
         That mixed case is REACHABLE through shipped components: a draft spilled
         to the sidebar's temp JSON comes back with ``value=""`` by design (the
-        encoder deliberately does not persist secrets), ``store_credential``
-        refuses a blank, and one restored credential beside one freshly pasted
-        one is exactly the shape. The docstring above asserted the invariant
-        twice while the code held it only in the all-or-nothing case.
+        encoder deliberately does not persist secrets), ``store`` refuses a
+        blank, and one restored credential beside one freshly pasted one is
+        exactly the shape. The docstring above asserted the invariant twice
+        while the code held it only in the all-or-nothing case.
         """
         payloads = credential_payloads(text, attachments)
         if not payloads:
             return text
-        session = self._session
-        store = getattr(session, "variables", None)
-        if store is None or not hasattr(store, "store_credential"):
-            # A VIEWER (or a session still starting). The store that matters is
-            # the OWNER's — `credential_env()` is read by the `bash` tool in
-            # the owner's process — and this path is synchronous, on the submit
-            # seam, with no place to await the remote op. Rather than store
-            # locally (a key no tool could read: the exact leak
-            # `_FRONTEND_LOCAL_SLASHES` documents) the capture DEGRADES
-            # LOUDLY: the secret is dropped here, the operator is told, and the
-            # model is told nothing was stored. The `/credential <KEY>` command
-            # still routes to the owner over the dedicated op and remains the
-            # supported way to hand a secret over from a viewer — but it is
-            # only reachable by PASTING the whole line, which is what the
-            # notice below has to say.
+        stored, refused, unreachable = await self._store_inline_credentials(payloads)
+        if unreachable:
+            # THE HONEST DEGRADE. The round-trip to the session's store
+            # genuinely failed — the runtime is gone, still starting, or a
+            # reduced double with no credential surface — and a key promised
+            # here would name an env var no tool can read. The secret is
+            # dropped, the operator is told, and the model is told nothing was
+            # stored. This path EXISTS on purpose; removing the wrong
+            # degradation did not remove the ability to fail.
             #
-            # IT MUST NAME THE PASTE, NOT THE TYPING. Typing `/credential KEY`
-            # cannot reach that command any more: the space after the token
-            # opens a masked capture, so the KEY NAME is minted as a short
-            # secret and nothing is handed to the owner. Advice that cannot be
-            # followed is worse than none here, because this notice fires on
-            # the submit seam — the chip the retyping mints is itself a
-            # payload, so the next submit re-enters this branch and reprints
-            # the same advice, and the operator LOOPS (review round 2, R5; QA
-            # round 2, Q5). A pasted whole line arms no capture and does reach
-            # the owner's prompt, so that is the route named.
+            # The advice must be FOLLOWABLE, unlike the notice this replaced:
+            # typing `/credential <KEY>` cannot reach any store (the space
+            # after the token opens a masked capture, so the KEY NAME is minted
+            # as a short secret), and the retired notice sent the operator
+            # into exactly that loop. Arming `/credential` and pasting the
+            # value again is the one gesture that retries a store.
+            noun = "credential" if len(payloads) == 1 else "credentials"
             self._system_notice(
-                "inline /credential needs the session that runs the tools; "
-                "paste the whole line /credential <KEY> here "
-                "and the secret is stored on the owner",
+                f"the {noun} could not be stored — the session could not be "
+                "reached; the agent has been told so. "
+                "Paste the value again after /credential to retry.",
                 "warning",
             )
             return self._mark_credentials_unstored(text, attachments)
-        stored: list[str] = []
-        # Keyed by the payload's OWN key, so the citation rewrite below can ask
-        # about each credential individually. A list of successes is not enough:
-        # the rewrite has to be able to say "this one did not land" for a
-        # specific marker, which is the whole of R1/Q1.
-        refused: dict[str, CredentialStoreFailure] = {}
-        for payload in payloads:
-            result = store.store_credential(payload.key, payload.value, "command")
-            if not result.ok or result.credential is None:
-                # `empty-value` is the reachable one (a restored spilled draft
-                # carries no bytes); `empty-key` cannot happen for a generated
-                # name, but the reason is carried through rather than assumed so
-                # the model is told what actually refused.
-                refused[payload.key] = result.reason or "empty-value"
-                continue
-            stored.append(result.credential.key)
-            # Journalled exactly as the masked-paste flow journals, so a
-            # credential handed over inline is visible to the next turn and to
-            # a resume. The record names the KEY only; `journal_credential_
-            # change` never sees the value.
-            self._journal_credential_change(result.credential.key, replaced=bool(result.replaced))
         if refused:
             # THE OPERATOR HEARS IT TOO, on every refusal and not only the
             # all-failed one. The composer has already cleared and the marker is
@@ -30018,10 +30017,10 @@ class OperatorApp(App[None]):
         # SCRUB THE MAP once the store owns the value. The same attachments map
         # rides on past this point into `SessionDraft` (the accepted-draft and
         # `/reload` hand-back), the compaction hold and the aside stash — all
-        # in-memory, none of which needs the bytes now that
-        # `VariableStore._credentials` holds them. Emptying the payload here
-        # means those seams are safe BY CONSTRUCTION rather than by an argument
-        # about which of them re-expands.
+        # in-memory, none of which needs the bytes now that the store the tools
+        # read from holds them. Emptying the payload here means those seams are
+        # safe BY CONSTRUCTION rather than by an argument about which of them
+        # re-expands.
         #
         # WHAT THIS SCRUB DOES NOT REACH, stated exactly, because an earlier
         # version of this comment claimed it bounded a secret's lifetime to the
@@ -30039,27 +30038,107 @@ class OperatorApp(App[None]):
         # field is absent from `_encode_draft`'s list (`session_drafts.py`), so
         # it never reaches disk, and nothing re-expands it into a prompt. It is
         # the operator's own unsubmitted draft, and scrubbing it would hand them
-        # back a credential marker with no value behind it, which
-        # `store_credential` then refuses — destroying unsubmitted work to
-        # shorten the lifetime of a secret that never leaves memory. The
-        # narrower claim is the true one: this bounds what the SUBMITTED turn's
-        # downstream holders carry, not what a parked draft retains.
+        # back a credential marker with no value behind it, which the store
+        # then refuses — destroying unsubmitted work to shorten the lifetime of
+        # a secret that never leaves memory. The narrower claim is the true one:
+        # this bounds what the SUBMITTED turn's downstream holders carry, not
+        # what a parked draft retains.
         #
         # The key and marker stay so a restored draft still paints its receipt.
-        # A restore that re-submits finds an empty value, which
-        # `store_credential` refuses, and the operator is told it was not
-        # stored rather than the model being promised a key twice.
+        # A restore that re-submits finds an empty value, which the store
+        # refuses, and the operator is told it was not stored rather than the
+        # model being promised a key twice.
         if isinstance(attachments, MutableMapping):
             for index, payload in list(attachments.items()):
                 if isinstance(payload, PastedCredential):
                     attachments[index] = PastedCredential("", payload.key, payload.marker)
         # The receipt names what the agent can now use. Plural-safe because two
         # pastes while armed capture two credentials (see `_capture_credential`).
+        # The stored keys are announced to the MODEL on the session side, by the
+        # same verb that stored them, so this notice is the operator's half.
         self._notice(
             f"Stored {', '.join(stored)}. Injected into every bash command "
             "as an environment variable; the agent cannot read the value."
         )
         return substituted
+
+    async def _store_inline_credentials(
+        self, payloads: Sequence[PastedCredential]
+    ) -> tuple[list[str], dict[str, CredentialStoreFailure], bool]:
+        """Send each captured credential through the session's ``credential_op``.
+
+        The I/O half of the inline gesture, split from the citation rewrite so
+        the rewrite stays pure and per-credential. Every session shape offers
+        the same verb (``SessionProtocol.credential_op``): an in-process
+        session executes it against its own store, an attached one routes it to
+        the runtime — this seam must not care which, because the TUI cannot
+        know.
+
+        Returns ``(stored, refused, unreachable)``: the keys that landed, the
+        keys the store itself refused (with the reason the citation rewrite
+        needs), and whether the round-trip failed in a way that says nothing
+        about any individual credential — a dropped runtime, a session still
+        starting, or a hung socket.
+
+        THE JOURNAL HAPPENS ON THE SESSION SIDE, not here: the routed store is
+        journalled where the live context lives (the runtime), and the local
+        store by ``Session.credential_op`` — journalling here as well would
+        announce every stored key twice.
+
+        BOUNDED, because this runs on the submit seam: a live round-trip is
+        milliseconds, and an answer that never comes is a dead or hung
+        connection, which is the degrade below and not a reason to park the
+        composer indefinitely.
+        """
+        # Probed and cast exactly as ``_credential_remote_flow`` probes and
+        # casts the same verb: the session may be either shape, the protocol
+        # declares the verb for both, and a probe with a default is the
+        # established way this file reaches an optional capability.
+        route = cast(
+            "Callable[..., Awaitable[Mapping[str, Any]]] | None",
+            getattr(self._session, "credential_op", None),
+        )
+        if route is None or not callable(route):
+            # No credential surface at all: a session still starting, or a
+            # reduced double. Indistinguishable in effect from a lost runtime
+            # and degraded identically — loudly, with nothing promised.
+            return [], {}, True
+        stored: list[str] = []
+        refused: dict[str, CredentialStoreFailure] = {}
+        for payload in payloads:
+            try:
+                answer = await asyncio.wait_for(
+                    route("store", payload.key, payload.value),
+                    timeout=CREDENTIAL_STORE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "inline credential store timed out after %ss", CREDENTIAL_STORE_TIMEOUT_S
+                )
+                return stored, refused, True
+            except Exception:  # noqa: BLE001 — a failed route is a notice, not a crash
+                logger.warning("inline credential store failed", exc_info=True)
+                return stored, refused, True
+            if not isinstance(answer, Mapping):
+                answer = {}
+            if answer.get("ok"):
+                stored.append(str(answer.get("key") or payload.key))
+                continue
+            reason = str(answer.get("reason") or "")
+            if reason in ("empty-key", "empty-value"):
+                # The store itself said no to THIS credential — the reachable
+                # case is a restored spilled draft, which carries no bytes.
+                # Per-key, so a refused credential beside a stored one cites
+                # individually (review round 1 R1 / QA round 1 Q1).
+                refused[payload.key] = reason  # type: ignore[assignment]
+                continue
+            # disconnected / unavailable / remote-client / unknown-action (or
+            # anything unrecognised): the failure is about the ROUND-TRIP, not
+            # the credential, so the whole gesture degrades rather than
+            # pretending a per-key verdict exists. Same rule the paste route
+            # applies to the same reasons.
+            return stored, refused, True
+        return stored, refused, False
 
     def _mark_credentials_unstored(
         self,
@@ -30074,12 +30153,13 @@ class OperatorApp(App[None]):
         the secret is missing, and the agent would go looking for an env var
         nobody set.
 
-        ``refused`` names why each key was refused, when a store was present and
-        said no. Without it the phrase is the viewer case — there is no store on
-        this side at all. The distinction is the whole of QA finding Q3: the
-        sentence used to hard-code "no session store available" for both, so a
-        store that WAS present and refused an empty value told the model the
-        store was unavailable, pointing any diagnosis at the wrong subsystem.
+        ``refused`` names why each key was refused, when the store was reached
+        and said no. Without it the phrase is the round-trip case — the store
+        could not be reached at all. The distinction is the whole of QA finding
+        Q3: the sentence used to hard-code "no session store available" for
+        both, so a store that WAS reached and refused an empty value told the
+        model the store was unavailable, pointing any diagnosis at the wrong
+        subsystem.
         """
         from local_operator.tui.widgets.editor import cite, describe_unstored
 

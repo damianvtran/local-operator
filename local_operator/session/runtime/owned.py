@@ -2364,14 +2364,20 @@ class OwnedSessionHandle(SessionHandle):
         result = await self.run_slash_authoritative(command, args, images)
         return str(result.get("text") or f"ran /{command}")
 
-    def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
-        """Run one ``/credential`` verb against the OWNER's variable store.
+    async def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
+        """Run one ``/credential`` verb against the session's variable store.
 
-        The store is session state and its whole purpose is to be injected into
-        the environment of the bash commands the agent runs — which run in this
-        process. A follower holding its own copy would advertise a key to the
-        model that no executing tool could read, so every verb lands here and
-        the follower only paints the receipt.
+        The runtime's half of a capability the base protocol declares for every
+        session: the agent's ``bash`` commands run in THIS process and read
+        ``credential_env()`` from this store, so the verb executes here and a
+        front end holding its own copy would advertise a key no executing tool
+        could read. The front end keeps the masked paste (the user is sitting
+        there); only the resulting value crosses, over the dedicated op.
+
+        The verb table itself is shared with the in-process shape
+        (:func:`local_operator.session.credential_ops.run_credential_verb`) so
+        the two implementations cannot drift — a verb added for one shape is a
+        verb added for both.
 
         Returns plain data rather than a ``SlashResult`` because the caller
         needs the FACTS (did it replace, what was removed) to build its own
@@ -2381,59 +2387,15 @@ class OwnedSessionHandle(SessionHandle):
         The value is never logged, never journalled, and never returned — only
         the key name and the outcome cross back.
         """
-        store = getattr(self._session, "variables", None)
-        if store is None or not hasattr(store, "store_credential"):
-            return {"ok": False, "reason": "unavailable"}
-        if action == "list":
-            return {
-                "ok": True,
-                "credentials": [
-                    {"key": item.key, "source": item.source} for item in store.list_credentials()
-                ],
-            }
-        if action == "names":
-            return {"ok": True, "names": list(store.credential_names())}
-        if action == "forget":
-            removed = bool(store.forget_credential(key))
-            if removed:
-                self._journal_credential(key, action="forgot")
-            return {"ok": True, "removed": removed, "key": key}
-        if action == "forget-all":
-            # Names BEFORE the clear: the store is empty afterwards, so reading
-            # them after would announce nothing to the model.
-            names = list(store.credential_names())
-            count = int(store.clear_credentials())
-            for name in names:
-                self._journal_credential(name, action="forgot")
-            return {"ok": True, "count": count, "names": names}
-        if action == "persist":
-            # §5.4's promotion route, executed on the OWNER because both stores
-            # that matter are the owner's: the session memory holding the value
-            # and the config dir holding the encrypted long-term store. Only a
-            # name and an outcome sentence cross back — never the value.
-            from local_operator.secrets.promote import (
-                promote_session_credential_guarded,
-            )
+        from local_operator.session.credential_ops import run_credential_verb
 
-            outcome = promote_session_credential_guarded(store, key)
-            return {
-                "ok": True,
-                "promoted": outcome.ok,
-                "key": key,
-                "message": outcome.message,
-            }
-        if action == "store":
-            result = store.store_credential(key, value, "command")
-            credential = getattr(result, "credential", None)
-            if not getattr(result, "ok", False) or credential is None:
-                return {"ok": False, "reason": getattr(result, "reason", "") or "empty-value"}
-            replaced = bool(getattr(result, "replaced", False))
-            # The announcement is what makes the key findable on LATER turns,
-            # so it belongs on the side that owns the context — same reason
-            # `_cmd_credential` journals rather than writing a transcript row.
-            self._journal_credential(credential.key, replaced=replaced)
-            return {"ok": True, "key": credential.key, "replaced": replaced}
-        return {"ok": False, "reason": "unknown-action"}
+        return await run_credential_verb(
+            getattr(self._session, "variables", None),
+            self._journal_credential,
+            action,
+            key,
+            value,
+        )
 
     def _journal_credential(
         self, key: str, *, action: str = "stored", replaced: bool = False

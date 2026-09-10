@@ -522,6 +522,26 @@ class FakeSession:
             store = self._variables = VariableStore(cwd="/tmp", env={})
         return store
 
+    async def credential_op(self, action: str, key: str = "", value: str = "") -> dict[str, Any]:
+        """The REAL verb table against this fake's store, not a stub of it.
+
+        The TUI's submit seam stores through ``credential_op`` now, so the
+        double must answer it the way the session it stands in for does —
+        otherwise every unit test below certifies a branch `lop` cannot reach,
+        which is exactly how the inline half-feature shipped. Delegating to the
+        shared table (rather than hand-writing a ``store``-only answer) also
+        keeps the double honest when a test drives the read or forget verbs,
+        and — because the journal is passed through exactly as the real
+        ``Session.credential_op`` passes it — an announcement a test stages on
+        ``journal_credential_change`` still fires, on the session side where
+        the live context lives.
+        """
+        from local_operator.session.credential_ops import run_credential_verb
+
+        return await run_credential_verb(
+            self.variables, getattr(self, "journal_credential_change", None), action, key, value
+        )
+
     async def seed_history(self, messages: list[Any]) -> None:
         pass
 

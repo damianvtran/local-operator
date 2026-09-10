@@ -748,21 +748,24 @@ def describe_unstored(reason: str | None) -> str:
     per-credential rewrite below — and a model reading two different sentences
     for one outcome would have to guess whether they mean different things.
 
-    ``reason`` is ``None`` when there is no store on this side at all (a viewer,
-    or a session still starting) and a
-    :data:`~local_operator.variables.CredentialStoreFailure` when a store was
-    present and refused the write. Naming which is not cosmetic: the phrase used
-    to hard-code "no session store available" for both, so a present store
-    refusing an empty value told the model the store was unavailable and sent
-    any diagnosis after the wrong subsystem (QA round 1, Q3).
+    ``reason`` is ``None`` when the round-trip to the session failed — the
+    runtime was lost or could not be reached between the paste and the submit —
+    and a :data:`~local_operator.variables.CredentialStoreFailure` when the
+    store was reached and refused the write. Naming which is not cosmetic: the
+    sentence used to hard-code "no session store available" for both, so a
+    store that WAS reached and refused an empty value told the model the store
+    was unavailable and sent any diagnosis after the wrong subsystem (QA round
+    1, Q3).
 
     In every form the sentence states the OUTCOME the agent must act on — there
     is no usable credential here — before it explains the cause, because an
     agent that reads only the first clause must still not go hunting an env var
-    nobody set.
+    nobody set. And no form names a privileged process: the failure is stated
+    as what happened (the store could not be reached), never as a topology the
+    operator is invited to think about.
     """
     if reason is None:
-        return "[credential NOT stored — no session store available]"
+        return "[credential NOT stored — the session could not be reached; try again]"
     if reason == "empty-key":
         return "[credential NOT stored — the store rejected its name]"
     # `empty-value`, the reachable one: a draft that spilled to disk comes back
