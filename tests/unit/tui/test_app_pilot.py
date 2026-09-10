@@ -2049,7 +2049,7 @@ async def test_follower_model_picker_lists_the_owners_models() -> None:
     class OwnerCatalogueSession(FakeSession):
         frontend_state: FrontendSessionState
 
-        def owner_model_catalogue(self) -> list[dict[str, Any]]:
+        def runtime_model_catalogue(self) -> list[dict[str, Any]]:
             return [
                 {
                     "provider": "anthropic",

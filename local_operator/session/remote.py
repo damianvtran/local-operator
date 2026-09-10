@@ -594,8 +594,8 @@ class RemoteSession:
         #: those two the same way (it has no build to compare against) and
         #: distinguishes them by whether the facade is cold, not by this
         #: value. See ``app.py::_check_build_skew``.
-        self.owner_version: str = ""
-        self.owner_source_ref: str = ""
+        self.runtime_version: str = ""
+        self.runtime_source_ref: str = ""
         #: Why this viewer opened WITHOUT live state, when that was not the
         #: ordinary "no runtime was running" case. Set by the launcher when an
         #: attach to a live runtime failed and it fell back to cold; the TUI
@@ -1793,13 +1793,13 @@ class RemoteSession:
             self._cwd = cwd
             self._repoint_armed_wakes(cwd)
             return "cold"
-        # ``owner_idle`` is the SAME reading the build-refresh seam uses, and
+        # ``runtime_idle`` is the SAME reading the build-refresh seam uses, and
         # it already covers every term that matters here — streaming, a parked
         # approval/ask gate, and a running background job — so this asks one
         # question rather than reassembling the predicate and drifting from it.
         # The runtime re-checks on its own side anyway (``may_refresh``): a
         # retire that races work arriving is refused there and surfaces below.
-        if not self.owner_idle():
+        if not self.runtime_idle():
             raise RuntimeError(
                 "this session is working right now — /move again when the turn finishes"
             )
@@ -2318,8 +2318,8 @@ class RemoteSession:
         # compares these with its own build and names the skew (see
         # ``app.py::_check_build_skew``); nothing here decides anything, so a
         # missing stamp degrades to "unknown", never to a refused attach.
-        self.owner_version = getattr(record, "version", "") or ""
-        self.owner_source_ref = getattr(record, "source_ref", "") or ""
+        self.runtime_version = getattr(record, "version", "") or ""
+        self.runtime_source_ref = getattr(record, "source_ref", "") or ""
         # The runtime's working directory, kept so a viewer that was ATTACHED
         # (``connect``, the `lop --resume` path) can engage a successor after
         # its owner retires for a refresh. Only ``cold()`` used to set ``_cwd``;
@@ -4139,7 +4139,7 @@ class RemoteSession:
         """
         self._refresh_callback = callback
 
-    def owner_idle(self) -> bool:
+    def runtime_idle(self) -> bool:
         """Whether the bound runtime is doing nothing a refresh would lose.
 
         Read off the canonical snapshot rather than asked over the wire, so
@@ -5551,7 +5551,7 @@ class RemoteSession:
             if row.type == "task" and row.status == "running" and not row.queued
         )
 
-    def owner_model_catalogue(self) -> list[dict[str, Any]]:
+    def runtime_model_catalogue(self) -> list[dict[str, Any]]:
         """The owner's offerable model rows, as published canonical state.
 
         A follower's own provider controller describes the follower's

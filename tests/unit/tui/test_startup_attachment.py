@@ -192,7 +192,7 @@ async def test_sync_preserves_active_interaction(surface, tmp_path, monkeypatch)
             assert picker.highlighted_selector() == held
             await pilot.press("escape")
             handle._frontend.mutate(model_catalogue=[])
-            await _until(pilot, lambda: viewer.owner_model_catalogue() == [])
+            await _until(pilot, lambda: viewer.runtime_model_catalogue() == [])
             assert not picker.is_open(), "late data must not reopen an Esc-dismissed picker"
         await pilot.press("escape", "escape", "Z")
         assert "Z" in editor.text

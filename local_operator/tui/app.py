@@ -14215,14 +14215,14 @@ class OperatorApp(App[None]):
         """
         logger.debug("runtime retired for a newer build; re-engaging")
         session = self._session
-        version = str(getattr(session, "owner_version", "") or "")
+        version = str(getattr(session, "runtime_version", "") or "")
         if version:
             from local_operator.update import BuildStamp
 
             self._refreshed_from = (
                 BuildStamp(
                     version=version,
-                    source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+                    source_ref=str(getattr(session, "runtime_source_ref", "") or ""),
                 ),
                 _session_subject(session),
                 # WHICH session retired. The subject alone cannot answer this:
@@ -14298,14 +14298,14 @@ class OperatorApp(App[None]):
                 getattr(session, "session_id", "") or "<none>",
             )
             return
-        version = str(getattr(session, "owner_version", "") or "")
+        version = str(getattr(session, "runtime_version", "") or "")
         if not version:
             return
         from local_operator.update import BuildStamp
 
         after = BuildStamp(
             version=version,
-            source_ref=str(getattr(session, "owner_source_ref", "") or ""),
+            source_ref=str(getattr(session, "runtime_source_ref", "") or ""),
         )
         if after == before:
             return
@@ -14623,7 +14623,7 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            # The bind resolved, so ``owner_version`` now holds the runtime's
+            # The bind resolved, so ``runtime_version`` now holds the runtime's
             # own stamp: this is the first moment the owner-skew comparison
             # has anything to compare. Before the command runs, because a
             # routed command is exactly what skew distorts.
@@ -23357,8 +23357,8 @@ class OperatorApp(App[None]):
         # report every cold session as a prehistoric runtime.
         if bool(getattr(session, "is_cold", False)):
             return
-        owner_version = str(getattr(session, "owner_version", "") or "")
-        runtime_ref = str(getattr(session, "owner_source_ref", "") or "")
+        runtime_version = str(getattr(session, "runtime_version", "") or "")
+        runtime_ref = str(getattr(session, "runtime_source_ref", "") or "")
         # The subject of an owner notice is the SESSION, so the debounce is
         # keyed by it: "once per session per process", which is what design
         # §6.7 and this method's own contract say. Keyed on the session id
@@ -23376,7 +23376,9 @@ class OperatorApp(App[None]):
         subject = _session_subject(session)
         from local_operator.update import BuildStamp
 
-        owner = BuildStamp(version=owner_version, source_ref=runtime_ref) if owner_version else None
+        owner = (
+            BuildStamp(version=runtime_version, source_ref=runtime_ref) if runtime_version else None
+        )
         if owner is not None and owner == loaded:
             return
         # WHICH SIDE IS STALE? A difference alone does not say, and this branch
@@ -23437,9 +23439,9 @@ class OperatorApp(App[None]):
         # is literally the condition the runtime waits for, and it is the one
         # that is also true of a session sitting at an empty prompt (design
         # review round 1, D3).
-        idle_probe = getattr(session, "owner_idle", None)
+        idle_probe = getattr(session, "runtime_idle", None)
         ask = getattr(session, "request_refresh", None)
-        owner_idle = bool(idle_probe()) if callable(idle_probe) else False
+        runtime_idle = bool(idle_probe()) if callable(idle_probe) else False
 
         def announce_stale() -> None:
             """C\u2032: this session is on an older build and will switch on its own.
@@ -23540,7 +23542,7 @@ class OperatorApp(App[None]):
                 notice_kind="note",
             )
 
-        if owner_idle and callable(ask):
+        if runtime_idle and callable(ask):
             logger.debug(
                 "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
                 reason,
@@ -27014,11 +27016,11 @@ class OperatorApp(App[None]):
         # credential store — crossed out or dropped every row the session
         # could actually switch to (D3, review round 2).
         session = self._session
-        owner_catalogue = getattr(session, "owner_model_catalogue", None)
-        if callable(owner_catalogue):
+        runtime_catalogue = getattr(session, "runtime_model_catalogue", None)
+        if callable(runtime_catalogue):
             runtime_rows: list[dict[str, Any]] = []
             try:
-                fetched = owner_catalogue()
+                fetched = runtime_catalogue()
                 if isinstance(fetched, list):
                     runtime_rows = fetched
             except Exception:
