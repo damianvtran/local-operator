@@ -2796,8 +2796,11 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session import naming
 
-        name = (arg or "").strip()
-        if name.casefold() in naming.TITLE_REFRESH_WORDS:
+        try:
+            is_refresh, name = naming.parse_title_arg(arg or "")
+        except ValueError as error:
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        if is_refresh:
             return await self._title_refresh_slash(session, SlashResult)
         if not name:
             current = getattr(session, "conversation_name", "") or ""

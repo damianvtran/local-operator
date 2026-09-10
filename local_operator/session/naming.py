@@ -931,6 +931,68 @@ async def generate_retitle(
 #: word ends up accepted on a terminal and typed into a title on a phone.
 TITLE_REFRESH_WORDS = frozenset({"refresh", "update", "retitle"})
 
+#: The same verbs in flag spelling, for the user who already knows the word and
+#: reaches for the shape every other command taught them.
+#:
+#: ``--update`` and ``--retitle`` are here for the reason their bare
+#: counterparts are in :data:`TITLE_REFRESH_WORDS`: a user who learned
+#: ``update`` from the argument picker and typed ``--update`` must not have that
+#: become the conversation's title. The prefix makes the failure worse, not
+#: better — nobody types a real title that starts with ``--``, so silently
+#: storing one is unambiguously wrong rather than merely unlucky.
+TITLE_REFRESH_FLAGS = frozenset({"--refresh", "--auto", "--update", "--retitle"})
+
+
+def parse_title_arg(arg: str) -> tuple[bool, str]:
+    """Classify a ``/title`` argument as a refresh request or literal title text.
+
+    Returns ``(is_refresh, title_text)``. ``--`` terminates option parsing, so
+    ``/title -- --refresh`` sets the literal title ``--refresh``; that is the
+    escape hatch keeping a ``--``-leading title reachable, and it is the idiom
+    :func:`~local_operator.spawn.policy.parse_fork_args` already establishes for
+    a free-text command.
+
+    Matching is on the WHOLE stripped, casefolded argument, so
+    ``--refresh the billing importer`` is a title rather than a refresh — the
+    near-miss rule the bare vocabulary already follows. An unknown
+    ``--``-leading token raises rather than being stored, because a title
+    nobody could have meant to type is a typo, and storing it is the failure
+    this whole vocabulary exists to prevent.
+
+    :raises ValueError: on an unknown leading flag.
+    """
+    text = arg.strip()
+    if text.startswith("--"):
+        # split(None, 1) also admits tabs/newlines between the option and prose.
+        parts = text.split(None, 1)
+        flag = parts[0]
+        remainder = parts[1] if len(parts) > 1 else ""
+        if flag == "--":
+            return False, remainder
+        # Only a BARE flag is the verb: with prose after it the whole argument
+        # is a title, matching the bare words' near-miss rule.
+        if not remainder and flag.casefold() in TITLE_REFRESH_FLAGS:
+            return True, ""
+        if not remainder:
+            raise ValueError(
+                f"unknown title option {flag}; use --refresh, --auto, or -- before text"
+            )
+        return False, text
+    if text.casefold() in TITLE_REFRESH_WORDS:
+        return True, ""
+    return False, text
+
+
+def is_refresh_request(arg: str) -> bool:
+    """``True`` when ``arg`` asks for a refresh rather than naming a title.
+
+    The thin predicate over :func:`parse_title_arg` for callers that have
+    already excluded the raising case; it shares the one parser so a spelling
+    accepted on one surface cannot be typed into a title on another.
+    """
+    return parse_title_arg(arg)[0]
+
+
 #: The refresh budget for a call made INSIDE a request/response op — the routed
 #: ``slash_result`` path and the detached runtime's, where a follower or a phone
 #: is holding a socket open waiting for the receipt.

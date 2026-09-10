@@ -113,7 +113,9 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             assert {row["name"] for row in catalog} == offered
             assert withheld == {"mobile", "info"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
-            assert sum(len(row["aliases"]) for row in catalog) == 8
+            assert sum(len(row["aliases"]) for row in catalog) == sum(
+                len(spec.aliases) for spec in SLASH_COMMANDS if spec.desktop_destination
+            )
             created = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
             )

@@ -1752,3 +1752,93 @@ async def test_the_refresh_word_is_never_mistaken_for_a_title() -> None:
         # the words are the user's to capitalise.
         assert session.conversation_name == "refresh the billing importer"
         assert session.conversation_name_state.user_set
+
+
+def test_the_refresh_flags_are_accepted_alongside_the_bare_words() -> None:
+    """The flag spelling reaches the same verb as the bare word.
+
+    A user who already knows `refresh` exists reaches for the shape every other
+    command taught them; `--update` becoming a conversation's title is the
+    exact failure the bare vocabulary exists to prevent, and the `--` prefix
+    makes it worse because nobody types a real title that way.
+    """
+    for flag in sorted(naming.TITLE_REFRESH_FLAGS):
+        assert naming.parse_title_arg(flag) == (True, ""), flag
+
+
+def test_a_double_dash_terminator_sets_a_literal_flag_shaped_title() -> None:
+    """`--` is the escape hatch that keeps a `--`-leading title reachable.
+
+    The same idiom `parse_fork_args` uses, so the one repo convention for a
+    free-text command holds here too.
+    """
+    assert naming.parse_title_arg("-- --refresh") == (False, "--refresh")
+
+
+def test_an_unknown_title_option_is_refused_rather_than_becoming_a_title() -> None:
+    """A typo'd flag raises instead of being stored.
+
+    `--refersh` is a mistyped verb, not a name anyone meant; the message has to
+    name both a real flag and the `--` terminator, or a user who wanted the
+    literal text has no way to discover it.
+    """
+    with pytest.raises(ValueError) as caught:
+        naming.parse_title_arg("--refersh")
+    message = str(caught.value)
+    assert "--refresh" in message
+    assert "--" in message
+
+
+def test_a_title_merely_containing_a_flag_word_is_still_a_title() -> None:
+    """The near-miss guard, in flag spelling.
+
+    Matching is on the WHOLE argument, so prose after the flag makes the whole
+    thing a title — the same rule the bare words follow.
+    """
+    assert naming.parse_title_arg("--refresh the billing importer") == (
+        False,
+        "--refresh the billing importer",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_flags_refresh_the_title_through_the_command() -> None:
+    """The flags reach the refresh branch through the real command path.
+
+    The parser agreeing is not enough: the dispatcher has to route on it, or
+    the flag is accepted in a unit test and typed into a title on a terminal.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.grow_transcript(4)
+        session.title = "<title>Billing importer rewrite</title>"
+
+        for flag in sorted(naming.TITLE_REFRESH_FLAGS):
+            session.set_conversation_name("Fix the login flow", user_set=False)
+            app._run_slash_command(f"/title {flag}")
+            await _settle()
+            assert session.conversation_name == "Billing importer rewrite", flag
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_title_option_notices_instead_of_renaming() -> None:
+    """A typo'd flag leaves the conversation's name alone and says so.
+
+    Without the parser this is the silent failure: `--refersh` is free text, so
+    it becomes the title AND sets `user_set`, which outranks every later
+    generated name — a typo permanently renaming the conversation.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        await _named(app, session, "fix the login redirect loop")
+        session.set_conversation_name("Fix the login flow", user_set=False)
+
+        app._run_slash_command("/title --refersh")
+        await _settle()
+
+        assert session.conversation_name == "Fix the login flow"
+        assert not session.conversation_name_state.user_set
+        assert any("unknown title option" in notice for notice in _notices(app))

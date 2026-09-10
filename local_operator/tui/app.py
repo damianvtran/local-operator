@@ -21720,10 +21720,15 @@ class OperatorApp(App[None]):
             # `notice` would collapse it. The rule `_cmd_goal` follows.
             self._system_notice("session is still starting…", "warning")
             return
-        if arg.strip().casefold() in naming.TITLE_REFRESH_WORDS:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            notice(str(error), "warning")
+            return
+        if is_refresh:
             self._cmd_title_refresh(session, notice)
             return
-        if not arg:
+        if not title:
             current = session.conversation_name
             if current:
                 notice(f"conversation: {current} — /title <words>, or /title refresh")
@@ -21739,7 +21744,7 @@ class OperatorApp(App[None]):
             else:
                 notice("unnamed — /title <words> names this conversation")
             return
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         # Superseded, and by the best possible answer: cleared for the reason
         # `_store_title` clears it, so nothing downstream still believes the
         # band is showing a stand-in.
@@ -32483,9 +32488,13 @@ class OperatorApp(App[None]):
         session = self._session
         if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
-        if arg.strip().casefold() in naming.TITLE_REFRESH_WORDS:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        if is_refresh:
             return await self._title_refresh_slash_result(session, SlashResult)
-        if not arg:
+        if not title:
             current = session.conversation_name
             text = (
                 f"conversation: {current} — /title <words>, or /title refresh"
@@ -32493,7 +32502,7 @@ class OperatorApp(App[None]):
                 else "unnamed — /title <words> names this conversation"
             )
             return SlashResult(kind="notice", text=text, style="info")
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         return SlashResult(
             kind="notice",
             text=f"renamed: {stored} — auto-naming will not override it",
