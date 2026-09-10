@@ -28314,7 +28314,15 @@ class OperatorApp(App[None]):
         runtime = replace(runtime, spend_is_floor=self._spend_is_floor)
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
-        screen = SessionScreen(None, runtime)
+        #
+        # The host's opener-derived stand-in goes in BEFORE the push, because it
+        # is already in memory: the header then names the conversation the way
+        # the band and the tab do on the FIRST frame, instead of reading
+        # "Untitled session" until the worker answers. The label only disk knows
+        # — what a RESUMED conversation is left with, since the reload clears
+        # that stand-in — follows from the worker; see
+        # `_open_session_report_worker`.
+        screen = SessionScreen(None, runtime, provisional_name=self._provisional_name)
         self.push_screen(screen)
         self.run_worker(
             self._open_session_report_worker(session, runtime, screen),
@@ -28327,8 +28335,26 @@ class OperatorApp(App[None]):
         self, session: SessionProtocol, runtime: SessionDiagnostics, screen: SessionScreen
     ) -> None:
         from local_operator.analytics import AnalyticsStore
+        from local_operator.analytics.model import SessionReport
+        from local_operator.paths import config_dir
+        from local_operator.resume import session_name
 
-        report = await asyncio.to_thread(AnalyticsStore().session_report, runtime.session_id)
+        def _read() -> tuple[SessionReport, str]:
+            """The ledger report and the store-derived label, in ONE thread hop.
+
+            Both halves are blocking reads, which is why the screen is pushed
+            before either starts: the keypress path must never wait on the disk.
+            ``session_name`` is the very helper ``session.catalog`` builds every
+            sidebar row through, at its default ``max_chars``, so the header and
+            the row cannot disagree about the same conversation — the miss this
+            exists to close was ``/session`` saying "Untitled session" beside a
+            sidebar that named it.
+            """
+            report = AnalyticsStore().session_report(runtime.session_id)
+            name = session_name(config_dir() / "sessions" / runtime.session_id)
+            return report, name
+
+        report, disk_name = await asyncio.to_thread(_read)
         if screen.presentation_cancelled or screen not in self.screen_stack:
             return
         if self._session is not session or session.session_id != runtime.session_id:
@@ -28341,6 +28367,13 @@ class OperatorApp(App[None]):
         if runtime.epoch is not None and getattr(state, "epoch", None) != runtime.epoch:
             screen.invalidate()
             return
+        # The label first: `set_report` repaints, so publishing the name after it
+        # would spend one frame on "Untitled session" in the common case where
+        # the ledger read is the slow half. Both publishers re-check the
+        # cancellation flag, and both run only past the identity/epoch guards
+        # above — a /new or /resume that landed mid-read is already rejected
+        # there, so no old conversation's label can reach the new one.
+        screen.set_disk_name(disk_name)
         screen.set_report(report)
 
     def _cmd_info(self, arg: str, notice: NoticeFn) -> None:

@@ -1,0 +1,42 @@
+{
+  "source": "/private/tmp/lo-session-before",
+  "scenario": "provisional",
+  "size": [
+    100,
+    30
+  ],
+  "first_frame_header": "Untitled session",
+  "settled_header": "Untitled session",
+  "screen": "SessionScreen",
+  "screen_geometry": {
+    "size": [
+      98,
+      28
+    ],
+    "virtual_size": [
+      98,
+      28
+    ],
+    "region": [
+      0,
+      0,
+      100,
+      30
+    ]
+  },
+  "prompts": [],
+  "ledger_unchanged": false,
+  "scroll": {
+    "size": [
+      84,
+      16
+    ],
+    "virtual_size": [
+      83,
+      22
+    ],
+    "max_x": 0,
+    "max_y": 6
+  },
+  "composer_focused_after_close": true
+}

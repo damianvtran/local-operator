@@ -353,6 +353,170 @@ async def test_invalidating_buried_pending_view_never_pops_newer_modal():
         assert app.focused is app.query_one(Editor)
 
 
+# -- the header's conversation name -------------------------------------------
+#
+# `/session` reads the LIVE session, and a live session's `conversation_name` is
+# the store of record: it stays EMPTY until a generated title lands or the user
+# renames. The opener-derived excerpt lives on the host and deliberately never
+# enters it, and a RESUMED conversation has no excerpt at all because the reload
+# clears the host's copy. The header nevertheless read "Untitled session" for a
+# conversation the sidebar named, because it was the one live surface that
+# ignored those stand-ins — the same class of miss already closed for
+# `/analytics` and for notifications. Three sources, in the order every other
+# surface uses them: the store, the host's stand-in, then the disk label the
+# sidebar and picker already paint from the same transcript.
+
+
+def _head(text: str) -> str:
+    """The rendered report's first line: the conversation's own name."""
+    return text.split("\n", 1)[0]
+
+
+async def _session_store(root, session_id: str, opener: str, *, title: str | None = None) -> None:
+    """A minimal store: one session directory holding just a transcript.
+
+    Written through the real ``Transcript`` writer, so the header is proved
+    against the bytes a running session actually leaves behind — and either
+    with a stored title (the `/rename`/generated case, journalled as the custom
+    entry the naming errand writes) or with only an opener (the session that was
+    closed before its title landed, which is what `session_name` falls back to).
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(root / "sessions" / session_id)
+    await transcript.append_message(Message(role="user", content=[TextContent(text=opener)]))
+    if title is not None:
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": title, "user_set": True}
+        )
+
+
+def test_header_prefers_the_store_over_every_stand_in():
+    unnamed = replace(runtime(), name="")
+    assert _head(build_session_report(SessionReport("sess"), runtime()).plain) == (
+        "Investigate request latency"
+    )
+    # A stand-in exists only to cover the store's absence, so it never displaces
+    # a title the user has already seen.
+    assert (
+        _head(
+            build_session_report(SessionReport("sess"), runtime(), fallback_name="a stand-in").plain
+        )
+        == "Investigate request latency"
+    )
+    assert _head(build_session_report(SessionReport("sess"), unnamed).plain) == "Untitled session"
+    assert (
+        _head(
+            build_session_report(
+                SessionReport("sess"), unnamed, fallback_name="Why the header said Untitled"
+            ).plain
+        )
+        == "Why the header said Untitled"
+    )
+
+
+def test_a_retired_presentation_never_paints_a_late_label():
+    """`set_disk_name` obeys the same ownership rule as `set_report`.
+
+    The label is read off the event loop, so it can land after `/new` or
+    `/resume` has already replaced the conversation under this screen.
+    """
+    screen = SessionScreen(None, replace(runtime(), name=""))
+    screen.invalidate()
+    screen.set_disk_name("the previous conversation")
+    screen.set_report(SessionReport("sess"))
+    assert screen._disk_name == "" and screen.report is None
+    assert _head(screen._report_text().plain) == "Untitled session"
+
+
+@pytest.mark.asyncio
+async def test_the_header_is_named_before_the_disk_read_lands(monkeypatch):
+    """The label is the one already in memory, so there is no "Untitled" flash.
+
+    The disk read is parked on this side of the barrier rather than timed, so
+    the assertion is about the FRAME the screen is pushed with, not about a race
+    the test hopes to win.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed(self, session_id):
+        started.set()
+        assert release.wait(5)
+        return SessionReport(session_id)
+
+    monkeypatch.setattr(AnalyticsStore, "session_report", delayed)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._show_provisional_name("fix the session header naming gap")
+            app._cmd_session("", lambda body, kind="info": None)
+            await pilot.pause()
+            assert isinstance(app.screen, SessionScreen)
+            assert await asyncio.to_thread(started.wait, 5)
+            assert _head(str(app.screen._body.render())) == "Fix the session header naming gap"
+            assert "Untitled session" not in str(app.screen._body.render())
+            release.set()
+            await app.workers.wait_for_complete()
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_a_stored_title_is_named_from_disk(tmp_path, monkeypatch):
+    """THE reported case: a conversation the sidebar names, reported as untitled.
+
+    No stored title and no host stand-in (a resumed conversation has neither),
+    so the header is the transcript-derived label the sidebar already paints —
+    same helper, same default length, so the two cannot disagree textually.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    await _session_store(tmp_path, "sess", "the sidebar names this conversation")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionScreen)
+        assert _head(str(app.screen._body.render())) == "the sidebar names this conversation"
+        assert "Untitled session" not in str(app.screen._body.render())
+        # No host stand-in on this conversation: the label can only have come
+        # from the store of record or the transcript on disk.
+        assert app.screen._provisional_name == ""
+        # The pin that keeps the two surfaces together: the header and the
+        # sidebar row are read through the same helper at its default length, so
+        # a future change to one shows up here instead of letting the two
+        # silently disagree about the same conversation.
+        from local_operator.paths import config_dir
+        from local_operator.resume import recent_session_rows
+
+        row = next(r for r in recent_session_rows(config_dir()) if r.id == "sess")
+        assert row.name == _head(str(app.screen._body.render()))
+
+
+@pytest.mark.asyncio
+async def test_a_stored_title_still_wins_on_a_resumed_conversation(tmp_path, monkeypatch):
+    """The disk label must not shadow the name the user last saw."""
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    await _session_store(tmp_path, "sess", "some forgettable opening line", title="Retention Fix")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionScreen)
+        assert _head(str(app.screen._body.render())) == "Retention Fix"
+
+
 # -- chart rendering ---------------------------------------------------------
 #
 # The screen is a set of bar tables whose whole value is that a bar means a
