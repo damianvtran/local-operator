@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from local_operator.skills.discovery import (
     Skill,
+    diagnose_missing_skill,
     discover_skills,
     parse_frontmatter,
+    roots_fingerprint,
     scan_skills_dir,
 )
 
@@ -269,3 +272,138 @@ class TestDiscoverSkills:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+class TestRootsFingerprint:
+    """The gate that decides whether a full 17-25 ms scan runs at all."""
+
+    def test_new_skill_directory_changes_the_fingerprint(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        before = roots_fingerprint([root])
+        _write_skill(root, "alpha")
+        assert roots_fingerprint([root]) != before
+
+    def test_skill_md_created_in_an_existing_directory_changes_it(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        (root / "alpha").mkdir()
+        before = roots_fingerprint([root])
+        (root / "alpha" / "SKILL.md").write_text("---\ndescription: A skill.\n---\n# Body")
+        assert roots_fingerprint([root]) != before
+
+    def test_skill_md_edited_in_place_changes_it(self, tmp_path: Path) -> None:
+        """The row that makes per-file stats mandatory.
+
+        Neither the root's nor the child's mtime moves for an in-place edit, so
+        a fingerprint built from directory mtimes alone would report "no
+        change" -- and this is a REAL case: a skill dropped at discovery for a
+        blank ``description`` is absent from the mapping, so repairing its
+        frontmatter is exactly a miss the gate has to notice.
+        """
+        root = tmp_path / "skills"
+        root.mkdir()
+        skill_md = _write_skill(root, "alpha", description=None)
+        root_mtime = root.stat().st_mtime_ns
+        child_mtime = (root / "alpha").stat().st_mtime_ns
+        before = roots_fingerprint([root])
+
+        # Rewrite with a description and a different length, preserving the
+        # directory mtimes the naive fingerprint would have relied on.
+        os.utime(skill_md, ns=(root_mtime + 1_000_000, root_mtime + 1_000_000))
+        skill_md.write_text("---\ndescription: Now it has one.\n---\n# Body")
+        os.utime(root, ns=(root_mtime, root_mtime))
+        os.utime(root / "alpha", ns=(child_mtime, child_mtime))
+
+        assert root.stat().st_mtime_ns == root_mtime
+        assert (root / "alpha").stat().st_mtime_ns == child_mtime
+        assert roots_fingerprint([root]) != before
+
+    def test_unchanged_tree_is_stable(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        _write_skill(root, "alpha")
+        assert roots_fingerprint([root]) == roots_fingerprint([root])
+
+    def test_missing_root_appearing_is_a_change(self, tmp_path: Path) -> None:
+        root = tmp_path / "later"
+        before = roots_fingerprint([root])
+        root.mkdir()
+        assert roots_fingerprint([root]) != before
+
+    def test_never_raises_on_a_hostile_tree(self, tmp_path: Path) -> None:
+        # Tolerance must match the scanner's: a symlink loop or a vanishing
+        # entry yields a shorter tuple, never an exception on the read path.
+        root = tmp_path / "skills"
+        root.mkdir()
+        (root / "loop").symlink_to(root)
+        (root / "dangling").symlink_to(tmp_path / "nowhere")
+        (root / "plain.txt").write_text("not a directory")
+        assert isinstance(roots_fingerprint([root]), tuple)
+
+
+class TestDiagnoseMissingSkill:
+    """One message per real cause, each naming its own remedy."""
+
+    def test_directory_without_skill_md(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        (root / "alpha").mkdir(parents=True)
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        assert "has no SKILL.md" in message
+
+    def test_missing_description(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        _write_skill(root, "alpha", description=None)
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        assert "no 'description'" in message
+        assert "Add one and read the URL again" in message
+
+    def test_malformed_frontmatter(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        (root / "alpha").mkdir(parents=True)
+        # Opens a block and never closes it.
+        (root / "alpha" / "SKILL.md").write_text("---\ndescription: Unterminated.\n\n# Body")
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        assert "malformed YAML frontmatter" in message
+
+    def test_disabled_skill(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        _write_skill(root, "alpha", enabled=False)
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        assert "disabled by 'enabled: false'" in message
+
+    def test_frontmatter_name_differs_from_directory(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        root.mkdir()
+        _write_skill(root, "alpha", name="actual-name")
+        message = diagnose_missing_skill("alpha", [root])
+        assert message is not None
+        # Names the URL that actually works rather than calling it an error:
+        # the divergence is legal, documented behaviour.
+        assert "skill://actual-name" in message
+        assert "frontmatter name wins" in message
+
+    def test_shadowed_by_an_earlier_root(self, tmp_path: Path) -> None:
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        _write_skill(first, "alpha")
+        _write_skill(second, "alpha")
+        message = diagnose_missing_skill("alpha", [first, second])
+        assert message is not None
+        assert "is shadowed by the one at" in message
+        assert "earlier roots win" in message
+
+    def test_nothing_on_disk_says_nothing(self, tmp_path: Path) -> None:
+        # A genuine typo has no remedy to name; the bare "Unknown skill" with
+        # its available-names list is already the right answer.
+        root = tmp_path / "skills"
+        root.mkdir()
+        assert diagnose_missing_skill("absent", [root]) is None

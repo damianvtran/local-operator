@@ -131,6 +131,37 @@ async def test_invocation_sends_body_and_request(skill_root) -> None:
 
 
 @pytest.mark.asyncio
+async def test_skill_created_after_app_start_is_invocable(skill_root) -> None:
+    """``$name`` must reach a skill authored mid-session, without a restart.
+
+    ``_discovered_skills`` used to cache for the life of the app, justified by
+    the rule that a new skill needed a restart to be visible anywhere. The
+    resolver now rescans on a miss, so leaving this cached would have made the
+    composer the one surface still requiring a restart.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Populate the cache first: the interesting case is invalidation, not
+        # a cold read that would have walked the filesystem anyway.
+        assert "research" in app._discovered_skills()
+
+        late = skill_root / "late-arrival"
+        late.mkdir(parents=True)
+        (late / "SKILL.md").write_text(
+            "---\nname: late-arrival\ndescription: Arrived late.\n---\n\nLate body."
+        )
+
+        await _submit(app, pilot, "$late-arrival do the thing")
+        await _await_prompt(pilot, session)
+    assert len(session.prompts) == 1
+    sent = session.prompts[0]
+    assert "Late body." in sent
+    assert "do the thing" in sent
+
+
+@pytest.mark.asyncio
 async def test_transcript_shows_what_was_typed_not_the_body(skill_root) -> None:
     """The row is the user's line; the injected body never lands in the ledger."""
     session = FakeSession()
