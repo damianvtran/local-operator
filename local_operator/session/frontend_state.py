@@ -1960,9 +1960,20 @@ def _frame_line_bytes(payload: dict[str, Any]) -> int:
 
     Mirrors the transport exactly — default ``json.dumps`` separators plus the
     newline the writer appends — because a budget measured any other way is a
-    budget for a line nobody sends.
+    budget for a line nobody sends. One payload leaves through TWO envelopes:
+    the attach push frame ``{"op": "frontend_sync", "data": ...}``, and the
+    ``frontend_sync`` RPC's reply ``{"op": "result", "req": <seq>, "data":
+    ...}`` whose ``req`` integer outgrows the op-name saving by one byte per
+    digit. Measuring only the push frame let the catalogue binary search park
+    the line within that envelope delta of the cap, so the RPC reply measured
+    OVER it and the handler paid the difference by degrading a perfectly good
+    display page to ``full_required`` — bytes the envelope added, not the page.
+    Surfaced when a wire-key rename moved the page size by two bytes and a
+    boundary-parked fixture flipped sides; the overshoot was always reachable.
+    The reply's ``req`` is a per-connection int sequence, so a 10-digit id
+    bounds any attach that will outlive this reserve.
     """
-    return len(json.dumps({"op": "frontend_sync", "data": payload}).encode()) + 1
+    return len(json.dumps({"op": "result", "req": 9_999_999_999, "data": payload}).encode()) + 1
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:

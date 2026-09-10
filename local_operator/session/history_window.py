@@ -59,13 +59,18 @@ class DisplayHistoryWindow(BaseModel):
 
     status: Literal["ok", "reset", "full_required"] = "ok"
     conversation_id: str
-    # Wire compat for the ``owner_epoch`` → ``runtime_epoch`` rename. This DTO
-    # is ``extra="forbid"`` and crosses the socket, so a viewer that stopped
-    # accepting the old key would fail ``model_validate`` on every page minted
-    # by an older runtime (sidebar history unavailable, a degrade not an
-    # error). Reads accept both keys; ``model_dump`` emits only the new one.
-    # Drop the ``owner_epoch`` choice after the release that follows this PR.
-    runtime_epoch: str = Field(validation_alias=AliasChoices("runtime_epoch", "owner_epoch"))
+    # Wire compat for the ``owner_epoch`` → ``runtime_epoch`` rename. Reads
+    # accept BOTH keys, but the wire keeps emitting ``owner_epoch`` this
+    # release: the DTO is ``extra="forbid"`` and crosses the socket, a
+    # pre-rename viewer's DTO knows only ``owner_epoch``, and mixed-version
+    # attach is supported — emitting the new key would fail that viewer's
+    # ``model_validate`` on every page and break the attach outright (worse
+    # than the degrade the rename was hedging against). The field therefore
+    # stays named ``owner_epoch`` — ``model_dump`` emits the field name on
+    # every wire route — and flips to ``runtime_epoch`` (name, emit, and
+    # dropping the old validation choice together) in the release after this
+    # PR, once no pre-rename viewer can attach.
+    owner_epoch: str = Field(validation_alias=AliasChoices("owner_epoch", "runtime_epoch"))
     history_generation: int
     through_id: str | None
     messages: list[AgentMessage] = Field(default_factory=list)
@@ -92,15 +97,17 @@ class DisplayHistoryWindow(BaseModel):
     audit_available: bool = False
 
     @property
-    def owner_epoch(self) -> str:
-        """Read-compat alias for the pre-rename viewer facade.
+    def runtime_epoch(self) -> str:
+        """Runtime-internal name for the epoch while the wire key is held back.
 
-        ``remote.py`` reads ``window.owner_epoch`` to reconcile a page against
-        canonical sync, and that file is owned by the viewer-identifier rename
-        in flight, so the attribute must survive one release beside the renamed
-        field. Drop after the release that follows this PR.
+        The wire emits ``owner_epoch`` this release (see the field above), so
+        the FIELD carries the old name while the rename's internal callers —
+        the capture path's parameter and claims, plus the tests — already use
+        ``runtime_epoch``. This bridge keeps both names readable until the
+        flip release swaps the field name and drops this property. Drop after
+        the release that follows this PR.
         """
-        return self.runtime_epoch
+        return self.owner_epoch
 
 
 #: Fields the audit capability introduced. Stripped for a viewer that did not
