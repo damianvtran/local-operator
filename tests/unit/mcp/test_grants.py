@@ -20,6 +20,7 @@ from local_operator.mcp.grants import (
     run_grant,
     start_grant,
 )
+from local_operator.session.protocol import RuntimeLocality
 
 
 class _Conn:
@@ -71,6 +72,13 @@ class _Manager:
 
 
 class _Session:
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
+
     def __init__(self, manager: Any) -> None:
         self.mcp_manager = manager
 

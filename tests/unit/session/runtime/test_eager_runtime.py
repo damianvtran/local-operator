@@ -24,6 +24,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.server import RuntimeServer, _ClientConn
 from tests.unit.session.runtime.test_server import FakeHandle
 
@@ -235,6 +236,13 @@ async def test_is_pristine_reads_the_attachment_sidecar(tmp_path: Path, monkeypa
     transcript = Transcript(directory)
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         def __init__(self) -> None:
             self._transcript = transcript
             self.wake_scheduler = None
@@ -273,6 +281,13 @@ async def test_is_pristine_reads_durable_rows_not_the_model_window(
     await transcript.append_message(Message.user("we talked about something"))
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         def __init__(self) -> None:
             self._transcript = transcript
             self.wake_scheduler = None
@@ -583,6 +598,13 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
     )
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         session_id = "s1"
 
         def __init__(self) -> None:

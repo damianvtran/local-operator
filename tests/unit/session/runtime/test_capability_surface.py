@@ -34,6 +34,8 @@ from typing import Any
 
 import pytest
 
+from local_operator.session.protocol import RuntimeLocality
+
 RUNTIME_DIR = Path(__file__).resolve().parents[4] / "local_operator" / "session" / "runtime"
 
 #: Handle attributes the server reads that are genuinely OPTIONAL — each is
@@ -357,6 +359,13 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
     from local_operator.session.runtime.owned import OwnedSessionHandle
 
     class _Session:
+        # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+        # it carries no attached runtime, which is what the absent legacy
+        # `is_remote` meant.
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+
         model_label = "anthropic/claude-opus-5"
 
         def __init__(self) -> None:

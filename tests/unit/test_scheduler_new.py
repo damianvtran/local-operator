@@ -37,6 +37,7 @@ from local_operator.harness.types import (
 )
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.types import OperatorType, Schedule, ScheduleUnit
 
 if TYPE_CHECKING:
@@ -55,6 +56,13 @@ class FakeSession:
     the scheduler narrows on the event and message TYPES, so a look-alike
     namespace would silently exercise a path production never takes.
     """
+
+    # Runtime role (SessionProtocol). This fake stands in for an OWNER:
+    # it carries no attached runtime, which is what the absent legacy
+    # `is_remote` meant.
+    owns_runtime = True
+    outcome_is_synchronous = True
+    runtime_locality: RuntimeLocality = "this-process"
 
     def __init__(self, fail: BaseException | None = None):
         self.prompts: list[str] = []

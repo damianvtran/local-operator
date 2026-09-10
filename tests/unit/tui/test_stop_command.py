@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import control
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.tui import app as app_mod
@@ -122,6 +123,11 @@ async def test_follower_stop_sends_the_op_to_the_owner() -> None:
 
     class Remoteish(FakeSession):
         is_remote = True
+        # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+        # viewer, so the predicates must agree with `is_remote` above.
+        owns_runtime = False
+        outcome_is_synchronous = False
+        runtime_locality: RuntimeLocality = "this-machine"
         frontend_state: FrontendSessionState
 
         def __init__(self) -> None:

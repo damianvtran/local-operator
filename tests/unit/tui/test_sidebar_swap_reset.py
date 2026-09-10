@@ -29,6 +29,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
 )
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
@@ -67,6 +68,11 @@ class SidebarRemote(FakeSession):
     """
 
     is_remote = True
+    # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+    # viewer, so the predicates must agree with `is_remote` above.
+    owns_runtime = False
+    outcome_is_synchronous = False
+    runtime_locality: RuntimeLocality = "this-machine"
 
     def __init__(
         self,

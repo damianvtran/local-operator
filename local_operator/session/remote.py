@@ -93,7 +93,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome
+from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
@@ -4271,6 +4271,55 @@ class RemoteSession:
         count to the authoritative one. ``None`` disarms it.
         """
         self._cancel_resolution = resolver
+
+    # -- SessionProtocol runtime role --------------------------------------
+    # This facade owns no loop: turns execute in the runtime process on the
+    # other end of the attach socket. See ``SessionProtocol.owns_runtime`` for
+    # why these are three predicates rather than the single ``is_remote`` flag
+    # above, which Stage 3 removes.
+
+    @property
+    def owns_runtime(self) -> bool:
+        """Always False: the loop, the lease and the transcript are the owner's.
+
+        True only after a TAKEOVER — but a takeover does not mutate this
+        facade, it REPLACES it with a real ``Session`` (see
+        ``set_takeover_callback``), so this object never has to answer True.
+        """
+        return False
+
+    @property
+    def outcome_is_synchronous(self) -> bool:
+        """Always False: :meth:`prompt` returns on the owner's admission ACK.
+
+        The ACK lands when the turn is durably appended, which is BEFORE
+        ``agent_start`` — so a caller that treats the return as an outcome
+        paints a result that does not exist yet. Hosts needing the outcome must
+        await :meth:`prompt_and_wait` or the event stream.
+        """
+        return False
+
+    @property
+    def runtime_locality(self) -> RuntimeLocality:
+        """Always ``"this-machine"``, attached or cold.
+
+        Attached: ``AttachClient`` dials ``127.0.0.1`` only and the runtime
+        listener binds ``127.0.0.1`` only ("THE security invariant",
+        ``mobile/service.py``), so a reachable runtime is on this host by
+        construction rather than by inference.
+
+        Cold: there is no runtime at all, and the next one this terminal starts
+        is local — which is why a cold viewer must NOT be treated as elsewhere.
+        Answering ``"unknown"`` here would refuse a config write in the single
+        most common moment a user sets a default (see #625).
+
+        This never returns ``"unknown"``. That arm is for a CALLER that cannot
+        prove locality — the registry scan in ``app.py::_session_runs_elsewhere``
+        has an except branch that must stay conservative. Locality is not
+        re-derived here because a property must not do registry I/O on a path
+        the status bar reads.
+        """
+        return "this-machine"
 
     # -- SessionProtocol identity/state ------------------------------------
 

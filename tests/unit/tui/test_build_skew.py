@@ -34,6 +34,7 @@ import asyncio
 
 import pytest
 
+from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.transcript import NoticeBlock
 from local_operator.update import BuildStamp
@@ -83,6 +84,11 @@ class _BoundViewer(FakeSession):
     """
 
     is_remote = True
+    # Runtime role (SessionProtocol): this fake emulates an ATTACHED
+    # viewer, so the predicates must agree with `is_remote` above.
+    owns_runtime = False
+    outcome_is_synchronous = False
+    runtime_locality: RuntimeLocality = "this-machine"
     is_cold = False
 
     def __init__(
