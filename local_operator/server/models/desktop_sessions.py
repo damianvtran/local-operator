@@ -125,8 +125,16 @@ class AttentionState(BaseModel):
     anchor_id: str | None
     kind: Literal["complete", "error", "interrupted"] | None
     unseen: bool
-    #: ``[published, acknowledged]`` -- monotonic, and independent of the owner
-    #: epoch, which is why a client merges on it rather than on arrival order.
+    #: ``[published, acknowledged]`` -- monotonic per conversation, and
+    #: independent of the owner epoch, so it orders a conversation's own states
+    #: rather than depending on arrival order.
+    #:
+    #: NOT a merge key: a heal deliberately REPUBLISHES a corrected state under
+    #: the SAME pair, so a client that dropped an update whose revision did not
+    #: advance would discard exactly the correction the heal exists to deliver.
+    #: The bridge republishes on full-state inequality, and no client currently
+    #: reads this field; it is a diagnostic ordering hint, and any future
+    #: consumer must treat an equal pair as "possibly changed", never as stale.
     revision: list[int]
     #: Absent on the cold list path; only a live owner can answer it.
     supported: bool | None = None
