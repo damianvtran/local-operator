@@ -56,9 +56,9 @@ async def _ask_user(questions: list[Any]) -> dict[str, list[str]] | None:
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
-    manager, the agent registry, and the ask hook plus the ``has_ui`` flag
-    ``ask`` needs (it is gated on both — the hook is what a subagent lacks,
-    the flag is what a headless host declares)."""
+    manager, the agent registry, and the ask hook ``ask`` is gated on (the hook,
+    and only the hook — it is what a subagent lacks; ``has_ui`` is set here
+    merely to describe a rich front end, not to satisfy that gate)."""
     base: dict[str, Any] = dict(
         wake_scheduler=_FakeScheduler(),
         subagent_launcher=_launcher,
@@ -118,12 +118,17 @@ def test_default_set_drops_ask_without_a_host_that_can_answer_it() -> None:
     assert without == [name for name in withhook if name != "ask"]
 
 
-def test_default_set_drops_ask_without_a_ui_to_draw_it_on() -> None:
-    """A host declaring no UI is asserting it cannot mount a prompt, and the tool
-    believes that over a handler somebody left installed."""
+def test_default_set_keeps_ask_for_a_host_with_a_hook_but_no_frontend_store() -> None:
+    """``has_ui`` must not subtract from the surface (#868).
+
+    The detached runtime that every interactive ``lop`` session boots through
+    builds with ``has_ui=False`` and installs a real ask gate, so a flag clause
+    here took ``ask`` off the default path entirely. The flag describes a
+    frontend state store; the hook describes who can answer.
+    """
     withui = [tool.name for tool in create_tools(_engine_context())]
     without = [tool.name for tool in create_tools(_engine_context(has_ui=False))]
-    assert without == [name for name in withui if name != "ask"]
+    assert without == withui
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:

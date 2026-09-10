@@ -72,15 +72,21 @@ def test_ask_exists_when_a_host_can_actually_answer_it() -> None:
     assert "ask" in _tools(_context(hook))
 
 
-def test_ask_is_absent_without_a_ui_to_draw_the_question_on() -> None:
-    """A server, exec mode or a scheduler run has nobody at a keyboard. An
-    advertised tool that can only fail to be answered is worse than none: the
-    model spends a call finding out what the tool list could have told it."""
+def test_ask_exists_for_a_host_that_can_answer_without_driving_a_frontend() -> None:
+    """#868: ``has_ui`` is not the "a human is present" signal it looks like.
+
+    It means "this host drives a rich frontend state store", and the detached
+    runtime behind every interactive ``lop`` session since 0.45.0 constructs
+    with it OFF and then installs a working ask gate. Gating on the flag as
+    well as the hook therefore withheld the tool from the default path — a
+    person at the terminal, ready to answer, and ``ask`` advertised to nobody.
+    The hook is the whole gate.
+    """
 
     async def hook(questions: list[AskQuestion]) -> dict[str, list[str]] | None:
         return None
 
-    assert "ask" not in _tools(_context(hook, has_ui=False))
+    assert "ask" in _tools(_context(hook, has_ui=False))
 
 
 def test_ask_is_absent_without_an_ask_hook_even_when_a_ui_is_claimed() -> None:

@@ -129,16 +129,25 @@ class RecordingStream:
         return names
 
 
-def make_session(tmp_path, stream: RecordingStream, **kwargs: Any) -> Session:
+def make_session(
+    tmp_path, stream: RecordingStream, *, has_ui: bool = True, **kwargs: Any
+) -> Session:
+    """A session in the shape a rich front end builds it, unless told otherwise.
+
+    ``has_ui`` is a keyword with a default rather than a hard-coded argument
+    because it is NOT what gates ``ask`` — the hook is (see ``build_ask_tool``)
+    — and the detached runtime that every interactive ``lop`` session goes
+    through builds with the flag OFF. A helper that could only produce
+    ``has_ui=True`` could not express that shape, which is how #868 went
+    unnoticed by this file.
+    """
     return Session(
         model=MODEL,
         stream_fn=stream,
         tools=[],
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
-        # A host that owns a terminal, which is the only kind that can answer a
-        # question: ``build_ask_tool`` requires both the hook and this flag.
-        has_ui=True,
+        has_ui=has_ui,
         **kwargs,
     )
 
@@ -194,6 +203,36 @@ async def test_an_ask_handler_installed_after_construction_is_advertised(tmp_pat
     assert "ask" in stream.advertised()
     # The rescue is additive: nothing the session already advertised moved out.
     assert {"task", "wait", "jobs", "wake", "hub"} <= set(stream.advertised())
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_detached_runtimes_session_shape_still_advertises_ask(tmp_path) -> None:
+    """#868: the DEFAULT ``lop`` path built a session that could answer and was
+    still refused the tool.
+
+    ``spawn_owned_session`` constructs with ``has_ui=False`` — correctly, since
+    that flag means "this host drives a rich frontend state store", not "a human
+    is present" — and then installs a real ask gate
+    (``OwnedSessionHandle._install_gates``). A human sits at the terminal (or
+    reaches it over the control socket) and can answer, but the old second
+    clause in ``build_ask_tool`` vetoed the tool on the flag, so ``ask`` reached
+    no model on the path every interactive session has taken since 0.45.0.
+
+    This reproduces that wiring rather than the builder in isolation, because
+    the builder's unit test passed throughout: the defect only appears once the
+    two halves are assembled the way the shipped runtime assembles them.
+    """
+    stream = RecordingStream()
+    session = make_session(tmp_path, stream, has_ui=False)
+    session.set_ask_handler(answer_nothing)
+
+    await session.prompt("hi")
+
+    assert "ask" in stream.advertised(), (
+        "a runtime that CAN mount a question does not advertise `ask`; "
+        f"got {stream.advertised()}"
+    )
     await session.dispose()
 
 
