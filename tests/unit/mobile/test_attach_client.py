@@ -4,6 +4,7 @@ correlation, and the no-reconnect contract."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ from local_operator.mobile.attach_client import (
     find_owner_record,
 )
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
+from local_operator.providers.clients import STREAM_READ_TIMEOUT_S
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 
@@ -383,32 +385,58 @@ async def test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one(
 
 
 class SlowEffortHandle(FakeHandle):
-    """An owner that is alive and healthy but slow to answer one op.
+    """An owner that is alive and healthy but slow to answer.
 
-    ``set_effort`` is a real dispatched wire op (``runtime/server.py`` ``_dispatch``)
-    whose ack is sent only after the handle returns, so sleeping here reproduces
-    exactly the shape of the reported bug: nothing wrong with the socket, the
-    answer simply has not arrived yet.
+    Both ops are real dispatched wire ops whose ack is sent only after the
+    handle returns, so sleeping here reproduces exactly the shape of the
+    reported bug: nothing wrong with the socket, the answer simply has not
+    arrived yet. ``set_effort`` routes through ``_request_frame`` and
+    ``fork_snapshot`` through ``_request_payload`` (``server.py``
+    ``_PAYLOAD_OPS``) — the two helpers carry SEPARATE copies of the
+    ``except`` ladder, so each needs its own behavioural cover.
     """
 
-    #: Long enough to outlast the 0.05 s deadlines these tests use by two
-    #: orders of magnitude, short enough that the owner's inline dispatch
-    #: drains inside the test rather than being torn down mid-await.
+    #: Long enough to outlast the 0.05 s deadlines these tests use by an order
+    #: of magnitude, short enough that the owner's inline dispatch drains
+    #: inside the test rather than being torn down mid-await.
     ANSWER_AFTER_S = 0.5
 
     async def set_effort(self, effort):  # noqa: ANN001, ANN202
         await asyncio.sleep(self.ANSWER_AFTER_S)
         return "effort"
 
+    async def fork_snapshot(self, message):  # noqa: ANN001, ANN202
+        await asyncio.sleep(self.ANSWER_AFTER_S)
+        return {"parent_id": "sess-a"}
+
 
 @pytest.mark.asyncio
-async def test_an_unanswered_request_is_a_timeout_not_a_lost_connection(config: Path) -> None:
+@pytest.mark.parametrize(
+    ("helper", "op", "fields"),
+    [
+        ("_request_frame", "set_effort", {"effort": "hi"}),
+        ("_request_payload", "fork_snapshot", {"message": ""}),
+    ],
+)
+async def test_an_unanswered_request_is_a_timeout_not_a_lost_connection(
+    config: Path, helper: str, op: str, fields: dict[str, str]
+) -> None:
     """A slow owner is not a dead one, and it must not be reported as one.
 
     ``asyncio.wait_for`` raises ``TimeoutError``, which subclasses ``OSError``
     on 3.11+ and whose ``str()`` is ``''``. Caught by the arm meant for dead
     sockets it rendered as the dangling ``owner connection lost:`` this fix
     removes. See docs/design-aside-deadline.md §2.
+
+    Parametrized over BOTH request helpers on purpose. They hold two separate
+    copies of the same ``except`` ladder, so cover on one proves nothing about
+    the other: an ``OSError`` arm inserted above ``_request_payload``'s
+    ``TimeoutError`` arm restores the bug for all eight payload ops
+    (``server.py`` ``_PAYLOAD_OPS``) while every frame-side test stays green.
+    Asserting the ORDER by source offset does not catch it either — a broader
+    ``except OSError`` sits above both arms without disturbing the offsets of
+    either pinned substring. Only driving each helper to a real timeout does.
+    This is design §7 risk 2, and it is what makes this a regression test.
     """
     handle = SlowEffortHandle("sess-a")
     r = RuntimeServer(handle, kind="tui")
@@ -417,49 +445,21 @@ async def test_an_unanswered_request_is_a_timeout_not_a_lost_connection(config: 
         record = await _wait_record()
         client = AttachClient(lambda p: None, lambda reason: None)
         await client.connect(record, "sess-a")
+        request = getattr(client, helper)
         with pytest.raises(OwnerAckTimeout) as caught:
-            await client._request_frame("set_effort", deadline_s=0.05, effort="hi")
+            await request(op, deadline_s=0.05, **fields)
         assert isinstance(caught.value, OwnerAckTimeout)
         assert isinstance(caught.value, ConnectionError)
         assert isinstance(caught.value, TimeoutError)
         assert str(caught.value)
         assert "owner connection lost" not in str(caught.value)
-        assert "set_effort" in str(caught.value)
+        assert op in str(caught.value)
         # Let the owner finish the op it is still parked on, so teardown does
         # not cancel a dispatch mid-await and emit a pending-task warning.
         await asyncio.sleep(SlowEffortHandle.ANSWER_AFTER_S + 0.2)
         await client.detach()
     finally:
         r.close()
-
-
-def test_the_timeout_arm_must_stay_above_the_oserror_arm() -> None:
-    """Pins the clause ORDER that IS the fix (design §7 risk 2).
-
-    ``TimeoutError`` subclasses ``OSError``, so the two arms are not
-    independent: an ``OSError`` arm placed first catches every ack timeout and
-    silently restores the bug. Nothing about the source says so, and no
-    behavioural test can see the difference without waiting out a real
-    deadline, so the order is asserted directly — the way
-    ``test_a_connection_reset_keeps_the_reset_reason_not_the_generic_one``
-    pins the pump's equally invisible clause order.
-    """
-    import inspect
-
-    from local_operator.mobile import attach_client as attach_client_module
-
-    for func in (
-        attach_client_module.AttachClient._request_frame,
-        attach_client_module.AttachClient._request_payload,
-    ):
-        source = inspect.getsource(func)
-        timeout_at = source.index("except TimeoutError")
-        oserror_at = source.index("except (ConnectionResetError, BrokenPipeError, OSError)")
-        assert timeout_at < oserror_at, (
-            f"{func.__name__}: TimeoutError subclasses OSError, so an OSError arm placed "
-            "first swallows every ack timeout and restores the dangling "
-            "'owner connection lost:' bug"
-        )
 
 
 @pytest.mark.asyncio
@@ -469,9 +469,27 @@ async def test_only_the_aside_waits_longer_than_the_ack_budget(config: Path) -> 
     Asserted on the deadline PASSED, never by waiting one out: a test that
     really waited 15 s or 180 s would hang the suite (there is no
     ``pytest-timeout`` here).
+
+    The stub below deliberately declares NO default for ``deadline_s``. A stub
+    that repeats the production default answers for it: an op calling
+    ``_request`` without the argument then records the STUB's value, so
+    widening ``_request``'s own default to 180 s would leak the long deadline
+    to all 19 ops with this test still green. Without a default the omission
+    is a ``TypeError``, and the real default is asserted directly from the
+    production signature.
     """
     assert ACK_TIMEOUT_S == 15.0
     assert ASIDE_DEADLINE_S == 180.0
+    # Pin the DERIVATION, not just the number: the constant's comment says it
+    # is matched to the provider layer's own budget for silence on a stream in
+    # flight (design §3). Importing it here is free; importing it in
+    # production would couple the transport to the provider package.
+    assert ASIDE_DEADLINE_S == STREAM_READ_TIMEOUT_S
+    # The seam every non-aside op relies on. Read from the signature because
+    # no call site passes it, so nothing else can observe a change to it.
+    assert inspect.signature(AttachClient._request).parameters["deadline_s"].default == (
+        ACK_TIMEOUT_S
+    )
 
     handle = FakeHandle("sess-a")
     r = RuntimeServer(handle, kind="tui")
@@ -483,11 +501,16 @@ async def test_only_the_aside_waits_longer_than_the_ack_budget(config: Path) -> 
 
         seen: list[tuple[str, float]] = []
 
-        async def recorder(op: str, *, deadline_s: float = ACK_TIMEOUT_S, **fields) -> str:
+        # Recorded BELOW ``_request``, not in place of it. ``_request`` is
+        # where the default lives and it forwards ``deadline_s`` to
+        # ``_request_frame`` explicitly, so intercepting here observes the
+        # value production actually chose. Stubbing ``_request`` itself would
+        # substitute the stub's own signature for the one under test.
+        async def recorder(op: str, *, deadline_s: float, **fields) -> dict[str, object]:
             seen.append((op, deadline_s))
-            return "recorded"
+            return {"op": "ack", "detail": "recorded"}
 
-        client._request = recorder  # type: ignore[assignment]
+        client._request_frame = recorder  # type: ignore[assignment]
 
         await client.complete_aside([])
         await client.abort()

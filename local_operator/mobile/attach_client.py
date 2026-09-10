@@ -60,8 +60,12 @@ ACK_TIMEOUT_S = 15.0
 #: control-plane op. Matched to ``providers/clients.py`` ``STREAM_READ_TIMEOUT_S
 #: = 180.0``, the layer below's own budget for silence from a stream in flight:
 #: shorter and this client kills requests that layer still considers healthy;
-#: much longer and a genuinely wedged owner stops surfacing at all. See
-#: docs/design-aside-deadline.md §3.
+#: much longer and a genuinely wedged owner stops surfacing at all. Raising it
+#: does NOT lengthen the owner's head-of-line block: the owner stays parked on
+#: the whole provider call either way, so today's 15 s buys no unblocking and
+#: only guarantees a false error while the block continues. See
+#: docs/design-aside-deadline.md §3, and §1.1 for that socket defect — still
+#: present, deliberately not fixed here.
 ASIDE_DEADLINE_S = 180.0
 
 #: Disconnect reason marking a DELIBERATE stop, as opposed to owner death.
@@ -544,7 +548,7 @@ class AttachClient:
             # OSError and str(TimeoutError()) is '', so an OSError arm placed
             # first swallows every ack timeout and renders it as the dangling
             # "owner connection lost:" this fix exists to remove.
-            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:.0f}s") from exc
+            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:g}s") from exc
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
@@ -572,7 +576,7 @@ class AttachClient:
             reply = await asyncio.wait_for(future, timeout=deadline_s)
         except TimeoutError as exc:
             # See _request_frame: this arm MUST precede the OSError one.
-            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:.0f}s") from exc
+            raise OwnerAckTimeout(f"owner did not answer {op!r} within {deadline_s:g}s") from exc
         except (ConnectionResetError, BrokenPipeError, OSError) as exc:
             raise ConnectionError(f"owner connection lost: {exc}") from exc
         finally:
