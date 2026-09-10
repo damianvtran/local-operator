@@ -30,8 +30,10 @@ same problem for the same providers):
   network blip must not make an account's quota unreadable. For OAuth
   providers the merge is per *account*: a 429 for one login keeps that
   login's previous numbers and does not shrink the sibling set. After
-  :data:`USAGE_ACCOUNT_MAX_FAILURES` consecutive misses the account stays
-  on the panel as usage-unavailable and is not re-probed until ``r``.
+  :data:`USAGE_ACCOUNT_MAX_FAILURES` consecutive misses the account is marked
+  usage-unavailable and re-probes on a jittered
+  :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence, so a provider that recovers is
+  discovered without the user pressing ``r``.
 - **TTL jitter**: each entry's lifetime is spread ±25% around the base TTL so
   several accounts on one provider do not all expire into the same refresh
   window (the same per-IP burst, one cycle later).
@@ -89,15 +91,31 @@ USAGE_FAILURE_BACKOFF_MS = 10_000
 #: account is served from last-good and its usage endpoint is not touched.
 USAGE_ACCOUNT_BACKOFF_BASE_MS = 10_000
 
-#: Ceiling on the per-account backoff (~5 min). Past this the account is
-#: still shown; it is just not re-probed more often than this until ``r``.
+#: Ceiling on the per-account backoff (~5 min). This bounds the exponential
+#: ladder BELOW the unavailable ceiling; once
+#: :data:`USAGE_ACCOUNT_MAX_FAILURES` is reached the account switches to the
+#: :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence instead.
 USAGE_ACCOUNT_BACKOFF_CAP_MS = 5 * 60_000
 
 #: After this many consecutive failures the account is marked usage
-#: unavailable and probing stops until the user force-refreshes. Five keeps
-#: a transient 429 storm from flipping the row to unavailable, while still
-#: bounding how long we keep hitting an endpoint that will not answer.
+#: unavailable. Five keeps a transient 429 storm from flipping the row to
+#: unavailable, while still bounding how long we keep hitting an endpoint on
+#: the short ladder. Past the ceiling the account is NOT latched: it re-probes
+#: on the :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence so recovery is
+#: discoverable without ``r``.
 USAGE_ACCOUNT_MAX_FAILURES = 5
+
+#: Retry cadence for an account that has reached
+#: :data:`USAGE_ACCOUNT_MAX_FAILURES`. The short exponential ladder (10 s …
+#: 160 s) is for transient blips; once the ceiling trips, the endpoint has
+#: failed five times in a row and hammering it every few minutes is both
+#: futile and a per-IP 429 magnet. Ten minutes is long enough to back off a
+#: sustained outage, short enough that a provider which recovers — quota
+#: reset, incident closed — is discovered on its own rather than sitting dark
+#: until the user happens to press ``r``. Jittered ±25% per account (the same
+#: spread :func:`_jittered_ttl_ms` applies to the TTL) so N unavailable
+#: accounts do not re-probe in lockstep.
+USAGE_UNAVAILABLE_RETRY_MS = 10 * 60_000
 
 #: How long a last-good row survives past its expiry, for stale serving and
 #: failure fallback. One day: longer than any rolling window the fetchers

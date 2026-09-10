@@ -56,6 +56,7 @@ from local_operator.providers.usage import (
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
     USAGE_REPORT_TTL_MS,
+    USAGE_UNAVAILABLE_RETRY_MS,
     UsageCacheStore,
     account_backoff_ms,
     fingerprint_accounts,
@@ -873,14 +874,15 @@ class ProviderController:
     def _account_in_backoff(previous: UsageReport | None, now_ms: int, *, force: bool) -> bool:
         """Whether this account should be served from last-good, not re-probed.
 
-        ``r`` always retries. An unavailable account stays dark until then.
-        Otherwise the per-account ``next_probe_at_ms`` is the gate — siblings
-        that are fresh still refresh on the same provider lease.
+        ``r`` always retries. An unavailable account is skipped only until its
+        scheduled retry (``next_probe_at_ms``, set to a jittered
+        :data:`USAGE_UNAVAILABLE_RETRY_MS` when the ceiling trips), then probed
+        like any other — so a provider that recovers is discovered without
+        ``r``. Otherwise the per-account ``next_probe_at_ms`` is the gate;
+        siblings that are fresh still refresh on the same provider lease.
         """
         if force or previous is None:
             return False
-        if previous.usage_unavailable:
-            return True
         # NOTE: ``credential_invalid`` deliberately does NOT gate here, and
         # that is load-bearing rather than an omission.
         #
@@ -902,9 +904,14 @@ class ProviderController:
         # reversed: a permanent message that the user cannot act their way
         # out of. The verdict must be re-derived from the live refresh each
         # cycle, never remembered as a terminal state.
-        # Only a FAILURE cool-down skips the probe. A successful account
-        # leaves next_probe_at_ms unset so a sibling's shorter backoff can
-        # expire the provider row without freezing the healthy logins.
+        # Only a FAILURE cool-down skips the probe. An unavailable account is
+        # no longer latched forever: ``_mark_account_failure`` schedules a
+        # jittered ``USAGE_UNAVAILABLE_RETRY_MS`` retry when the ceiling trips,
+        # so the account falls through to the same ``next_probe_at_ms`` gate as
+        # a transient miss and is probed once that time passes. A successful
+        # account leaves ``next_probe_at_ms`` unset so a sibling's shorter
+        # backoff can expire the provider row without freezing the healthy
+        # logins.
         if previous.consecutive_failures <= 0:
             return False
         nxt = previous.next_probe_at_ms
@@ -981,10 +988,14 @@ class ProviderController:
     ) -> UsageReport:
         """Keep last-good (if any) and bump this account's consecutive misses.
 
-        After :data:`USAGE_ACCOUNT_MAX_FAILURES` the account stays on the
-        panel as usage-unavailable. Last-good numbers, when they exist, stay
-        on the report so the operator can still see they are logged in and
-        what the last successful check said.
+        After :data:`USAGE_ACCOUNT_MAX_FAILURES` the account is marked
+        usage-unavailable and its next probe is scheduled on the jittered
+        :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence rather than latched dark:
+        a provider whose quota resets or whose incident closes is discovered
+        on its own, and the background warmer retries it every ~10 min instead
+        of never. Last-good numbers, when they exist, stay on the report so
+        the operator can still see they are logged in and what the last
+        successful check said.
 
         A transient miss also CLEARS any dead-grant verdict, which is not the
         contradiction it first looks like. Reaching here means the store
@@ -1004,7 +1015,11 @@ class ProviderController:
         report.consecutive_failures = failures
         report.usage_unavailable = unavailable
         report.credential_invalid = False
-        report.next_probe_at_ms = None if unavailable else now_ms + account_backoff_ms(failures)
+        report.next_probe_at_ms = (
+            now_ms + self._jittered_unavailable_retry_ms()
+            if unavailable
+            else now_ms + account_backoff_ms(failures)
+        )
         return report
 
     def _payload_expires_at_ms(self, reports: list[UsageReport], now_ms: int) -> int:
@@ -1013,9 +1028,12 @@ class ProviderController:
         A mixed payload used to inherit the full 5-minute success TTL, which
         swallowed the 10 s / 20 s / … per-account backoff: the failed login
         sat un-retried until the whole set expired. Expiry is the soonest
-        ``next_probe_at_ms`` still in the future; if every account is
-        unavailable (only ``r`` retries) the full jittered TTL keeps the
-        warmer from spinning.
+        ``next_probe_at_ms`` still in the future. An unavailable account now
+        carries a scheduled retry too, so a wholly-latched payload expires at
+        the :data:`USAGE_UNAVAILABLE_RETRY_MS` cadence (~10 min) and the
+        background warmer re-probes it — which is the point: recovery is
+        discoverable without ``r``. The full jittered TTL is the fallback only
+        when no account has a future probe scheduled at all.
         """
         soonest: int | None = None
         for report in reports:
@@ -1091,6 +1109,14 @@ class ProviderController:
         into the same refresh window (the per-IP burst that earns a 429)."""
         jitter = USAGE_REPORT_TTL_MS * (random.random() * 0.5 - 0.25)
         return int(USAGE_REPORT_TTL_MS + jitter)
+
+    @staticmethod
+    def _jittered_unavailable_retry_ms() -> int:
+        """Unavailable-retry cadence spread ±25%, the same way
+        :func:`_jittered_ttl_ms` spreads the TTL, so N latched accounts do not
+        re-probe in lockstep into the same per-IP 429."""
+        jitter = USAGE_UNAVAILABLE_RETRY_MS * (random.random() * 0.5 - 0.25)
+        return int(USAGE_UNAVAILABLE_RETRY_MS + jitter)
 
     async def _fetch_provider_cached(
         self,

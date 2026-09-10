@@ -752,13 +752,25 @@ def test_a_dead_grant_does_not_repeat_itself_on_the_heading() -> None:
 
 
 def test_a_stale_account_keeps_its_numbers_and_says_last_known() -> None:
+    """A row the title does not speak for keeps its numbers and states its age.
+
+    Adjusted for the display-honesty invariant: a failure streak alone no
+    longer triggers the note — only a row materially behind the title's stamp
+    (``behind_header``) or an unavailable one does. This row is placed behind a
+    ``just now`` header by more than the TTL*1.25 threshold so the note fires
+    for the right reason: the title genuinely does not describe it.
+    """
+    now = 10 * 60_000
     report = _report(
         _percent("a:7d", "7 day", 40.0, shared=True),
         identity="damian@radienthq.com",
     )
     report.consecutive_failures = 2
-    report.fetched_at = 0
-    lines = _lines([report], now=5 * 60_000)
+    # A non-zero stamp: ``behind_header`` requires ``fetched_at`` to be truthy,
+    # and the age is rendered from it. The row sits 10 min behind a ``just now``
+    # header, past the TTL*1.25 (~6.25 min) threshold.
+    report.fetched_at = 1
+    lines = _lines([report], now=now, header_ms=now)
     assert any("damian@radienthq.com" in line for line in lines)
     assert any("last known" in line for line in lines)
     assert any("40%" in line for line in lines)
@@ -1872,6 +1884,52 @@ def test_a_row_inside_its_cache_lifetime_is_not_marked_stale() -> None:
     assert sum("last known" in line for line in marked) == 5, marked
 
 
+@pytest.mark.asyncio
+async def test_a_post_force_miss_on_a_fresh_row_is_not_stale() -> None:
+    """The reported frame: title ``just now · 5 stale`` over rows reading
+    ``last known just now``.
+
+    Pressing ``r`` during a rate-limit storm zeroes every streak and re-probes
+    all accounts in one burst. A 429 in that burst lands in
+    ``_mark_account_failure`` with ``failures=1`` while KEEPING the previous
+    round's seconds-old ``fetched_at``. The numbers were confirmed seconds ago;
+    one missed probe does not change what they say or when they were confirmed,
+    so the title's age still describes the row. Under the old predicate the
+    failure streak alone fired the note and the title's stale count, rendering
+    the self-contradictory ``last known just now`` beside a ``just now`` header.
+    """
+    now = 200 * 60_000.0
+    # A sibling confirmed seconds ago: the title's stamp comes from this one.
+    sibling = _aged(
+        _report(_percent("a:5h", "5 hour", 12.0, shared=True), identity="newest@x"),
+        now - 5_000,
+    )
+    # The reported row: numbers confirmed 10s ago, then ONE probe missed in the
+    # forced burst. `_mark_account_failure` keeps the previous report object, so
+    # it keeps that 10-second-old stamp and acquires failures=1.
+    missed = _aged(
+        _report(_percent("a:7d", "7 day", 74.0, shared=True), identity="me@x"),
+        now - 10_000,
+    )
+    missed.consecutive_failures = 1
+
+    reports = [sibling, missed]
+    header_ms = OperatorApp._usage_data_fetched_ms(reports)
+    assert format_age(now - header_ms) == "just now"
+
+    # No note anywhere, and specifically never `last known just now`.
+    lines = _lines(reports, now=now, header_ms=header_ms)
+    assert not any("last known" in line for line in lines), lines
+    assert not any("last known just now" in line for line in lines), lines
+
+    async with _panel_app() as panel:
+        panel.set_clock(now)
+        panel.show_reports(reports, now_ms=header_ms)
+        assert panel._flagged_account_counts() == (0, 0)
+        title = panel.render_lines_for_test()[0]
+    assert "stale" not in title, title
+
+
 def test_a_failed_probe_stamp_never_becomes_the_header() -> None:
     """R2: ``max`` must count confirmations, not the clock reading of a miss.
 
@@ -2118,6 +2176,41 @@ def test_the_unavailable_note_keeps_its_age_on_a_narrow_card() -> None:
     assert "…" not in narrow, narrow
     # The full sentence is still preferred wherever it fits.
     assert wide.strip() == "usage unavailable — last known 2h ago", wide
+
+
+def test_a_latched_row_with_fresh_numbers_says_unavailable_without_an_age() -> None:
+    """``usage unavailable — last known just now`` is unreachable by construction.
+
+    A latched account whose numbers were confirmed seconds ago renders the bare
+    state: the age would be ``just now``, which is what the title already says,
+    so appending it produced the self-contradictory note this panel was reported
+    for. Once the numbers age past the formatter's minute the vintage is
+    information again and the suffix grows back.
+    """
+    now = 200 * 60_000.0
+    # Sub-minute-old numbers: age renders `just now`, so no suffix.
+    fresh_latched = _aged(
+        _report(_percent("k:7d", "7 day", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 30_000,
+    )
+    fresh_latched.usage_unavailable = True
+    fresh_latched.consecutive_failures = 5
+    lines = _lines([fresh_latched], now=now)
+    note = next(line for line in lines if "unavailable" in line)
+    assert note.strip() == "usage unavailable", note
+    assert "last known" not in note, note
+    assert not any("last known just now" in line for line in lines), lines
+
+    # Past a minute the suffix grows back.
+    aged_latched = _aged(
+        _report(_percent("k:7d", "7 day", 64.0, shared=True), provider="kimi", identity="cred:8"),
+        now - 90_000,
+    )
+    aged_latched.usage_unavailable = True
+    aged_latched.consecutive_failures = 5
+    aged_lines = _lines([aged_latched], now=now)
+    aged_note = next(line for line in aged_lines if "unavailable" in line)
+    assert "usage unavailable — last known 1m ago" in aged_note, aged_note
 
 
 def test_the_note_survives_compaction_ahead_of_the_meters_it_qualifies() -> None:
