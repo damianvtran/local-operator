@@ -340,3 +340,237 @@ async def test_returning_to_a_reparked_source_paints_its_stream_again(tmp_path) 
                 "a source parked a SECOND time by the switch-away re-park never "
                 "came back: returning to it paints no tokens"
             )
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_switch_leaves_the_still_visible_source_live(tmp_path) -> None:
+    """A commit that RAISES must not leave the conversation on screen muted.
+
+    ``SessionNavigation._prepare_and_commit`` catches ``Exception``
+    unconditionally, shows a warning notice and abandons the switch -- so the
+    OUTGOING conversation stays on screen. If the switch-away re-park has
+    already run by then, that visible conversation is muted with nothing to
+    lift it: it paints its boundaries and no streaming tokens for the rest of
+    the turn (review round 2, MAJOR).
+
+    The fix is ordering rather than an unwind: the re-park runs after
+    ``_adopt_session``, so an exception in the widget work above it never
+    reaches the mute at all. This test drives the REAL ``nav.select()`` entry
+    point rather than calling ``_commit_sidebar_session`` directly, because the
+    failure only exists on the path that catches.
+
+    THE ORACLE IS PER-TOKEN, deliberately. ``message_end`` is NOT in the drop
+    set, so a parked source still paints the full text off a settled row --
+    a settled-row oracle passes whether or not the source is muted (QA round 2
+    found exactly that vacuous cell in its own rig). Only ``message_update`` is
+    dropped, so the sensitive shape is start + update + flush with NO end.
+    """
+    async with (
+        _remote(tmp_path, "abandon-origin") as origin,
+        _remote(tmp_path, "abandon-first") as first,
+        _remote(tmp_path, "abandon-second") as second,
+    ):
+
+        async def factory():
+            return origin
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is origin:
+                    break
+
+            sources: dict[str, SessionInteraction] = {}
+            for remote in (first, second):
+                source = SessionInteraction(remote)
+                sources[remote.session_id] = source
+                app._sidebar_sources[remote.session_id] = source
+
+            async def lease(session_id, *, speculative=False):
+                source = sources[session_id]
+                source.preparations += 1
+                if source.controller is None:
+                    from local_operator.tui.events import EventController
+
+                    app._interactions[id(source.session)] = source
+                    source.controller = EventController(source.session, app)
+                    app._event_sources[source.controller] = source
+                    source.controller.set_parked(True)
+                    source.controller.subscribe()
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+
+            failures: list[tuple[str, str]] = []
+            original_failed = app._sidebar_navigation_failed
+
+            def record_failure(session_id: str, error: Exception) -> None:
+                failures.append((session_id, repr(error)))
+                original_failed(session_id, error)
+
+            app._sidebar_navigation_failed = record_failure  # type: ignore[method-assign]
+            app._sidebar_navigation._failed = record_failure
+
+            # Visit `first` normally: it becomes the visible conversation.
+            await asyncio.wait_for(app._sidebar_navigation.select(first.session_id), 30)
+            await _pump(pilot, 12)
+            first_source = sources[first.session_id]
+            assert app._interaction is first_source, "the ordinary switch did not commit"
+            assert first_source.controller is not None
+            assert not first_source.controller.parked
+
+            # Now fail the NEXT commit inside its window. `_apply_sidebar_
+            # presentation` is a real step of the commit that sits after the
+            # point the re-park used to run and before `_adopt_session`, which
+            # is exactly the span the MAJOR was about. Patched on the class so
+            # the production bound method is what raises.
+            injected = {"count": 0}
+            original_apply = type(app)._apply_sidebar_presentation
+
+            def exploding_apply(self, presentation):  # type: ignore[no-untyped-def]
+                injected["count"] += 1
+                raise RuntimeError("synthetic failure inside the commit window")
+
+            type(app)._apply_sidebar_presentation = exploding_apply  # type: ignore[assignment]
+            try:
+                await asyncio.wait_for(app._sidebar_navigation.select(second.session_id), 30)
+                await _pump(pilot, 12)
+            finally:
+                type(app)._apply_sidebar_presentation = original_apply  # type: ignore[assignment]
+
+            # Canary: a null result from an injection that never fired would be
+            # indistinguishable from a pass.
+            assert injected["count"] > 0, "the injected failure never ran; the cell is vacuous"
+            assert failures, "the navigation did not report a failure: nothing was abandoned"
+            assert app._interaction is first_source, (
+                "the abandoned switch moved the current source anyway; this test "
+                "no longer exercises the still-visible case"
+            )
+
+            controller = first_source.controller
+            assert not controller.parked, (
+                "the conversation STILL ON SCREEN was left parked by an abandoned "
+                "switch: the mute outlived the failed commit and nothing lifts it"
+            )
+
+            posted: list[object] = []
+            original_post = controller._post
+            controller._post = posted.append  # type: ignore[method-assign]
+            try:
+                controller._on_event(MessageStartEvent(message=Message.assistant("")))
+                for event in _delta_grade(4):
+                    controller._on_event(event)
+                controller._flush_assistant()
+            finally:
+                controller._post = original_post  # type: ignore[method-assign]
+
+            assert any(isinstance(message, AssistantDelta) for message in posted), (
+                "the visible conversation painted NO streaming tokens after a "
+                "failed switch: a mute with no unwind, silent for the whole turn"
+            )
+
+            # `parked_at` is the idle sweep's deadline, and the same window
+            # stamped it. A session that is still current must carry none, or
+            # the sweep can reap the conversation the user is looking at.
+            assert first_source.parked_at is None, (
+                "the still-visible source was left with an idle deadline by the " "abandoned switch"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_commit_does_not_mute_the_visible_conversation(tmp_path) -> None:
+    """A commit that re-lands the session ALREADY on screen must not park it.
+
+    ``_start_sidebar_connection`` re-commits the current source to swap a cold
+    display-only projection for a live one. On that path the outgoing and
+    incoming source are the SAME object, so an unguarded switch-away re-park
+    would mute the conversation the user is looking at -- the same blank stream
+    as the abandoned switch above, on a path that runs routinely.
+
+    Review round 2 (MINOR) found this guard was load-bearing but untested:
+    dropping it survived all three suites. The guard now lives in
+    ``_park_switched_away_source`` as the ``outgoing is self._interaction``
+    test, and this is what fails if it goes.
+
+    Per-token oracle, not a settled row, for the reason given above:
+    ``message_end`` is not dropped, so a settled row paints either way.
+    """
+    async with (
+        _remote(tmp_path, "refresh-origin") as origin,
+        _remote(tmp_path, "refresh-target") as target,
+    ):
+
+        async def factory():
+            return origin
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 30)) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is origin:
+                    break
+
+            source = SessionInteraction(target)
+            app._sidebar_sources[target.session_id] = source
+
+            async def lease(session_id, *, speculative=False):
+                source.preparations += 1
+                if source.controller is None:
+                    from local_operator.tui.events import EventController
+
+                    app._interactions[id(source.session)] = source
+                    source.controller = EventController(source.session, app)
+                    app._event_sources[source.controller] = source
+                    source.controller.set_parked(True)
+                    source.controller.subscribe()
+                return source
+
+            app._lease_sidebar_source = lease  # type: ignore[method-assign]
+
+            async def commit(prepared) -> None:
+                ready = app._commit_sidebar_session(
+                    target.session_id, prepared, app._sidebar_navigation.generation
+                )
+                await _pump(pilot, 12)
+                if ready is not None and not ready.done():
+                    ready.cancel()
+
+            # Become the visible conversation, then REFRESH it: `refresh=True`
+            # is what `_start_sidebar_connection` passes, and it is the only
+            # way to reach a commit whose outgoing source is its incoming one.
+            await commit(await app._prepare_sidebar_session(target.session_id))
+            assert app._interaction is source, "the source under test is not on screen"
+
+            refreshed = await app._prepare_sidebar_session(target.session_id, refresh=True)
+            await commit(refreshed)
+
+            # Canary in the other direction: if the refresh silently failed to
+            # re-commit, "not muted" would be true for the wrong reason.
+            assert app._interaction is source, "the refresh commit did not re-land the source"
+
+            controller = source.controller
+            assert controller is not None
+            assert not controller.parked, (
+                "a refresh commit parked the conversation the user is LOOKING AT: "
+                "the outgoing-is-current guard is gone"
+            )
+
+            posted: list[object] = []
+            original_post = controller._post
+            controller._post = posted.append  # type: ignore[method-assign]
+            try:
+                controller._on_event(MessageStartEvent(message=Message.assistant("")))
+                for event in _delta_grade(5):
+                    controller._on_event(event)
+                controller._flush_assistant()
+            finally:
+                controller._post = original_post  # type: ignore[method-assign]
+
+            assert any(isinstance(message, AssistantDelta) for message in posted), (
+                "the visible conversation paints no streaming tokens after a "
+                "refresh commit muted it"
+            )
+            assert (
+                source.parked_at is None
+            ), "the visible conversation was given an idle deadline by a refresh"

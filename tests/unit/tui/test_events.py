@@ -39,6 +39,7 @@ from local_operator.tui.costs import turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
+    AssistantMessageStart,
     EventController,
     NoticePosted,
     StartFlushTimer,
@@ -618,12 +619,21 @@ def test_parked_source_keeps_tool_and_message_boundaries() -> None:
     )
     message = Message.assistant("final")
     message.id = "m2"
+    session.emit(MessageStartEvent(message=message))
     session.emit(MessageEndEvent(message=message))
     session.emit(NoticeEvent(text="owner said something", kind="info"))
 
     kinds = [type(m) for m in app.posted]
     assert ToolStarted in kinds
     assert ToolEnded in kinds
+    # `message_start` is ROW IDENTITY. Adding it to `_PARKED_DROP_TYPES` was a
+    # mutation that survived every suite (review round 2, MINOR): membership
+    # was asserted only positively, so the set could silently grow to include
+    # the one boundary the docstring names as un-droppable. A parked source
+    # that loses its starts has no row to key the dedupe and card pairing on,
+    # and QA's residual histogram on the real seam is 100% `message_start` --
+    # i.e. this is exactly the traffic the mute is supposed to let through.
+    assert AssistantMessageStart in kinds
     assert AssistantMessageEnd in kinds
     assert NoticePosted in kinds
 
