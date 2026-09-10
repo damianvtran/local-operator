@@ -127,6 +127,28 @@ def user_row_text(text: str) -> str:
     return typed_line_of(stripped) or stripped
 
 
+def assistant_row_text(text: str) -> str:
+    """What a surface paints for a ``role="assistant"`` message, or ``""``.
+
+    The counterpart to :func:`user_row_text`, and it exists for the same
+    reason: THE HOSTS DO NOT AGREE on what they hand in. The TUI strips a
+    message's text at the top of its replay loop and tests the stripped
+    value, so a whitespace-only turn produces NO block there. The phone
+    tested ``message.text`` verbatim, and ``"   "`` is truthy — so the same
+    history produced an extra EMPTY assistant row on the phone, ~8px of
+    blank space and, more importantly, a row SEQUENCE the TUI never emits.
+
+    That is the weaker version of this module's whole claim. "The two folds
+    produce the same rows" is worth something; "the same rows plus one blank
+    one" is a divergence with a smaller pixel budget, not an agreement.
+
+    Returning the stripped text rather than a bare truthiness verdict also
+    settles the content half: both surfaces paint the same bytes, so a
+    padded message cannot render one row indented and the other not.
+    """
+    return text.strip()
+
+
 def gate_timeout_notice(details: dict[str, Any]) -> str:
     """Say what expired, what it wanted, and that nobody chose it.
 
@@ -201,8 +223,17 @@ def wake_receipt_headline(text: str) -> str:
     head, _, _ = text.partition("\n\n")
     head = " ".join(head.split())  # collapse any envelope whitespace
     head = head.split(" — cancel with wake(", 1)[0]
-    if head.startswith("(alarm) "):
-        head = head[len("(alarm) ") :]
+    # Strip EVERY leading marker, not one. A single strip leaves a doubled
+    # prefix ("(alarm) (alarm) …") leaking model-facing markup onto a human
+    # surface — the exact defect this function exists to prevent, surviving
+    # in the function that prevents it. No producer emits a doubled prefix
+    # today, so this is closing the shape rather than a live bug; a partial
+    # strip is the same "handles the case it happens to have seen" reasoning
+    # that produced the incomplete chrome-prompt copy in this module's
+    # docstring.
+    alarm = "(alarm) "
+    while head.startswith(alarm):
+        head = head[len(alarm) :]
     # The surface's own wake affordance already says "wake"; repeating
     # "Scheduled wake" in the headline is a caption where a label belongs.
     prefix = "Scheduled wake "

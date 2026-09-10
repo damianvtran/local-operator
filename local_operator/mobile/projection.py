@@ -38,6 +38,7 @@ from local_operator.harness.comms import HUB_MESSAGE_TYPE, extract_parent_messag
 # the convergence review found was a decision one surface made and the other
 # did not (docs/design/history-fold-convergence.md §3).
 from local_operator.harness.rows import (
+    assistant_row_text,
     assistant_stop_notice,
     compaction_refused_notice,
     gate_timeout_notice,
@@ -785,8 +786,16 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
             # the `!` row, so a later unrelated turn must not inherit the flag.
             message_bang = bang_pending
             bang_pending = False
-            if message.text:
-                entries.append(TranscriptEntry(id=message.id, kind="assistant", text=message.text))
+            # Through the shared helper, not `if message.text:` — the latter
+            # is truthy for `"   "`, so a whitespace-only turn painted an
+            # extra EMPTY row here that the TUI (which tests its stripped
+            # text) never emits. Same rows plus one blank one is not the
+            # same rows.
+            assistant_text = assistant_row_text(message.text)
+            if assistant_text:
+                entries.append(
+                    TranscriptEntry(id=message.id, kind="assistant", text=assistant_text)
+                )
             for call in message.tool_calls:
                 # Only the FIRST call of a bang assistant message is the
                 # command's own card; the shape record_shell writes has exactly

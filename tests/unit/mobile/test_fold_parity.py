@@ -58,10 +58,12 @@ from local_operator.harness.comms import (
     TO_CHILD_INSTRUCTIONS,
 )
 from local_operator.harness.rows import (
+    assistant_row_text,
     assistant_stop_notice,
     harness_chrome_prompts,
     is_harness_chrome,
     user_row_text,
+    wake_receipt_headline,
 )
 from local_operator.harness.types import (
     AgentMessage,
@@ -492,3 +494,59 @@ def test_the_shared_helpers_normalize_so_the_hosts_cannot_diverge() -> None:
     chrome = harness_chrome_prompts()[0]
     assert is_harness_chrome(f"  {chrome}\n")
     assert user_row_text("  hello  ") == "hello"
+
+
+def test_a_whitespace_only_turn_produces_no_assistant_row_on_either_surface() -> None:
+    """QA round 2 (Q3): the phone emitted an extra EMPTY assistant row.
+
+    ``if message.text:`` is truthy for ``"   "``, so a whitespace-only turn
+    painted a blank row on the phone that the TUI — which tests its stripped
+    text — never produces. The notice beside it rendered correctly on both
+    surfaces, so the visible symptom was only ~8px of blank space; the real
+    defect is that the row SEQUENCES stopped matching, which is the whole
+    claim this delta makes.
+
+    Asserted as sequence equality rather than by looking at a frame: the
+    property is "these two lists are the same", and a screenshot can only
+    show that some blank space went away.
+    """
+    padded = "   \n\t "
+
+    # The helper both hosts read: whitespace is nothing, prose is itself.
+    assert assistant_row_text(padded) == ""
+    assert assistant_row_text("  hello  ") == "hello"
+
+    history = [Message.user("do it"), _assistant(padded, stop="error")]
+
+    # Both phone folds, and the kinds in order.
+    page = [row.kind for row in _page_rows(history)]
+    attach = [row.kind for row in _attach_rows(history)]
+    assert page == attach
+
+    # The notice still renders — this fix removes the blank row, NOT the
+    # row the reviewer's MAJOR was about.
+    assert page == ["user", "notice"]
+    assert "assistant" not in page
+
+    # And the ordinary case is untouched: real prose still gets its row. No
+    # notice here — `assistant_stop_notice` guards its error arm on there
+    # being NOTHING produced, which is the same emptiness question this test
+    # is about, answered by the same strip.
+    real = [Message.user("do it"), _assistant("here is the answer", stop="error")]
+    assert [row.kind for row in _page_rows(real)] == ["user", "assistant"]
+
+
+def test_the_wake_headline_strips_every_model_facing_prefix() -> None:
+    """Review round 2 (MINOR-1): a single strip leaves a doubled prefix.
+
+    ``wake_receipt_headline`` removed one ``(alarm) `` and stopped, so
+    ``(alarm) (alarm) x`` leaked the marker onto a human surface. No producer
+    emits a doubled prefix today; this pins the shape so the function that
+    exists to keep model-facing markup off the screen cannot itself pass some
+    through.
+    """
+    assert wake_receipt_headline("(alarm) build finished") == "build finished"
+    assert wake_receipt_headline("(alarm) (alarm) build finished") == "build finished"
+    assert wake_receipt_headline("(alarm) " * 5 + "build finished") == "build finished"
+    # A message that merely MENTIONS the marker keeps its own words.
+    assert wake_receipt_headline("see (alarm) in the logs") == "see (alarm) in the logs"

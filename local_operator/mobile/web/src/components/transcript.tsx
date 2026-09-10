@@ -122,14 +122,30 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 				"text-meta flex gap-1.5 break-words",
 				severity === "error" && "text-danger",
 				severity === "warning" && "text-warning",
-				!severity && "text-ink-dim",
+				/* `info` and absent are ONE case, not two. Written as three
+				   branches this fell through all of them for an explicit
+				   `severity: "info"` and rendered with no ink class at all —
+				   while NOTICE_GLYPHS above does handle `info`, so the table
+				   and the renderer disagreed about the same tier. Latent (no
+				   producer emits it today) and exactly the shape of the
+				   typed-but-unread field this delta exists to remove. */
+				(!severity || severity === "info") && "text-ink-dim",
 			)}
 		>
 			{/* aria-hidden: the glyph is a redundant encoding of the severity
 			    already carried by the text, so announcing "✗" adds noise for a
 			    screen reader rather than information. `shrink-0` keeps the
-			    marker on the first line when the text wraps. */}
-			<span aria-hidden="true" className="shrink-0">
+			    marker on the first line when the text wraps.
+
+			    `w-4 text-center font-mono` is the glyph-column recipe
+			    `tool-row.tsx` already uses, and it is what makes the column a
+			    column: bare `shrink-0` sizes each marker to its own advance
+			    width in the PROPORTIONAL body font, so the text beside it
+			    started anywhere across a 7.6px range (21.6→29.1px) — worst on
+			    the highest-severity rows, which are the ones the eye should
+			    catch fastest. A fixed monospace box makes every notice's text
+			    start on one edge. */}
+			<span aria-hidden="true" className="w-4 shrink-0 text-center font-mono">
 				{glyph}
 			</span>
 			<span className="min-w-0">{entry.text}</span>

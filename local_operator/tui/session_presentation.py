@@ -505,6 +505,7 @@ def project_settled_rows(
     # found was a decision one surface made and the other missed
     # (docs/design/history-fold-convergence.md §3).
     from local_operator.harness.rows import (
+        assistant_row_text,
         assistant_stop_notice,
         compaction_refused_notice,
         gate_timeout_notice,
@@ -732,7 +733,12 @@ def project_settled_rows(
             # inherit the open-on-settle flag.
             bang_pending = self._replay_bang_pending
             self._replay_bang_pending = False
-            if text:
+            # Through the shared helper even though this loop already
+            # stripped: the DECISION about what an assistant row shows is the
+            # thing both surfaces must read from one place. Leaving it as a
+            # bare truthiness test here is what let the phone's own bare test
+            # drift — the helper is only load-bearing if both hosts call it.
+            if assistant_row_text(text):
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
                 block.update_text(text)

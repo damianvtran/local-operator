@@ -146,6 +146,64 @@ describe("rows the phone used to drop entirely", () => {
 		// Not dressed as a failure: the user asked for this to fire.
 		expect(row.parentElement?.className).not.toContain("text-danger");
 	});
+
+	it("inks an explicit `info` notice the same as an unmarked one", () => {
+		/* Review round 2 MINOR-2: written as three branches
+		   (error / warning / !severity), an explicit `severity: "info"` fell
+		   through ALL of them and rendered with no ink class at all — while
+		   NOTICE_GLYPHS does handle `info`, so the glyph table and the ink
+		   renderer disagreed about one tier. Latent (nothing emits it today)
+		   and the same shape as the typed-but-unread `notice_kind` above:
+		   a declared case the renderer drops. */
+		render(
+			<Transcript
+				pid="1"
+				entries={[
+					entry({ id: "a", text: "explicitly info", details: { severity: "info" } }),
+					entry({ id: "b", text: "unmarked" }),
+				]}
+			/>,
+		);
+
+		const row = (text: string) => screen.getByText(text).parentElement;
+		// The point is that the two agree — `info` IS the default tier.
+		expect(row("explicitly info")?.className).toContain("text-ink-dim");
+		expect(row("unmarked")?.className).toContain("text-ink-dim");
+		expect(row("explicitly info")?.className).toBe(row("unmarked")?.className);
+	});
+
+	it("gives every notice glyph one fixed column so the text starts on one edge", () => {
+		/* Design D12: the marker span was bare `shrink-0`, so in the
+		   PROPORTIONAL body font each glyph sized to its own advance width and
+		   the text beside it started anywhere across a 7.6px range
+		   (21.6→29.1px) — worst on the highest-severity rows. `w-4 text-center
+		   font-mono` is the column recipe `tool-row.tsx` already uses; asserted
+		   as classes because jsdom has no layout engine, with the measured
+		   spread (7.6px → 0.0px) recorded on the PR. */
+		render(
+			<Transcript
+				pid="1"
+				entries={[
+					entry({ id: "a", text: "compaction failed", details: { severity: "error" } }),
+					entry({ id: "b", text: "compaction skipped", details: { severity: "warning" } }),
+					entry({ id: "c", text: "an ordinary receipt" }),
+					entry({ id: "d", text: "a wake fired", details: { notice_kind: "wake" } }),
+				]}
+			/>,
+		);
+
+		for (const text of [
+			"compaction failed",
+			"compaction skipped",
+			"an ordinary receipt",
+			"a wake fired",
+		]) {
+			const marker = screen.getByText(text).parentElement?.firstElementChild;
+			expect(marker?.className).toContain("w-4");
+			expect(marker?.className).toContain("text-center");
+			expect(marker?.className).toContain("font-mono");
+		}
+	});
 });
 
 describe("a hub steer never leaks its envelope", () => {
