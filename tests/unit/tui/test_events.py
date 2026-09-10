@@ -15,6 +15,7 @@ import pytest
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentStartEvent,
+    AgentToolUpdate,
     ImageContent,
     Message,
     MessageEndEvent,
@@ -23,6 +24,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
     ToolResult,
     Usage,
 )
@@ -37,6 +39,7 @@ from local_operator.tui.costs import turn_cost
 from local_operator.tui.events import (
     AssistantDelta,
     AssistantMessageEnd,
+    AssistantMessageStart,
     EventController,
     NoticePosted,
     StartFlushTimer,
@@ -534,3 +537,140 @@ async def test_controller_async_handler_compat() -> None:
     controller, session, app = _controller()
     session.emit(AgentStartEvent())
     assert controller.generation == 1
+
+
+# -- parked sources: delta-grade traffic is declined, state is not ----------
+#
+# Guards the N-way fan-in fix. Opening the sidebar prewarms every live session
+# it can see and holds a REAL subscription to each, so without a mute every
+# streaming delta of every other conversation is decoded, dispatched, posted as
+# a Textual message and dequeued by the app -- which discards it. Measured at 12
+# streaming sessions: ~229 discarded events/s, +9 points of a core.
+#
+# What these guard is the removal of PROVABLY DISCARDED work, NOT keystroke
+# latency: the open/closed typing gap is real but survives this change (ABBA:
+# 153.8 ms with / 143.1 ms without / 121.1 ms closed), and a ceiling arm
+# dropping the same events at the owner did not close it either. See
+# `EventController.set_parked` for the full disproof before attributing any
+# latency result to this path.
+#
+# Each of these fails on the pre-fix tree: without `set_parked` the controller
+# posts for every event regardless of whether anyone is looking.
+
+
+def test_parked_source_drops_delta_grade_events() -> None:
+    """The volume traffic -- one event per token -- must not reach the app."""
+    controller, session, app = _controller()
+    controller.set_parked(True)
+    session.emit(AgentStartEvent())
+    app.posted.clear()
+
+    message = Message.assistant("partial")
+    message.id = "m1"
+    for _ in range(50):
+        session.emit(MessageUpdateEvent(message=message, delta="tok"))
+    session.emit(
+        ToolExecutionUpdateEvent(
+            tool_call_id="call-1",
+            tool_name="read",
+            partial_result=AgentToolUpdate(),
+        )
+    )
+
+    assert app.posted == []
+
+
+def test_parked_source_still_reports_turn_boundaries() -> None:
+    """A turn that STARTS or ENDS while parked is still an observable fact.
+
+    `_reduce_hidden_session_event` maintains `source.turn` from these, and the
+    sidebar row, the abandon path and the commit-time gate all read it. Muting
+    them would leave a parked session showing the wrong live state.
+    """
+    controller, session, app = _controller()
+    controller.set_parked(True)
+
+    session.emit(AgentStartEvent(generation=7))
+    session.emit(AgentEndEvent(generation=7))
+
+    assert [type(m) for m in app.posted] == [TurnStarted, TurnEnded]
+    assert controller.generation == 7
+
+
+def test_parked_source_keeps_tool_and_message_boundaries() -> None:
+    """Row identity and card pairing survive the mute.
+
+    A dropped tool START would leave its END unmatched and the revealed view
+    would paint a call that SUCCEEDED as interrupted -- so only the per-chunk
+    `tool_execution_update` is in the drop set, never the boundaries.
+    """
+    controller, session, app = _controller()
+    controller.set_parked(True)
+    session.emit(AgentStartEvent())
+    app.posted.clear()
+
+    session.emit(ToolExecutionStartEvent(tool_call_id="call-1", tool_name="read"))
+    session.emit(
+        ToolExecutionEndEvent(
+            tool_call_id="call-1",
+            tool_name="read",
+            result=ToolResult(tool_call_id="call-1", tool_name="read"),
+        )
+    )
+    message = Message.assistant("final")
+    message.id = "m2"
+    session.emit(MessageStartEvent(message=message))
+    session.emit(MessageEndEvent(message=message))
+    session.emit(NoticeEvent(text="owner said something", kind="info"))
+
+    kinds = [type(m) for m in app.posted]
+    assert ToolStarted in kinds
+    assert ToolEnded in kinds
+    # `message_start` is ROW IDENTITY. Adding it to `_PARKED_DROP_TYPES` was a
+    # mutation that survived every suite (review round 2, MINOR): membership
+    # was asserted only positively, so the set could silently grow to include
+    # the one boundary the docstring names as un-droppable. A parked source
+    # that loses its starts has no row to key the dedupe and card pairing on,
+    # and QA's residual histogram on the real seam is 100% `message_start` --
+    # i.e. this is exactly the traffic the mute is supposed to let through.
+    assert AssistantMessageStart in kinds
+    assert AssistantMessageEnd in kinds
+    assert NoticePosted in kinds
+
+
+def test_unparking_restores_delta_delivery() -> None:
+    """Committing a parked source makes it current: its tokens paint again."""
+    controller, session, app = _controller()
+    controller.set_parked(True)
+    session.emit(AgentStartEvent())
+    controller.set_parked(False)
+    app.posted.clear()
+
+    message = Message.assistant("live")
+    message.id = "m3"
+    session.emit(MessageUpdateEvent(message=message, delta="tok"))
+    app.flush()
+
+    assert any(isinstance(m, AssistantDelta) for m in app.posted)
+
+
+def test_restoring_projection_is_never_muted() -> None:
+    """The reveal replays the owner's live seed through this same entry point.
+
+    `restore_live_projection` runs BEFORE the app clears the parked flag in
+    some orderings, so the restore path must bypass the mute or a revealed
+    conversation loses the in-flight answer it is supposed to show.
+    """
+    controller, session, app = _controller()
+    controller.set_parked(True)
+    message = Message.assistant("seeded")
+    message.id = "m4"
+
+    class _State:
+        streaming = True
+        generation = 3
+        live_events = [MessageUpdateEvent(message=message, delta="seeded").model_dump(mode="json")]
+
+    controller.restore_live_projection(_State(), set(), set())
+
+    assert any(isinstance(m, AssistantDelta) for m in app.posted)

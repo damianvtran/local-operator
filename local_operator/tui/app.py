@@ -4418,6 +4418,19 @@ class OperatorApp(App[None]):
             self._sidebar_sources[session_id] = source
             source.controller = EventController(remote, self)
             self._event_sources[source.controller] = source
+            # PARKED BEFORE SUBSCRIBING, never after. A lease reached from
+            # prewarm is speculative by construction -- it exists to make a
+            # future CLICK fast, and until that click every delta it receives
+            # is discarded by `_reduce_hidden_session_event`. Parking first
+            # means the very first relayed token is already declined rather
+            # than paid for in the window between the two calls.
+            #
+            # The subscription itself STAYS: `_emit_or_buffer` buffers rather
+            # than drops when no handler is registered, so an unsubscribed
+            # parked source silently accumulates its owner's whole stream (8k+
+            # events in 25 s across 12 sources, measured) and then delivers it
+            # in one drain at commit. See `EventController.set_parked`.
+            source.controller.set_parked(True)
             source.controller.subscribe()
             self._watch_source_frontend(source)
             return source
@@ -5453,6 +5466,84 @@ class OperatorApp(App[None]):
             editor.set_commands(SLASH_COMMANDS)
             editor.set_records_history(True)
 
+    def _park_switched_away_source(self, outgoing: SessionInteraction) -> None:
+        """Start the idle clock of a source that has just left the screen, and mute it.
+
+        THE INVARIANT THIS EXISTS TO MAKE STRUCTURAL: **a source that is
+        VISIBLE must never be parked.** A parked controller drops delta-grade
+        events (see :meth:`EventController.set_parked`), so parking the
+        conversation the user is looking at paints its boundaries and none of
+        its streaming tokens -- silently, for the whole turn. That is the worst
+        failure this feature can produce, and it must not be reachable by a
+        caller forgetting a guard.
+
+        So the visibility test is made HERE, against ``self._interaction`` --
+        the single authority on which source is on screen -- rather than at
+        each call site against whatever local happens to be in scope. Two
+        cases collapse into that one test:
+
+        * the REFRESH commit, where the switch re-lands the session already on
+          screen (``outgoing is source``), and
+        * a commit that RAISES before ownership moves, where the switch is
+          abandoned by ``SessionNavigation._prepare_and_commit`` and the
+          outgoing conversation stays on screen (review round 2, MAJOR).
+
+        The second is why this is called only AFTER :meth:`_adopt_session` has
+        returned. A mute applied before the transfer is a mute with no unwind:
+        the failure path shows a warning notice and abandons the switch, and
+        nothing there would lift it. Applied after, the mute simply never
+        happens unless the switch actually completed -- which needs no
+        ``try``/``finally`` and cannot be defeated by a future exception
+        somewhere in the ~66 lines of widget work the commit does.
+
+        THE POST-SWAP WINDOW IS NOT A LEAK, stated here because it reads like
+        one. A raise after :meth:`_apply_sidebar_presentation` but before this
+        line leaves the INCOMING transcript mounted on screen while
+        ``self._interaction`` still points at the OUTGOING source, and that
+        incoming source is still parked from its birth in
+        :meth:`_lease_sidebar_source`. Both halves are correct. The outgoing
+        source is the one the app considers current, and it is left unmuted and
+        unstamped -- this line never ran -- so the conversation the app is
+        driving still paints. The incoming one stays muted because no commit
+        ever claimed it: the navigation failed, and the retry prepares it again
+        through the same seam that unparks it. Verified by injecting a raise in
+        exactly that window: current source unparked and painting deltas,
+        ``parked_at`` None, incoming still parked.
+
+        ``parked_at`` moves with the mute for the same reason. It is the idle
+        sweep's deadline (:meth:`_sweep_idle_sidebar_sources`), and stamping it
+        on a session that is still current advertises a reapable source that
+        the user is in fact looking at.
+        """
+        # `self._interaction` is the incoming source by now, so this is false
+        # exactly when the switch really moved the screen somewhere else.
+        if outgoing is self._interaction:
+            return
+        # Attention is the only thing this stamp records: `outgoing` has just
+        # stopped being on screen. A source that is current has no deadline at
+        # all, which is what makes "the displayed conversation is never reaped"
+        # a structural property rather than a clause someone must remember.
+        outgoing.parked_at = time.monotonic()
+        # SYMMETRIC WITH THE STAMP ABOVE, and for the same reason: from here
+        # every delta `outgoing` receives is discarded by
+        # `_reduce_hidden_session_event` exactly as a never-visited prewarmed
+        # source's is. Without this the mute is a ONE-WAY LATCH --
+        # `_lease_sidebar_source` parks at birth and `_adopt_session` unparks
+        # on commit, and nothing ever re-parks -- so every session the user
+        # actually clicks into stays exempt for the rest of its
+        # `SIDEBAR_IDLE_RELEASE_S` retention and keeps paying full per-token
+        # delivery while hidden. That decays the saving with exactly the
+        # behaviour the sidebar exists to support (review round 1, R1).
+        #
+        # Safe with respect to the reveal, because the return trip either
+        # rebuilds the presentation (the cache misses whenever the source is
+        # `streaming`, so an in-flight answer is never served from it) or
+        # replays the owner's `live_events` seed through
+        # `restore_live_projection`, which bypasses the mute. The buffer this
+        # drops is per-token text already superseded by that seed.
+        if outgoing.controller is not None:
+            outgoing.controller.set_parked(True)
+
     def _commit_sidebar_session(
         self,
         session_id: str,
@@ -5523,14 +5614,15 @@ class OperatorApp(App[None]):
             ):
                 self._sidebar_presentations[previous.session_id] = outgoing_presentation
                 outgoing_presentation = None
-        # Start the outgoing source's idle clock, and stop the incoming one's.
-        # This is the single place the two transitions happen together, and
-        # attention is the only thing either stamp records: `outgoing` has just
-        # stopped being on screen, `source` has just become the session the
-        # user is looking at. A source that is current has no deadline at all,
-        # which is what makes "the displayed conversation is never reaped" a
-        # structural property rather than a clause someone must remember.
-        outgoing.parked_at = time.monotonic()
+        # Stop the incoming source's idle clock: it is about to be the session
+        # the user is looking at, and a current source has no deadline at all.
+        # Its counterpart -- starting the OUTGOING source's clock, and muting
+        # it -- deliberately does NOT happen here. It runs after
+        # `_adopt_session` via `_park_switched_away_source`, because a mute
+        # applied before ownership moves is a mute with no unwind: a commit
+        # that raises in the widget work below is caught by
+        # `SessionNavigation._prepare_and_commit`, which abandons the switch
+        # and leaves this conversation on screen (review round 2, MAJOR).
         source.parked_at = None
         self._park_sidebar_aside(outgoing)
         if isinstance(previous, RemoteSession):
@@ -5598,6 +5690,16 @@ class OperatorApp(App[None]):
             # straight back to.
             self._reset_band_for_swap(retire=False)
             self._adopt_session(session, replay_history=False, reuse_controller=True)
+            # IMMEDIATELY AFTER the adopt, and never before it. `_adopt_session`
+            # is the single place a source becomes current: it has just moved
+            # `self._interaction` to the incoming source and lifted ITS mute, so
+            # from this line the helper's `outgoing is self._interaction` test
+            # can tell a completed switch from an abandoned one. Ordering the
+            # pair this way is what makes "a VISIBLE source is never parked"
+            # hold without an unwind path -- an exception anywhere above simply
+            # never reaches this line, leaving the outgoing conversation live on
+            # the screen it never left (review round 2, MAJOR).
+            self._park_switched_away_source(outgoing)
             # Re-derive the fork indicator from the session now in front of the
             # user. `fork_pending` is app-scoped with no `FrontendSessionState`
             # field, so no snapshot repaints it and the park leg deliberately
@@ -6819,6 +6921,14 @@ class OperatorApp(App[None]):
         # a source leased by prewarm and later adopted would otherwise keep the
         # stamp it was born with and be swept while on screen.
         source.parked_at = None
+        # THE SINGLE PLACE A SOURCE BECOMES CURRENT, and therefore the one
+        # place its event stream must go live again. A prewarmed source was
+        # muted for delta-grade events while speculative (see
+        # `_lease_sidebar_source` and `EventController.set_parked`); from here
+        # its tokens are painted, so the mute has to lift BEFORE the commit
+        # path below replays the owner's live seed through the same controller.
+        if source.controller is not None:
+            source.controller.set_parked(False)
         self._watch_source_frontend(source)
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):

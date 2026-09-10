@@ -513,8 +513,80 @@ class EventController:
         self._flush_timer = None
         self._unsubscribe: Callable[[], Any] | None = None
         self._restoring_projection = False
+        self._parked = False
 
     # -- lifecycle ----------------------------------------------------------
+    def set_parked(self, parked: bool) -> None:
+        """Mute delta-grade traffic for a source nobody is looking at.
+
+        WHY THIS EXISTS. The sidebar prewarms every live session it can see, so
+        opening it attaches up to ``RETAINED_PRESENTATIONS`` real subscriptions
+        held for ``SIDEBAR_IDLE_RELEASE_S``. Each streaming delta of each of
+        those OTHER conversations was then decoded, deserialized, deduped,
+        dispatched, posted as a Textual message, and dequeued by the app --
+        which discarded it, because ``_reduce_hidden_session_event`` paints
+        nothing for a hidden source. Measured on 12 background sessions: ~229
+        such events/s, every one hidden-source, +9 points of a core. The full
+        delivery cost of a result thrown away.
+
+        WHAT THIS DOES *NOT* FIX, stated here because this is where the next
+        investigator lands. Typing is measurably slower with the sidebar open
+        than closed, and THIS PATH IS NOT THE CAUSE -- do not re-derive the
+        retracted attribution from the numbers above. An ABBA A/B put this
+        change at 153.8 ms against 143.1 ms without it (within noise) while
+        closed sat at 121.1 ms; an independent QA replication measured
+        109.5 ms with / 100.3 ms without / 86.7 ms closed and reached the same
+        conclusion. A CEILING ARM that dropped the identical events at the
+        owner's ``_relay_on_loop`` -- i.e. before they ever reach a viewer --
+        did not close the gap either, which retires viewer-side gating on the
+        event path as a CLASS: no filter placed here can recover it, however
+        aggressive. The leading open suspect is ``_prepare_sidebar_session``
+        (93 ms median, on the event loop, two per prewarm refresh), not event
+        fan-in. The justification for this mode is the discarded work above,
+        and nothing else.
+
+        WHY IT IS A MODE HERE, AND NOT A DEFERRED ``subscribe()``. The obvious
+        fix -- do not subscribe a speculative source at all -- does not work,
+        and it fails silently. ``RemoteSession._emit_or_buffer`` does not DROP
+        an event when nobody is subscribed, it BUFFERS it (``remote.py``: ``if
+        not self._ready_for_events or not self._handlers: ...append``). A
+        parked source is ready-for-events with zero handlers, which is exactly
+        that branch, so deferring the subscribe trades CPU for an unbounded
+        list: measured at 8,169 events parked across 12 sources in 25 s (327/s
+        and climbing), which the commit path would then hand over in ONE drain
+        -- an avalanche landing on the click, i.e. on precisely the switch
+        latency the retention tuning exists to protect. Staying subscribed and
+        declining the work HERE keeps the drop where the events are already
+        known to be discardable.
+
+        WHAT SURVIVES THE MUTE. Only per-token/per-chunk traffic is dropped
+        (see ``_PARKED_DROP_TYPES``). Everything that changes a parked
+        conversation's OBSERVABLE state still flows: turn/agent boundaries keep
+        ``source.turn`` honest (a turn that starts or ends while parked is
+        still noticed, which is what the notifier, the abandon path and the
+        commit-time gate read), tool starts/ends keep card pairing intact so a
+        revealed view does not paint a succeeded call as interrupted,
+        compaction boundaries still release input held for the source, and
+        notices/wakes/peer deliveries are session facts a viewer must not miss.
+        The dropped events are recoverable by construction: the owner folds
+        them into ``live_events`` and ``restore_live_projection`` replays that
+        seed at commit, which is the same path a mid-turn join already uses.
+        """
+        if parked == self._parked:
+            return
+        self._parked = parked
+        if parked:
+            # A parked controller must not hold a 30 Hz timer for text nobody
+            # can see; the buffer it would flush is dropped below anyway.
+            self._stop_flush_timer()
+            self._assistant_buffer = ""
+            self._assistant_seen = ""
+
+    @property
+    def parked(self) -> bool:
+        """Whether delta-grade events are being dropped (test/inspection hook)."""
+        return self._parked
+
     def restore_live_projection(
         self, state: Any, rendered_ids: set[str], settled_tools: set[str]
     ) -> None:
@@ -584,7 +656,17 @@ class EventController:
     # -- event dispatch -----------------------------------------------------
     def _on_event(self, event: AgentEvent) -> None:
         """Route one engine event to its handler (sync or async-safe)."""
-        handler = self._HANDLERS.get(event.type)
+        event_type = event.type
+        # The drop is FIRST, before the handler lookup and before anything can
+        # mint a Textual message: the cost this closes is the delivery, not the
+        # handler (the reduction the app finally runs is 1.1 us/call, 0.025% of
+        # a core -- the ~9 points sat in getting there). Guarded on the restore
+        # path too, which replays the seed through this same entry point while
+        # the source is being revealed and must NOT be muted.
+        if self._parked and not self._restoring_projection:
+            if event_type in self._PARKED_DROP_TYPES:
+                return
+        handler = self._HANDLERS.get(event_type)
         if handler is not None:
             handler(self, event)
 
@@ -894,6 +976,39 @@ class EventController:
         "subagent_progress": _handle_subagent_progress,
         "subagent_end": _handle_subagent_end,
     }
+
+    #: Event types a PARKED source drops outright (see :meth:`set_parked`).
+    #: Grouped with ``_HANDLERS`` because both are class-level dispatch tables
+    #: read by ``_on_event``, and this file keeps its class constants together.
+    #:
+    #: MEMBERSHIP RULE, all three clauses required: the event carries a
+    #: fragment of something in flight, the owner's ``live_events`` seed
+    #: already accumulates it (so a reveal rebuilds the same viewport through
+    #: ``restore_live_projection``), AND it is emitted UNTHROTTLED, once per
+    #: token or chunk. The third clause is what makes the set finite, and it is
+    #: why ``tool_call_compose`` is DELIBERATELY EXCLUDED despite satisfying
+    #: the first two: it carries partial argument bytes of an in-flight call,
+    #: but ``harness/loop.py`` already rate-limits it to one per
+    #: ``COMPOSE_NOTICE_INTERVAL_S`` (0.2 s), so it is not volume traffic and
+    #: dropping it would buy nothing while costing a compose preview on reveal.
+    #: Do not "complete" this set by adding it.
+    #:
+    #: Also deliberately absent: ``message_start``/``message_end`` (row
+    #: identity and the settled row the dedupe and card pairing key on), every
+    #: turn/agent boundary, tool start/end, compaction, retry, model change,
+    #: and every delivery notice -- those change state a parked source is still
+    #: expected to have right.
+    #:
+    #: These three ARE the volume: at 12 streaming sessions they were ~229
+    #: events/s of the traffic measured, against a handful per turn for
+    #: everything above.
+    _PARKED_DROP_TYPES: frozenset[str] = frozenset(
+        {
+            "message_update",  # one per assistant token
+            "tool_execution_update",  # one per streamed tool-output chunk
+            "subagent_progress",  # one per child progress beat
+        }
+    )
 
     # -- flush timer --------------------------------------------------------
     def _request_flush_timer(self) -> None:
