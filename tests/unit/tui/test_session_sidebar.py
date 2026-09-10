@@ -2410,3 +2410,57 @@ async def test_a_click_superseded_by_a_click_for_the_same_session_does_not_spawn
         assert committed and set(committed) == {"target-session"}, (
             "every switch that landed must be the session the clicks asked " f"for: {committed!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
+    """The N-way fan-in guard, at the seam that creates the attachments.
+
+    `_prewarm_sidebar` leases a real, subscribed source for every live session
+    the sidebar can see. Those sources are speculative: nothing they receive is
+    painted until the user clicks one, and at 12 streaming sessions delivering
+    them anyway cost ~229 discarded events/s and +9 points of a core -- work
+    whose result is thrown away. It is NOT a keystroke-latency fix; see
+    `EventController.set_parked` for the measurements that retired that claim.
+
+    Two halves, and BOTH are load-bearing:
+
+    * the controller must be PARKED, so per-token traffic is declined; and
+    * it must still be SUBSCRIBED, because `RemoteSession._emit_or_buffer`
+      buffers rather than drops when no handler is registered -- an
+      unsubscribed parked source silently accumulates its owner's entire
+      stream (measured: 8,169 events across 12 sources in 25 s) and dumps it
+      in one drain at commit, landing on the click this whole cache exists to
+      make fast.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from local_operator.session.remote import RemoteSession
+
+    remote = MagicMock(spec=RemoteSession)
+    remote.session_id = "spec"
+    remote.is_cold = False
+    remote.frontend_state = SimpleNamespace(pending_gate=None)
+    handlers: list[object] = []
+    remote.subscribe = lambda handler: handlers.append(handler) or (lambda: None)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+
+        async def connect(*_args, **_kwargs):
+            return remote
+
+        with (
+            patch("local_operator.session.remote.RemoteSession.connect", side_effect=connect),
+            patch(
+                "local_operator.mobile.attach_client.find_owner_record",
+                return_value=(SimpleNamespace(pid=1), SimpleNamespace()),
+            ),
+        ):
+            source = await app._lease_sidebar_source("spec", speculative=True)
+
+        assert source.controller is not None
+        assert source.controller.parked, "a speculative lease must not paint deltas"
+        assert handlers, "a parked source must stay subscribed or its owner's stream buffers"
