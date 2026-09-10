@@ -1099,6 +1099,37 @@ class ProviderModelClient:
                 compaction=compaction,
             )
         try:
+            # A ``toolUse`` stop that carried NO tool call and NO text is a model
+            # that chose the tool channel and then put nothing on it. Left alone it
+            # reaches ``parse_decision`` as an empty string, which reports "decision
+            # is not valid JSON" -- so the runner re-prompts the model to fix JSON
+            # it never wrote, and the correction cannot land because it names the
+            # wrong defect.
+            #
+            # Measured on minimax/minimax-m3: ~8% of replies on a routine screen and
+            # ~60% on a screen that looks already-complete come back this way, after
+            # spending output tokens entirely on reasoning. That killed a first paid
+            # episode at 3 calls. The failures are CORRELATED within an observation
+            # (three in a row is a 1-in-1700 event if independent), so a bigger
+            # retry bound does not fix it -- the re-prompt has to say something
+            # different, which is exactly what the rejection path does.
+            #
+            # Raised as a DecisionParseError, NOT a ProviderStreamAbortedError: an
+            # abort seals the episode as a provider failure with no retry at all,
+            # which is strictly worse than the status quo. This is the model's
+            # error and it is recoverable, so it takes the corrective-re-prompt
+            # path, where an explicit "you must reply with a tool call" turn is
+            # appended to the history. A 10-sample probe of that exact correction
+            # against a latched screen recovered 10/10, where escalating
+            # ``tool_choice`` to ``required`` recovered only 7/10 and a named tool
+            # choice 2/10.
+            if stop_reason == "toolUse" and tool_call_count == 0 and not text.strip():
+                raise DecisionParseError(
+                    "reply carried no tool call and no text: the tool channel was "
+                    "selected but nothing was emitted on it. Reply with the action "
+                    "batch itself, as a single JSON object with a non-empty "
+                    '"actions" array, and nothing else.'
+                )
             return parse_decision(
                 text.strip(),
                 observation,

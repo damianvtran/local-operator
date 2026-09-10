@@ -2585,3 +2585,73 @@ async def test_byte_trigger_does_not_fire_under_the_trigger(tmp_path: Path) -> N
     for previous, following in zip(stream.requests, stream.requests[1:]):
         assert len(following.messages) > len(previous.messages)
         assert all(a is b for a, b in zip(previous.messages, following.messages))
+
+
+@pytest.mark.asyncio
+async def test_a_tool_use_stop_with_no_call_and_no_text_is_a_correctable_rejection() -> None:
+    """The model selected the tool channel and put nothing on it.
+
+    Measured on ``minimax/minimax-m3``: ~8% of replies on a routine screen, and
+    ~60% on a screen that looks already-complete, terminate as ``toolUse`` with
+    zero tool calls and empty content, after spending their output tokens
+    entirely on reasoning. ``toolUse`` is a NORMAL stop -- it is the terminator
+    a model uses when it answers on the tool channel -- so this reply used to
+    fall through to ``parse_decision`` as an empty string and be reported as
+    "decision is not valid JSON". The runner then re-prompted the model to fix
+    JSON it had never written, the correction could not land because it named
+    the wrong defect, and the retry bound sealed the episode as a MODEL
+    failure. That is how a first paid episode died at three calls.
+
+    It must be a ``DecisionRejected`` (the correctable path that appends a
+    corrective turn), NOT a ``ProviderStreamAbortedError``: an abort seals the
+    episode as a provider failure with no retry at all, which would be strictly
+    worse than the behaviour this replaces.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        "",
+        stop_reason="toolUse",
+        usage=Usage(input_tokens=48, output_tokens=299),
+    )
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream).decide(current, _turns(current))
+
+    assert isinstance(info.value.__cause__, DecisionParseError)
+    # The diagnostic must name what actually happened. "not valid JSON" is the
+    # wrong defect and is precisely why the re-prompt could not work.
+    assert "no tool call and no text" in str(info.value.__cause__)
+    assert "JSON" not in str(info.value.__cause__).split("Reply with")[0]
+    # Billed: the prompt was read and the reasoning tokens were charged.
+    assert info.value.stop_reason == "toolUse"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_use_stop_that_carried_text_is_still_parsed_normally() -> None:
+    """The guard must not swallow a model that answers in prose under ``toolUse``.
+
+    Some providers report ``toolUse`` while the batch itself arrives as text.
+    Keying the guard on the stop reason alone would reject those valid replies,
+    so it also requires the content to be empty.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "wait",
+                        "observation_id": current.observation_id,
+                        "duration_ms": 1000,
+                    }
+                ]
+            }
+        ),
+        stop_reason="toolUse",
+    )
+
+    decision = await _client(stream).decide(current, _turns(current))
+
+    assert [action.kind for action in decision.action_batch.actions] == ["wait"]
