@@ -20,35 +20,33 @@
 # syntax against GitHub's own CODEOWNERS validator
 # (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
 # validates the default branch; the pre-change baseline on `main` returned an
-# empty error list). Of the three owners added 2026-09-10, only
-# `sherman-tsui` had reached the collaborators list by end of that day; the
-# other two had not -- see the pending-invite caveat below for the split.
+# empty error list). Both owners added 2026-09-10 -- `olafagbemi` and
+# `sherman-tsui` -- were confirmed as write collaborators the same day, so
+# every handle on the `*` line below is already effective.
 #
-# PENDING-INVITE CAVEAT -- `SanaKetabchi`, `olafagbemi` and `sherman-tsui`
-# were added as owners on 2026-09-10 by explicit operator decision, and on the
-# same date (15:54 UTC) each was invited as a collaborator with `write`
-# permission. As of 2026-09-10 the split between accepted and pending is:
-# `sherman-tsui` has ACCEPTED (invitation 332543903 consumed; confirmed via
-# `gh api repos/damianvtran/local-operator/collaborators/sherman-tsui/permission`
-# returning `write`), so that handle in the `*` line is already effective;
-# the other two invitations remain PENDING as of 2026-09-10 -- invitation
-# ids 332543898 (SanaKetabchi) and 332543900 (olafagbemi). Until each of
-# those two accepts, they are not collaborators, and per the documented
-# rule above GitHub silently ignores their handles here -- the exact
-# failure mode this file exists to fix, knowingly accepted for a bounded
-# window. It does not recreate the 2026-09-05 unsatisfiable-control state:
-# the `*` rule still resolves through `damianvtran` and `bbqben`, who are
-# active write-access collaborators, and an approval from ANY listed owner
-# satisfies the requirement, so `main`'s code-owner review stays
-# satisfiable throughout. If either pending handle still does not resolve
-# after a wait, the fix is acceptance of the invite -- or re-invitation,
-# since GitHub invitations expire seven days after creation (2026-09-17
-# for these) -- NOT editing this file. Re-check state with
+# 2026-09-10 ADDITIONS -- `olafagbemi` and `sherman-tsui` were added as
+# owners on 2026-09-10 by explicit operator decision, and each was invited
+# as a collaborator with `write` permission the same day (15:54 UTC). Both
+# ACCEPTED on 2026-09-10: invitations 332543900 (olafagbemi) and 332543903
+# (sherman-tsui) are consumed, and
+# `gh api repos/damianvtran/local-operator/collaborators/<handle>/permission`
+# returns `write` for each, so both handles on the `*` line are effective.
+#
+# `SanaKetabchi` was on the same 2026-09-10 operator request and was invited
+# with `write` permission (invitation 332543898), but that invitation was
+# still PENDING as of 2026-09-10 21:50 UTC, so she was REMOVED from this
+# file the same day by operator decision: per the documented rule above a
+# pending handle is silently ignored by GitHub -- the exact failure mode
+# this file exists to prevent. She is NOT an owner. The invitation is left
+# open (do not cancel it; GitHub invitations expire seven days after
+# creation, 2026-09-17 for this one), and a later PR will add her if and
+# when she accepts. Her handle must not sit on the owners line "for later"
+# -- that is the silent-ignore failure described above. Re-check state with
 # `gh api repos/damianvtran/local-operator/collaborators` and
 # `gh api repos/damianvtran/local-operator/invitations`.
 #
-# Handle verification for the three additions, in the same evidence-first
-# spirit: all three are listed together in
+# Handle verification for the 2026-09-10 candidates, in the same
+# evidence-first spirit: all three are listed together in
 # `pergamon-labs/pergamon-infra-services/.github/CODEOWNERS`; the
 # `pergamon-labs/pergamon-developer-platform` Helm chart values.yaml carries
 # their GitHub user-ids (SanaKetabchi=U_kgDOBypusA,
@@ -64,4 +62,4 @@
 # non-owners because no such decision covers them.
 
 # Default owners for everything in the repository.
-* @damianvtran @bbqben @SanaKetabchi @olafagbemi @sherman-tsui
+* @damianvtran @bbqben @olafagbemi @sherman-tsui
