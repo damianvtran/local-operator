@@ -93,7 +93,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
+from local_operator.session.protocol import (
+    CompactionOutcome,
+    RuntimeLocality,
+    unanswered_tail_call_ids,
+)
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
@@ -2638,22 +2642,11 @@ class RemoteSession:
 
         Shared by the two "this row is not finished" questions below, which
         differ only in what makes the call unfinished — a gate parked in front
-        of it, or the tool still executing. The scan itself is one rule and
-        belongs in one place: the latest call group after the latest user
-        boundary is the only eligible group, so old interrupted turns keep
-        their ``⊘`` and are never revived by a later turn's liveness.
+        of it, or the tool still executing. The scan is the one rule in
+        :func:`session.protocol.unanswered_tail_call_ids`, shared with the
+        local owner so both surfaces answer identically for the same tail.
         """
-        answered: set[str] = set()
-        for message in reversed(self.display_history_window()):
-            role = getattr(message, "role", "")
-            if role == "user":
-                break
-            if role == "tool":
-                answered.add(str(getattr(message, "tool_call_id", "")))
-            calls = getattr(message, "tool_calls", None)
-            if role == "assistant" and calls:
-                return {call.id for call in calls} - answered
-        return set()
+        return unanswered_tail_call_ids(self.display_history_window())
 
     def pending_display_tool_ids(self) -> set[str]:
         """Unanswered calls in the pending gate's current serialized user turn.

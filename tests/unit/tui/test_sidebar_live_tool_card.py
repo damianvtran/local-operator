@@ -44,6 +44,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -538,3 +539,119 @@ def test_a_clockless_running_row_reserves_the_settled_spine() -> None:
     # same ladder `waiting` uses one arm up.
     assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL))] == [RUNNING_LABEL]
     assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL) - 1)] == [""]
+
+
+# --- the resume-onto-a-running-turn duplicate --------------------------------
+#
+# The tests above cover the SIDEBAR: a conversation parked in a tool, switched
+# to, repainted live. The resume variant is one step further on and was a
+# separate defect: `/resume` (and `--resume`, and the owner-reconnect gap) run
+# the SAME projection against a session whose turn is in flight IN THIS
+# PROCESS. The replay then painted a second row for a call the running turn's
+# own events were already painting — two rows for one call, a "running N
+# tools" count that included the replayed ghost, and an `interrupted` stamp on
+# a call that had not stopped. The seam is `replay_tool_call`, so these pin it
+# there directly; the assembled path is covered by the frames on the MR.
+
+
+def _call(call_id: str, name: str = PARKING_TOOL) -> Any:
+    """One transcript tool-call record, the shape ``replay_tool_call`` reads."""
+
+    return SimpleNamespace(id=call_id, name=name, arguments={"job_id": "7a73c97ffc54"})
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_live_call_is_not_doubled() -> None:
+    """A call live in this process mounts ONE row, and the band counts ONE.
+
+    The replay skips its settled row for an in-flight call so the live path
+    owns it; where no live path will paint (a local resume: the turn's
+    ToolStarted fired before this process subscribed), the projection's owner
+    paints the single row afterwards. Either way the call has exactly one
+    visible row and the working line's count reflects the one real call.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+
+        call = _call("call-live")
+        app._projection_live_call_ids = {"call-live"}
+        app._projection_skipped_live = []
+        app._replay_tool_call(call, {})
+        # The replay mounted nothing for the live call, and recorded it for
+        # the owner to paint.
+        assert app._projection_skipped_live == [call]
+        assert not [
+            b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)
+        ], "the replay mounted a settled row beside the live one"
+
+        # The owner paints the one row, clock withheld, counted once.
+        app._paint_skipped_live_tool_rows(
+            app._transcript_view(), app._tool_cards, app._projection_skipped_live
+        )
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1, "a live call must have exactly one visible row"
+        assert cards[0]._state == "running"
+        assert cards[0]._started is None, "the painted row must not invent a start time"
+        assert len(app._tool_cards) == 1, "the working line must count one live tool"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_resume_of_the_same_history_still_marks_interrupted() -> None:
+    """Nothing is live: the same unanswered call still renders interrupted.
+
+    The guard must not become "never paint interrupted" — a turn that really
+    died mid-flight is exactly the case the settled projection exists to
+    report, and an empty executing set is the cold-resume answer.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        app._projection_live_call_ids = set()  # cold: no live turn
+        app._projection_skipped_live = []
+        app._replay_tool_call(_call("call-dead"), {})
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1
+        assert cards[0]._state == "interrupted", (
+            "a call from a turn that genuinely stopped was repainted live; "
+            "interrupted must remain its outcome"
+        )
+        assert app._projection_skipped_live == []
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_running_row_never_starts_its_clock() -> None:
+    """A painted live row withholds its clock exactly as restore does.
+
+    The transcript carries no true start time for an in-flight call, so the
+    one row the owner paints must refuse to count from when it was painted —
+    the same guarantee `restore(state="running")` makes, pinned here on the
+    painter the projection path uses. Driven through the app's own view so
+    the mount is real.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        view = app._transcript_view()
+        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
+        card = app._tool_cards["call-clock"]
+        assert card._state == "running"
+        assert card._started is None
+        # One row per call: painting the same skipped call again is a no-op.
+        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
+        assert len(app._tool_cards) == 1
+        assert len([b for b in view.blocks() if isinstance(b, ToolCard)]) == 1

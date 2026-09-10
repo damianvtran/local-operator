@@ -152,7 +152,11 @@ from local_operator.session.naming import (
     ConversationName,
 )
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
-from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
+from local_operator.session.protocol import (
+    CompactionOutcome,
+    RuntimeLocality,
+    unanswered_tail_call_ids,
+)
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
@@ -3492,6 +3496,43 @@ class Session:
         ``Message`` docstring).
         """
         return list(self._context.messages)
+
+    def pending_display_tool_ids(self) -> set[str]:
+        """Unanswered calls in the pending gate's current serialized user turn.
+
+        The local half of the display question ``RemoteSession`` already
+        answers for a viewer: a replay of the in-flight turn's tail must not
+        settle the row the gate is parked on. A gate can precede
+        tool_execution_start, so no invented start event is needed.
+        """
+        if self.pending_gate is None:
+            return set()
+        return unanswered_tail_call_ids(self._context.messages)
+
+    def executing_display_tool_ids(self) -> set[str]:
+        """Unanswered calls of a turn that is STILL RUNNING right now.
+
+        The gate's counterpart, and the reason it cannot answer for both. A
+        long tool — ``wait(wait_ms=1800000)``, a background ``bash``, a
+        ``task`` — parks the turn inside execution with NO gate open, so
+        ``pending_display_tool_ids`` returns nothing for it while the call is
+        very much alive.
+
+        Until this accessor existed the question was RemoteSession-only, so a
+        resume onto a LIVE LOCAL session replayed the in-flight call as a
+        settled row — a duplicate beside the card the running turn's own
+        events paint, one extra head in the "running N tools" count, and a
+        ``⊘ interrupted`` stamp on a call that had not stopped.
+
+        Gated on :attr:`is_streaming` and on the LATEST group only, so the answer
+        is "this turn, right now" and never "some turn once left a call
+        dangling". A turn that has ended reports nothing here and its
+        unanswered rows stay interrupted, which for a turn that really died
+        mid-flight is the truth.
+        """
+        if not self._is_streaming:
+            return set()
+        return unanswered_tail_call_ids(self._context.messages)
 
     def context_breakdown(self) -> dict[str, int]:
         """On-demand token breakdown for the context the next request sends.
