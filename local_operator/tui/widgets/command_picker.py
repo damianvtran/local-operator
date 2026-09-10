@@ -1063,6 +1063,10 @@ class CommandPicker(Static):
         # Not a match: it is never selectable, so it lives beside the rows rather
         # than among them (see set_notice).
         self._notice = ""
+        # Widest-first phrasings for a notice whose TAIL must not crop, resolved
+        # at paint time so the choice survives a resize (see set_notice_rungs).
+        # Empty for every ordinary notice, which is cropped by `truncate_cells`.
+        self._notice_rungs: tuple[str, ...] = ()
         # True only while the one notice row is a TRANSIENT loading reserve —
         # rows are expected to replace it (see set_loading_reserve). Kept as explicit
         # state rather than inferred from the notice text, because the editor
@@ -1189,6 +1193,48 @@ class CommandPicker(Static):
         """
         return self._loading
 
+    def set_notice_rungs(self, rungs: Sequence[str]) -> None:
+        """Set a notice that DEGRADES with width instead of being cropped.
+
+        ``rungs`` is widest-first; the row paints the first one that fits its own
+        measured width and falls back to the narrowest rather than to a
+        truncation. Passing an empty sequence withdraws the notice.
+
+        Resolved HERE, at paint time, rather than by the caller choosing a string
+        up front — which is what makes the choice survive a resize. A capture
+        that opens at 120 columns and is then dragged to 60 mid-secret re-fits on
+        the ``Resize`` the row already re-truncates on; a caller-chosen string
+        would keep painting the wide rung and crop it, which is the defect this
+        replaces (design round 1, D2).
+
+        The credential typing notice is the caller this exists for: its tail
+        names the way OUT of a mode, so it is the one notice whose degradation
+        cannot be left to ``truncate_cells``.
+        """
+        fitted = tuple(text.strip() for text in rungs if text.strip())
+        if fitted == self._notice_rungs:
+            return
+        # `set_notice` clears the rungs (every other caller means a plain
+        # notice), so it is called FIRST and the rungs are installed after it.
+        self.set_notice(fitted[0] if fitted else "")
+        self._notice_rungs = fitted
+        if fitted:
+            self._repaint()
+
+    def _fitted_notice(self, width: int) -> str:
+        """The notice as it should paint at ``width`` cells of row.
+
+        A laddered notice picks its widest fitting rung; a plain one is returned
+        as-is for ``truncate_cells`` to crop, which is correct for every notice
+        whose tail is not load-bearing.
+        """
+        if not self._notice_rungs:
+            return self._notice
+        for rung in self._notice_rungs:
+            if cell_len(rung) <= width:
+                return rung
+        return self._notice_rungs[-1]
+
     def set_notice(self, text: str) -> None:
         """Say why an ARGUMENT list is empty, IN THE LIST'S OWN PLACE.
 
@@ -1206,6 +1252,11 @@ class CommandPicker(Static):
         an open picker still goes to the buffer. Passing ``""`` withdraws it.
         """
         text = text.strip()
+        # The rungs phrase THIS notice; a plain notice replacing it is not
+        # laddered, and leaving them set would degrade an unrelated string.
+        # Cleared before the early return so a repeat of the same text still
+        # drops a stale ladder.
+        self._notice_rungs = ()
         if text == self._notice:
             return
         self._notice = text
@@ -1398,6 +1449,8 @@ class CommandPicker(Static):
             self._window_start = 0
             self._chosen_by_hand = False
             self._notice = ""
+            # The rungs go with the notice they phrase, for the same reason.
+            self._notice_rungs = ()
             # The loading reserve goes with the notice it was riding: it
             # described THAT list's transient window (see set_loading_reserve).
             self._loading = False
@@ -1898,10 +1951,10 @@ class CommandPicker(Static):
         )
         row = Text()
         row.append(" " * _GUTTER_CELLS, style=dim)
-        row.append(
-            truncate_cells(self._notice, max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
-            style=dim,
-        )
+        budget = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
+        # `_fitted_notice` FIRST, so a laddered notice sheds whole clauses; the
+        # truncate stays as the backstop every other notice relies on.
+        row.append(truncate_cells(self._fitted_notice(budget), budget), style=dim)
         return _pad_to(row, width, dim)
 
     def _primary_column(self) -> int:
@@ -2054,6 +2107,7 @@ class CommandPicker(Static):
         # The notice belonged to the list that is now gone. Esc, a completion and a
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
+        self._notice_rungs = ()
         self._loading = False
         self.display = False
         self._report_highlight()
