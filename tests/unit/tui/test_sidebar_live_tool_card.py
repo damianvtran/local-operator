@@ -44,11 +44,18 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.types import AgentTool, TextContent, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    Message,
+    TextContent,
+    ToolCall,
+    ToolResult,
+)
 from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
@@ -538,3 +545,359 @@ def test_a_clockless_running_row_reserves_the_settled_spine() -> None:
     # same ladder `waiting` uses one arm up.
     assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL))] == [RUNNING_LABEL]
     assert [text for text, _style in card._status_runs(cap=len(RUNNING_LABEL) - 1)] == [""]
+
+
+# --- the resume-onto-a-running-turn duplicate --------------------------------
+#
+# The tests above cover the SIDEBAR: a conversation parked in a tool, switched
+# to, repainted live. The resume variant is one step further on and was a
+# separate defect: `/resume` (and `--resume`, and the owner-reconnect gap) run
+# the SAME projection against a session whose turn is in flight IN THIS
+# PROCESS. The replay then painted a second row for a call the running turn's
+# own events were already painting — two rows for one call, a "running N
+# tools" count that included the replayed ghost, and an `interrupted` stamp on
+# a call that had not stopped. The seam is `replay_tool_call`, so these pin it
+# there directly; the assembled path is covered by the frames on the MR.
+
+
+def _call(call_id: str, name: str = PARKING_TOOL) -> Any:
+    """One transcript tool-call record, the shape ``replay_tool_call`` reads."""
+
+    return SimpleNamespace(id=call_id, name=name, arguments={"job_id": "7a73c97ffc54"})
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_live_call_is_not_doubled() -> None:
+    """A call live in this process mounts ONE row, and the band counts ONE.
+
+    The replay skips its settled row for an in-flight call so the live path
+    owns it; where no live path will paint (a local resume: the turn's
+    ToolStarted fired before this process subscribed), the projection's owner
+    paints the single row afterwards. Either way the call has exactly one
+    visible row and the working line's count reflects the one real call.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    session = FakeSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+
+        call = _call("call-live")
+        app._projection_live_call_ids = {"call-live"}
+        app._projection_skipped_live = []
+        app._replay_tool_call(call, {})
+        # The replay mounted nothing for the live call, and recorded it for
+        # the owner to paint.
+        assert app._projection_skipped_live == [call]
+        assert not [
+            b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)
+        ], "the replay mounted a settled row beside the live one"
+
+        # The owner paints the one row, clock withheld, counted once.
+        app._paint_skipped_live_tool_rows(
+            app._transcript_view(), app._tool_cards, app._projection_skipped_live
+        )
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1, "a live call must have exactly one visible row"
+        assert cards[0]._state == "running"
+        assert cards[0]._started is None, "the painted row must not invent a start time"
+        assert len(app._tool_cards) == 1, "the working line must count one live tool"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_resume_of_the_same_history_still_marks_interrupted() -> None:
+    """Nothing is live: the same unanswered call still renders interrupted.
+
+    The guard must not become "never paint interrupted" — a turn that really
+    died mid-flight is exactly the case the settled projection exists to
+    report, and an empty executing set is the cold-resume answer.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        app._projection_live_call_ids = set()  # cold: no live turn
+        app._projection_skipped_live = []
+        app._replay_tool_call(_call("call-dead"), {})
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1
+        assert cards[0]._state == "interrupted", (
+            "a call from a turn that genuinely stopped was repainted live; "
+            "interrupted must remain its outcome"
+        )
+        assert app._projection_skipped_live == []
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_running_row_never_starts_its_clock() -> None:
+    """A painted live row withholds its clock exactly as restore does.
+
+    The transcript carries no true start time for an in-flight call, so the
+    one row the owner paints must refuse to count from when it was painted —
+    the same guarantee `restore(state="running")` makes, pinned here on the
+    painter the projection path uses. Driven through the app's own view so
+    the mount is real.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        view = app._transcript_view()
+        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
+        card = app._tool_cards["call-clock"]
+        assert card._state == "running"
+        assert card._started is None
+        # One row per call: painting the same skipped call again is a no-op.
+        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
+        assert len(app._tool_cards) == 1
+        assert len([b for b in view.blocks() if isinstance(b, ToolCard)]) == 1
+
+
+def _history_with_one_call(call_id: str, tool_name: str = PARKING_TOOL) -> list[Message]:
+    """A tail whose last assistant message asks for exactly one call.
+
+    The shape every live-projection test needs: the call has no result yet,
+    so whether the replay settles it, skips it, or the pending scan re-marks
+    it is exactly what each test asserts on.
+    """
+    return [
+        user_message("run the thing"),
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id=call_id, name=tool_name, arguments={"job_id": "j1"})],
+            stop_reason="toolUse",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_gate_parked_call_keeps_its_waiting_row_on_a_live_projection() -> None:
+    """Round 1 MAJOR-1: the projection seed subtracts the pending set.
+
+    A turn parked at an approval gate is ALSO a streaming one, so both
+    live-id accessors answer with exactly the call the gate holds. Seeding
+    the skip set with the un-subtracted answer skipped that call out of the
+    replay, and the painter then showed it `running` while it waited on the
+    user — the documented "waiting wins" rule of `_mark_pending_tool_rows`
+    could not fire, because no replayed row existed to re-mark. The seed is
+    the gate-free set, so the held call takes the mount → `mark_waiting`
+    route that predates this PR.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Gated(FakeSession):
+        """Both accessors answer with the held call: a gated turn is streaming."""
+
+        def pending_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+    session = Gated()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-gated"))
+        cards = [b for b in app._transcript_view().blocks() if isinstance(b, ToolCard)]
+        assert len(cards) == 1, "one row for the held call, mounted by the replay"
+        assert cards[0]._state == "waiting"
+        assert "tool-running" not in cards[0].classes
+        # A waiting row owns no clock either: nothing started executing.
+        assert cards[0]._started is None
+
+
+@pytest.mark.asyncio
+async def test_a_live_waiting_card_is_not_doubled_by_the_gated_projection() -> None:
+    """Round 2 Q-R2-1: the fold's mount consults the already-painted registry.
+
+    The MAJOR-1 test above drives a FakeSession whose gate answers WITHOUT any
+    live card ever mounted, so the fold's append is the only row and a double
+    mount cannot show. On the REAL path — ``/resume`` onto a gated turn, or a
+    sidebar switch back to one — the turn's own ``ToolStarted`` mounted a
+    clocked card during adoption, and the gate-free seed subtraction correctly
+    declines to skip the held call: the fold then appended a SECOND ``waiting``
+    row beside the live one, and ``_paint_skipped_live_tool_rows`` had nothing
+    to reconcile because the skip list was empty. The one-row rule the live-skip
+    arm enforces now covers this arm too: a call id with a card already on
+    screen mounts nothing, and the pending scan re-marks the EXISTING row.
+    """
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Gated(FakeSession):
+        """Both accessors answer with the held call: a gated turn is streaming."""
+
+        def pending_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-gated"}
+
+    session = Gated()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+
+        # The live turn mounted its card when ToolStarted fired: clocked and
+        # registered, exactly as adoption leaves it when the projection runs.
+        live_card = ToolCard("call-gated", PARKING_TOOL, {"job_id": "j1"})
+        app._append_block(live_card)
+        app._tool_cards["call-gated"] = live_card
+
+        app._project_settled_rows(_history_with_one_call("call-gated"))
+        cards = [
+            b
+            for b in app._transcript_view().blocks()
+            if isinstance(b, ToolCard) and b.tool_call_id == "call-gated"
+        ]
+        assert len(cards) == 1, (
+            "the projection mounted a second row beside the live card — "
+            "one call has exactly one visible row on the gated path too"
+        )
+        assert cards[0] is live_card, "the surviving row must be the live one"
+        assert (
+            cards[0]._state == "waiting"
+        ), "the pending scan still owns the state correction: waiting, not running"
+
+
+@pytest.mark.asyncio
+async def test_a_painted_skipped_row_settles_success_through_the_controller() -> None:
+    """Round 1 Q-1: the adopt path registers the row it paints.
+
+    The skipped call's ToolStarted predates this process's subscription, so
+    the controller never knew the call: the real ToolEnded buffered as an
+    orphan and turn-end retirement stamped a genuinely successful call
+    `interrupted`. The projection now registers the painted ids with the
+    controller — the same seam the presentation-commit path uses — so the
+    end pairs with the painted card and the receipt reads success.
+    """
+    from local_operator.harness.types import ToolExecutionEndEvent, ToolResult
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Live(FakeSession):
+        def pending_display_tool_ids(self) -> set[str]:
+            return set()
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-live"}
+
+    session = Live()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-live"))
+        card = app._tool_cards["call-live"]
+        assert card._state == "running"
+
+        # The end takes the route a real session's end takes: through the
+        # controller, not straight to the card. Registered at paint time, it
+        # pairs here instead of buffering behind a start nobody saw.
+        end = ToolExecutionEndEvent(
+            tool_call_id="call-live",
+            tool_name=PARKING_TOOL,
+            result=ToolResult(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                content=[TextContent(text="The job finished.")],
+                duration_s=2.4,
+            ),
+            duration_s=2.4,
+        )
+        controller = app._controller
+        assert controller is not None
+        controller._on_event(end)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._state == "success", "a real success must not read interrupted"
+        assert card._duration == 2.4, "the executor's measured interval is the receipt"
+        # Settled through the ordinary path: the registry released the card,
+        # so turn death has nothing left to retire as interrupted.
+        assert "call-live" not in app._tool_cards
+        assert app._retire_live_tool_cards() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_re_delivered_start_never_rearms_the_withheld_clock() -> None:
+    """Round 1 U1/U2: re-entry preserves the withheld clock, settle stays honest.
+
+    `/resume` onto a parked turn, and a switch away and back, both re-deliver
+    the still-in-flight ToolStarted to the card the projection painted.
+    `begin_running` used to restart `_started` at that instant: `0s` on
+    arrival, a clock ticking from the RESUME, and a receipt settled to the
+    time since the command. A restored card cannot date itself, so the
+    re-entry must not arm a clock; the settle falls back to the executor's
+    measured interval — the only number that is about the call.
+    """
+    from local_operator.harness.types import (
+        ToolExecutionEndEvent,
+        ToolExecutionStartEvent,
+        ToolResult,
+    )
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    class Live(FakeSession):
+        def pending_display_tool_ids(self) -> set[str]:
+            return set()
+
+        def executing_display_tool_ids(self) -> set[str]:
+            return {"call-live"}
+
+    session = Live()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        app._project_settled_rows(_history_with_one_call("call-live"))
+        card = app._tool_cards["call-live"]
+        assert card._state == "running"
+        assert card._started is None
+
+        # The re-delivered start — the exact re-entry `/resume` and a return
+        # visit produce when the owner's live seed replays through the
+        # controller.
+        controller = app._controller
+        assert controller is not None
+        controller._on_event(
+            ToolExecutionStartEvent(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                args={"job_id": "j1"},
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._started is None, "re-entry must not date a card that cannot know"
+        assert card._elapsed() is None, "no elapsed time exists to paint or settle from"
+
+        end = ToolExecutionEndEvent(
+            tool_call_id="call-live",
+            tool_name=PARKING_TOOL,
+            result=ToolResult(tool_call_id="call-live", tool_name=PARKING_TOOL, duration_s=6.0),
+            duration_s=6.0,
+        )
+        controller._on_event(end)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert card._state == "success"
+        assert card._duration == 6.0, "the measured interval, not time since re-delivery"
