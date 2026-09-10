@@ -4439,6 +4439,107 @@ def test_client_for_spec_openrouter_attribution_headers() -> None:
     assert client._extra_headers == expected
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter `provider` routing preferences
+# ---------------------------------------------------------------------------
+
+
+async def test_openrouter_provider_preferences_reach_the_request_body() -> None:
+    """The wire shape itself: a configured routing object lands as `provider`,
+    top-level, beside (never replacing) the rest of the body."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {"content": "ok"}, "index": 0}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openrouter_provider_preferences={"sort": "throughput", "ignore": ["some-host"]},
+    )
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("openrouter", "deepseek/deepseek-chat"),
+                messages=[Message.user("hi")],
+            ),
+            "sk-test",
+        )
+    )
+
+    assert captured["body"]["provider"] == {"sort": "throughput", "ignore": ["some-host"]}
+    # The routing object shares the body with everything else, it does not
+    # replace it — the model and messages are still there.
+    assert captured["body"]["model"] == "deepseek/deepseek-chat"
+    assert captured["body"]["messages"]
+
+
+async def test_openrouter_body_omits_provider_key_when_unconfigured() -> None:
+    """The cache-safety default: no preferences → NO `provider` key at all, so
+    OpenRouter's sticky routing (warm prompt cache) stays in force."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {"content": "ok"}, "index": 0}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenAICompatClient(
+        "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_spec("openrouter", "deepseek/deepseek-chat"),
+                messages=[Message.user("hi")],
+            ),
+            "sk-test",
+        )
+    )
+    assert "provider" not in captured["body"]
+
+
+def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() -> None:
+    prefs = {"sort": "price"}
+
+    openrouter = client_for_spec(
+        _spec(provider="openrouter", model_id="deepseek/deepseek-chat"),
+        openrouter_provider_preferences=prefs,
+    )
+    assert isinstance(openrouter, OpenAICompatClient)
+    assert openrouter._openrouter_provider_preferences == prefs
+
+    # Radient fronts OpenRouter, so the same routing object applies there.
+    radient = client_for_spec(
+        _spec(provider="radient", model_id="deepseek/deepseek-chat"),
+        openrouter_provider_preferences=prefs,
+    )
+    assert isinstance(radient, OpenAICompatClient)
+    assert radient._openrouter_provider_preferences == prefs
+
+    # Every other compat provider must never see the key it wouldn't understand.
+    kimi = client_for_spec(
+        _spec(provider="kimi", model_id="kimi-k2"),
+        openrouter_provider_preferences=prefs,
+    )
+    assert isinstance(kimi, OpenAICompatClient)
+    assert kimi._openrouter_provider_preferences is None
+
+    # The constructor copies the mapping: mutating the caller's dict afterwards
+    # must not leak into later request bodies.
+    prefs["sort"] = "latency"
+    assert openrouter._openrouter_provider_preferences == {"sort": "price"}
+
+
 async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
     """``usage.cache_creation`` splits the write count by TTL; both slices land
     on the Usage event and the sum still equals ``cache_write_tokens``."""

@@ -461,6 +461,32 @@ SECTIONS: tuple[Section, ...] = (
 )
 
 
+def _validate_openrouter_max_price(value: Any) -> None:
+    """Accept a JSON object string or mapping of optional price caps.
+
+    Runs before persistence (see :attr:`Setting.validate_value`): the TUI
+    editor types a string, the desktop ``PATCH /v1/settings/{key}`` route and a
+    hand-written config.yml hand a parsed mapping, and both must be checked or
+    a typo would sail into the request body as-is. Stored verbatim either way;
+    :func:`local_operator.model.configure._openrouter_provider_preferences`
+    parses the string form at client build time.
+    """
+    if isinstance(value, str):
+        if not value.strip():
+            return  # "" is "no cap"; `empty_unsets` clears the key on write.
+        try:
+            value = json.loads(value)
+        except ValueError:
+            raise ValueError('expected a JSON object like {"prompt": 1, "completion": 2}') from None
+    if not isinstance(value, Mapping):
+        raise ValueError('expected a JSON object like {"prompt": 1, "completion": 2}')
+    for name, cap in value.items():
+        if name not in ("prompt", "completion", "request", "image"):
+            raise ValueError(f"unknown price field: {name}")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap < 0:
+            raise ValueError(f"{name} must be a non-negative number")
+
+
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
     return (Choice(True, "on", on), Choice(False, "off", off))
 
@@ -585,6 +611,253 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         minimum=0,
         maximum=10_000_000,
+    ),
+    # -- providers.openrouter: chat-completions `provider` routing object ----
+    #
+    # These rows build the OpenRouter chat-completions request body's
+    # ``provider`` object (openrouter.ai/docs/guides/routing/provider-selection).
+    # The over-arching constraint is DeepSeek prompt-cache affinity: OpenRouter
+    # normally routes follow-up calls back to the host that answered the first
+    # one ("sticky routing"), which keeps the host-side KV cache warm on long
+    # conversations. ANY explicit preference risks routing away from that warm
+    # host, and ``order`` disables sticky routing outright — so every default
+    # below is "no opinion", and the resolver emits NO ``provider`` object at
+    # all until the user sets at least one of them. Do not give ``sort`` an
+    # explicit default: an always-on sort is an always-on cache miss.
+    Setting(
+        key="providers.openrouter.sort",
+        path=("providers", "openrouter", "sort"),
+        section="providers",
+        label="OpenRouter routing policy",
+        kind=Kind.ENUM,
+        # "" is the unset member: the schema must know a stored empty string
+        # means "no opinion", and the resolver treats it exactly like a missing
+        # key. An ENUM member rather than `empty_unsets` so the page can show
+        # the three real policies beside "default" as peers to pick between.
+        default="",
+        help=(
+            "How OpenRouter ranks hosts for this call. May route away from the "
+            "host holding your warm prompt cache (a cold start on long "
+            "conversations); 'default' sends no preference at all."
+        ),
+        choices=(
+            Choice("", "default", "no preference — sticky routing stays on (warmest cache)"),
+            Choice("price", "price", "cheapest host first"),
+            Choice("throughput", "throughput", "highest tokens/sec first"),
+            Choice("latency", "latency", "lowest response latency first"),
+        ),
+    ),
+    Setting(
+        key="providers.openrouter.order",
+        path=("providers", "openrouter", "order"),
+        section="providers",
+        label="OpenRouter host order",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Comma-separated host slugs tried in this exact order. WARNING: "
+            "disables sticky routing — DeepSeek's prompt cache goes COLD on "
+            "long conversations, repaying the full prefix cost every turn. "
+            "Leave empty unless you need a pinned host sequence."
+        ),
+        members=(
+            "deepseek",
+            "google-ai-studio",
+            "google-vertex",
+            "anthropic",
+            "openai",
+            "azure",
+            "amazon-bedrock",
+            "together",
+            "fireworks",
+            "groq",
+            "mistral",
+            "cohere",
+        ),
+        # An empty routing order is "no opinion", not a validation error —
+        # unlike web_search.providers, nothing breaks with zero entries.
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.openrouter.only",
+        path=("providers", "openrouter", "only"),
+        section="providers",
+        label="OpenRouter allowed hosts",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Comma-separated allow-list of host slugs; all others are excluded. "
+            "May route away from a warm prompt cache — a forced cold start. "
+            "Empty means every host is eligible."
+        ),
+        members=(
+            "deepseek",
+            "google-ai-studio",
+            "google-vertex",
+            "anthropic",
+            "openai",
+            "azure",
+            "amazon-bedrock",
+            "together",
+            "fireworks",
+            "groq",
+            "mistral",
+            "cohere",
+        ),
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.openrouter.ignore",
+        path=("providers", "openrouter", "ignore"),
+        section="providers",
+        label="OpenRouter ignored hosts",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Comma-separated block-list of host slugs to omit (e.g. a host "
+            "that is failing right now). May route away from a warm prompt "
+            "cache — a forced cold start. Empty means nothing is excluded."
+        ),
+        members=(
+            "deepseek",
+            "google-ai-studio",
+            "google-vertex",
+            "anthropic",
+            "openai",
+            "azure",
+            "amazon-bedrock",
+            "together",
+            "fireworks",
+            "groq",
+            "mistral",
+            "cohere",
+        ),
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.openrouter.allow_fallbacks",
+        path=("providers", "openrouter", "allow_fallbacks"),
+        section="providers",
+        label="OpenRouter fallbacks",
+        kind=Kind.BOOL,
+        default=True,
+        help="Off: fail rather than fall through to a host outside your preferences.",
+        choices=_bool_choices("fall back when the preferred host fails", "fail instead"),
+    ),
+    Setting(
+        key="providers.openrouter.require_parameters",
+        path=("providers", "openrouter", "require_parameters"),
+        section="providers",
+        label="OpenRouter require parameters",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "On: only use hosts that support every parameter you send "
+            "(tools, structured output). Off (default): OpenRouter silently "
+            "drops unsupported parameters."
+        ),
+        choices=_bool_choices("only hosts that support every parameter", "drop unsupported ones"),
+    ),
+    Setting(
+        key="providers.openrouter.data_collection",
+        path=("providers", "openrouter", "data_collection"),
+        section="providers",
+        label="OpenRouter data collection",
+        kind=Kind.ENUM,
+        default="",
+        help=(
+            "'deny' excludes hosts that may train on or retain your prompts. "
+            "'default' sends no preference (OpenRouter's default: allow)."
+        ),
+        choices=(
+            Choice("", "default", "no preference sent"),
+            Choice("allow", "allow", "hosts may collect data"),
+            Choice("deny", "deny", "exclude hosts that collect data"),
+        ),
+    ),
+    Setting(
+        key="providers.openrouter.zdr",
+        path=("providers", "openrouter", "zdr"),
+        section="providers",
+        label="OpenRouter zero data retention",
+        kind=Kind.BOOL,
+        # Tri-state: False = unset (no preference sent), True = ZDR hosts only.
+        # A None default would make the row read as "off" while meaning "unset".
+        default=False,
+        help="On: restrict to zero-data-retention endpoints. Off: no preference sent.",
+        choices=_bool_choices("ZDR endpoints only", "no preference"),
+    ),
+    Setting(
+        key="providers.openrouter.enforce_distillable_text",
+        path=("providers", "openrouter", "enforce_distillable_text"),
+        section="providers",
+        label="OpenRouter distillable text",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "On: restrict to endpoints whose text output may be distilled. "
+            "Off: no preference sent."
+        ),
+        choices=_bool_choices("distillable-text endpoints only", "no preference"),
+    ),
+    Setting(
+        key="providers.openrouter.quantizations",
+        path=("providers", "openrouter", "quantizations"),
+        section="providers",
+        label="OpenRouter quantizations",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Comma-separated quantization levels the served model may use "
+            "(e.g. int8, fp8). Empty means any."
+        ),
+        members=("int4", "int8", "fp4", "fp6", "fp8", "fp16", "bf16", "fp32"),
+        empty_unsets=True,
+    ),
+    Setting(
+        key="providers.openrouter.max_price",
+        path=("providers", "openrouter", "max_price"),
+        section="providers",
+        label="OpenRouter max price",
+        kind=Kind.TEXT,
+        default="",
+        help=(
+            'JSON object capping price, e.g. {"prompt": 1, "completion": 2} '
+            '(USD per million tokens; also "request" per request and "image" '
+            "per image). Empty sends no cap."
+        ),
+        empty_unsets=True,
+        validate_value=_validate_openrouter_max_price,
+    ),
+    Setting(
+        key="providers.openrouter.preferred_min_throughput",
+        path=("providers", "openrouter", "preferred_min_throughput"),
+        section="providers",
+        label="OpenRouter min throughput (tok/s)",
+        kind=Kind.FLOAT,
+        default=0.0,
+        help=(
+            "Prefer hosts serving at least this many output tokens/sec "
+            "(p50). 0 sends no preference. A host below the bar is deprioritised, "
+            "which may cost you a warm prompt cache."
+        ),
+        minimum=0.0,
+        maximum=100_000.0,
+    ),
+    Setting(
+        key="providers.openrouter.preferred_max_latency",
+        path=("providers", "openrouter", "preferred_max_latency"),
+        section="providers",
+        label="OpenRouter max latency (s)",
+        kind=Kind.FLOAT,
+        default=0.0,
+        help=(
+            "Prefer hosts whose time-to-first-token stays under this many "
+            "seconds (p50). 0 sends no preference. A host above the bar is "
+            "deprioritised, which may cost you a warm prompt cache."
+        ),
+        minimum=0.0,
+        maximum=600.0,
     ),
     # -- failover -----------------------------------------------------------
     Setting(
@@ -1594,6 +1867,11 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         # Hand-written YAML maps and the text editor share the same contract.
         # Python's dict repr uses single quotes and cannot round-trip as JSON.
         return json.dumps(raw, default=str)
+    if setting.validate_value is _validate_openrouter_max_price and isinstance(raw, Mapping):
+        # Same contract as model_overrides above: the TUI editor is text, so a
+        # stored mapping (PATCH route, hand-written YAML) is shown as JSON the
+        # editor can round-trip.
+        return json.dumps(raw, default=str)
     if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
         return strict_bool(raw, setting.default)
     return raw
@@ -1721,7 +1999,11 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         unknown = [item for item in value if item not in setting.members]
         if unknown:
             return f"unknown: {', '.join(str(item) for item in unknown)}"
-        if not value:
+        if not value and not setting.empty_unsets:
+            # An empty list is an error only where the consumer NEEDS at least
+            # one entry (web_search.providers). Where empty means "no opinion"
+            # and the feature simply stays off (the OpenRouter routing lists),
+            # `empty_unsets` marks it and the row clears instead of failing.
             return "at least one provider is required"
         return None
     if setting.kind is Kind.BOOL:
@@ -1741,6 +2023,13 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
             return f"must be at most {_number(setting.maximum)}"
         return None
     if setting.kind is Kind.TEXT:
+        # A TEXT row with its own `validate_value` (JSON-object fields like
+        # `providers.openrouter.max_price`, endpoint URLs) owns the value's
+        # whole contract — including accepting non-string shapes the PATCH
+        # route hands in — so the generic string check only applies to
+        # unvalidated text.
+        if setting.validate_value is not None:
+            return None
         return None if isinstance(value, str) else "expected text"
     if setting.kind is Kind.HOTKEY:
         # THE guard, and it has to be here rather than in the capture widget:
