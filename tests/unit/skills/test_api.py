@@ -11,7 +11,11 @@ import pytest
 
 import local_operator.skills.api as api_module
 import local_operator.skills.discovery as discovery_module
-from local_operator.skills.api import default_skill_roots, make_skill_resolver
+from local_operator.skills.api import (
+    _url_name,
+    default_skill_roots,
+    make_skill_resolver,
+)
 from local_operator.skills.discovery import Skill
 from local_operator.skills.protocol import MAX_READ_BYTES
 
@@ -581,3 +585,38 @@ class TestResolverRefreshOnMiss:
         assert content is not None
         assert "Unknown skill: blank" in content
         assert "no 'description'" in content
+
+
+class TestUrlNameDecodesPercentEncoding:
+    """R11: the safety check runs on the DECODED name, so the decode is load-bearing.
+
+    ``_url_name`` feeds ``is_plain_skill_name``, and percent-encoding is the
+    delivery vehicle for every netloc attack this PR closes: ``%2fetc`` and
+    ``%44%3ax`` are plain-looking single segments until they are decoded, and a
+    ``_url_name`` that skipped the decode would hand both of them the refresh
+    and the filesystem work the guard exists to deny. The resolver-level tests
+    exercise that consequence; these pin the decode itself, so dropping the
+    ``unquote`` cannot pass unnoticed on the strength of the URL's raw text
+    happening to look safe.
+    """
+
+    def test_percent_encoded_name_is_decoded(self) -> None:
+        # %44%3ax -> D:x: the drive shape arrives ONLY after decoding.
+        assert _url_name("skill://%44%3ax") == "D:x"
+        assert _url_name("skill://%2fetc") == "/etc"
+        assert _url_name("skill://a%2fb") == "a/b"
+        assert _url_name("skill://%2e%2e") == ".."
+
+    def test_plain_name_survives_the_decode_unchanged(self) -> None:
+        # The decode must not mangle the ordinary case it sits in front of.
+        assert _url_name("skill://lean-formalization") == "lean-formalization"
+        assert _url_name("skill://notes:2024") == "notes:2024"
+
+    def test_the_decoded_name_is_what_the_safety_check_sees(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The decode and the predicate, wired together as the resolver wires them."""
+        monkeypatch.setattr(discovery_module, "_DRIVE_RESETS_JOIN", True)
+        # Encoded, it looks like one plain segment; decoded, it is drive-anchored.
+        assert discovery_module.is_plain_skill_name("%44%3ax") is True
+        assert discovery_module.is_plain_skill_name(_url_name("skill://%44%3ax")) is False

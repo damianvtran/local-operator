@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,37 @@ from local_operator.skills.discovery import (
     roots_fingerprint,
     scan_skills_dir,
 )
+
+
+def _discovery_under_os_name(platform_name: str) -> types.ModuleType:
+    """Re-execute ``discovery.py`` with ``os.name`` forced, and return the copy.
+
+    Module-level constants derived from the platform are fixed at import time,
+    so the only way to observe the DERIVATION (rather than its result on this
+    host) is to run the module body again under each platform name.
+
+    Loaded under a distinct module name rather than ``importlib.reload``-ing
+    the live one, matching ``tests/unit/test_xdist_worker_budget.py``: the
+    session running this test already holds
+    ``local_operator.skills.discovery`` and many other modules hold references
+    INTO it, so rebinding its constant -- even transiently -- would change the
+    behaviour of concurrently running tests in the same worker. This private
+    copy is discarded when the test ends.
+
+    The spec is built BEFORE the patch and only ``exec_module`` runs under it:
+    importlib resolves a source path with the running platform's rules, so a
+    spec created while ``os.name == "nt"`` treats this absolute POSIX path as
+    relative, joins it onto the cwd with backslashes, and raises
+    ``FileNotFoundError`` before the module body ever runs.
+    """
+    source = Path(discovery_module.__file__)
+    spec = importlib.util.spec_from_file_location("_skills_discovery_under_test", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "name", platform_name)
+        spec.loader.exec_module(module)
+    return module
 
 
 def _write_skill(
@@ -549,6 +582,34 @@ class TestPlainSkillNameDriveRuleIsPlatformGated:
         and opening the drive door on Windows, which is precisely the bug.
         """
         assert discovery_module._DRIVE_RESETS_JOIN == (os.name == "nt")
+
+    def test_the_gate_derives_both_ways_from_os_name(self) -> None:
+        """R10/Q2: the derivation above is TAUTOLOGICAL on the host that runs it.
+
+        ``_DRIVE_RESETS_JOIN == (os.name == "nt")`` compares the constant to the
+        same expression that produced it, so on this POSIX host both sides are
+        ``False`` for any module whose constant is ``False`` -- including a
+        hardcoded ``False``, which is exactly the direction that reopens the
+        Windows existence oracle the drive rule exists to close. (An INVERTED
+        or hardcoded-``True`` derivation is caught, because those disagree with
+        POSIX; only the dangerous direction survives.) No CI leg closes it
+        either: ``filesystem-boundaries-windows`` runs two boundary files and
+        never these tests, and it cannot be widened to run them -- three tests
+        here ``mkdir`` a literal ``a:b`` directory, which Windows parses as
+        drive-relative and refuses to create.
+
+        So evaluate the derivation itself under BOTH platform names, which
+        needs no Windows runner: re-execute the module source with ``os.name``
+        patched and read what the constant comes out as. A constant that
+        ignores ``os.name`` now fails on the ``nt`` side.
+        """
+        for platform_name, expected in (("nt", True), ("posix", False)):
+            fresh = _discovery_under_os_name(platform_name)
+            assert fresh._DRIVE_RESETS_JOIN is expected, platform_name
+            # The derivation is only worth pinning because the predicate reads
+            # it: prove the gate actually reaches behaviour in this same copy.
+            assert fresh.is_plain_skill_name("D:x") is (not expected), platform_name
+            assert fresh.is_plain_skill_name("plain-one") is True, platform_name
 
     def test_unpatched_predicate_matches_this_hosts_semantics(self) -> None:
         """End-to-end on the REAL host, with no seam patched at all.
