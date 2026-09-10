@@ -50,6 +50,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.session.runtime.server import (
     SessionHandle,
+    has_durable_history,
     image_blocks,
     image_blocks_in_thread,
 )
@@ -102,6 +103,21 @@ class TuiSessionHandle(SessionHandle):
         session = app._session
         if session is None:
             raise RuntimeError("TUI session has not finished starting")
+        # Same wiring ``OwnedSessionHandle.__init__`` performs: the session
+        # flips the discovery record's ``started`` bit at the top of every
+        # real turn (``Session._run_turn_pipeline``), and the handle owns the
+        # publish. Without it a TUI-owned ``kind="tui"`` record would stay
+        # ``started=False`` for its whole life — permanently invisible to
+        # broadcasts and quietly mailbox-dialled on exact sends even after
+        # hundreds of turns. Guarded with ``hasattr`` so reduced hosts (test
+        # doubles standing in for a Session) keep constructing; the ignore
+        # matches the house pattern for duck-typed hooks
+        # (``RuntimeServer``'s ``handle._registrant`` assignment) — the
+        # protocol deliberately does not declare per-host hooks.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = (  # type: ignore[attr-defined]
+                self._publish_session_started
+            )
         self._projection = SessionProjection(
             session_id=session.session_id,
             pid=0,
@@ -227,6 +243,44 @@ class TuiSessionHandle(SessionHandle):
             self.subscribe(self._on_projection)
         if self._on_event is not None:
             self.subscribe_events(self._on_event)
+        # The registrant outlives the session object, so two pieces of
+        # per-session state must follow the swap. First, the started hook:
+        # the NEW session object must get it or (on a TUI-owned record) it
+        # would never flip. Second, the registrant's ``started`` bit itself,
+        # which cannot simply carry over — it describes the OLD conversation:
+        # a ``/new`` after a working conversation must drop back to ``False``
+        # (the composer window the flag exists for), while a ``/resume`` must
+        # read ``True`` because that conversation already ran turns and a
+        # peer wake could always reach it. Re-seeded from the NEW session's
+        # own durable history so both directions come out right.
+        if hasattr(session, "_publish_session_started"):
+            session._publish_session_started = self._publish_session_started
+        registrant = getattr(self, "_registrant", None)
+        reseed = getattr(registrant, "reset_record_started", None)
+        if callable(reseed):
+            try:
+                reseed(has_durable_history(session))
+            except Exception:  # noqa: BLE001 — a stale bit must never break /new
+                logger.debug("could not re-seed the started bit on rebind", exc_info=True)
+
+    def _publish_session_started(self) -> None:
+        """Flip the record's ``started`` bit once this session runs a real turn.
+
+        The ``kind="tui"`` twin of ``OwnedSessionHandle``'s hook, called from
+        ``Session._run_turn_pipeline`` at the top of every turn; the
+        registrant's ``set_record_started`` de-duplicates so only the first
+        turn publishes. Defensive in the same shape as the owned hook: a
+        reduced host with no registrant, or one predating the setter, is a
+        no-op rather than a failed turn.
+        """
+        registrant = getattr(self, "_registrant", None)
+        setter = getattr(registrant, "set_record_started", None)
+        if not callable(setter):
+            return
+        try:
+            setter(True)
+        except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
+            logger.debug("could not publish the started state", exc_info=True)
 
     # -- SessionHandle -----------------------------------------------------------
 

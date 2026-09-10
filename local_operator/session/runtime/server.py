@@ -67,6 +67,7 @@ from local_operator.session.runtime.types import (
     ClientLocality,
     SessionRecord,
 )
+from local_operator.session.transcript import durable_conversation_path
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +565,33 @@ class ProjectionSink(Protocol):
     def set_pending(self, pending: Any) -> None: ...
 
 
+def has_durable_history(session: Any) -> bool:
+    """Whether this session's transcript already holds a REAL conversation turn.
+
+    The seed signal for the record's ``started`` bit at two call sites that
+    face the same question — ``RuntimeServer.__init__`` (a resumed boot must
+    publish ``started=True`` before any turn runs in the NEW process) and
+    ``TuiSessionHandle.rebind`` (a ``/resume`` mid-flight re-seeds the bit for
+    the swapped identity). Thin wrapper over
+    :func:`~local_operator.session.transcript.durable_conversation_path`,
+    where the discriminator lives with the row shapes it reads: only a plain
+    ``Message`` row counts — a CustomMessage row (a quiet-dialled
+    ``peer_message`` note, a wake prompt) is persisted WITHOUT a turn running,
+    and counting one seeds ``started=True`` on a session whose owner never
+    typed, after which a peer ``--wake`` or broadcast drives an assistant
+    turn into it (QA Q4). Read off the session's declared
+    ``transcript_path`` rather than ``session.transcript.path`` — the same
+    read, through the session's own contract instead of two privates deep;
+    a session shape without one (a reduced host) answers False, the
+    conservative "unstarted" direction a first real turn immediately
+    corrects.
+    """
+    path = getattr(session, "transcript_path", None)
+    if path is None:
+        return False
+    return durable_conversation_path(path)
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -578,6 +606,14 @@ class RuntimeServer:
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
+        #: True once this session has run at least one real turn. Starts
+        #: False for every fresh boot (a ``/new`` session sitting in the
+        #: composer) and flips True the first time a turn actually runs — the
+        #: hook lives in ``Session._run_turn_pipeline``. One exception at
+        #: birth, below: a boot that RESUMED a conversation with history
+        #: seeds True from the transcript, because those turns already ran
+        #: under an earlier process.
+        self._started = False
         self._busy = False
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
@@ -689,6 +725,26 @@ class RuntimeServer:
             version=build.version,
             source_ref=build.source_ref,
         )
+        # A resumed conversation has ALREADY run its turns under an earlier
+        # process, and the record must say so from its FIRST publish. Until
+        # the owner's first turn here, the bit would otherwise read False and
+        # peers would treat a working session as a composer window (QA Q3:
+        # after a terminal restart, `lop --resume <sid>` engaged a child whose
+        # record said ``started=false``, making the idle session invisible to
+        # broadcasts and degrading peer wakes to quiet notes until the owner
+        # typed once). Seeded from the session's own durable transcript — the
+        # same signal ``TuiSessionHandle.rebind`` uses — so a true ``/new``
+        # (no message rows) still boots as the composer window. Probed off
+        # ``handle._session`` because only the owned-handle shape carries its
+        # Session there; a handle without one (the TUI's, a reduced test
+        # host) keeps the conservative False a first real turn immediately
+        # corrects. Direct field writes, not ``set_record_started``: nothing
+        # is published yet, and this is a derivation at birth, not the
+        # per-turn signal.
+        owned_session = getattr(handle, "_session", None)
+        if owned_session is not None and has_durable_history(owned_session):
+            self._started = True
+            self._record.started = True
         self._publisher: RecordPublisher | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unsubscribe_events: Callable[[], None] | None = None
@@ -1162,6 +1218,14 @@ class RuntimeServer:
                         conversation_name=seed.conversation_name,
                         model_label=seed.model_label,
                         cwd=seed.cwd,
+                        # Carried explicitly rather than trusted to survive on
+                        # the record object: ``self._record is
+                        # publisher.record`` today, so omitting it happens to
+                        # work — but that identity is an implementation
+                        # detail, and one rebuild or copied publish away from
+                        # silently dropping the bit and making a working
+                        # session broadcast-invisible.
+                        started=self._started,
                     )
             except Exception:  # noqa: BLE001 — a missed heartbeat is self-healing
                 logger.debug("runtime heartbeat failed", exc_info=True)
@@ -1639,6 +1703,42 @@ class RuntimeServer:
         self._busy = busy
         self._republish()
 
+    def set_record_started(self, started: bool) -> None:
+        """Record that this session has run at least one real turn.
+
+        One-way, and enforced: once a turn has run, ``False`` is IGNORED —
+        the caller is the per-turn hook in ``_run_turn_pipeline``, for which
+        ``False`` can only ever be a mistake (no code path un-runs a turn).
+        The only legitimate way the bit drops again is a session-identity
+        swap, which goes through :meth:`reset_record_started` instead.
+        """
+        if not started or self._started:
+            return
+        self._started = True
+        # Write through to the record NOW, not only on the next republish: the
+        # publisher serializes ``self._record``, and a caller reading the record
+        # between here and the republish (or a republish that never comes, e.g.
+        # no publisher yet) must already see the flipped bit.
+        self._record.started = True
+        self._republish()
+
+    def reset_record_started(self, started: bool) -> None:
+        """Re-seed the ``started`` bit for a NEW session identity.
+
+        NOT the turn-running signal :meth:`set_record_started` answers: a
+        TUI's registrant outlives ``/new`` and ``/resume``
+        (``TuiSessionHandle.rebind`` re-points it at the new session), so the
+        bit must be re-derived from the NEW session's own durable history
+        instead of inherited from the old one. A ``/new`` after a working
+        conversation must drop back to ``False`` — the composer window this
+        flag exists for — while a ``/resume`` must read ``True``, because that
+        conversation already ran turns and a peer wake could always reach it.
+        Both directions are legal HERE only because the identity changed.
+        """
+        self._started = started
+        self._record.started = started
+        self._republish()
+
     def set_subagents(self, running: int | None, queued: int | None) -> None:
         """Record this runtime's subagent trajectory counts.
 
@@ -1677,6 +1777,7 @@ class RuntimeServer:
             publisher.heartbeat(
                 pending=self._pending,
                 busy=self._busy,
+                started=self._started,
                 detached=not bool(self._visible_attach_surfaces()),
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,

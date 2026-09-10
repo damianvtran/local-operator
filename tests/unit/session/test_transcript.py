@@ -882,3 +882,67 @@ async def test_audit_slice_never_begins_inside_a_tool_group(tmp_path):
     )
     assert messages[0].id == call.id
     assert [m.id for m in messages] == [call.id, result.id]
+
+
+class TestDurableConversationPath:
+    """The ``started``-bit seed discriminator: a REAL turn's row counts, a
+    CustomMessage row persisted without a turn (QA Q4) does not."""
+
+    #: The quiet-dial note exactly as ``append_messages`` persists it: a
+    #: message row whose payload kind is ``custom`` (QA Q4's repro row).
+    _PEER_NOTE = (
+        '{"id":"p1","ts":1,"type":"message","payload":{"kind":"custom",'
+        '"custom_type":"peer_message","attribution":"user","details":{"text":"hi"}}}'
+    )
+
+    def _write(self, tmp_path: Path, rows: list[str]) -> Path:
+        path = tmp_path / "transcript.jsonl"
+        path.write_text("".join(row + "\n" for row in rows))
+        return path
+
+    def test_a_real_user_turn_counts(self, tmp_path: Path) -> None:
+        from local_operator.session.transcript import durable_conversation_path
+
+        row = '{"id":"m1","ts":1,"type":"message","payload":{"kind":"message","role":"user"}}'
+        path = self._write(tmp_path, [row])
+        assert durable_conversation_path(path) is True
+
+    def test_a_peer_note_only_transcript_does_not_count(self, tmp_path: Path) -> None:
+        """QA Q4: a quiet-dialled peer note persists as a message row (kind
+        ``custom``) with NO turn running; treating it as history seeds
+        ``started=True`` and a peer wake then drives a turn into a session
+        the owner never typed in."""
+        from local_operator.session.transcript import durable_conversation_path
+
+        path = self._write(
+            tmp_path,
+            [
+                self._PEER_NOTE,
+                '{"id":"t1","ts":2,"type":"custom","payload":{"custom_type":"title"}}',
+            ],
+        )
+        assert durable_conversation_path(path) is False
+
+    def test_peer_notes_plus_a_real_turn_counts(self, tmp_path: Path) -> None:
+        from local_operator.session.transcript import durable_conversation_path
+
+        row = '{"id":"m1","ts":2,"type":"message","payload":{"kind":"message","role":"assistant"}}'
+        path = self._write(tmp_path, [self._PEER_NOTE, row])
+        assert durable_conversation_path(path) is True
+
+    def test_a_legacy_row_without_a_kind_marker_counts(self, tmp_path: Path) -> None:
+        """``kind`` arrived with producer admission; a row predating it IS a
+        plain Message — the custom writer always tagged its rows."""
+        from local_operator.session.transcript import durable_conversation_path
+
+        path = self._write(
+            tmp_path, ['{"id":"m1","ts":1,"type":"message","payload":{"role":"user"}}']
+        )
+        assert durable_conversation_path(path) is True
+
+    def test_missing_and_torn_files_read_as_unstarted(self, tmp_path: Path) -> None:
+        from local_operator.session.transcript import durable_conversation_path
+
+        assert durable_conversation_path(tmp_path / "absent.jsonl") is False
+        torn = self._write(tmp_path, ["{torn", "not json"])
+        assert durable_conversation_path(torn) is False

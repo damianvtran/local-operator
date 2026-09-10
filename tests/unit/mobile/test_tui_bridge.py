@@ -9,6 +9,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -203,3 +204,91 @@ async def test_tui_auto_registers_and_answers_control() -> None:
         writer.close()
 
     assert not registry.scan(), "record was not unpublished on exit"
+
+
+def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
+    """Q2: ``TuiSessionHandle`` must wire ``session._publish_session_started``
+    the way ``OwnedSessionHandle`` does, or a TUI-owned ``kind="tui"`` record
+    stays ``started=False`` forever. Rebind must RE-wire it on the new session
+    object and re-seed the registrant's bit from the new session's own durable
+    history: a ``/new`` (no message rows) drops back to False — the composer
+    window — while a ``/resume`` (message rows on disk) reads True."""
+
+    class _Session(FakeSession):
+        # The attribute OwnedSessionHandle/TuiSessionHandle wire onto a real
+        # Session; the fake does not carry it, so the test stands it up.
+        def __init__(self, session_id: str, transcript_rows: list[str]) -> None:  # noqa: ANN001
+            super().__init__()
+            self._publish_session_started: Any = None
+            self._sid = session_id
+            path = tmp_path / session_id / "transcript.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(row + "\n" for row in transcript_rows))
+            self.transcript_path = path
+
+        # FakeSession pins a constant "sess"; the rebind path copies this
+        # onto the projection, so the test needs per-session values.
+        @property
+        def session_id(self) -> str:
+            return self._sid
+
+    class _App:
+        def __init__(self, session) -> None:  # noqa: ANN001
+            self._session = session
+
+    class _Registrant:
+        def __init__(self) -> None:
+            self.resets: list[bool] = []
+            self.started_calls: list[bool] = []
+
+        def reset_record_started(self, started: bool) -> None:
+            self.resets.append(started)
+
+        def set_record_started(self, started: bool) -> None:
+            self.started_calls.append(started)
+
+    fresh = _Session("fresh-id", [])
+    resumed = _Session(
+        "resumed-id",
+        [
+            '{"id":"m1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+            '{"id":"m2","ts":2,"type":"message","payload":{"role":"user"}}',
+        ],
+    )
+    registrant = _Registrant()
+    handle = TuiSessionHandle(_App(fresh))  # type: ignore[arg-type]
+    handle._registrant = registrant  # type: ignore[attr-defined]
+
+    # Wired at construction: the session's hook reaches the handle. Bound
+    # methods are compared with == (each attribute access mints a new object).
+    assert fresh._publish_session_started == handle._publish_session_started
+    fresh._publish_session_started()
+    assert registrant.started_calls == [True]
+
+    # /resume: message history on disk re-seeds the bit True even though THIS
+    # process has not run a turn for it.
+    handle._app = _App(resumed)  # type: ignore[assignment]
+    handle.rebind()
+    assert resumed._publish_session_started == handle._publish_session_started
+    assert registrant.resets == [True]
+
+    # /new after that working conversation: no message rows, bit drops False.
+    newer = _Session("newer-id", ['{"id":"t1","ts":3,"type":"custom","payload":{}}'])
+    handle._app = _App(newer)  # type: ignore[assignment]
+    handle.rebind()
+    assert newer._publish_session_started == handle._publish_session_started
+    assert registrant.resets == [True, False]
+
+    # QA Q4: a transcript whose only message rows are quiet-dialled peer
+    # notes (``peer_message`` CustomMessages, persisted without a turn) is
+    # NOT durable history — the bit must stay False on rebind to it.
+    noted = _Session(
+        "noted-id",
+        [
+            '{"id":"p1","ts":4,"type":"message","payload":{"kind":"custom",'
+            '"custom_type":"peer_message","attribution":"user","details":{"text":"hi"}}}',
+        ],
+    )
+    handle._app = _App(noted)  # type: ignore[assignment]
+    handle.rebind()
+    assert registrant.resets == [True, False, False]

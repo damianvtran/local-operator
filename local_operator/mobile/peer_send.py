@@ -165,6 +165,19 @@ def resolve_peer_target(
     needle = needle_source.lower()
     matches: list[Any] = []
     for rec, _state in live:
+        # A session that has never run a turn (``/new``, owner still composing
+        # the first prompt) is excluded from a BROADCAST/substring match: an
+        # interrupt there would drive a turn into a session whose owner has not
+        # started it. An EXACT ``--pid``/``--session`` send still resolves to it
+        # (the sender deliberately named that session); delivery then degrades
+        # to a quiet mailbox dial that drives no turn — see
+        # ``deliver_peer_message``. The default True keeps a record that simply
+        # lacks the attribute (a test double, a hand-built record) eligible; a
+        # pre-field binary's record round-trips through ``from_json``, which
+        # reads the ABSENT key as True (old peer behaviour preserved) — see the
+        # mixed-version note there.
+        if not getattr(rec, "started", True):
+            continue
         haystacks = [
             rec.conversation_name or "",
             rec.session_id or "",
@@ -354,6 +367,33 @@ def stored_candidate_lines(
     return lines
 
 
+async def _spool_quiet_note(
+    session_id: str, *, text: str, mode: str, sender: "dict[str, Any]"
+) -> str:
+    """Spool one message for a session with NO live runtime. Returns receipt.
+
+    The single spool writer for ``deliver_peer_message``'s cold branch (and
+    historically its unstarted branch): one ``O_APPEND`` row under the
+    session's directory, consumed by the runtime child's boot drain
+    (``process._drain_inbox_into``) the next time that session actually opens
+    a runtime. A spool is ONLY for a session nobody has open — the drain runs
+    once at child boot, so a session that is already live would never read
+    it, which is why a live-but-unstarted target is dialled quietly instead
+    (see ``deliver_peer_message``).
+    """
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    directory = config_dir() / "sessions" / session_id
+    written = await asyncio.to_thread(
+        append_inbox,
+        directory,
+        InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
+    )
+    if not written:
+        raise RuntimeError("could not spool the message for that session")
+    return "spooled (will be read when the session next opens)"
+
+
 async def deliver_peer_message(
     record: "Any | None",
     *,
@@ -366,9 +406,17 @@ async def deliver_peer_message(
 ) -> str:
     """Hand one message to a peer session, running or not. Returns the receipt.
 
-    Three cases, and the split between them is the whole point:
+    Four cases, and the split between them is the whole point:
 
-    - **A live record** — dial it, exactly as before.
+    - **A live, started record** — dial it, exactly as before.
+    - **A live, UNSTARTED record** (``/new``, owner still composing) — dial it
+      in the quiet mailbox shape (``mailbox`` + no wake) so the receive side
+      paints the peer card and persists the row WITHOUT driving a turn. A
+      spool would be wrong here: a live record means the session is already
+      open, and the only inbox consumer is the runtime child's boot drain, so
+      a spooled note would sit unread for that session's whole life while the
+      receipt claimed otherwise. Degrading wake/steer to the quiet dial is
+      the deliverable form of "never drive a turn into an unstarted session".
     - **No runtime, quiet note** (``wake=False`` and mailbox mode) — SPOOL it.
       Starting a runtime here would contradict what the sender asked for:
       ``wake=False`` means "read this on your next turn", not "start one now",
@@ -381,20 +429,28 @@ async def deliver_peer_message(
     from local_operator.mobile.peer_client import send_peer_message
 
     if record is not None:
+        if not getattr(record, "started", True):
+            # Belt-and-braces with the resolver's broadcast exclusion: an
+            # exact-address send (or any caller that bypassed resolution) must
+            # NEVER drive a turn into a session whose owner is still composing
+            # their first prompt — so whatever mode/wake the sender asked for,
+            # the dial uses the record-only shape (``mailbox`` + no wake). The
+            # receive side's record-only branch persists the row and paints the
+            # peer card but spawns no turn, which makes the message visible to
+            # the already-open session NOW; a spool cannot (its only consumer
+            # is the runtime child's boot drain, and this session is past
+            # that). The default True is a defence against a NON-standard
+            # record that simply lacks the attribute (a test double, a
+            # hand-built record); a record a PRE-FIELD binary wrote round-trips
+            # through ``from_json``, which reads the absent key as ``True`` —
+            # old peer behaviour preserved — so an old working session is
+            # dialled normally, never degraded.
+            await send_peer_message(record, text=text, mode="mailbox", wake=False, sender=sender)
+            return "delivered to the mailbox (session not started yet; no turn driven)"
         return await send_peer_message(record, text=text, mode=mode, wake=wake, sender=sender)
 
     if not wake and mode == "mailbox":
-        from local_operator.session.runtime.inbox import InboxLine, append_inbox
-
-        directory = config_dir() / "sessions" / session_id
-        written = await asyncio.to_thread(
-            append_inbox,
-            directory,
-            InboxLine(text=text, sender=dict(sender), mode=mode, written_at=time.time()),
-        )
-        if not written:
-            raise RuntimeError("could not spool the message for that session")
-        return "spooled (will be read when the session next opens)"
+        return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)
 
     from local_operator.session.runtime.launch import PeerMessageErrand, engage_runtime
 

@@ -59,6 +59,11 @@ async def _start_peer(conversation_name: str = "peer-target"):
     registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     try:
+        # The registrant's OWN record (pid = this process) is what the self-send
+        # guard and sender-identity tests resolve. A fresh RuntimeServer starts
+        # with ``started=False`` and would now be broadcast-invisible / spooled,
+        # so these working-session tests flip it the way a real first turn does.
+        registrant.set_record_started(True)
         own = await _wait_record()  # the registrant's record (pid = this process)
         alias = registry.SessionRecord(
             # The parent pid is alive and is not us: it passes both the
@@ -72,6 +77,10 @@ async def _start_peer(conversation_name: str = "peer-target"):
             model_label="test/model",
             control_port=own.control_port,
             control_key=own.control_key,
+            # These tests exercise a WORKING session's delivery; ``started``
+            # defaults False so the alias would be broadcast-invisible and
+            # spooled without this.
+            started=True,
         )
         registry.publish(alias)
         return registrant, alias, handle
@@ -247,6 +256,9 @@ async def test_ambiguous_target_returns_candidates_and_asks_for_a_pid() -> None:
                 model_label="test/model",
                 control_port=9,  # never dialed: disambiguation fires first
                 control_key="k",
+                # Working sessions: ``started`` defaults False and would make
+                # these broadcast-invisible without it.
+                started=True,
             )
         )
     result = await execute_send(
@@ -421,6 +433,7 @@ async def test_disambiguation_prints_the_parameter_syntax() -> None:
                 model_label="test/model",
                 control_port=9,
                 control_key="k",
+                started=True,
             )
         )
     result = await execute_send(
