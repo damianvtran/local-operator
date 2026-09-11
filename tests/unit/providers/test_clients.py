@@ -4589,7 +4589,11 @@ def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() ->
         "max_price": {"prompt": 1},
     }
     prefs["max_price"]["prompt"] = 99
-    assert openrouter._openrouter_provider_preferences["max_price"] == {"prompt": 1}
+    # Pyright cannot narrow the attribute away from None through the `==`
+    # compares above, so bind and assert non-None before subscripting it.
+    stored = openrouter._openrouter_provider_preferences
+    assert stored is not None
+    assert stored["max_price"] == {"prompt": 1}
 
 
 async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:
