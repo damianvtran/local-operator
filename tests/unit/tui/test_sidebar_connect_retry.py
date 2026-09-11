@@ -46,7 +46,7 @@ from local_operator.session.attached import COLD_FALLBACK_S, AttachedSession
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
-from local_operator.tui.session_navigation import SurfaceNotReady
+from local_operator.tui.session_navigation import OwnerWentCold, SurfaceNotReady
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: The shipped schedule, captured at import BEFORE any test patches it for
@@ -443,6 +443,217 @@ def test_the_retry_budget_outlasts_the_recovery_give_up_bound():
     # One attempt fewer must NOT clear the bound, which is what makes the
     # derived count minimal rather than an arbitrary large number.
     assert sum(schedule[:-1]) <= COLD_FALLBACK_S * 1.5
+
+
+class BindsThenLosesItsOwner(RecoveringRemote):
+    """A viewer that BINDS, then loses its owner before its frame paints.
+
+    The window the defect lives in, in one object: the bind postcondition
+    passes and the owner disappears in the gap between that check and the first
+    painted frame — which is where a real ``ATTACH_MAX_CLIENTS`` LRU eviction
+    landed for the user (the architect's rig reproduced it at 15.1 s with 1,820
+    refusals).
+
+    ``heals_after`` is deliberately unused: this double never comes back, so
+    the arms under test are the refusal and the BOUND, not the heal. The heal
+    is asserted against real runtimes in
+    ``tests/e2e/test_sidebar_reconnect_e2e.py``.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id, heals_after=None)
+        self._cold = False
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+
+    def go_cold(self) -> None:
+        self._cold = True
+
+
+async def _drain_with_paints(app: OperatorApp, pilot: Any, source: SessionInteraction) -> None:
+    """``_drain_retries``, but pumping the pilot so the app actually PAINTS.
+
+    A cold pending frame is decided by ``post_display_hook``, and that only runs
+    when Textual renders. A drain that merely awaits the task leaves the
+    compositor idle, so the readiness gate's own 15 s timer becomes the only
+    thing that can settle the frame — which IS the pre-fix behaviour, and the
+    reason every assertion below is on the exception TYPE and the counters
+    rather than on how long anything took.
+
+    ``wait_for`` is a runaway backstop, never an assertion: a chain that has
+    settled breaks out immediately.
+    """
+    for _ in range(40):
+        task = source.connection_task
+        if task is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 30)
+        except asyncio.CancelledError:
+            return
+        await pilot.pause()
+        if source.connection_task is task or source.connection_task is None:
+            return
+    raise AssertionError("the retry chain never settled")
+
+
+def _cold_frame_rig(
+    app: OperatorApp,
+    source: SessionInteraction,
+    session: Any,
+    monkeypatch: Any,
+    *,
+    deferred: bool = True,
+):
+    """Arm a REAL frame, then lose the owner before it can paint.
+
+    Returned as the recorder for what the frame finally settled with.
+
+    ``deferred`` selects WHICH HALF of the window is exercised, and the two are
+    not interchangeable — they are the two places this PR closes it:
+
+    * ``True`` (the hook's half): the loss is scheduled with ``call_soon``, so
+      it lands while the connect body is suspended on ``await ready`` and the
+      next paint is what notices. Inline would be caught by the belt instead,
+      because the belt is SYNCHRONOUS between ``_commit_sidebar_session``
+      returning and its ``is_cold`` read — the test would then prove nothing
+      about the hook.
+    * ``False`` (the belt's half): the loss is applied inline, i.e. before the
+      commit returns, which is what an owner lost during preparation looks
+      like. The belt refuses it before the body ever waits.
+    """
+    outcomes: list[BaseException | None] = []
+    loop = asyncio.get_running_loop()
+
+    def commit(*_args: Any, **_kwargs: Any) -> Any:
+        future = app._await_sidebar_frame(source, app._sidebar_navigation.generation)
+        future.add_done_callback(lambda settled: outcomes.append(settled.exception()))
+        if deferred:
+            loop.call_soon(session.go_cold)
+        else:
+            session.go_cold()
+        return future
+
+    monkeypatch.setattr(app, "_commit_sidebar_session", commit)
+    prepared: Any = (source, object())
+    monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+    return outcomes
+
+
+@pytest.mark.asyncio
+async def test_a_cold_frame_does_not_wait_out_the_readiness_gate(monkeypatch):
+    """THE CORE FIX: a cold committed frame fails at once, and spends the budget.
+
+    ``_sidebar_gate_surface_ready``'s first check is ``is_cold``, so for as long
+    as the owner is gone the gate's verdict is already known. Waiting it out is
+    not a longer check — it is 15 s of refusals, each buying a forced
+    full-screen relayout (measured pre-fix: 1,820 of them, ~127/s), ending in
+    ``SurfaceNotReady``, which #883 made terminal-on-first for the good reason
+    that a PAINT failure should not be retried. That latched a TRANSIENT owner
+    loss and told the user to reselect the session the reselect healed in 0.17 s.
+
+    Asserted as the exception the frame settled with plus a COUNT of attempts —
+    the defect is "the wrong arm decided this: the timer instead of the cold
+    check, and no retry", which is a fact about types and counts, not durations.
+    """
+    monkeypatch_setup = monkeypatch
+    session = BindsThenLosesItsOwner("cold-at-paint")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        outcomes = _cold_frame_rig(app, source, session, monkeypatch_setup)
+        # A SHORT budget: the property is that this arm SPENDS it and latches
+        # only on exhaustion, not the shipped length of it.
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert outcomes, "no frame was ever armed"
+        assert isinstance(outcomes[0], OwnerWentCold), (
+            f"the cold frame settled as {outcomes[0]!r}: a SurfaceNotReady means the "
+            "gate's 15 s timer decided it, not the cold branch"
+        )
+        # THE BOUND HOLDS: attempts are spent per round, and only exhaustion
+        # latches — one bind that succeeded, then one per refusing round.
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        assert source.display_only is True
+        assert source.connection_error == "the runtime is not responding"
+        # Surrendering hands the user a full budget for their reselect.
+        assert source.connect_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_loss_during_preparation_is_refused_before_the_wait(monkeypatch):
+    """THE BELT: an owner lost between the bind check and the commit.
+
+    The commit->paint half is the hook's; this is the other half, and it is
+    closed by re-reading ``is_cold`` once between the commit and the ``await``.
+    Without it the frame is armed against a session that is already cold, and
+    the only thing that can settle it is the gate's 15 s timer.
+
+    Its signature is DISTINCT from the hook's, which is why both are pinned:
+    the gate is consulted ZERO times here, because nothing was ever painted
+    before the refusal, where the hook's half consults it exactly once.
+    """
+    session = BindsThenLosesItsOwner("cold-at-commit")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        outcomes = _cold_frame_rig(app, source, session, monkeypatch, deferred=False)
+        _instant_backoff(monkeypatch, attempts=3)
+        reached_before = app._sidebar_gate_reached
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert outcomes, "no frame was ever armed"
+        assert isinstance(outcomes[0], OwnerWentCold), (
+            f"the cold commit settled as {outcomes[0]!r}: the frame was waited on "
+            "instead of refused"
+        )
+        assert (
+            app._sidebar_gate_reached - reached_before == 0
+        ), "the gate was consulted for a commit the belt can already refuse"
+        # Spends the budget like every other transient arm, and latches only on
+        # exhaustion — the whole reason it is not routed at the terminal one.
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        assert source.display_only is True
+        assert source.connection_error == "the runtime is not responding"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_frame_buys_no_relayout(monkeypatch):
+    """NO GATE SPIN, for the commit->paint window this time.
+
+    #856's counters are the sharpest instrument here: ``_sidebar_gate_reached``
+    "reached the gate" and ``_sidebar_gate_recoveries`` "bought a full-screen
+    relayout chasing it". A cold frame that waits can only ever produce the
+    second — the gate refuses on ``is_cold`` before it can pass — so the fix's
+    signature is one consultation and ZERO recoveries, against 1,820 before it.
+
+    Counts, not rates: a busy machine changes how long the frames take, not how
+    many the gate refuses.
+    """
+    session = BindsThenLosesItsOwner("cold-at-paint")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _cold_frame_rig(app, source, session, monkeypatch)
+        _instant_backoff(monkeypatch, attempts=3)
+        reached_before = app._sidebar_gate_reached
+        recoveries_before = app._sidebar_gate_recoveries
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert (
+            app._sidebar_gate_reached - reached_before == 1
+        ), "the gate was consulted for a frame that was already refused"
+        assert (
+            app._sidebar_gate_recoveries - recoveries_before == 0
+        ), "a relayout was bought for a verdict the gate had already reached"
 
 
 @pytest.mark.asyncio
