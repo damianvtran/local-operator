@@ -114,7 +114,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: arithmetic closes without re-measuring. Headroom at 27,250 is 49 tokens
 #: (~0.2% — tighter than the ~2% this comment's sibling describes, in the safe
 #: direction), and the next context reduction tightens it.
-BUDGET_BILLED_TOKENS = 27_250
+#:
+#: RAISED 27,250 -> 27,320 for the `edit` tool's not-found diagnostics, stated
+#: here because the guard exists to make this an explicit decision. Measured on
+#: this branch's base (``origin/main`` 0d6cde1f0) the figure was 27,237 — 13
+#: tokens of headroom, so no useful sentence fits under the old ceiling and the
+#: description had to be paid for rather than squeezed in. The added sentence
+#: (`edit` now says a non-matching hunk writes nothing and that the error names
+#: the closest file lines, so a caller re-reads instead of re-sending the
+#: batch) is 118 characters, i.e. 42 billed tokens at 2.78 chars/token — the
+#: whole of the increase, with 41 tokens of headroom left. The trade is not
+#: close: one avoided blind retry of an edit batch costs far more than 42
+#: tokens, and the observed session paid that retry nine times.
+BUDGET_BILLED_TOKENS = 27_320
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
