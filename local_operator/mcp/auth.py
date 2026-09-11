@@ -424,6 +424,23 @@ class McpRefreshContendedError(RuntimeError):
                 f"MCP OAuth token refresh for {server_url} could not be sent: the "
                 "token endpoint was unreachable, so no token was presented"
             )
+        # The two LOCAL codes get their own sentence rather than falling through
+        # to the lock's (review round 4, N4.1's sibling; QA round 3, Q2). The
+        # fall-through was untrue in the log for both: neither ran into another
+        # session's lock — ``unsent`` never had anything to present, and
+        # ``unattributed`` is our own coordination failing without any answer to
+        # blame. This is the LOG sentence only; the rendered copy is composed
+        # from the code by ``McpManager._auth_failure_text`` and is unchanged.
+        elif reason_code == REFRESH_REFUSAL_UNSENT:
+            message = (
+                f"MCP OAuth token refresh for {server_url} was not sent: the stored grant "
+                "held nothing to present (no refresh token, or no client registration)"
+            )
+        elif reason_code == REFRESH_REFUSAL_UNATTRIBUTED:
+            message = (
+                f"MCP OAuth token refresh for {server_url} did not complete, and the "
+                "outcome cannot be attributed to an answer from the authorization server"
+            )
         else:
             message = (
                 f"MCP OAuth token refresh for {server_url} was skipped: another "
@@ -3688,7 +3705,14 @@ async def ensure_mcp_oauth_fresh(
         outcome = await _refresh_oauth_token_locked(
             server_url, storage, endpoints, lock=lock, peer_refresh_is_success=True
         )
-        if outcome in ("contended", "overran", "failed", "unreachable", "unacknowledged"):
+        if outcome in (
+            "contended",
+            "overran",
+            "failed",
+            "unreachable",
+            "unacknowledged",
+            "unsent",
+        ):
             # Best-effort by contract: the connect proceeds and re-reads under
             # the lock on its next attempt. Each refusal already logged its own
             # reason at INFO, naming that writer — no second line here, because

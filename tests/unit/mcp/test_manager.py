@@ -4014,12 +4014,17 @@ class TestRefreshRefusalCopy:
     }
 
     @staticmethod
-    def _toast_failure_line(reason: str, cells: int) -> str:
-        """The failure row the REAL toast composer paints, for ``reason``."""
+    def _toast_failure_line(reason: str, cells: int, name: str = "notion") -> str:
+        """The failure row the REAL toast composer paints, for ``reason``.
+
+        ``name`` defaults to the 6-cell pseudonym every D9 pin was measured on;
+        the long-name cases pass the server name they are about, because the
+        row's budget depends on its width (D11).
+        """
         from local_operator.session.mcp_status import McpStartupOutcome
         from local_operator.tui.widgets.toast import format_mcp_startup
 
-        outcome = McpStartupOutcome(configured=("notion",), failures={"notion": reason})
+        outcome = McpStartupOutcome(configured=(name,), failures={name: reason})
         payload = format_mcp_startup(outcome, max_cells=cells)
         assert payload is not None
         return payload[0].plain.split("\n")[1]
@@ -4162,6 +4167,80 @@ class TestRefreshRefusalCopy:
                 # never the server name the command has to hand over.
                 assert "/mcp reauth notion" in narrow, (key, narrow)
 
+    #: The D11 rows, measured on the head that fixes them. Both names are this
+    #: project's own server names: ``minerva-qa`` (10 cells) is the one
+    #: ``test_turn_abandoned.py`` uses, and ``launchdarkly`` (12) the one this
+    #: file already copies. The wide row keeps the whole command and sheds the
+    #: reason; the narrow one is asserted VERBATIM as the base renders it, which
+    #: is the recorded deferral (see the test's docstring).
+    LONG_NAME_EXPECTED = {
+        "minerva-qa": (
+            "failed: minerva-qa — /mcp reauth minerva-qa…",
+            "failed: minerva-qa — /mcp reauth mi…",
+        ),
+        "launchdarkly": (
+            "failed: launchdarkly — /mcp reauth launchdarkly…",
+            "failed: launchdarkly — /mcp reauth…",
+        ),
+    }
+
+    def test_a_long_name_sheds_the_reason_rather_than_clipping_the_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Design review round 3, D11: the D9 pin held only for 6-cell names.
+
+        The row is ``failed: <name> — <command> — <reason>`` and the command
+        repeats the name, so it needs ``45 + 2n`` cells against the card's 58
+        and fits only while the name is 6 cells. ``minerva-qa`` and
+        ``launchdarkly`` are 10 and 12, and the clamp ate the END of the line:
+        the REASON at 100 columns (``— refresh unc…``) and the command's own name
+        argument at 44 (``/mcp reauth mi…`` — a command that errors if followed).
+        The budget now decides what is SHED: the command survives whole and the
+        reason is dropped, marked with the ``…`` the 44-column card has always
+        shown (D9 accepted it as marking the shed reason). The reason is the
+        right part to lose — ``/mcp`` and the durable transcript notice carry it
+        whole.
+        """
+        from local_operator.mcp.auth import McpRefreshUnconfirmedError
+
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant", lambda url, store=None: True
+        )
+        for name, (wide, narrow) in self.LONG_NAME_EXPECTED.items():
+            text = McpManager._auth_required_text(name, McpRefreshUnconfirmedError(self.URL))
+            assert text == f"/mcp reauth {name} — refresh unconfirmed", name
+            rendered = self._toast_failure_line(text, 58, name)
+            assert rendered == wide, (name, rendered)
+            # The whole command with its name, and NOTHING of the reason: what
+            # this removes is a half-rendered reason, which the user cannot act
+            # on and which the other two surfaces state in full.
+            assert f"/mcp reauth {name}" in rendered, (name, rendered)
+            assert "refresh" not in rendered and "unconfirmed" not in rendered, rendered
+            assert rendered.count("—") == 1, rendered  # D4: not a chain of dashes
+            assert len(rendered) <= 58, (name, rendered)
+            # At 44 columns the command ALONE is ``23 + 2n`` cells against 36, so
+            # no composition of this line fits for names >= 7 without a second
+            # row or a different card shape — both layout decisions this change
+            # does not make (D11 resolution 2). The base row is pinned verbatim
+            # instead, so a future regression is visible rather than silent.
+            assert self._toast_failure_line(text, 36, name) == narrow, (name, narrow)
+
+    def test_the_shed_boundary_is_the_seventh_cell_of_the_name(self) -> None:
+        """The boundary the shed starts at, pinned from BOTH sides.
+
+        ``45 + 2n`` against 58 makes ``n <= 6`` the range where
+        ``name + command-with-name + reason`` fits: ``github``'s unconfirmed row
+        is 57 cells and keeps its reason, while ``datadog`` (7) is 59 and sheds
+        it. Both names are real servers in this repo's own config vocabulary, so
+        the boundary is asserted on the two names a user would actually read.
+        """
+        kept = self._toast_failure_line("/mcp reauth github — refresh unconfirmed", 58, "github")
+        assert kept == "failed: github — /mcp reauth github — refresh unconfirmed"
+        assert len(kept) == 57, kept
+        shed = self._toast_failure_line("/mcp reauth datadog — refresh unconfirmed", 58, "datadog")
+        assert shed == "failed: datadog — /mcp reauth datadog…"
+        assert len(shed) == 38, shed
+
     def test_the_local_refusals_never_blame_a_server(self) -> None:
         """The endpoint copy is false about a request that was never made.
 
@@ -4201,7 +4280,9 @@ class TestRefreshRefusalCopy:
             REFRESH_REFUSAL_ENDPOINT,
             REFRESH_REFUSAL_INFLIGHT,
             REFRESH_REFUSAL_LOCK,
+            REFRESH_REFUSAL_UNATTRIBUTED,
             REFRESH_REFUSAL_UNREACHABLE,
+            REFRESH_REFUSAL_UNSENT,
             McpRefreshContendedError,
         )
 
@@ -4226,6 +4307,34 @@ class TestRefreshRefusalCopy:
         # The lock sentence still says the lock: it is the accurate log line.
         assert "holds the refresh lock" in str(
             McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_LOCK)
+        )
+        # The two LOCAL codes say what happened to THEM instead of borrowing
+        # that sentence, which was untrue for both — neither ran into another
+        # session's lock (QA round 3, Q2; review round 4, N4.1 is its sibling in
+        # the proactive site's outcome tuple).
+        unsent = str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNSENT))
+        assert "was not sent" in unsent
+        assert "nothing to present" in unsent
+        assert "holds the refresh lock" not in unsent
+        unattributed = str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNATTRIBUTED)
+        )
+        assert "cannot be attributed" in unattributed
+        assert "holds the refresh lock" not in unattributed
+        # …and the split is log-only by construction: the rendered copy is
+        # composed from the CODE, so neither sentence can reach a user surface.
+        assert (
+            McpManager._auth_failure_text(
+                "notion", McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNSENT)
+            )
+            == "no stored token to send"
+        )
+        assert (
+            McpManager._auth_failure_text(
+                "notion",
+                McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNATTRIBUTED),
+            )
+            == "the refresh did not complete"
         )
 
     @pytest.mark.asyncio
