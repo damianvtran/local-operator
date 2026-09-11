@@ -240,3 +240,32 @@ async def test_preview_degrades_to_the_receipt_when_the_store_blob_is_gone(tmp_p
     assert len(blocks) == 1
     assert blocks[0].data == ""
     assert any("previewed [Image #1]" in message.text for message in preview.messages)
+
+
+@pytest.mark.asyncio
+async def test_preview_degrades_when_the_store_sidecar_is_not_an_object(tmp_path, monkeypatch):
+    """A JSON sidecar that is not an object must degrade, not raise.
+
+    ``AttachmentStore.get`` documents "Callers must treat that as ordinary and
+    degrade to a placeholder, never raise", and this reader reaches the store
+    only because it now hydrates. A sidecar of ``[]``/``null`` parses fine but
+    is not an object, so an unguarded ``meta.get`` raised AttributeError out
+    through ``read_saved_preview`` and into the sidebar's lease.
+    """
+    from local_operator.harness.types import ImageContent
+
+    session_dir, _ = await _seeded_image_journal(tmp_path, monkeypatch)
+    sidecars = list((tmp_path / "owner" / "attachments").glob("*.json"))
+    assert len(sidecars) == 1, "precondition: the write path stored one sidecar"
+    sidecars[0].write_text("null", encoding="utf-8")
+
+    preview = read_saved_preview(session_dir)
+    blocks = [
+        block
+        for message in preview.messages
+        for block in (message.content or [])
+        if isinstance(block, ImageContent)
+    ]
+    assert len(blocks) == 1
+    assert blocks[0].data == ""
+    assert any("previewed [Image #1]" in message.text for message in preview.messages)

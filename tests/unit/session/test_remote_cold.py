@@ -201,6 +201,61 @@ async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
 
 
 @pytest.mark.asyncio
+async def test_a_cold_viewer_degrades_when_the_store_sidecar_is_not_an_object(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A damaged sidecar must degrade into the viewer, never raise.
+
+    ``AttachmentStore.get`` promises "degrade to a placeholder, never raise" —
+    and so does ``transcript._resolve_attachments``, which is the only caller on
+    this path. A sidecar that parses as JSON but is not an object (``[]``,
+    ``null``, a bare number) has no ``mime_type`` key, so an unguarded
+    ``meta.get`` raised AttributeError straight through the cold replay. It
+    needs a damaged or hand-edited store, which is why this is the guard rather
+    than a live defect: the property under test is that the replay survives the
+    same class of damage as a truncated sidecar already did.
+    """
+    import base64
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.session.transcript import Transcript
+
+    owner_cfg = tmp_path / "owner"
+    directory = _seed_transcript(owner_cfg, SESSION_ID)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(owner_cfg))
+
+    image = ImageContent(
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096).decode("ascii"),
+        mime_type="image/png",
+    )
+    await Transcript(directory).append_message(
+        Message.user("look at this [Image #1]", images=[image])
+    )
+
+    sidecars = list((owner_cfg / "attachments").glob("*.json"))
+    assert len(sidecars) == 1, "precondition: the write path stored one sidecar"
+    sidecars[0].write_text("[]", encoding="utf-8")
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=owner_cfg, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        history = viewer.history()
+        blocks = [
+            block
+            for message in history
+            for block in (getattr(message, "content", None) or [])
+            if isinstance(block, ImageContent)
+        ]
+        assert len(blocks) == 1
+        # The honest receipt, not a raise and not a blanked transcript.
+        assert blocks[0].data == ""
+        assert any("look at this [Image #1]" in getattr(m, "text", "") for m in history)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_cold_viewer_shows_scheduled_wakes_from_the_index(
     tmp_path: Path, monkeypatch
 ) -> None:

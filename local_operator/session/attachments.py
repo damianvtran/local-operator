@@ -183,9 +183,18 @@ class AttachmentStore:
         try:
             raw = self._content_path(digest).read_bytes()
             meta = json.loads(self._meta_path(digest).read_text(encoding="utf-8"))
-            mime_type = str(meta.get("mime_type", "image/png"))
         except (OSError, ValueError):
             return None
+        # A sidecar that PARSES but is not a JSON object (``[]``, ``null``, a
+        # bare number) has no ``mime_type`` key to read, so ``meta.get`` would
+        # raise AttributeError — straight through the callers whose contract is
+        # "degrade to a placeholder, never raise" (this method's own docstring,
+        # ``transcript._resolve_attachments``, and the readers built on them).
+        # Damaged sidecars are a hand-edited or interrupted write, i.e. the same
+        # class as a missing file, so they are treated the same way.
+        if not isinstance(meta, dict):
+            return None
+        mime_type = str(meta.get("mime_type", "image/png"))
         # The filename IS the digest. A bit-rotted or truncated file
         # that still has a sidecar would otherwise flow silently-wrong
         # bytes into the model; treat a mismatch as missing so replay

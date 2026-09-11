@@ -10,9 +10,10 @@ Externalized attachments ARE hydrated, through the store that owned the journal
 preview that paints "image unavailable" for a picture the session actually has
 is the same false receipt this reader exists to avoid. The cost is bounded and
 paid off the loop: rows are still capped at ``PREVIEW_BYTES`` of journal, and
-each image reference is one file read whose size is that image (no decoding
-here — the widget decodes). What stays true from before: this reader never
-starts an owner.
+each image reference costs one content read, one tiny sidecar read, and a
+full-digest re-hash (the store validates the file against its name) — all
+proportional to that image, with no decoding here: the widget decodes. What
+stays true from before: this reader never starts an owner.
 """
 
 from __future__ import annotations
