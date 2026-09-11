@@ -41,6 +41,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
+    from local_operator.secrets.session import SessionRegistration
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -237,6 +238,7 @@ class ServingSessionHandle(SessionHandle):
         auto_approve: bool = False,
         approval_pinned: bool = False,
         install_gates: bool = True,
+        config_dir: Path | None = None,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -333,6 +335,24 @@ class ServingSessionHandle(SessionHandle):
             effort_ladder=_ladder(session),
         )
         self._fold = ProjectionFold(self._projection)
+        #: The broker registration that authorizes THIS process's descendants to
+        #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
+        #: promptly rather than waiting for the process's socket to close: a
+        #: runtime can outlive the session it served — a stopped ``exec`` run
+        #: returning to its supervisor — and a session that is gone must stop
+        #: authorizing its descendants (§2.1).
+        self._secret_registration: SessionRegistration | None = None
+        #: The config root this handle's session was built from, when the spawn
+        #: site knows it (``spawn_owned_session``/``start_exec_control`` both
+        #: do). Passed rather than re-read from ``config_dir()`` at registration
+        #: time so the store-existence check and the registration share ONE
+        #: base (MINOR-3): a handle whose session is rooted elsewhere can no
+        #: longer check one store and register against another. ``None`` means
+        #: the spawn site did not declare one; registration then falls back to
+        #: this process's own ``config_dir()``, which is the same root the
+        #: session was built from because the runtime is spawned with it in the
+        #: environment.
+        self._config_dir = config_dir
         # Conversation naming is a TUI-only errand today (OperatorApp owns the
         # naming worker), so a phone-started session used to stay "mobile
         # session" forever — the session list and the header both read the
@@ -405,6 +425,15 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        # Last, so a handle that could not be fully built never leaves a live
+        # registration behind (see :meth:`_register_secret_session`). The call
+        # is synchronous and can stall the loop for up to ``STARTUP_TIMEOUT_S``
+        # (5 s) while a cold broker starts — bounded, one-time, and paid only
+        # when a store exists at this handle's root and no daemon is listening
+        # (MINOR-1). It mirrors the TUI's own boot cost deliberately, because
+        # the alternative (registering off-loop) would let the handle serve
+        # turns before it can authorize the descendants those turns spawn.
+        self._register_secret_session()
 
     # -- gates -----------------------------------------------------------------
 
@@ -697,6 +726,84 @@ class ServingSessionHandle(SessionHandle):
         self._mcp_reload_tasks.add(task)
         task.add_done_callback(self._mcp_reload_tasks.discard)
 
+    def _register_secret_session(self) -> None:
+        """Register THIS process as the session the broker notifies (§6).
+
+        **The notice has to reach the process that owns the output filter and
+        the transcript**, and in the attached architecture that is this
+        runtime: ``Session.variables`` here is the store the bash and eval
+        redactors read, while the TUI holds only an ``AttachedSession`` facade
+        with no store at all. Registering from the viewer instead made the
+        notice unanswerable by construction, so the broker (correctly) denied
+        every descendant retrieval in every attached session.
+
+        Best-effort by contract, exactly like the TUI's own registration: the
+        store is an optional capability and never a boot dependency (§13), so a
+        session starts and runs normally with no broker to reach.
+
+        Runs on the runtime's loop, so the one blocking step — starting a
+        broker that is not up yet — is a bounded, one-time stall
+        (``STARTUP_TIMEOUT_S``, 5 s) before the runtime serves anyone. That is
+        the cost the TUI already pays at its own boot, and it is paid only when
+        a store exists at this handle's root AND no daemon is already
+        listening; a warm daemon makes the poll return on its first check.
+
+        The base is the handle's own ``self._config_dir``, not a re-read of
+        ``config_dir()``: the spawn sites declare the root they built the
+        session from, so the store-existence check inside
+        ``register_variable_store_session`` and the registration itself cannot
+        disagree about WHICH store this session owns (MINOR-3, NIT-2).
+        """
+        from local_operator.secrets.session import register_variable_store_session
+
+        try:
+            self._secret_registration = register_variable_store_session(
+                self._session,
+                session_id=getattr(self._session, "session_id", None),
+                base=self._config_dir,
+            )
+        except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
+            logger.debug("secret session registration failed", exc_info=True)
+            self._secret_registration = None
+
+    def register_secret_redaction(self, value: str) -> None:
+        """Add ONE value the §6 notice asked this process to scrub.
+
+        The owner side of ``AttachedSession.register_secret_redaction``: the
+        viewer forwards a value here when ITS registration, not this runtime's,
+        is the one that answered the broker's notice — which happens when this
+        runtime registered nothing because no store existed at its base at boot
+        (see :meth:`_register_secret_session`). The value has to reach the store
+        the bash and eval redactors read, which is ``self._session.variables``,
+        so that is the only thing this method touches.
+
+        It writes the value into the redaction set and nothing else: never a
+        credential, never an announcement, never a log line, never an audit row
+        or an event. It RAISES when there is no store, so the viewer's sink
+        declines to acknowledge and the broker denies the child rather than
+        serving a value nothing can scrub — the fail-closed direction §6 requires.
+        """
+        variables = getattr(self._session, "variables", None)
+        if variables is None:
+            raise RuntimeError("this runtime has no variable store to redact through")
+        variables.register_redaction(value)
+
+    def close_secret_registration(self) -> None:
+        """Deregister this process, so its descendants stop being authorized.
+
+        Idempotent and non-raising. The socket closing on process exit is the
+        backstop; this is the plan (§2.1), and it is what covers a runtime that
+        outlives the session it served — an ``exec`` run whose control surface
+        closes while the process lives on to be reused.
+        """
+        registration = self._secret_registration
+        self._secret_registration = None
+        if registration is not None:
+            try:
+                registration.close()
+            except Exception:  # noqa: BLE001 — teardown must not fail on a deregistration
+                logger.debug("secret session deregistration failed", exc_info=True)
+
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -704,6 +811,10 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # Revoke the broker registration along with the session: descendants of
+        # a session that is going away must not stay authorized behind it
+        # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
+        self.close_secret_registration()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         if self._unsubscribe_config_watch is not None:
@@ -2650,7 +2761,16 @@ class ServingSessionHandle(SessionHandle):
         viewer. Anything not handled falls through to an honest notice rather
         than the transport's ``unknown op``, because a user typing a command
         this runtime does not implement needs to know what to do instead.
+
+        The word is resolved to its registry PRIMARY name first, exactly as the
+        app-hosted twin does: the branches below match literals, so an ALIAS off
+        the wire (``/title``, ``/models``, ``/recall``) would otherwise fall
+        past every one of them and collect the terminal-only refusal for a
+        command this runtime implements.
         """
+        from local_operator.slash_commands import primary_slash_name
+
+        command = primary_slash_name(command)
         session = self._session
         if command == "desktop_mcp":
             from local_operator.mcp.config import MCPConfigWriteError
@@ -2705,7 +2825,7 @@ class ServingSessionHandle(SessionHandle):
         if command == "goal":
             return self._goal_slash(session, args, SlashResult)
         if command == "rename":
-            return self._rename_slash(session, args, SlashResult)
+            return await self._rename_slash(session, args, SlashResult)
         if command == "effort":
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
@@ -2777,19 +2897,113 @@ class ServingSessionHandle(SessionHandle):
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
-    def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        name = (arg or "").strip()
+    async def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """``/title`` on a detached runtime: report, set, or refresh.
+
+        Async only for the refresh branch, which spends a provider call and is
+        awaited rather than detached: this method's return value IS the receipt
+        the invoking terminal or phone renders, so answering before the call
+        settled would report a title that had not been decided.
+        """
+        from local_operator.session import naming
+
+        try:
+            is_refresh, name = naming.parse_title_arg(arg or "")
+        except ValueError as error:
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        if is_refresh:
+            return await self._title_refresh_slash(session, SlashResult)
         if not name:
             current = getattr(session, "conversation_name", "") or ""
-            text = f"name: {current}" if current else "no name set — /rename <text> to set one"
+            text = (
+                f"name: {current} — /title <words>, or /title refresh"
+                if current
+                else "no name set — /title <words> to set one"
+            )
             return SlashResult(kind="notice", text=text, style="info")
         setter = getattr(session, "set_conversation_name", None)
         if not callable(setter):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         stored = setter(name)
-        # The name is on the discovery record, so `lop sessions` and the
-        # picker must see the rename without waiting for the next heartbeat.
-        # `_notify` refreshes the projection; the registrant owns the record.
+        self._publish_name()
+        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
+
+    async def _title_refresh_slash(self, session: Any, SlashResult: Any) -> Any:
+        """``/title refresh`` on a detached runtime.
+
+        Shares :func:`naming.refresh_title` and the release-on-success rule with
+        the TUI's own handler, so a session owned by a runtime and one owned by
+        an app cannot disagree about what a refresh does to ``user_set``.
+
+        No generation stamp here, and that is not an omission. The TUI's twin
+        needs one because :meth:`OperatorApp._name_conversation_worker` stores
+        its answer whenever the generation still matches, so a call dispatched
+        before a refresh will happily overwrite the refreshed title. This
+        runtime's :meth:`_name_conversation_worker` instead re-reads
+        ``conversation_name`` AFTER its await and returns when anything is
+        already set, so a refresh that landed first is what the late call sees
+        and declines to overwrite. The guard is the name check, not a counter —
+        and it is why there is no generation concept on this path to stamp.
+        """
+        from local_operator.session import naming
+
+        setter = getattr(session, "set_conversation_name", None)
+        complete_once = getattr(session, "complete_once", None)
+        if not callable(setter) or not callable(complete_once):
+            return SlashResult(kind="notice", text="session is still starting…", style="warning")
+        current = getattr(session, "conversation_name", "") or ""
+        # One budget over the history read AND the naming call, and one failure
+        # policy for both — shared with the app-hosted twin so the two cannot
+        # drift on the deadline the way they once drifted on the receipt.
+        result = await naming.routed_refresh(current, session)
+        # The second condition is the rename-during-the-call guard: a `/rename`
+        # landing while this was in flight outranks an answer decided against a
+        # title no longer in force, and storing over it would strip the latch
+        # protecting the words the user just typed.
+        standing = getattr(session, "conversation_name", "") or ""
+        if not result.changed or standing != current:
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, standing, stored=False),
+                style="info",
+            )
+        state = getattr(session, "conversation_name_state", None)
+        release = getattr(state, "release_user_set", None)
+        if callable(release):
+            # Released only on success, and only here: a refresh that changed
+            # nothing must leave a name the user typed exactly as they left it.
+            release()
+        # `setter` came off a duck-typed handle, so its return is untyped; the
+        # stored title is the string the receipt has to quote.
+        stored = str(setter(result.title, user_set=False) or result.title)
+        self._publish_name()
+        return SlashResult(kind="notice", text=naming.refresh_receipt(result, stored), style="info")
+
+    def _publish_name(self) -> None:
+        """Push a changed conversation name onto every surface that shows it.
+
+        THREE calls, and dropping any one of them leaves the name visible in a
+        different place from where it is true:
+
+        * ``_refresh_state`` rebuilds the projection. This is the one that was
+          missing, and its absence was total rather than transient: the
+          projection's ``conversation_name`` has exactly one writer, the
+          heartbeat republishes the projection's copy every 15 s, and
+          ``_republish`` does not carry the name field at all — so a renamed
+          session was re-asserted under its OLD name forever, and an attached
+          phone kept the stale header for the life of the session. The runtime's
+          own naming worker has always made this call; the slash path did not.
+        * ``_notify`` pushes that projection to attached clients.
+        * ``_republish`` updates the discovery record, so ``lop sessions`` and
+          the picker see the change without waiting for the next heartbeat.
+
+        Extracted from ``_rename_slash`` when the refresh branch became a second
+        writer: two copies of this would be two chances for one of them to skip
+        a step and leave a session listed under a name it no longer has — which
+        is precisely what the missing ``_refresh_state`` was, and fixing it in
+        this one seam repairs ``/title <words>`` along with the refresh.
+        """
+        self._refresh_state()
         self._notify()
         republish = getattr(self._registrant, "_republish", None)
         if callable(republish):
@@ -2797,7 +3011,6 @@ class ServingSessionHandle(SessionHandle):
                 republish()
             except Exception:  # noqa: BLE001 — a stale name is not worth a failure
                 logger.debug("could not republish the renamed record", exc_info=True)
-        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
 
     def _context_slash(self, session: Any, SlashResult: Any) -> Any:
         """The routed ``/context``: the token breakdown, computed HERE.
@@ -4033,7 +4246,15 @@ async def spawn_owned_session(
     # the running one; the guard mirrors that seam's "boot must not depend on
     # the watcher" degrade.
     handle = ServingSessionHandle(
-        session, loop, cwd=cwd, auto_approve=auto_approve, approval_pinned=False
+        session,
+        loop,
+        cwd=cwd,
+        auto_approve=auto_approve,
+        approval_pinned=False,
+        # Declared so the §6 registration's store-existence check and the
+        # registration itself share the config root this session was built
+        # from (MINOR-3).
+        config_dir=config_directory,
     )
     attach_gate_config_watch(handle, config_directory)
     return handle

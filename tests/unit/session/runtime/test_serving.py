@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,6 +23,8 @@ from local_operator.harness.types import (
     NoticeEvent,
     SteeringDeliveredEvent,
 )
+from local_operator.session.frontend_state import SlashResult as _SlashResult
+from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -36,6 +39,15 @@ class FakeSession:
     owns_runtime = True
     outcome_is_synchronous = True
     runtime_locality: RuntimeLocality = "this-process"
+
+    #: Declared, deliberately UNASSIGNED: the naming tests set these per-case,
+    #: and `_title_refresh_slash` probes the public one with
+    #: `getattr(session, "conversation_name_state", None)`. A default here
+    #: would make the attribute exist on every fake and silently move those
+    #: tests onto the other branch, so the annotation states the surface this
+    #: fake stands in for without creating it.
+    _name_state: ConversationName
+    conversation_name_state: ConversationName
 
     def __init__(self) -> None:
         self.session_id = "sess-1"
@@ -834,6 +846,95 @@ async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     await handle.ask_answer(second.request_id, "yes")
     assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_title_refresh_retitles_a_detached_session_and_republishes() -> None:
+    """``/title refresh`` on a runtime nobody is attached to.
+
+    The receipt is the RETURN VALUE here, not a painted notice, so the call is
+    awaited rather than detached: a handle that answered before the naming call
+    settled would report a title that had not been decided. The republish is
+    what keeps ``lop sessions`` and the resume picker from listing the session
+    under the name it just stopped having.
+    """
+    handle, session = make_handle()
+    session.conversation_name = "Fix the login flow"
+    session._name_state = ConversationName(text="Fix the login flow", user_set=True)
+    session.conversation_name_state = session._name_state
+    session.history = lambda: [  # type: ignore[attr-defined]
+        SimpleNamespace(role="user", text="fix the login redirect loop"),
+        SimpleNamespace(role="assistant", text="done"),
+        SimpleNamespace(role="user", text="now rewrite the billing importer"),
+    ]
+    session.title_reply = "<title>Billing importer rewrite</title>"
+    republished: list[bool] = []
+    handle._registrant = SimpleNamespace(  # type: ignore[attr-defined]
+        _republish=lambda: republished.append(True)
+    )
+
+    result = await handle._rename_slash(session, "refresh", _SlashResult)
+
+    assert result.text == "title refreshed: Billing importer rewrite"
+    assert session.conversation_name == "Billing importer rewrite"
+    # Stored as a GENERATED title, and the human latch released with it: asking
+    # for a fresh name withdraws the one you typed.
+    assert session._named[-1] == ("Billing importer rewrite", False)
+    assert not session._name_state.user_set
+    assert republished == [True], "a renamed session was left stale in the registry"
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_session_reaches_the_projection_and_the_record() -> None:
+    """A name nobody can read is not a rename.
+
+    The projection's ``conversation_name`` has exactly one writer
+    (``_refresh_state``), the heartbeat republishes the PROJECTION's copy every
+    15 s, and ``_republish`` does not carry the name field at all. So a slash
+    path that skipped ``_refresh_state`` did not merely lag — the stale name was
+    re-asserted for the life of the session, and an attached phone kept the old
+    header forever. Covers both writers through the one seam they share.
+    """
+    for args, expected in (
+        ("refresh", "Billing importer rewrite"),
+        ("Typed by hand", "Typed by hand"),
+    ):
+        handle, session = make_handle()
+        session.conversation_name = "Fix the login flow"
+        session._name_state = ConversationName(text="Fix the login flow")
+        session.conversation_name_state = session._name_state
+        session.history = lambda: [  # type: ignore[attr-defined]
+            SimpleNamespace(role="user", text="fix the login redirect loop"),
+            SimpleNamespace(role="assistant", text="done"),
+            SimpleNamespace(role="user", text="now rewrite the billing importer"),
+        ]
+        session.title_reply = "<title>Billing importer rewrite</title>"
+
+        await handle._rename_slash(session, args, _SlashResult)
+
+        assert handle.session_projection_seed.conversation_name == expected, args
+
+
+@pytest.mark.asyncio
+async def test_title_refresh_that_changes_nothing_keeps_the_name_and_the_latch() -> None:
+    """A refresh is not a rename: "the name still fits" must leave both the
+    title and the user's claim on it exactly as they were."""
+    handle, session = make_handle()
+    session.conversation_name = "Ledger reconciliation"
+    session._name_state = ConversationName(text="Ledger reconciliation", user_set=True)
+    session.conversation_name_state = session._name_state
+    session.history = lambda: [  # type: ignore[attr-defined]
+        SimpleNamespace(role="user", text="reconcile the ledger"),
+        SimpleNamespace(role="assistant", text="done"),
+    ]
+    session.title_reply = "<title/>"  # the model says: unchanged
+
+    result = await handle._rename_slash(session, "refresh", _SlashResult)
+
+    assert result.text == "title unchanged: Ledger reconciliation"
+    assert session.conversation_name == "Ledger reconciliation"
+    assert session._name_state.user_set, "the rename was quietly revoked"
+    assert session._named == []
 
 
 @pytest.mark.asyncio

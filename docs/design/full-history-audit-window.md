@@ -4,7 +4,7 @@ Status: proposal (architect). Not implemented. Scope: `local-operator` @ `f1ab7d
 
 All line citations are against `f1ab7d346`, read in a clean worktree
 (`/private/tmp/arch-hist/wt`) because the primary checkout has uncommitted edits
-to `remote.py` and `app.py` from a sibling session.
+to `attached.py` and `app.py` from a sibling session.
 
 ---
 
@@ -41,7 +41,7 @@ Twelve of the operator's sessions exceed 80% unreachable. This is the defect.
 
 `_reconcile_head_notice` (`app.py:7267-7269`) computes
 `more = bool(self._resume_pending_head) or bool(session.history_before_token)`,
-and `AttachedSession.history_before_token` (`remote.py:2603-2606`) returns the
+and `AttachedSession.history_before_token` (`attached.py`) returns the
 window's `before_token` — `None` once the truncated replay is drained. So
 `RESUME_START_NOTICE` (`app.py:1077`) is the honest rendering of a history layer
 that already discarded the older rows. **Do not fix the copy.** Fix the layer.
@@ -63,7 +63,7 @@ demonstrated by it. The `_resume_pending_head = []` resets (`app.py:4972`,
 fresh resume, `/clear`, a canonical reset) and each is followed by a
 re-projection of the *current* history, so none of them strands rows while
 claiming exhaustion. `load_older_display_page`'s `full_required` branch
-(`remote.py:2618-2620`) does not drop a page either — it escalates to
+(`attached.py`) does not drop a page either — it escalates to
 `materialize_history()` and returns the id-deduped difference.
 
 What that session *does* show is a different, real, and much smaller thing worth
@@ -166,7 +166,7 @@ file and integer offsets become lies. On resolve-failure, return `status="reset"
 
 `total_message_count` **stays the context total.** Do not inflate it. It is read
 by `_sidebar_presentation_current` (`app.py:3922-3924`) as a monotonic growth
-signal and by `history_message_count` (`remote.py:4280-4287`); redefining it
+signal and by `history_message_count` (`attached.py`); redefining it
 mid-chain would make cached presentations miss forever. Audit pages report their
 extent through `start`/`audit` only. Expose the audit depth, if it is ever
 needed, as a separate `audit_message_count` — but I would not add it until a
@@ -200,7 +200,7 @@ Three conclusions the coder must not relitigate:
    journal — a thousandfold regression for no benefit.
 2. **Never call full audit replay.** 0.29 s and 47 MB of peak allocation per
    call is exactly what budget B forbids. `audit_slice` is the only entry point.
-3. `read_replay_suffix` (`remote.py:99`, `transcript.py:360`) is for the
+3. `read_replay_suffix` (`attached.py`, `transcript.py:360`) is for the
    *attach* path and stays exactly as it is. Audit paging is a post-attach,
    reader-driven gesture on a runtime that already holds the journal. **The
    resume path's cost does not change at all.**
@@ -381,7 +381,7 @@ runtime also pages audit history". Two ways it breaks without a new string:
 - **Old viewer, new runtime.** `DisplayHistoryWindow` sets
   `model_config = ConfigDict(extra="forbid")` (`history_window.py:39`), so an
   old viewer validating a payload carrying `audit`/`audit_available` **raises**,
-  and `_fetch_history_page` (`remote.py:2490`) turns that into a failed attach.
+  and `_fetch_history_page` (`attached.py`) turns that into a failed attach.
   This is a hard cross-version break, and it is the single most likely way this
   change causes an incident during a staged rollout.
 
@@ -484,7 +484,7 @@ tests under `env -u NO_COLOR TERM=xterm-256color`.
    include audit rows breaks `_sidebar_presentation_current`'s monotonic growth
    check (`app.py:3922-3924`). Put the reason in a comment at the field, not
    only in this document.
-5. **Contiguity assertion** (`remote.py:2621`) — if the audit exemption is
+5. **Contiguity assertion** (`attached.py`) — if the audit exemption is
    missed, the first audit page raises `ConnectionError` and the reader sees a
    failed page rather than history. Cheap to get wrong, loud when it happens.
 
@@ -561,7 +561,7 @@ so the argument does not have to be rediscovered from this document.
 **Keeping `total_message_count` context-scoped.** The alternative — making it
 the true total — is arguably the more honest field name. Rejected on evidence:
 two consumers read it as a monotonic context-growth signal (`app.py:3922`,
-`remote.py:4287`), and redefining it silently breaks presentation caching. A
+`attached.py`), and redefining it silently breaks presentation caching. A
 separate `audit_message_count` is available if a surface ever needs it; I did
 not add it speculatively.
 
