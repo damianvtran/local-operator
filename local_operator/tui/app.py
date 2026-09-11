@@ -1637,6 +1637,49 @@ def _sidebar_connect_attempts() -> int:
 #: cover it would buy nothing and cost every click path a longer wait.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
+
+def _resume_connect_attempts() -> int:
+    """How many times `/resume` re-dials before the user is told it failed.
+
+    THE SAME RULE AS `_sidebar_connect_attempts`, APPLIED TO THE OTHER BOUND.
+    The quantity a redial budget has to outlast is the give-up bound of the
+    facade it is building, and that bound is selected by `_can_go_cold`.
+    `/resume` reaches `AttachedSession.connect`, which builds a TERMINAL
+    surface — so `_can_go_cold` is False and the bound that governs it is
+    `RECOVERY_GIVE_UP_S`, not `COLD_FALLBACK_S`. Reusing the sidebar's count
+    here would be sizing one facade's budget from another facade's bound,
+    which is the mistake this derivation exists to prevent.
+
+    `RECOVERY_GIVE_UP_S` is also the RIGHT question for this seam rather than
+    merely the wider one: it is scoped to "a record has been seen", which is
+    exactly the shape of a failed `/resume` — the loop re-reads the record
+    before every attempt, so a record that is present and an owner that will
+    not answer are both established facts, and the bound answers precisely
+    "an owner is there and will not answer". The same 50% margin as the
+    sidebar's: the last attempt must land clearly past the owner's give-up on
+    a loaded machine, not tie with it.
+    """
+    from local_operator.session.attached import RECOVERY_GIVE_UP_S
+
+    return _attempts_outlasting(RECOVERY_GIVE_UP_S * 1.5)
+
+
+#: Attempts `/resume` may spend re-dialling an owner that is being republished,
+#: before the user is told the session is unreachable.
+#:
+#: The pre-#883 shape at this seam was ONE-SHOT: any exception from
+#: `AttachedSession.connect` printed the error and returned, so a runtime that
+#: was mid-restart — the ordinary case, since a `kill -9` republishes a record
+#: within a second or two — was reported to the user as a permanent failure to
+#: be retyped by hand. Bounded rather than immediate, and bounded rather than
+#: infinite: every attempt re-reads the runtime record, so a republished owner
+#: under a NEW pid is picked up instead of dialling a dead socket, and the
+#: budget is what stops that from becoming a hang.
+#:
+#: NOT `SIDEBAR_CONNECT_ATTEMPTS`. Derivation and its reasoning live on
+#: `_resume_connect_attempts` above.
+RESUME_CONNECT_ATTEMPTS = _resume_connect_attempts()
+
 #: The chord that lifts the aside's full text to the clipboard.
 #:
 #: `omp`, the reference implementation this surface is modelled on, ships copy
@@ -5216,6 +5259,56 @@ class OperatorApp(App[None]):
             and not card.settled
         )
 
+    def _abandon_sidebar_frame(self, error: Exception) -> bool:
+        """Fail a pending sidebar frame with ``error``; report whether one was armed.
+
+        The one seam through which a caller that has PROVEN this frame can never
+        paint releases the connect body's ``await ready`` early, instead of
+        leaving it to sit out ``_await_sidebar_frame``'s 15 s timer. Both
+        points that can learn the answer (the display hook, and the bind->commit
+        half of the same window) go through here so the pending tuple is cleared
+        exactly once and in one place — a second clearer is how a future edit
+        ends up resolving a frame whose future the connect body has already
+        stopped waiting on.
+
+        ``False`` means the frame had already settled, so the caller owns the
+        error: returning success there would publish the very state this exists
+        to refuse.
+        """
+        pending = getattr(self, "_sidebar_ready_frame", None)
+        if pending is None:
+            return False
+        self._sidebar_ready_frame = None
+        future = pending[2]
+        if future.done():
+            return False
+        future.set_exception(error)
+        return True
+
+    def _sidebar_live_frame_owner_gone(self, source: SessionInteraction) -> bool:
+        """Whether this pending frame is a LIVE commit whose owner went cold.
+
+        The gate's first check is ``is_cold``, so this is the one state whose
+        verdict is already known before a single frame is painted: no relayout
+        can ever make it pass, and buying one per frame is what turned a
+        transient owner loss into a 15 s hot spin (measured pre-fix: 1,820
+        refusals, every one of them a recovery relayout, ~127/s).
+
+        ``display_only`` frames are excluded deliberately — their gate branch
+        does not consult ``is_cold`` at all (a saved excerpt is ALLOWED to
+        paint over a cold session), so failing them here would break the
+        preview path rather than the state this guards.
+
+        ``getattr`` for the same reason the gate uses it: the source's session
+        is typed as the general viewer protocol, and only the owner-backed
+        facade declares ``is_cold``.
+        """
+        return (
+            not source.display_only
+            and self._is_current(source)
+            and bool(getattr(source.session, "is_cold", False))
+        )
+
     def _await_sidebar_frame(
         self, source: SessionInteraction, generation: int
     ) -> asyncio.Future[None]:
@@ -5310,6 +5403,46 @@ class OperatorApp(App[None]):
             # update. Only now are the target frame and its input surface ready.
             self._sidebar_ready_frame = None
             future.set_result(None)
+        elif (
+            generation == self._sidebar_navigation.generation
+            and self._sidebar_live_frame_owner_gone(source)
+        ):
+            # A LIVE COMMIT WHOSE OWNER WENT COLD CAN NEVER PAINT, so the one
+            # thing this state must not do is wait out the gate's 15 s timer.
+            # `_sidebar_gate_surface_ready`'s FIRST check is `is_cold`, so the
+            # verdict is already known; the branch below would buy a forced
+            # full-screen relayout for it on every frame (measured pre-fix on
+            # the architect's rig: 15.1 s, 1,820 refusals, every one of them a
+            # recovery, ~127/s) and the timer would then raise
+            # `SurfaceNotReady`, which is terminal-on-first by #883's design —
+            # latching a transient owner loss the reselect healed in 0.17 s.
+            #
+            # THE BOUND IS THE CONNECT BODY'S, NOT THIS CALL SITE'S. The
+            # exception is NOT a `SurfaceNotReady` (it subclasses
+            # `ConnectionError`, see `OwnerWentCold`), so it lands in
+            # `_connect_sidebar_source`'s generic arm — the one that increments
+            # `connect_attempts` and re-arms through the backoff, latching only
+            # when the budget is EXHAUSTED. That is the whole reason it is a
+            # distinct type rather than a faster timer: an arm that re-armed
+            # without spending the budget is the infinite reconnect loop this
+            # codebase already measured once (the `connect_attempts` reset that
+            # made the retry's own re-arm refill it). The cold condition is
+            # bounded by the facade's own recovery (`COLD_FALLBACK_S`), and
+            # `SIDEBAR_CONNECT_ATTEMPTS` is derived to outlast it — so the
+            # budget is spent on a condition that really does end, and a
+            # genuinely unreachable owner still latches with the honest copy.
+            #
+            # Through the shared abandon seam rather than a second `set_exception`
+            # here: ``future`` is provably unsettled at this point (the chain
+            # opens on `if future.done()`), so the helper cannot report a settled
+            # frame, and having ONE clearer is what keeps a future edit from
+            # resolving a frame the connect body has stopped waiting on.
+            from local_operator.tui.session_navigation import (
+                UNREACHABLE_OWNER_MESSAGE,
+                OwnerWentCold,
+            )
+
+            self._abandon_sidebar_frame(OwnerWentCold(UNREACHABLE_OWNER_MESSAGE))
         elif (
             generation == self._sidebar_navigation.generation
             and self._is_current(source)
@@ -6400,6 +6533,39 @@ class OperatorApp(App[None]):
 
         source.connection_task.add_done_callback(settled)
 
+    def _sidebar_connect_failure_fields(
+        self, source: SessionInteraction, *, error: BaseException, elapsed: float
+    ) -> str:
+        """The one diagnostics line for a terminal/latched sidebar connect arm.
+
+        Shared by both arms so a future edit cannot enrich one and leave the
+        other blind, which is how this path ended up with NO log line at all
+        while the user was being told to reselect: everything needed to explain
+        the verdict was already in memory, on the source and its viewer.
+
+        Every field answers a question the investigation had to ask by hand:
+        WHICH arm (named by the caller), WHICH session, how long THIS ROUND
+        waited, how much budget was spent, whether the app still believed it was
+        showing a saved excerpt, and the three pieces of facade state the three
+        falsifiable causes map onto — ``is_cold`` (the owner is gone), ``_recovering``
+        (it is on its way back), ``display_history_current`` (the app can still
+        paint what it holds). ``getattr`` with a default because the source's
+        session is the general viewer protocol and only some facades declare
+        these.
+
+        No secret content: ids, counters, booleans and an exception message.
+        """
+        session = source.session
+        session_id = getattr(session, "session_id", None) or "?"
+        return (
+            f"session={session_id} elapsed={elapsed:.2f}s "
+            f"attempts={source.connect_attempts} display_only={source.display_only} "
+            f"is_cold={bool(getattr(session, 'is_cold', False))!r} "
+            f"recovering={getattr(session, '_recovering', None)!r} "
+            f"display_history_current={getattr(session, 'display_history_current', None)!r} "
+            f"error={type(error).__name__}: {error}"
+        )
+
     async def _connect_sidebar_source(self, source: SessionInteraction) -> None:
         """Reconcile a saved view without holding the navigation coordinator.
 
@@ -6424,6 +6590,8 @@ class OperatorApp(App[None]):
         published false around the wait instead of only in `finally`.
         """
         from local_operator.tui.session_navigation import (
+            UNREACHABLE_OWNER_MESSAGE,
+            OwnerWentCold,
             PreparationInvalidated,
             SurfaceNotReady,
         )
@@ -6431,6 +6599,17 @@ class OperatorApp(App[None]):
         prepared = None
         retry = False
         cancelled = False
+        loop = asyncio.get_running_loop()
+        # THIS ATTEMPT ROUND's own clock, not the sequence's. The retry is
+        # re-armed as a NEW task each round, so that is the only span a round can
+        # measure about itself — and it is the informative one at the arms that
+        # log: the paint arm's elapsed IS the 15 s gate wait. The sequence's size
+        # is carried beside it as `connect_attempts`.
+        started = loop.time()
+        # Snapshotted for the paint arm's deltas: the gate counters are
+        # app-global, so only a delta says how many refusals THIS connect spent.
+        gate_reached_at_entry = self._sidebar_gate_reached
+        gate_recoveries_at_entry = self._sidebar_gate_recoveries
         try:
             session = source.session
             if not _is_viewer(session):
@@ -6466,7 +6645,7 @@ class OperatorApp(App[None]):
                 # The message is the sentence the sync-failure path already
                 # uses, so the two ways a connect can fail read identically to
                 # the user and no new copy is introduced.
-                raise ConnectionError("the runtime is not responding")
+                raise OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
             await session.ensure_display_current()
             if source.retired or not self._is_current(source):
                 return
@@ -6496,6 +6675,25 @@ class OperatorApp(App[None]):
             ready = self._commit_sidebar_session(session.session_id, prepared, generation)
             prepared = None
             if ready is not None:
+                # THE BELT FOR THE OTHER HALF OF THE WINDOW. `post_display_hook`
+                # closes the commit->paint half; an owner lost between the bind
+                # postcondition above and this commit is already cold BY THE
+                # TIME the frame is armed, so re-check it before waiting rather
+                # than hoping a display arrives to notice. Cheap and exact: one
+                # property read on the same session the bind just checked.
+                #
+                # Raising here (rather than only failing the frame) is what
+                # keeps the bound: this is a `ConnectionError`, so it falls to
+                # the generic arm below, which spends `connect_attempts` and
+                # re-arms through the backoff. `_abandon_sidebar_frame` must
+                # run first so the pending tuple is cleared and the connect
+                # body is not left waiting on a frame nothing will resolve —
+                # and if it reports no armed frame, the raise is the only way
+                # left to refuse a cold commit.
+                if _is_viewer(session) and session.is_cold:
+                    error = OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
+                    if not self._abandon_sidebar_frame(error):
+                        raise error
                 await ready
             # REFILL THE BUDGET ONLY ON A COMPLETED CONNECT, and only here at
             # the very end of the success path. Resetting earlier — beside
@@ -6528,6 +6726,21 @@ class OperatorApp(App[None]):
             # firing is itself a signal. The budget exists to outlast
             # `COLD_FALLBACK_S`; a gate timeout is not a thing `COLD_FALLBACK_S`
             # bounds, so spending the budget on it is category error.
+            #
+            # Logged because this path used to be silent in the total: a user
+            # reporting "the session just said Reconnect failed" left nothing to
+            # read, and the ONE number that explains the wait (how many frames
+            # the gate refused, each buying a full-screen relayout) existed only
+            # in the counters.
+            logger.warning(
+                "sidebar connect failed terminally (paint gate did not open): %s "
+                "gate_reached=%d gate_recoveries=%d",
+                self._sidebar_connect_failure_fields(
+                    source, error=error, elapsed=loop.time() - started
+                ),
+                self._sidebar_gate_reached - gate_reached_at_entry,
+                self._sidebar_gate_recoveries - gate_recoveries_at_entry,
+            )
             source.display_only = True
             source.connection_error = str(error) or "Connection unavailable"
             source.connect_attempts = 0
@@ -6588,6 +6801,26 @@ class OperatorApp(App[None]):
                     cancelled = True
                     raise
             else:
+                # THE LATCH, and the only arm the user ever sees as a verdict.
+                # Logged with the same fields as the paint arm: this is the
+                # other half of "the session said Reconnect failed and the logs
+                # say nothing", and the reason it latched (budget spent versus
+                # the source leaving the screen) is a property of THIS arm's
+                # condition, not of the error.
+                why = []
+                if source.connect_attempts > SIDEBAR_CONNECT_ATTEMPTS:
+                    why.append("retry budget exhausted")
+                if source.retired:
+                    why.append("source retired")
+                if not self._is_current(source):
+                    why.append("source left the screen")
+                logger.warning(
+                    "sidebar connect latched (%s): %s",
+                    ", ".join(why) or "not retryable",
+                    self._sidebar_connect_failure_fields(
+                        source, error=error, elapsed=loop.time() - started
+                    ),
+                )
                 source.connection_error = str(error) or "Connection unavailable"
                 # Surrendered, so the counter goes back to zero: the status now
                 # reads "Reselect to retry", and that affordance has to mean a
@@ -11525,34 +11758,99 @@ class OperatorApp(App[None]):
         Protocol <4 has no full event stream. The degraded projection view was
         deliberately deleted, so a mixed-version owner gets a precise upgrade
         refusal rather than silently falling back to a divergent UI.
+
+        THE DIAL IS BOUNDED-RETRIED, which this seam was not (#883 fixed the
+        sidebar's connect and left this one one-shot). `AttachedSession.connect`
+        raising used to be printed to the user and accepted as a verdict, so a
+        runtime that was being restarted — the ordinary case, since a `kill -9`
+        republishes its record within a second or two — read as a permanent
+        failure and the user re-typed `/resume` to try again. The record is
+        therefore RE-READ BEFORE EVERY ATTEMPT rather than captured once: a
+        runtime that retired between attempts publishes a new record under a
+        NEW pid, and redialling the dead one would spend the whole budget on a
+        socket that cannot answer.
         """
         from local_operator.mobile.attach_client import find_runtime_record
-        from local_operator.session.attached import AttachedSession
+        from local_operator.session.attached import (
+            AttachedSession,
+            frontend_attach_refusal,
+        )
+        from local_operator.tui.session_navigation import UNREACHABLE_OWNER_MESSAGE
 
-        record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
-        if record is None or found_owner != owner or record.protocol < 4:
-            self._system_notice(
-                f"session {concrete} is open in an older Local Operator process "
-                f"(pid {owner}) — update or close that process, then resume again",
-                "warning",
-            )
-            return
         assert self._resume_factory is not None
 
         async def takeover_factory() -> Any:
             assert self._resume_factory is not None
             return await self._resume_factory(concrete)
 
-        try:
-            remote = await AttachedSession.connect(
-                record,
-                concrete,
-                config_dir=config_root,
-                takeover_factory=takeover_factory,
+        # ONE live row for the redial, restated in place rather than stacked.
+        # The budget spans the facade's whole give-up bound, so a notice per
+        # attempt would write a hundred rows into a durable transcript to say
+        # one thing — the same reason `NoticeBlock.restate` exists.
+        retry_notice: NoticeBlock | None = None
+
+        def narrate(text: str) -> None:
+            nonlocal retry_notice
+            if retry_notice is None or not retry_notice.is_attached:
+                retry_notice = NoticeBlock(text, "warning")
+                self._append_block(retry_notice, ends_empty_state=False)
+            else:
+                retry_notice.restate(text, "warning")
+
+        attempt = 0
+        remote: Any = None
+        while True:
+            record, found_owner = await asyncio.to_thread(
+                find_runtime_record, config_root, concrete
             )
-        except Exception as error:
-            self._system_notice(str(error), "warning")
-            return
+            # The pid the user named is honoured on the FIRST attempt only.
+            # After that a record for the SAME session id under a new pid is
+            # the owner coming back, which is what `/resume` asked for; the
+            # mixed-version refusal stays exact because it is a property of
+            # the record in hand, re-read like everything else here.
+            if attempt == 0 and (record is None or found_owner != owner or record.protocol < 4):
+                self._system_notice(
+                    f"session {concrete} is open in an older Local Operator process "
+                    f"(pid {owner}) — update or close that process, then resume again",
+                    "warning",
+                )
+                return
+            if record is None or record.protocol < 4:
+                # An owner that is not there THIS MOMENT. A restarting runtime
+                # has no record between the old pid retiring and the new one
+                # publishing, which is the window the redial exists for — so
+                # this is paced and retried, not reported.
+                error: Exception = ConnectionError(UNREACHABLE_OWNER_MESSAGE)
+            else:
+                try:
+                    remote = await AttachedSession.connect(
+                        record,
+                        concrete,
+                        config_dir=config_root,
+                        takeover_factory=takeover_factory,
+                    )
+                    break
+                except Exception as caught:  # noqa: BLE001 — classified below
+                    error = caught
+            attempt += 1
+            # A CAPABILITY/PROTOCOL GAP IS STATIC, so it is never retried:
+            # every redial would raise the identical refusal and only make the
+            # user wait for a sentence already known. Read off the SAME record
+            # `connect` just refused, so the two cannot disagree.
+            static = frontend_attach_refusal(record) if record is not None else None
+            if static is not None or attempt > RESUME_CONNECT_ATTEMPTS:
+                self._system_notice(str(error), "warning")
+                return
+            narrate(
+                f"reconnecting to session {concrete} — the owner is not answering "
+                f"(retry {attempt} of {RESUME_CONNECT_ATTEMPTS})"
+            )
+            await asyncio.sleep(sidebar_connect_backoff_s(attempt))
+
+        # The retry row described a dial that is now over; leaving it up would
+        # have the transcript promise a reconnect that already happened.
+        if retry_notice is not None and retry_notice.is_attached:
+            self._transcript_view().remove_block(retry_notice)
 
         detach_gates = getattr(self._session, "detach_viewer_gates", None)
         if callable(detach_gates):
