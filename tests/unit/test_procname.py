@@ -198,10 +198,19 @@ class TestStaleness:
     def test_unreadable_libpython_parent_does_not_raise(self, branded, tmp_path):
         """QA round 2, Q3: `_needs_replant` is contractually no-raise.
 
-        `Path.exists()` is not total — an unreadable parent directory makes it
-        raise `PermissionError` (reproduced), which escaped a function this
+        An unreadable parent directory made `Path.exists()` raise
+        `PermissionError` (reproduced on 3.12), which escaped a function this
         module documents as never raising. "Replant" is the safe answer: a
         libpython we cannot stat is not one to assume correct.
+
+        The wall is asserted with `os.stat` rather than `Path.exists` because
+        the stdlib changed underneath the original precondition: 3.14 routes
+        `exists()` through `os.path.exists`/`_stat(ignore_errors=True)`, so
+        EACCES becomes `False` instead of propagating (3.12 raises). The route
+        this test is named for is still exercised wherever the stdlib still has
+        it — `_needs_replant` calls `exists()` itself, so an unguarded raise
+        there fails this test on 3.12 — while the property being pinned, "must
+        not raise on a path it cannot stat", holds on every interpreter.
         """
         walled = tmp_path / "lib" / "sub"
         walled.mkdir(parents=True)
@@ -211,12 +220,12 @@ class TestStaleness:
         try:
             # PRECONDITION, not decoration. `True` is ALSO reachable through the
             # `resolve()` identity mismatch below, so asserting it alone would
-            # not prove this test exercised the `exists()` path it is named for
+            # not prove this test exercised the unreadable path it is named for
             # — and on a host where `chmod 0o000` does not block (root, some
             # container runtimes) it would stay green with the guard deleted.
             # Review round 3, M3-2: the R2-1 failure mode in embryo.
             with pytest.raises(PermissionError):
-                dylib.exists()
+                os.stat(dylib)
             assert (
                 procname._needs_replant(branded, Path(os.path.realpath(sys.executable)), dylib)
                 is True

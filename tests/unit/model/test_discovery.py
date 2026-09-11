@@ -2387,3 +2387,31 @@ def test_cached_available_models_falls_back_to_static_on_cache_miss(tmp_path) ->
     agg_models, agg_status = discovery.cached_available_models("openrouter", cache_dir=tmp_path)
     assert agg_status == "static"
     assert agg_models == []
+
+
+def test_a_router_listing_row_is_not_where_cache_support_comes_from() -> None:
+    """The router's cache support cannot arrive through the listing merge, and does not.
+
+    Review finding R1-1. The first version of this test asserted the merge restores
+    the flag, which is a contract the shipped merge does not provide for this row:
+    `_merge_one` ORs a listing row against a static registry row, and
+    `discovery._static_rows("radient")` is empty — this provider bundles no rows —
+    so the merge runs with `info=None` and `bool(row or None)` stays False.
+
+    That is inert rather than broken, and the boundary is worth pinning in BOTH
+    directions: the flag the request builder reads comes from the registry row via
+    `configure.resolve_model_info` / `build_model_spec` (covered by
+    `test_registry.py::test_aggregator_router_rows_advertise_prompt_caching`), and
+    nothing reads this field on this row. If a future change starts reading it, the
+    router route silently loses its cache key again — the defect the registry change
+    fixed — so it should fail here first.
+    """
+    assert discovery._static_rows("radient") == {}, (
+        "this test's premise is that this provider contributes no static rows to the "
+        "merge; if that changed, re-derive the test rather than editing the assertion"
+    )
+
+    live = [DiscoveredModel(id="auto", supports_prompt_cache=False, cache_read_price=0.0)]
+    merged = merge_models(discovery._static_rows("radient"), live)
+
+    assert merged[0].supports_prompt_cache is False

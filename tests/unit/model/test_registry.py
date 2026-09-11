@@ -582,3 +582,29 @@ def test_an_arbitrary_aggregator_model_keeps_the_unknown_sentinels(provider: str
     info = get_model_info(provider, "some-vendor/never-heard-of-it")
     assert info.context_window == -1
     assert info.supports_images is False
+
+
+@pytest.mark.parametrize("provider", ["radient", "openrouter"])
+def test_aggregator_router_rows_advertise_prompt_caching(provider: str) -> None:
+    """The router row must not claim its route cannot cache.
+
+    `supports_prompt_cache` gates two emissions on the chat-completions wire, and
+    both of them exist to keep a long conversation's prompt cache warm: the
+    `prompt_cache_key` OpenRouter uses as its sticky-routing key, and the
+    `cache_control` marker that asks a provider to cache the prefix. A False here
+    therefore did not mean "unknown" — it meant every router request was sent with
+    no routing key and no cache marker, so a session paid full input price on every
+    turn after the first, and OpenRouter fell back to an affinity it only
+    establishes after a hit it had no way to earn.
+
+    True is the honest value because the router is a route and today every route
+    caches; the asymmetry is what settles it, since a hint or a marker sent to a
+    model that does not cache is inert, while withholding them from one that does
+    costs the full prefix on every turn.
+    """
+    info = get_model_info(provider, "auto")
+
+    assert info.supports_prompt_cache is True
+
+    spec = build_model_spec(provider, "auto", info)
+    assert spec.supports_prompt_cache is True, "the spec the request builder reads must carry it"
