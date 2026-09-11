@@ -48,13 +48,19 @@ def test_the_name_field_never_narrows_as_the_terminal_grows() -> None:
     saturate at the same value, so past the breakpoint the two are equal. This
     fails against any breakpoint-only fix.
     """
-    widths = [plan_layout(width, 40).name_width for width in range(80, 241)]
-    shrinks = [
-        (width, before, after)
-        for width, before, after in zip(range(81, 241), widths, widths[1:])
-        if after < before
-    ]
-    assert shrinks == [], f"name field narrowed as the terminal grew: {shrinks}"
+    # BOTH query states, because they are two different reservations and only
+    # one of them was covered when this shipped. With a query active the soft
+    # gutter is reserved, and at the flip that reservation came out of the name
+    # field on the side-by-side side but not on the stacked side — 64 -> 63 at
+    # 158 -> 159, one shrink event, invisible to a no-query sweep.
+    for querying in (False, True):
+        widths = [plan_layout(width, 40, querying=querying).name_width for width in range(80, 241)]
+        shrinks = [
+            (width, before, after)
+            for width, before, after in zip(range(81, 241), widths, widths[1:])
+            if after < before
+        ]
+        assert shrinks == [], f"name narrowed as the terminal grew (querying={querying}): {shrinks}"
 
 
 def test_the_breakpoint_is_where_side_by_side_reaches_the_cap() -> None:

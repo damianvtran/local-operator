@@ -2416,3 +2416,48 @@ async def test_a_narrow_filter_row_keeps_the_active_query() -> None:
             await pilot.press(char)
         await pilot.pause()
         assert "asteroid" in screen.render_footer_for_test()
+
+
+@pytest.mark.asyncio
+async def test_the_way_out_is_stated_at_every_width_the_picker_supports() -> None:
+    """The footer is the only place the picker says how to get out.
+
+    The module docstring has said so since the card era, and the shed ladder is
+    what has to honour it: counters, legends and chord GLOSSES all go before
+    the keys, and ``esc`` goes last of all. A review found the row shedding
+    ``esc`` entirely at 30 and 24 columns — a silent no-exit state, on a modal
+    whose only other exit is the mouse.
+    """
+    rows = [_row(f"{index:012d}", f"session {index}") for index in range(60)]
+    for width in (24, PICKER_MIN_WIDTH, 40, 50, 74, 100):
+        screen = SessionPickerScreen(rows, NOW)
+        screen._layout = lambda width=width: plan_layout(width, 30)  # type: ignore[method-assign]
+        footer = screen.render_footer_for_test()
+        assert "esc" in footer, f"no way out stated at {width} cols: {footer!r}"
+        assert cell_len(footer) <= plan_layout(width, 30).screen_width, (width, footer)
+
+
+@pytest.mark.asyncio
+async def test_a_filter_that_fits_one_page_reports_the_match_count() -> None:
+    """D35: the footer reported the whole store's size over a filtered list.
+
+    The position counter only appears when the list scrolls, and the branch it
+    falls through to was answering "how many sessions are there" — true of an
+    unfiltered picker, and plainly wrong beside eleven rows the user filtered
+    down to.
+    """
+    rows = [_row(f"{index:012d}", f"session {index}") for index in range(63)]
+    screen = SessionPickerScreen(rows, NOW)
+    screen._layout = lambda: plan_layout(120, 30)  # type: ignore[method-assign]
+
+    # Unfiltered, 63 rows scroll at this height, so the POSITION counter is
+    # what shows — and its denominator is the store total, correctly.
+    assert f"of {len(rows):,}" in screen.render_footer_for_test()
+
+    screen.set_query("session 1")
+    matches = len(screen.visible_rows)
+    assert 0 < matches <= plan_layout(120, 30).list_rows, "fixture must fit one page"
+
+    footer = screen.render_footer_for_test()
+    assert f"{matches:,} session" in footer, footer
+    assert f"{len(rows):,} sessions" not in footer, footer
