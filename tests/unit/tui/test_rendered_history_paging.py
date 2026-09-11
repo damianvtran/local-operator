@@ -1270,3 +1270,193 @@ def test_the_compaction_marker_is_spaced_apart_from_the_head_notice() -> None:
         "share a glyph, an ink and their opening words, and one is clickable "
         "while the other is not"
     )
+
+
+async def _pump(pilot, count: int) -> None:
+    for _ in range(count):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_page_fetch_is_retired_by_the_next_click(tmp_path) -> None:
+    """The stuck frame from the operator's report, and its fix.
+
+    A fetch whose owner socket never answers — and whose teardown never
+    arrives to cancel it — holds the paging lease forever. Every gesture gates
+    on that lease: the click's `_check_resume_page` and the wheel's
+    `_transcript_scrolled` both stand down against `_resume_paging`, so the
+    frame is left unscrollable with the head notice still advertising an action
+    no input can take. The reader's repeated click must retire the abandoned
+    gate and load the page itself.
+    """
+    async with remote_session(tmp_path, history(count=130)) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settled(app, pilot)
+            assert remote.history_before_token or app._resume_pending_head
+
+            fetched = asyncio.Event()
+            stall = asyncio.Event()
+            real_load = remote.load_older_display_page
+
+            async def wedged_load():
+                fetched.set()
+                try:
+                    # Bound so a missed cancel cannot hang an xdist worker.
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+                return await real_load()
+
+            remote.load_older_display_page = wedged_load
+            notice = app._resume_head_notice
+            assert isinstance(notice, OlderHistoryNotice)
+            notice.action_older()
+            await asyncio.wait_for(fetched.wait(), 5)
+            await _pump(pilot, 10)
+
+            # The wedge holds the gate; the notice keeps promising a load.
+            assert app._resume_paging
+            assert "load" in notice.text()
+
+            # The transport is healthy again underneath, and the reader clicks
+            # the same row a second time — the gesture that used to be
+            # swallowed by the gate the wedged holder never released.
+            remote.load_older_display_page = real_load
+            notice.action_older()
+            await settled(app, pilot)
+            for _ in range(8):
+                await pilot.pause()
+
+            # The retired holder freed the gate and the retry mounted rows.
+            assert not app._resume_paging
+            assert not remote.history_before_token
+            assert not app._resume_pending_head
+            assert notice.text() == "start of conversation"
+            stall.set()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_leaves_a_retryable_notice(tmp_path) -> None:
+    """A transport drop at attach must not strand the head notice.
+
+    The first fill's remote fetch raises ConnectionError; the fill stands
+    down, the frame is unscrollable, and the notice still says there is more
+    to load. Clicking it after the transport recovers must fetch and mount.
+    """
+    async with remote_session(tmp_path, history(count=130)) as remote:
+        real_load = remote.load_older_display_page
+        failing = {"flag": True}
+
+        async def flaky_load():
+            if failing["flag"]:
+                raise ConnectionError("history owner is unavailable")
+            return await real_load()
+
+        remote.load_older_display_page = flaky_load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            notice = app._resume_head_notice
+            assert notice is not None
+            assert "load" in notice.text()
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert remote.history_before_token
+            assert not app._resume_paging
+
+            failing["flag"] = False
+            assert isinstance(notice, OlderHistoryNotice)
+            app.on_older_history_notice_requested(OlderHistoryNotice.Requested(notice))
+            await settled(app, pilot)
+            for _ in range(12):
+                await pilot.pause()
+            assert not remote.history_before_token
+            assert notice.text() == "start of conversation"
+
+
+@pytest.mark.asyncio
+async def test_an_unscrollable_stuck_frame_loads_on_click(tmp_path) -> None:
+    """The operator's stuck state: no scrollbar, notice present, click loads.
+
+    A wedged first fetch holds the lease with the local head already drained
+    into an unscrollable frame. Neither a wheel notch nor a first click that
+    stood down against the lease used to recover; the second click (after
+    the breaker) must.
+    """
+    async with remote_session(tmp_path, history(count=250)) as remote:
+        wedged = {"flag": True}
+        stall = asyncio.Event()
+        real_load = remote.load_older_display_page
+
+        async def load():
+            if wedged["flag"]:
+                try:
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+            return await real_load()
+
+        remote.load_older_display_page = load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            notice = app._resume_head_notice
+            assert notice is not None
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert app._resume_paging
+            assert remote.history_before_token
+            # Scrolling cannot work on this frame; the copy must not claim it can.
+            assert "select to load" in notice.text()
+
+            wedged["flag"] = False
+            assert isinstance(notice, OlderHistoryNotice)
+            app.on_older_history_notice_requested(OlderHistoryNotice.Requested(notice))
+            await settled(app, pilot)
+            for _ in range(16):
+                await pilot.pause()
+            assert not remote.history_before_token
+            assert not app._resume_paging
+            stall.set()
+
+
+@pytest.mark.asyncio
+async def test_a_mounted_lease_survives_a_second_click(tmp_path) -> None:
+    """F1: a click must not retire a lease that has already painted rows.
+
+    The breaker exists for wedges, not for a healthy insert whose settle is
+    still answering. A second click against a mounted lease must leave the
+    holder in place so the in-flight settle is the one that releases it.
+    """
+    async with remote_session(tmp_path, history(count=250)) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            source = app._interaction
+            lease = app._acquire_paging_lease(source)
+            assert lease is not None
+            lease.mounted = True
+            broke = app._break_abandoned_paging_lease(source)
+            assert broke is False
+            assert app._paging_leases.get(source.token) is lease
+            app._release_paging_lease(lease)
+            assert source.token not in app._paging_leases
