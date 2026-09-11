@@ -5711,6 +5711,59 @@ async def test_loop_no_goal_hint_surfaces_inline_form() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_stop_says_this_terminal_while_a_turn_is_in_flight() -> None:
+    """`/loop stop` must not contradict the reader's own screen, or claim more.
+
+    The branch used to be guarded by ``_session_is_busy``, which probed
+    ``is_busy``/``busy`` — names that exist on NEITHER session class — so it
+    answered a hard-coded ``False`` and this case was unreachable: a second
+    viewer watching a loop's turns arrive from another terminal was told "no
+    loop is running", a flat contradiction of what it could see.
+
+    Replacing the dead probe with ``is_streaming`` made the case reachable but
+    wrong in the other direction: ``is_streaming`` is true for ANY in-flight
+    turn, so it also fired in the OWNER's terminal during an ordinary prompt
+    where no loop exists anywhere, and it asserted where a loop was
+    ("a loop is cancelled where it was started") while offering ``/stop`` — a
+    session-ending action — as the remedy for a no-op (UX round 1, U1/U2;
+    design round 1, D2). One scoped sentence is true in every one of those
+    states, so the branch is flat again.
+    """
+    session = GoalSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        # Collapse wrap so an 80-col break inside the notice does not matter.
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running in THIS terminal" in text
+    # Nothing may be suggested that ends the session, and nothing that names a
+    # place the reader cannot act on.
+    assert "/stop" not in text
+    assert "where it was started" not in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_loop_stop_is_the_same_honest_no_op_when_nothing_is_running() -> None:
+    """Idle and in-flight answer identically, because the answer is scoped.
+
+    The message says only what THIS terminal knows, so there is no second copy
+    to keep in step and no state in which it asserts something false.
+    """
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running in THIS terminal" in text
+    assert "/stop" not in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_loop_stops_on_turn_error() -> None:
     session = GoalSession()
     session.set_goal("g")
