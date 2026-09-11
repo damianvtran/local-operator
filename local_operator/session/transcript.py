@@ -95,6 +95,25 @@ ENTRY_PRUNE = "prune"
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset({SESSION_INCIDENT_MESSAGE_TYPE})
 
 
+def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
+    """Whether EVERY row in ``entries`` is a :data:`BOOKKEEPING_CUSTOM_TYPES`
+    record, and the batch is therefore safe to write without moving the clock.
+
+    ``all``, not ``any``, and that is the whole point: one real user message in
+    the batch means the append IS work, and freezing the clock over it would
+    hide that turn from ``retention.session_activity`` — the ONE RANKING CLOCK,
+    shared with ``session.cleanup``, so the session would rank as older than it
+    is on the picker AND age toward deletion. An empty batch answers False: a
+    write with nothing bookkeeping in it has earned no exemption.
+    """
+    return bool(entries) and all(
+        entry.type == ENTRY_MESSAGE
+        and entry.payload.get("kind") == CUSTOM_KIND_CUSTOM
+        and entry.payload.get("custom_type") in BOOKKEEPING_CUSTOM_TYPES
+        for entry in entries
+    )
+
+
 def durable_conversation_path(path: Any) -> bool:
     """Whether the transcript file at ``path`` holds a REAL conversation turn.
 
@@ -654,10 +673,12 @@ class Transcript:
         the transcript envelope, where replay preserves it without exposing
         transport bookkeeping to either model-facing history or the UI.
 
-        ``preserve_mtime`` puts the file's modification time back after the
-        durable write, so the append does not advance the session's activity
-        clock. Opt-in and for :data:`BOOKKEEPING_CUSTOM_TYPES` only — see
-        :meth:`_write_entries` for the rule and the window it does not cover.
+        ``preserve_mtime`` REQUESTS that the file's modification time be put
+        back after the durable write, so the append does not advance the
+        session's activity clock. The writer honours it only when the whole
+        batch is :data:`BOOKKEEPING_CUSTOM_TYPES`, and ignores it otherwise —
+        see :meth:`_write_entries` for the enforcement and the window the
+        restore does not cover.
         """
         entries = await self.append_messages(
             [message],
@@ -920,14 +941,23 @@ class Transcript:
         sentinels (``resume._write_title_scan_sentinel``,
         ``resume._write_origin_scan_sentinel``) already stat-then-``os.utime``
         for exactly that reason, and this applies the same rule to the
-        transcript. Best-effort by the same contract as theirs \u2014 a failed
-        restore costs one wrong age on one picker row, while raising would cost
-        the entry, and the boot-time incident is the only thing telling the
-        model why its last run failed.
+        transcript.
+
+        **The flag is a request this method validates, never an instruction it
+        obeys.** :func:`_is_bookkeeping_batch` gates the restore, so a caller
+        that sets it on a batch carrying a real user message gets the ordinary
+        clock-advancing write: one careless call site must not be able to erase
+        a turn from the picker's ranking and from ``session.cleanup``'s age.
+        Both exits restore — the rollback path as well as the success path,
+        because ``open("a")`` and ``os.truncate`` each stamp the file even when
+        the write itself fails. Best-effort by the same contract as the sites
+        above — a failed restore costs one wrong age on one picker row, while
+        raising would cost the entry, and the boot-time incident is the only
+        thing telling the model why its last run failed.
 
         **What the restore does NOT protect against:** a reader that stats the
-        file in the window between the ``fsync`` and the ``os.utime`` \u2014 one
-        syscall wide \u2014 observes the advanced mtime. Every stat-keyed reader
+        file in the window between the ``fsync`` and the ``os.utime`` — one
+        syscall wide — observes the advanced mtime. Every stat-keyed reader
         downstream also carries the SIZE, which still changes on every append:
         ``search_index.build_index``'s ``[st_size, st_mtime, title_mtime]``
         still invalidates, ``mobile.durable.DurableFoldCache`` takes its
@@ -952,8 +982,12 @@ class Transcript:
             else:
                 previous_size = previous.st_size
                 # Off the SAME stat as the rollback boundary: the restore is
-                # not worth a second syscall on a path every turn takes.
-                previous_mtime = previous.st_mtime if preserve_mtime else None
+                # not worth a second syscall on a path every turn takes. The
+                # flag is a REQUEST, honoured only for a batch that is wholly
+                # bookkeeping — see :func:`_is_bookkeeping_batch`.
+                previous_mtime = (
+                    previous.st_mtime if preserve_mtime and _is_bookkeeping_batch(entries) else None
+                )
                 try:
                     with self.path.open("a", encoding="utf-8") as handle:
                         for entry in entries:
@@ -963,22 +997,21 @@ class Transcript:
                 except FileNotFoundError:
                     rebuild = True
                 except BaseException:
-                    # Deliberately no restore here: an append that failed rolled
-                    # back to its old byte boundary and did not move the clock.
+                    # The BYTES roll back, but the clock does not roll back with
+                    # them: ``open("a")`` stamps the file before the write fails
+                    # and ``os.truncate`` stamps it again, so a failed
+                    # bookkeeping append still moves the mtime (measured at
+                    # +24763 h on a forced fsync failure). Restore it here too,
+                    # or the rollback path reintroduces the very defect the
+                    # success path closes.
                     try:
                         os.truncate(self.path, previous_size)
                     except FileNotFoundError:
                         pass
+                    self._restore_mtime(previous_mtime)
                     raise
                 else:
-                    if previous_mtime is not None:
-                        try:
-                            os.utime(self.path, (previous_mtime, previous_mtime))
-                        except OSError:
-                            logger.debug(
-                                "could not restore transcript mtime after a bookkeeping append",
-                                exc_info=True,
-                            )
+                    self._restore_mtime(previous_mtime)
         if rebuild:
             self.directory.mkdir(parents=True, exist_ok=True)
             self._created_at = ensure_session_created_at(
@@ -996,6 +1029,25 @@ class Transcript:
                 except FileNotFoundError:
                     pass
                 raise
+
+    def _restore_mtime(self, previous_mtime: float | None) -> None:
+        """Put a bookkeeping append's pre-write mtime back, best-effort.
+
+        ``None`` means the batch never earned the exemption and the clock is
+        meant to move. Never raises: a failed restore costs one wrong age on one
+        picker row, while propagating would cost the entry itself — and on the
+        rollback path it would mask the original write failure the caller is
+        about to re-raise.
+        """
+        if previous_mtime is None:
+            return
+        try:
+            os.utime(self.path, (previous_mtime, previous_mtime))
+        except OSError:
+            logger.debug(
+                "could not restore transcript mtime after a bookkeeping append",
+                exc_info=True,
+            )
 
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):

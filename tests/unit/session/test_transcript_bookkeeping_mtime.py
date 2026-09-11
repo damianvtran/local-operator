@@ -149,3 +149,75 @@ async def test_a_rebuild_does_not_attempt_a_restore(tmp_path):
     lines = transcript.path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == committed + 1
     assert TranscriptEntry.from_json(lines[-1]) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_flag_refuses_a_batch_carrying_real_work(tmp_path):
+    """``preserve_mtime`` must not be able to freeze the clock over a turn.
+
+    QA round 1. ``BOOKKEEPING_CUSTOM_TYPES`` is defined in ``transcript.py``
+    and cited by both :meth:`Transcript.append_message` and
+    :meth:`Transcript._write_entries` as the rule that governs this flag —
+    "an append carrying only :data:`BOOKKEEPING_CUSTOM_TYPES`" — but no code
+    path evaluates it: the restore keys on the boolean alone. A caller that
+    passes ``preserve_mtime=True`` on a batch containing a real user message
+    therefore erases that turn from ``retention.session_activity``, which is
+    the ONE RANKING CLOCK shared with ``session.cleanup``: the session ranks
+    as older than it is on the picker AND ages toward deletion.
+
+    Only ``Session.journal_incident`` passes the flag today, so this is not
+    reachable in production — it is one careless caller away, and nothing
+    guards it. The docstring's claim is the contract; this pins it.
+    """
+    from local_operator.session.retention import session_activity
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(tmp_path / "sess")
+    await _seeded(transcript)
+    before = session_activity(transcript.directory)
+    assert before == pytest.approx(PAST, abs=1e-6)
+
+    await transcript.append_messages(
+        [_incident(), Message.user("deploy the release")],
+        preserve_mtime=True,
+    )
+
+    assert "deploy the release" in transcript.path.read_text(encoding="utf-8")
+    after = session_activity(transcript.directory)
+    assert after is not None and after > PAST, (
+        "a batch carrying a real user message was clock-frozen: the append "
+        "claims to honour BOOKKEEPING_CUSTOM_TYPES but never reads it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bookkeeping_append_does_not_move_the_clock_either(tmp_path, monkeypatch):
+    """The rollback path restores too, because the bytes roll back and the
+    clock does not roll back with them.
+
+    ``open("a")`` stamps the file before the write fails and ``os.truncate``
+    stamps it again, so a failed bookkeeping append used to advance the
+    activity clock by the full age of the transcript — measured at +24763 h on
+    a forced fsync failure (QA round 2). That is the very defect this module
+    exists to close, reintroduced through the error path, so it is pinned here
+    rather than left to the success path's coverage.
+    """
+    import local_operator.session.transcript as transcript_mod
+    from local_operator.session.retention import session_activity
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(tmp_path / "sess")
+    await _seeded(transcript)
+    before = session_activity(transcript.directory)
+    size_before = transcript.path.stat().st_size
+
+    def failing_fsync(fd):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(transcript_mod.os, "fsync", failing_fsync)
+
+    with pytest.raises(OSError):
+        await transcript.append_message(_incident(), preserve_mtime=True)
+
+    assert transcript.path.stat().st_size == size_before
+    assert session_activity(transcript.directory) == pytest.approx(before, abs=1e-6)
