@@ -1,0 +1,10 @@
+# after-collapsed.svg (100x30, cell width 8px)
+y=  47.934  c2='▌' | c4='what' | c9='is' | c12='left' | c17='before' | c24='we' | c27='can' | c31='cut' | c35='the' | c39='release?'
+y=  81.934  c2='Two' | c6='PRs' | c10='are' | c14='still' | c20='in' | c23='review.' | c31='Checking' | c40='what' | c45='has' | c49='merged' | c56='since' | c62='the' | c66='tag.'
+y= 115.934  c3='\uf120' | c5='bash' | c14='git' | c18='log' | c22='--oneline' | c32='v0.50.3..origin/main' | c88='✓' | c91='0.0s'
+y= 149.934  c3='\uf01c' | c5='peer' | c14='"lo-release-window"' | c34='·' | c36='I' | c38='am' | c41='claiming' | c50='the' | c54='current' | c62='release' | c70='window' | c77='as' | c80='owner' | c86='(pid' | c91='4821…'
+y= 183.934  c3='\uf1d8' | c5='send' | c14='wake' | c19='·' | c21='lo-release-window' | c39='·' | c41='ack' | c45='—' | c47='folding' | c55='#751' | c60='into' | c65='your' | c70='window' | c88='✓' | c91='0.0s'
+y= 217.934  c3='\uf01c' | c5='peer' | c14='"lo-mcp-oauth-tombstone"' | c39='·' | c41='gates' | c47='are' | c51='green' | c57='on' | c60='#751' | c65='—' | c67='merging' | c75='now'
+y= 251.934  c2='A' | c4='peer' | c9='already' | c17='owns' | c22='the' | c26='window,' | c34='so' | c37='I' | c39='have' | c44='handed' | c51='it' | c54='our' | c58='PR.'
+y= 438.934  c2='❯' | c6='Message' | c14='Local' | c20='Operator…'
+y= 472.934  c2='◆' | c4='test/model' | c15='›' | c17='⌂' | c19='/Users/damian/local-operator-worktrees/ledger-inset'
