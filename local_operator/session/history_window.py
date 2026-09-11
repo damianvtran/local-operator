@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.transcript import (
     audit_slice,
@@ -717,7 +718,18 @@ def _capture_display_window(
         start=start,
         audit_available=audit_available,
         theme_turn_count=sum(getattr(m, "role", "") in ("user", "assistant") for m in history),
+        # The opener names the conversation, and a title is read by a person.
+        # A row the harness minted from a ``CustomMessage`` is not the user's
+        # opening prompt (see ``harness/rows.py``), so it must not title a
+        # thread "[model switch] You are now running as …" — the rows an older
+        # build already leaked into a transcript are exactly why this scan
+        # checks the stamp rather than trusting the role alone.
         opener_text=next(
-            (m.text[:256] for m in history if isinstance(m, Message) and m.role == "user"), ""
+            (
+                m.text[:256]
+                for m in history
+                if isinstance(m, Message) and m.role == "user" and not is_harness_injection(m)
+            ),
+            "",
         ),
     )
