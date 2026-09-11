@@ -334,7 +334,7 @@ SECTIONS: tuple[Section, ...] = (
     # a setting I want it to go into effect for all my agents") is the
     # opposite: a disk write IS the machine-wide intent, and it overrides any
     # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
-    # applies at the next approval DECISION (``OwnedSessionHandle`` reads its
+    # applies at the next approval DECISION (``ServingSessionHandle`` reads its
     # flag per gate call), so a prompt already parked on screen is left for
     # the human — never auto-answered, never auto-denied; and every viewer
     # prints the amber "tool approvals now auto" notice. ``--yolo`` is an

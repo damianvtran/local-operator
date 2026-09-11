@@ -523,7 +523,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     to do: page a display window it did not build, ask the runtime to stop,
     adopt a takeover, report which build the runtime is running.
 
-    **Why this is declared.** These members exist only on ``RemoteSession``,
+    **Why this is declared.** These members exist only on ``AttachedSession``,
     and its hosts reached all of them through ``getattr(session, "name", None)``
     duck-probes rather than through a type \u2014 roughly forty undeclared members
     at the time of writing, on the object the entire front end is written
@@ -534,7 +534,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     wrong. A rename on the facade or a typo in a probe string is invisible to
     pyright and surfaces as a silently missing capability at runtime, which is
     exactly how ``/info`` reported zero subagents for a session that had
-    several (see ``RemoteSession.subagent_comms``).
+    several (see ``AttachedSession.subagent_comms``).
 
     **Why it is a separate protocol and not more of SessionProtocol.**
     Runtimes genuinely do not have these members and should not be forced to grow
@@ -545,7 +545,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     **How the TUI reaches it.** Through ``tui/app.py::_is_viewer``, a
     ``TypeGuard[ViewerSessionProtocol]`` over the declared ``owns_runtime``
     predicate — NOT through ``isinstance`` against this class. The sixteen
-    ``isinstance(session, RemoteSession)`` checks that preceded it became one
+    ``isinstance(session, AttachedSession)`` checks that preceded it became one
     predicate, and pyright narrows to this type inside every true branch, so
     the members below are statically checked at each of those call sites.
 
@@ -553,7 +553,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     production path performs an ``isinstance`` against it. The decorator is not
     here to be used at runtime by the app; it is what lets
     ``tests/unit/session/test_viewer_protocol.py`` assert conformance
-    STRUCTURALLY — that ``RemoteSession`` satisfies this protocol and that
+    STRUCTURALLY — that ``AttachedSession`` satisfies this protocol and that
     ``Session`` does not, which is the property making the split meaningful
     rather than decorative. Those assertions run once per test, never on a
     paint path.
@@ -564,7 +564,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     3.12.13, min-of-seven over 2,000 iterations:
 
     ====================================================  ==================
-    ``isinstance(viewer, RemoteSession)`` (what it was)    0.014-0.015 us
+    ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
     ``isinstance(viewer, ViewerSessionProtocol)``            55-58 us
     ``not session.owns_runtime`` (what it is now)          0.021-0.024 us
     ====================================================  ==================
@@ -583,16 +583,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     overwhelmingly positive.)
 
     **HOW to re-measure, because the obvious method silently measures the wrong
-    path.** Only a FULLY CONSTRUCTED ``RemoteSession`` is a positive here — the
+    path.** Only a FULLY CONSTRUCTED ``AttachedSession`` is a positive here — the
     cost is 84 property getters actually executing, so anything cheaper to build
     is cheaper to check for the wrong reason:
 
     ==========================================  =========  ==========
     construction                                positive?  measured
     ==========================================  =========  ==========
-    ``RemoteSession(config_dir=..., ...)``       **yes**    ~55 us
-    ``RemoteSession.__new__(RemoteSession)``     no         ~15 us
-    ``MagicMock(spec=RemoteSession)``            no         ~3 us
+    ``AttachedSession(config_dir=..., ...)``       **yes**    ~55 us
+    ``AttachedSession.__new__(AttachedSession)``     no         ~15 us
+    ``MagicMock(spec=AttachedSession)``            no         ~3 us
     a synthetic class from ``__protocol_attrs__``  no       ~1-2 us
     ==========================================  =========  ==========
 
@@ -612,7 +612,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     Headless hosts need this surface too, which is why it lives here rather
     than in the TUI: ``server/utils/desktop_sessions.py`` already imports,
-    types against, and constructs ``RemoteSession`` to serve history pages.
+    types against, and constructs ``AttachedSession`` to serve history pages.
 
     The member list is not curated by hand \u2014 it is derived by AST from every
     session-valued attribute access in ``tui/app.py`` and asserted complete by
@@ -722,7 +722,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         type-narrowing made pyright ask for it at three TUI sites. That is the
         guard working: the member was always reachable and always unchecked.
 
-        **Raises until the first sync.** ``RemoteSession.frontend_state`` raises
+        **Raises until the first sync.** ``AttachedSession.frontend_state`` raises
         ``RuntimeError`` while ``_frontend_store`` is None, so a caller on a
         paint path that cannot tolerate a raise probes defensively instead —
         several in ``app.py`` deliberately do, and ``_session_subject`` records
@@ -865,7 +865,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Unlike the duck-probed members, these three were NOT invisible to
         pyright before this declaration: the routes reach them through
         ``DesktopSessionBridge.remote``, annotated as a concrete
-        ``RemoteSession | None``, so a rename was already a type error there —
+        ``AttachedSession | None``, so a rename was already a type error there —
         reproduced against the pre-PR base (QA round 3, Q8, correcting an
         earlier claim here that it was not). Declaring them buys the protocol's
         coverage of the surface, not a check that was missing.

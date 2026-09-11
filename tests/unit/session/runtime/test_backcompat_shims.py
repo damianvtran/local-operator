@@ -46,10 +46,10 @@ def test_registry_shim_re_exports_the_same_functions() -> None:
 
 def test_owned_shim_re_exports_the_same_objects() -> None:
     shim = importlib.import_module("local_operator.mobile.owned")
-    owned = importlib.import_module("local_operator.session.runtime.owned")
+    serving = importlib.import_module("local_operator.session.runtime.serving")
 
-    assert shim.OwnedSessionHandle is owned.OwnedSessionHandle
-    assert shim.spawn_owned_session is owned.spawn_owned_session
+    assert shim.ServingSessionHandle is serving.ServingSessionHandle
+    assert shim.spawn_owned_session is serving.spawn_owned_session
 
 
 def test_child_shim_re_exports_the_same_entrypoint() -> None:

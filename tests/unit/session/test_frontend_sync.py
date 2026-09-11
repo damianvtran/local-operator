@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from local_operator.mobile.attach_client import AttachClient
+from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
-from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -43,8 +43,8 @@ async def test_owner_two_followers_share_full_1m_state_and_live_updates(
         record = await _record(tmp_path)
         assert FRONTEND_CAPABILITY in record.capabilities
         first, second = await asyncio.gather(
-            RemoteSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never),
-            RemoteSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never),
+            AttachedSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never),
+            AttachedSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never),
         )
         assert first.frontend_state == second.frontend_state
         assert first.effective_model.context_window == 1_000_000
@@ -75,7 +75,7 @@ async def test_owner_two_followers_share_full_1m_state_and_live_updates(
 async def test_real_socket_follower_consumes_immutable_subagent_progress_and_settlement(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """RuntimeServer → RemoteSession keeps the follower's full child ledger usable."""
+    """RuntimeServer → AttachedSession keeps the follower's full child ledger usable."""
     import time
 
     from local_operator.session.frontend_state import JobState
@@ -111,7 +111,7 @@ async def test_real_socket_follower_consumes_immutable_subagent_progress_and_set
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         app = OperatorApp(_remote_factory(remote))
@@ -214,7 +214,7 @@ async def test_wrong_key_wrong_session_and_old_protocol_are_rejected(
 
         old = record.__class__(**{**record.to_json(), "protocol": 4, "capabilities": []})
         with pytest.raises(ConnectionError, match="lacks tui_state_v1"):
-            await RemoteSession.connect(old, "s1", config_dir=tmp_path, takeover_factory=_never)
+            await AttachedSession.connect(old, "s1", config_dir=tmp_path, takeover_factory=_never)
     finally:
         registrant.close()
 
@@ -404,8 +404,8 @@ async def test_real_session_streams_through_registrant_to_two_followers(
     try:
         record = await _record(tmp_path)
         first, second = await asyncio.gather(
-            RemoteSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
-            RemoteSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
+            AttachedSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
+            AttachedSession.connect(record, "conv", config_dir=tmp_path, takeover_factory=_never),
         )
         events: list[str] = []
         first.subscribe(lambda event: events.append(event.type))

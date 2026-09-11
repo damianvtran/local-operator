@@ -21,7 +21,7 @@ socket and speaks one new control op. We add:
 1. one new `ControlOp` (`peer_message`) + its frame validation,
 2. one branch in `Registrant._dispatch`,
 3. one new `SessionHandle` method (`receive_peer_message`) implemented on the
-   two real handles (`OwnedSessionHandle`, `TuiSessionHandle`) plus a new
+   two real handles (`ServingSessionHandle`, `TuiSessionHandle`) plus a new
    `Session.receive_peer_message`,
 4. one new transcript custom type (`PEER_MESSAGE_MESSAGE_TYPE`) that renders
    with a cross-session indicator in TUI, mobile web, and the subagent/peek
@@ -202,9 +202,9 @@ Make it **optional at the Protocol level** by treating it as a capability
 `registrant.py:657`), so fake/third-party handles in tests need not implement
 it. Add it to the Protocol for documentation and typing on the real handles.
 
-### 2.2 `OwnedSessionHandle.receive_peer_message`
+### 2.2 `ServingSessionHandle.receive_peer_message`
 
-`local_operator/mobile/owned.py` (add after `steer`, ~L623). This handle owns an
+`local_operator/mobile/serving.py` (add after `steer`, ~L623). This handle owns an
 in-process `Session` on `self._loop`:
 
 ```python
@@ -220,7 +220,7 @@ async def receive_peer_message(
     detail = await self._session.receive_peer_message(
         text, mode=mode, wake=wake, sender=sender or {}
     )
-    # Mirror the phone fold the same way steer() does (owned.py:620-622): put a
+    # Mirror the phone fold the same way steer() does (serving.py:620-622): put a
     # visible row on the projection now so any attached phone paints it without
     # waiting for the next MessageStartEvent.
     self._fold.note_peer_message(text, sender=sender or {})
@@ -962,7 +962,7 @@ Backend/protocol:
   `PROTOCOL_VERSION` bump (comment why).
 - `local_operator/mobile/registrant.py`: `_dispatch` peer branch;
   `SessionHandle` Protocol += `receive_peer_message`.
-- `local_operator/mobile/owned.py`: `OwnedSessionHandle.receive_peer_message`.
+- `local_operator/mobile/serving.py`: `ServingSessionHandle.receive_peer_message`.
 - `local_operator/mobile/tui_handle.py`: `TuiSessionHandle.receive_peer_message`.
 - `local_operator/session/session.py`: `Session.receive_peer_message`;
   `_peer_custom_message`; add `PEER_MESSAGE_MESSAGE_TYPE` to the custom-type

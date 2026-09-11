@@ -329,7 +329,7 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
     from local_operator.agents import AgentRegistry
     from local_operator.credentials import CredentialManager
     from local_operator.exec_mode import ExecArgs, job_status
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session_factory import create_session
     from local_operator.tui.app import OperatorApp
     from tests.e2e.harness import wait_for_adoption
@@ -358,7 +358,7 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
     try:
         async with app.run_test(size=(110, 34)) as pilot:
             await wait_for_adoption(app, pilot)
-            assert isinstance(app._session, RemoteSession)
+            assert isinstance(app._session, AttachedSession)
             assert app._session.session_id == session_id
             assert app._session.active_team_name == (team or "")
             await pilot.pause()

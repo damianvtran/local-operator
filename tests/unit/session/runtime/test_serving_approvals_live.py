@@ -1,4 +1,4 @@
-"""``OwnedSessionHandle``'s approval gate follows ``tool_approval_mode`` live.
+"""``ServingSessionHandle``'s approval gate follows ``tool_approval_mode`` live.
 
 The gate the RUNTIME's tools actually consult is ``_auto_approve`` on the
 handle (``_install_gates``), read per decision. ``follow_config`` hangs a
@@ -20,8 +20,8 @@ import pytest
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests
-from local_operator.session.runtime.owned import OwnedSessionHandle
-from tests.unit.session.runtime.test_owned import FakeSession
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.runtime.test_serving import FakeSession
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +40,7 @@ def _write_elsewhere(config_dir, key: str, value: Any) -> None:
 
 def _handle(
     tmp_path, *, auto_approve: bool, pinned: bool = False
-) -> tuple[OwnedSessionHandle, FakeSession, ConfigWatcher, list[Any]]:
+) -> tuple[ServingSessionHandle, FakeSession, ConfigWatcher, list[Any]]:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     ConfigManager(config_dir).set_config_value(
@@ -53,7 +53,7 @@ def _handle(
         emitted.append(event)
 
     session._emit = _emit
-    handle = OwnedSessionHandle(
+    handle = ServingSessionHandle(
         session,
         asyncio.get_running_loop(),
         cwd=str(tmp_path),

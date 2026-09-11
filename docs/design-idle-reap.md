@@ -98,7 +98,7 @@ live socket whose owner deltas are still delivered while parked"
 (`app.py:1367-1368`).
 
 **That price is wrong, and the omission is the defect.** A parked
-presentation pins its leased `RemoteSession`, whose attach socket makes the
+presentation pins its leased `AttachedSession`, whose attach socket makes the
 runtime's `attach_clients()` return 1 (`server.py:1536-1551`), which is
 term 3 of `process._should_exit` (`process.py:282-283`). So a widget cache
 sized for a *rendering* working set silently became a **process** working
@@ -165,7 +165,7 @@ two, and both are wrong for an idle reap of a displayed session:
 
 Bare EOF is worse than it looks for exactly the sources we care about.
 `_can_go_cold` is set from `surface == "desktop"` (`remote.py:485`), and
-`_lease_sidebar_source` calls `RemoteSession.connect` (`app.py:4056-4062`)
+`_lease_sidebar_source` calls `AttachedSession.connect` (`app.py:4056-4062`)
 without a `surface` argument, so it defaults to `"terminal"`
 (`remote.py:782`) and `_can_go_cold` is **False**. A parked source that sees
 EOF therefore enters runtime-death recovery and, per
@@ -338,7 +338,7 @@ churn loop in §2 gets discovered in production instead of in this note.
 ### 3.4 What resets the clock, if one is ever built
 
 Recorded for completeness (question 2), and stated in the existing
-vocabulary rather than a new one. `is_busy()` (`owned.py:688-740`) already
+vocabulary rather than a new one. `is_busy()` (`serving.py:688-740`) already
 covers turns, compaction, subagents, jobs, queued prompts and parked gates,
 and is checked first and alone (`process.py:277-279`).
 
@@ -406,7 +406,7 @@ The fix is to offer the runtime back on the sidebar-leave path too, before
 the same `getattr` probe the existing caller uses (`app.py:12949-12951`).
 Nothing else is required: the op already refuses when another viewer is
 attached (`server.py:1743-1745`) or anything durable exists
-(`is_pristine`, `owned.py:809-894`, every probe failing closed), and its
+(`is_pristine`, `serving.py:809-894`, every probe failing closed), and its
 failure mode is "the runtime stays up and the drain gets it"
 (`remote.py:4941-4944`).
 
@@ -422,8 +422,8 @@ the drain reaps in 3 s. Adding the offer makes it *immediate* rather than
 | scenario | what keeps it alive |
 |---|---|
 | Reading a long conversation for 6 min, then typing | It is the CURRENT session. `_sidebar_source_releasable` refuses on `source is not self._interaction` (`app.py:4638`), which is checked before any other clause and is not time-based. Nothing in this design can reap the displayed session — that is the entire reason I reject the runtime-side clock. |
-| Session parked on an approval | Three independent guards: `is_busy()` counts a parked gate as a running turn (`owned.py:692-695`, `724-727`), so `_should_exit` refuses; `has_pending_gate_reply` refuses release (`app.py:4642`); `gate_draft` makes it `retained_for_local_work` (`session_interaction.py:170`). |
-| Detached background job | `is_busy()` counts running jobs (`owned.py:728-737`, uncertainty failing closed at 736-737) and background tasks (738-739). The runtime refuses to exit regardless of viewer state. Note this is genuinely *stronger* than the viewer's own `retained_for_auto_work`, which is gated on `approve_all` (`session_interaction.py:186`) — but that only means the viewer may release a socket, never that the runtime dies. |
+| Session parked on an approval | Three independent guards: `is_busy()` counts a parked gate as a running turn (`serving.py:692-695`, `724-727`), so `_should_exit` refuses; `has_pending_gate_reply` refuses release (`app.py:4642`); `gate_draft` makes it `retained_for_local_work` (`session_interaction.py:170`). |
+| Detached background job | `is_busy()` counts running jobs (`serving.py:728-737`, uncertainty failing closed at 736-737) and background tasks (738-739). The runtime refuses to exit regardless of viewer state. Note this is genuinely *stronger* than the viewer's own `retained_for_auto_work`, which is gated on `approve_all` (`session_interaction.py:186`) — but that only means the viewer may release a socket, never that the runtime dies. |
 | Phone attached | An interactive phone attach dials as `"attach"` (`process.py:272-275`) and counts in `attach_clients()`; the SSE watcher registers through `watch` (`server.py:1598-1608`). A TUI releasing its own socket does not touch either. |
 
 **The risks I would actually watch during rollout**, none of which the table

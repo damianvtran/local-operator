@@ -60,7 +60,7 @@ async def main() -> None:
         config = Path.home() / ".local-operator"
         os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config)
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     session_id = uuid.uuid4().hex[:12]
@@ -68,11 +68,11 @@ async def main() -> None:
     async def _never() -> None:
         raise AssertionError("takeover was not expected")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         session_id, config_dir=config, cwd=os.getcwd(), takeover_factory=_never
     )
 
-    async def factory() -> RemoteSession:
+    async def factory() -> AttachedSession:
         return viewer
 
     app = OperatorApp(factory)

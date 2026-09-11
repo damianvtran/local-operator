@@ -1,7 +1,7 @@
 """Desktop read receipts: a cold durable path that never admits or binds.
 
 The desktop control surface reaches sessions through `DesktopSessionBridge`,
-which acquires a `RemoteSession` and can START an owner. A read receipt must
+which acquires a `AttachedSession` and can START an owner. A read receipt must
 not do any of that: the user is looking at a conversation that already ended,
 frequently with no owner alive at all, and marking it read is not a reason to
 spawn a process. These tests pin that separation plus the ordering rules the
@@ -30,7 +30,7 @@ async def test_a_read_receipt_never_acquires_a_session_or_starts_an_owner(tmp_pa
     """The cold path is the point: no bridge, no attach, no spawn.
 
     `DesktopSessions.session()` is the only other way in, and it constructs a
-    `RemoteSession` that will start an owner for a cold session. Reading is not
+    `AttachedSession` that will start an owner for a cold session. Reading is not
     an admission, so this route must not reach it -- an exploding `session()`
     is how that stays true if someone later "simplifies" the implementation.
     """

@@ -55,7 +55,7 @@ from typing import Literal, Union, cast
 #:
 #: Lives here, beside the gate concept itself, because three layers need to
 #: agree on it and none of them may import the others: the runtime WRITES it
-#: (``session/runtime/owned.py``), the session RENDERS it for the model
+#: (``session/runtime/serving.py``), the session RENDERS it for the model
 #: (``session/session.py``), and the TUI renders it for the user. A copy in
 #: any one of them would be a fourth place for the string to drift.
 #:

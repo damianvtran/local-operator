@@ -208,14 +208,14 @@ async def test_tui_auto_registers_and_answers_control() -> None:
 
 def test_the_started_hook_is_wired_and_reseeded_on_rebind(tmp_path) -> None:
     """Q2: ``TuiSessionHandle`` must wire ``session._publish_session_started``
-    the way ``OwnedSessionHandle`` does, or a TUI-owned ``kind="tui"`` record
+    the way ``ServingSessionHandle`` does, or a TUI-owned ``kind="tui"`` record
     stays ``started=False`` forever. Rebind must RE-wire it on the new session
     object and re-seed the registrant's bit from the new session's own durable
     history: a ``/new`` (no message rows) drops back to False — the composer
     window — while a ``/resume`` (message rows on disk) reads True."""
 
     class _Session(FakeSession):
-        # The attribute OwnedSessionHandle/TuiSessionHandle wire onto a real
+        # The attribute ServingSessionHandle/TuiSessionHandle wire onto a real
         # Session; the fake does not carry it, so the test stands it up.
         def __init__(self, session_id: str, transcript_rows: list[str]) -> None:  # noqa: ANN001
             super().__init__()

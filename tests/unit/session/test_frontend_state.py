@@ -930,7 +930,7 @@ def test_a_fork_restores_its_own_session_id_not_the_parents(tmp_path) -> None:
     A fork copies ``transcript.jsonl`` verbatim, so the newest checkpoint it
     restores was written BY THE PARENT and carries the parent's ``session_id``.
     The runtime then served that id in every ``frontend_sync`` and
-    ``RemoteSession._install_frontend`` refused the frame — a fork nobody could
+    ``AttachedSession._install_frontend`` refused the frame — a fork nobody could
     attach to, and (in switch mode) a fork whose own viewer never got a state
     install, so ``/model`` looked inert and the band never painted its context.
     The same shape as the ``COPIED_SIDECARS`` set-equality test in

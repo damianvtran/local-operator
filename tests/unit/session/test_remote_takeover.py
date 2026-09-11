@@ -1,4 +1,4 @@
-"""Owner-death recovery semantics for RemoteSession."""
+"""Owner-death recovery semantics for AttachedSession."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-import local_operator.session.remote as remote_module
-from local_operator.session.remote import RemoteSession
+import local_operator.session.attached as remote_module
+from local_operator.session.attached import AttachedSession
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_owner_death_takes_over_silently_and_retains_submitted_input(
         return winner
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=takeover,
@@ -92,7 +92,7 @@ async def test_takeover_swaps_subscription_and_updates_flow_from_the_winner(
         return winner
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=takeover)
+    remote = AttachedSession(config_dir=tmp_path, session_id="s1", takeover_factory=takeover)
     remote._install_frontend(
         FrontendSessionState(session_id="s1", epoch="dead-owner", cumulative_parent_cost=12.34)
     )
@@ -141,7 +141,7 @@ async def test_deliberate_stop_never_takes_over(tmp_path, monkeypatch) -> None:
         raise AssertionError("takeover must not run after a deliberate stop")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=takeover,
@@ -175,7 +175,7 @@ async def test_wire_stop_by_another_process_never_takes_over(tmp_path, monkeypat
         raise AssertionError("takeover must not run after a deliberate stop")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=takeover,
@@ -208,7 +208,7 @@ async def test_owner_death_without_stopped_marker_still_takes_over(tmp_path, mon
 
     winner = Winner()
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=winner),
@@ -251,7 +251,7 @@ async def test_wire_stopping_frame_prevents_takeover_without_any_wake_entry(
         raise AssertionError("takeover must not run after an announced stop")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=takeover,
@@ -293,7 +293,7 @@ async def test_a_failed_stop_does_not_disable_later_owner_death_recovery(
 
     winner = Winner()
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=winner),
@@ -322,7 +322,7 @@ async def test_a_failed_stop_does_not_disable_later_owner_death_recovery(
 async def test_stop_with_no_client_attached_does_not_latch(tmp_path, monkeypatch) -> None:
     """The simpler failure shape: nothing attached, so nothing was stopped."""
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -349,7 +349,7 @@ async def test_a_stopped_viewer_is_told_so_and_never_says_reconnecting(
 
     told: list[str] = []
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -375,7 +375,7 @@ async def test_a_dropped_connection_still_says_reconnecting(tmp_path, monkeypatc
     this is what stops the D3-1 fix from lying in the other direction.
     """
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -401,7 +401,7 @@ async def test_a_deliberate_stop_ends_the_turn_in_both_states(
     from local_operator.mobile.attach_client import STOPPED_REASON
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -437,7 +437,7 @@ async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch)
     from local_operator.harness.types import AgentEndEvent
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -472,7 +472,7 @@ async def test_a_disconnect_followed_by_going_cold_ends_the_turn_once(
     from local_operator.harness.types import AgentEndEvent
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -530,7 +530,7 @@ async def test_going_cold_survives_a_controllers_higher_adopted_generation(
     successor_first_turn_generation = 1  # Session.__init__ starts a fresh count
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -590,7 +590,7 @@ async def test_going_cold_does_not_let_a_raising_handler_break_teardown(
     of the process.
     """
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),

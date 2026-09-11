@@ -1,4 +1,4 @@
-"""Real HTTP + canonical Session/OwnedSessionHandle/RuntimeServer/AttachClient.
+"""Real HTTP + canonical Session/ServingSessionHandle/RuntimeServer/AttachClient.
 
 Only the provider stream is scripted. No session, socket, admission, transcript,
 gate or bridge is mocked: this catches the seams a green adapter suite cannot.
@@ -17,8 +17,8 @@ import uvicorn
 
 from local_operator.mobile.attach_client import AttachClient
 from local_operator.server.app import app
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 pytestmark = pytest.mark.e2e
@@ -110,7 +110,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     members=[TeamMember(role="coder")],
                 )
             )
-            handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
             runtime = RuntimeServer(handle, kind="daemon")
             await runtime.start_in_process()
             # The assembled test owns this in-process Session; production's

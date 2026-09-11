@@ -14,9 +14,9 @@ import pytest
 from textual.events import MouseScrollUp
 
 from local_operator.harness.types import Message, TextContent
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
@@ -66,10 +66,10 @@ async def remote_session(tmp_path: Path, rows: list[Message], name: str = "pagin
     directory = config / "sessions" / f"synthetic-{name}"
     await seed_transcript(directory, rows)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,
@@ -214,7 +214,7 @@ async def test_remote_fetch_lease_extends_through_painted_settlement(tmp_path) -
             view = app._transcript_view()
             assert view.scroll_y >= view.container_size.height
             # Consume only already-local rows so the next real control action
-            # must cross the production RemoteSession / runtime RPC boundary.
+            # must cross the production AttachedSession / runtime RPC boundary.
             while app._resume_pending_head:
                 app._mount_older_resume_page()
                 await settled(app, pilot)
@@ -1077,10 +1077,10 @@ async def compacted_session(tmp_path: Path, *, compactions: int = 3, rows_each: 
     directory = config / "sessions" / "synthetic-compacted"
     await compacted_history(directory, compactions=compactions, rows_each=rows_each)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,

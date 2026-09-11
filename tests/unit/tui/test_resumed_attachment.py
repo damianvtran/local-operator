@@ -268,7 +268,7 @@ async def test_a_restored_goal_is_reported(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> None:
-    """R4: owner death swaps a RemoteSession facade for a REAL Session, which
+    """R4: owner death swaps a AttachedSession facade for a REAL Session, which
     restores its attachment at construction. ``StatusLine.update`` treats
     ``None`` as leave-alone, so omitting the two segments left whatever the
     remote facade had painted — the one adopt sink that did not show them."""

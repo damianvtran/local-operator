@@ -50,7 +50,7 @@ publishes its record on the CLI startup path, where dragging in
 every ``lop`` invocation including ``--version``.
 
 So an entry point added here must resolve its heavy dependencies lazily
-(function-local imports), exactly as :func:`.owned.spawn_owned_session`
+(function-local imports), exactly as :func:`.serving.spawn_owned_session`
 already does with ``session_factory``. ``tests/unit/test_import_graph.py``
 is the guard that will catch the alternative.
 """

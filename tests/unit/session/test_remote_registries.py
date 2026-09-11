@@ -4,7 +4,7 @@ Teams and agent profiles are LOCAL CONFIG — files under ``<config_dir>/teams``
 and ``<config_dir>/agents`` — not runtime state. The TUI reads both registries
 off the SESSION object (``_team_registry()``, ``_agent_profile_rows()``), so
 when ``lop`` stopped building a ``Session`` and started handing the app a
-``RemoteSession``, both surfaces silently went empty: every team the user had
+``AttachedSession``, both surfaces silently went empty: every team the user had
 vanished from `/team`, and `/agent` fell back to the packaged starters.
 
 That is what these tests pin. The regression is invisible to any test that
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.teams import TeamEditFields, TeamRegistry
 
 SESSION_ID = "registryviewer1"
@@ -48,7 +48,7 @@ async def test_a_cold_viewer_lists_the_teams_on_this_machine(tmp_path: Path, mon
     for name in ("alpha", "beta", "gamma"):
         _seed_team(tmp_path, name)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -67,7 +67,7 @@ async def test_a_cold_viewer_serves_the_agent_registry_too(tmp_path: Path, monke
     would ship a half-fixed picker.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -91,7 +91,7 @@ async def test_the_registries_are_built_once_and_cached(tmp_path: Path, monkeypa
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     _seed_team(tmp_path, "alpha")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -120,11 +120,11 @@ async def test_an_unusable_registry_degrades_one_feature_not_the_session(
     # `TeamRegistry` inside its own body, so each call re-reads the patched
     # name (R6). Hoisting that import to module scope for performance would
     # make this test silently stop exercising the guard while still passing
-    # green — if you move the import, patch `local_operator.session.remote`'s
+    # green — if you move the import, patch `local_operator.session.attached`'s
     # binding instead.
     monkeypatch.setattr("local_operator.teams.TeamRegistry", _explode)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -141,13 +141,13 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
 
     `/team` and `/agent` broke because `app.py` reads local machine config off
     whatever object happens to be in ``self._session``, through ~50 unchecked
-    ``getattr`` calls, and ``RemoteSession`` silently lacked two of the names
+    ``getattr`` calls, and ``AttachedSession`` silently lacked two of the names
     ``Session`` provides. Nothing raised: every surface degraded quietly, which
     is why it reached a user rather than a test.
 
     So this asserts PRESENCE, not behaviour: every public attribute the TUI
     reads off a session, which ``Session`` provides, must also exist on a cold
-    ``RemoteSession`` — or be named in ``KNOWN_VIEWER_GAPS`` below with the
+    ``AttachedSession`` — or be named in ``KNOWN_VIEWER_GAPS`` below with the
     reason. A NEW divergence fails here, at the seam, instead of as an empty
     picker on the reporter's machine.
 
@@ -235,7 +235,7 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
     shared = {name for name in read_by_tui if not name.startswith("_") and name in session_surface}
     assert shared, "the getattr scan found nothing — the pattern has drifted"
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -247,7 +247,7 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
     assert not new_gaps, (
         f"the TUI reads {sorted(new_gaps)} off the session and a viewer does not provide "
         "it, so that surface fails only on the viewer path — the exact shape of the "
-        "/team and /agent regression. Implement it on RemoteSession, or add it to "
+        "/team and /agent regression. Implement it on AttachedSession, or add it to "
         "known_viewer_gaps with the reason."
     )
     # The registries this PR restored must never reappear as gaps.
@@ -283,7 +283,7 @@ async def test_a_failed_registry_is_constructed_once_not_once_per_keystroke(
 
     monkeypatch.setattr("local_operator.teams.TeamRegistry", _explode)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -326,7 +326,7 @@ async def test_a_transient_registry_failure_recovers_without_a_restart(
 
     monkeypatch.setattr("local_operator.teams.TeamRegistry", _flaky)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:

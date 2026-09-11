@@ -11,8 +11,8 @@ import asyncio
 import pytest
 
 from local_operator.session.goal import MAX_GOAL_CHARS, GoalState
-from local_operator.session.runtime.owned import OwnedSessionHandle
-from tests.unit.session.runtime.test_owned import FakeSession
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.runtime.test_serving import FakeSession
 
 
 class GoalSession(FakeSession):
@@ -35,7 +35,7 @@ class GoalSession(FakeSession):
 async def test_goal_starts_or_steers_once(entry, busy):
     session = GoalSession()
     session.is_streaming = busy
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
     try:
         if entry == "authoritative":
             result = await handle.run_slash_authoritative("goal", "ship it", None)
@@ -55,7 +55,7 @@ async def test_goal_starts_or_steers_once(entry, busy):
 @pytest.mark.parametrize("consumers", [None, [], ["team_attached"], ["goal_set"]])
 async def test_goal_receipt_honors_exact_declared_consumer_and_keeps_full_request(consumers):
     session = GoalSession()
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
     text = "x" * (MAX_GOAL_CHARS + 100)
     try:
         result = await handle.run_slash_authoritative("goal", text, None, consumers=consumers)
@@ -74,7 +74,7 @@ async def test_goal_receipt_honors_exact_declared_consumer_and_keeps_full_reques
 async def test_goal_status_and_clear_never_submit(entry, arg):
     session = GoalSession()
     session.set_goal("existing goal")
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
     try:
         if entry == "authoritative":
             result = await handle.run_slash_authoritative("goal", arg, None)

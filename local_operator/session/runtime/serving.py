@@ -218,7 +218,7 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
         return None
 
 
-class OwnedSessionHandle(SessionHandle):
+class ServingSessionHandle(SessionHandle):
     """SessionHandle over an in-process Session living on ``loop``.
 
     The registrant drives handle methods on the OWNING loop here — the child
@@ -1101,7 +1101,7 @@ class OwnedSessionHandle(SessionHandle):
     # ``FRONTEND_CAPABILITY``, and therefore what makes a TUI viewer's attach
     # succeed at all: ``server.py`` advertises the capability only when the
     # handle has ``subscribe_frontend``, and hangs up on any client that asks
-    # for a capability it did not advertise. ``RemoteSession`` asks for it
+    # for a capability it did not advertise. ``AttachedSession`` asks for it
     # unconditionally.
     #
     # They lived ONLY on ``mobile.tui_handle.TuiSessionHandle`` — the owner
@@ -2417,7 +2417,7 @@ class OwnedSessionHandle(SessionHandle):
     def cancel_subagents_count(self) -> int:
         """Cancel every running subagent and return the REAL count.
 
-        Esc's second job. `RemoteSession.cancel_subagents` swallows a failure
+        Esc's second job. `AttachedSession.cancel_subagents` swallows a failure
         to ``stopped = -1``, so a handle without this method makes Esc quietly
         do less than it says on a detached session (round 3, U9) — the turn
         ends but the children keep burning tokens.
@@ -3953,7 +3953,7 @@ async def spawn_owned_session(
     model_id: str | None = None,
     resume: str | None = None,
     model_selection_override: bool = True,
-) -> OwnedSessionHandle:
+) -> ServingSessionHandle:
     """Build a session for the phone with the CLI's composition root.
 
     ``resume`` names an existing session id to reopen: it flows into
@@ -4032,14 +4032,14 @@ async def spawn_owned_session(
     # this directory (``attach_config_watch``), so ``process_watcher`` returns
     # the running one; the guard mirrors that seam's "boot must not depend on
     # the watcher" degrade.
-    handle = OwnedSessionHandle(
+    handle = ServingSessionHandle(
         session, loop, cwd=cwd, auto_approve=auto_approve, approval_pinned=False
     )
     attach_gate_config_watch(handle, config_directory)
     return handle
 
 
-def attach_gate_config_watch(handle: OwnedSessionHandle, config_directory: Path) -> None:
+def attach_gate_config_watch(handle: ServingSessionHandle, config_directory: Path) -> None:
     """Hang the handle's approval listener on the process watcher, or degrade.
 
     Shared by the phone/TUI runtime spawn and ``exec --control`` so the two

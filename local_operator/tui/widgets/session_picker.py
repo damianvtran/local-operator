@@ -555,7 +555,7 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     already animate with, so "this is working" looks the same everywhere.
 
     ``live_state == "busy"`` is now the CONVERSATION's activity rather than the
-    runtime's residency (see ``OwnedSessionHandle.is_conversationally_active``),
+    runtime's residency (see ``ServingSessionHandle.is_conversationally_active``),
     which is what makes the spinner honest: it had been pinned on by any
     background job or subagent the session had ever launched.
     """
