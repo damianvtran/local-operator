@@ -52,10 +52,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from local_operator.harness.types import ImageContent
 
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
+from local_operator.paths import config_dir
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
@@ -753,6 +756,15 @@ class RuntimeServer:
             self._started = True
             self._record.started = True
         self._publisher: RecordPublisher | None = None
+        #: The config dir this runtime was STARTED in, captured by ``start`` /
+        #: ``start_in_process`` and handed to the publisher. The record path is
+        #: ``<config dir>/run/mobile/<pid>.json``, so resolving it when the
+        #: worker thread eventually reaches ``_serve`` lets a thread the OS did
+        #: not schedule promptly publish into whatever directory is current by
+        #: then — another session's, under a pid-keyed filename. Left as None
+        #: until a start path runs, so a server that is never started keeps the
+        #: publisher's own default.
+        self._run_root: Path | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
@@ -835,6 +847,16 @@ class RuntimeServer:
         event feed — on a dedicated thread with its own loop. Idempotent."""
         if self._thread is not None:
             return
+        # PIN THE DISCOVERY DIRECTORY HERE, at the moment the caller asks this
+        # runtime to announce itself. ``start`` only hands the work to a thread,
+        # so this is the last point at which the answer is still the caller's:
+        # a runner loaded enough to delay that thread past ``start``'s return
+        # (and past the runtime's own ``close``, whose join is bounded) had
+        # ``_serve`` create its publisher against a config dir the process had
+        # already moved on from, publishing — and then deleting — a record in
+        # a directory this runtime never started in. See
+        # ``RecordPublisher.__init__`` for the other half of this invariant.
+        self._run_root = config_dir()
         # The thread name is a runtime-observable diagnostic (py-spy, thread
         # dumps, `ps -M`) and deliberately keeps its mobile-era spelling: this
         # move changes no behaviour, and renaming it would silently invalidate
@@ -849,6 +871,7 @@ class RuntimeServer:
         call through a cross-thread hop for no benefit."""
         if self._server is not None:
             return
+        self._run_root = config_dir()
         self._loop = asyncio.get_running_loop()
         await self._serve()
 
@@ -1066,7 +1089,7 @@ class RuntimeServer:
         )
         port = self._server.sockets[0].getsockname()[1]
         self._record.control_port = port
-        self._publisher = RecordPublisher(self._record)
+        self._publisher = RecordPublisher(self._record, self._run_root)
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.
         # Probed, not required — a handle without the capability leaves attach

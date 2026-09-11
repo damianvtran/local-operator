@@ -229,6 +229,71 @@ def test_the_heartbeat_republishes_the_subagent_counts(tmp_path: Path) -> None:
         registry.unpublish(record.pid, root=tmp_path)
 
 
+def test_the_publisher_rewrites_the_file_it_created(tmp_path: Path, monkeypatch) -> None:
+    """A publisher's directory is decided when it publishes, not per call.
+
+    ``root=None`` means "whatever ``config_dir()`` says", and ``config_dir()``
+    reads the environment on every call on purpose. Resolving it again inside
+    ``heartbeat`` therefore let a runtime that outlived its own config dir
+    rewrite its record into whatever directory was current at that moment — a
+    different session's file, because records are keyed by pid alone, and an
+    xdist worker keeps one pid for every test it runs. This is the shape a
+    shard runner produced: a runtime from the previous test, whose heartbeat
+    had not been cancelled yet, landed its own ``started=False`` copy on the
+    next test's record.
+    """
+    started_in = tmp_path / "started-in"
+    moved_to = tmp_path / "moved-to"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
+    record = make_record()
+    publisher = registry.RecordPublisher(record)
+    own = registry.run_dir(started_in) / f"{record.pid}.json"
+    try:
+        assert publisher.path == own, "the publisher's own record is the one it names"
+        # The config dir moves under a live runtime. Every test boundary in this
+        # suite does exactly this to HOME, which is what makes it the shape that
+        # bit, rather than a hypothetical.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+        publisher.heartbeat(conversation_name="renamed")
+        assert own.exists(), "the record must stay where this publisher put it"
+        stray = registry.run_dir(moved_to) / f"{record.pid}.json"
+        assert not stray.exists(), (
+            "a heartbeat must not write into a directory this publisher never "
+            "published into — that filename belongs to another session"
+        )
+    finally:
+        publisher.close()
+
+
+def test_the_publisher_removes_only_the_file_it_created(tmp_path: Path, monkeypatch) -> None:
+    """The exit path, where the damage inverts from clobbering to deleting.
+
+    Needs its own test because the two directions fail differently: a stray
+    ``heartbeat`` overwrites a stranger's record, a stray ``close`` unlinks it,
+    and the suite's own runs showed the second — a leaked runtime's shutdown
+    resolving the NEXT test's directory and taking that test's record with it.
+    """
+    started_in = tmp_path / "started-in"
+    moved_to = tmp_path / "moved-to"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
+    publisher = registry.RecordPublisher(make_record())
+    own = publisher.path
+    assert own.exists()
+    # Another session's record in the directory the config dir moves to, keyed
+    # by the SAME pid — the pid keying is what makes this a wrong-FILE hazard
+    # rather than a missing-file one.
+    other = make_record()
+    registry.publish(other, root=moved_to)
+    other_path = registry.run_dir(moved_to) / f"{other.pid}.json"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+    try:
+        publisher.close()
+        assert not own.exists(), "a publisher removes the record it created"
+        assert other_path.exists(), "and must leave a different session's record alone"
+    finally:
+        registry.unpublish(other.pid, root=moved_to)
+
+
 def test_the_protocol_version_did_not_move_for_the_subagent_counts() -> None:
     """Pinned WITH ITS REASON, because the tempting change is to bump it.
 
