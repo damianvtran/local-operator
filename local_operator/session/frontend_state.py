@@ -42,6 +42,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
+from local_operator.harness.intent import ACTIVITY_RESPONDING, ACTIVITY_THINKING
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -49,7 +50,13 @@ from local_operator.harness.types import (
     AgentStartEvent,
     CompactionEndEvent,
     MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
+    ToolCallComposeEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    TurnEndEvent,
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
@@ -60,6 +67,20 @@ from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
 FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: The phase names ``FrontendSessionState.activity_phase`` folds to.
+#:
+#: The reader matches a folded phase against the phase it DERIVED by string
+#: equality, so these have to be the same words the working line's own
+#: vocabulary uses rather than a private enum: `thinking` and `responding` are
+#: imported from ``harness/intent.py`` (the module that owns the label words)
+#: rather than restated here, and `composing`/`running` name the two states the
+#: tool ledger itself uses. A rename in either place must move together or the
+#: reader silently stops matching and every clock goes blank.
+ACTIVITY_PHASE_THINKING = ACTIVITY_THINKING
+ACTIVITY_PHASE_RESPONDING = ACTIVITY_RESPONDING
+ACTIVITY_PHASE_COMPOSING = "composing"
+ACTIVITY_PHASE_RUNNING = "running"
 
 #: How many per-call billing receipts ``usage_components`` retains.
 #:
@@ -223,6 +244,13 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "context_window",
         "context_is_estimate",
         "cumulative_parent_cost",
+        # The working line's phase and its zero are read PER EVENT that moves the
+        # turn (`OperatorApp._current_activity`), which is far too hot for the
+        # whole-state clone. Both are admitted on the set's own two tests: a
+        # `str` and a `float | None`, so nothing of the store's can be reached
+        # through them.
+        "activity_phase",
+        "activity_phase_started_at",
     }
 )
 #: Wire budget for the in-flight seed's retained tool results.
@@ -1585,6 +1613,40 @@ class FrontendSessionState(BaseModel):
     #: tolerant. One value per user prompt, not per compaction continuation.
     last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
     activity_started_at: float | None = None
+    #: Which kind of work the working line is naming, and when that kind began.
+    #:
+    #: The terminal's band and the phone's working line both key their elapsed
+    #: number to the PHASE (`thinking`/`responding`/`composing`/`running`) rather
+    #: than to the label, because a batch shedding a call or a tool name arriving
+    #: in fragments must not restart a clock that answers "has this been stuck".
+    #: That phase zero lived only in whoever built the widget, so a frontend that
+    #: joined mid-turn counted from its own arrival — the operator's report
+    #: names the thinking indicator as well as the tool row, which a per-call
+    #: stamp alone cannot fix. `running` is folded here too, but its clock is
+    #: still taken from the live cards themselves (the oldest of their starts),
+    #: which is a finer anchor than any phase edge.
+    #:
+    #: ``""`` is "no phase": the turn has not started, or has ended, and a
+    #: frontend must not match it against anything it derives.
+    activity_phase: str = ""
+    activity_phase_started_at: float | None = None
+    #: ``tool_call_id -> started_at_epoch`` for the calls executing RIGHT NOW.
+    #:
+    #: Folded from ``ToolExecutionStartEvent.started_at_epoch`` so a frontend
+    #: that attaches mid-turn can seed a live row's clock from the call's true
+    #: age instead of its own arrival. Keyed by call rather than as one scalar
+    #: because a batch has several: the row and the band must agree on ONE
+    #: anchor, and only the per-call map can tell them what the oldest live
+    #: call's age actually is.
+    #:
+    #: TRANSIENT by construction and bounded by the live batch: an entry is
+    #: popped by the call's own end and the whole map is cleared at
+    #: ``agent_start``/``agent_end``, so it neither grows with the conversation
+    #: nor outlives the turn. A call whose producer sent no epoch is
+    #: deliberately ABSENT rather than stamped with the fold instant — see
+    #: ``_fold_live_tool_starts``. It is stripped from the durable checkpoint
+    #: for the same reason ``live_events`` is: there is nothing to restore.
+    live_tool_started_at: dict[str, float] = Field(default_factory=dict)
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
@@ -2777,6 +2839,34 @@ class FrontendStateStore:
             )
         return getattr(self._state, name)
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """A COPY of the live-call start map, without cloning the whole state.
+
+        The sibling of :meth:`read_field`, which cannot serve this one: that
+        allow-list is restricted to deeply immutable scalars precisely because
+        it hands out the store's OWN object, and this is a mutable mapping.
+
+        Copying is what the per-call caller can afford, and asking for ``state``
+        instead is what it cannot: ``state`` deep-copies every job, usage
+        component and trajectory row, which profiling one sidebar navigation
+        measured at ~30 ms of a 135 ms frame. This is read once per tool start
+        and once per switch, so the copy is a handful of floats.
+        """
+        return dict(self._state.live_tool_started_at)
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase and when it began, read cheaply.
+
+        One call rather than two :meth:`read_field` reads because the pair is
+        only ever consumed together — the reader compares the phase and uses
+        the instant in the same expression — and a caller that could read them
+        apart could pair a phase with the previous phase's zero.
+        """
+        return (
+            self.read_field("activity_phase"),
+            self.read_field("activity_phase_started_at"),
+        )
+
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.
 
@@ -3298,6 +3388,27 @@ class FrontendStateStore:
                 if bool(getattr(session, "is_streaming", False))
                 else None
             ),
+            # The live-batch anchor is carried on the same gate as the turn's
+            # own start instant, and for the same reason: both answer "how long
+            # has the work in flight been going", and neither means anything
+            # once the turn is over. See ``_fold_live_tool_starts``.
+            live_tool_started_at=(
+                current.live_tool_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else {}
+            ),
+            # The working line's phase and its zero ride the same gate. A
+            # non-streaming session has no phase, and leaving a stale one in
+            # place would let a frontend that has just settled match it and
+            # count from a zero belonging to a turn that is over.
+            activity_phase=(
+                current.activity_phase if bool(getattr(session, "is_streaming", False)) else ""
+            ),
+            activity_phase_started_at=(
+                current.activity_phase_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else None
+            ),
             queued_steering=queued,
             jobs=jobs,
             todos=todos,
@@ -3419,11 +3530,139 @@ class FrontendStateStore:
             )
         return self.mutate(model_catalogue=rows)
 
+    def _fold_live_tool_starts(self, event: AgentEvent[Any]) -> dict[str, Any]:
+        """Track the start epoch of every call executing RIGHT NOW.
+
+        The map a mid-turn joiner seeds a live row's clock from. The producer
+        stamped the instant on its own ``tool_execution_start`` (see
+        ``ToolExecutionStartEvent.started_at_epoch``); this keeps those stamps
+        keyed by call so the row and the band can share one anchor, and drops
+        them the moment the call ends so nothing about a finished call is
+        offered as a start.
+
+        Two deliberate omissions, both of which keep this from becoming an
+        invention:
+
+        * a ``tool_execution_start`` carrying NO epoch contributes no entry.
+          The tempting default — the fold's own ``now`` — is precisely the
+          fabricated zero this whole path exists to refuse: for an attached
+          viewer it is its arrival instant dressed as the call's start, and it
+          would print a plausible wrong age where the widget's blank column
+          currently tells the truth.
+        * the map is cleared at BOTH ends of the turn (``agent_start`` and
+          ``agent_end``) rather than left to the individual ends. A turn that
+          dies without emitting every ``tool_execution_end`` is exactly the
+          case that leaves a stale entry, and a stale entry is worse than none:
+          a later turn's row would seed from it.
+        """
+        state = self._state
+        if isinstance(event, (AgentStartEvent, AgentEndEvent)):
+            return {"live_tool_started_at": {}} if state.live_tool_started_at else {}
+        if isinstance(event, ToolExecutionStartEvent):
+            epoch = getattr(event, "started_at_epoch", None)
+            if not isinstance(epoch, (int, float)):
+                return {}
+            live = dict(state.live_tool_started_at)
+            live[event.tool_call_id] = float(epoch)
+            return {"live_tool_started_at": live}
+        if isinstance(event, ToolExecutionEndEvent):
+            if event.tool_call_id not in state.live_tool_started_at:
+                return {}
+            live = dict(state.live_tool_started_at)
+            del live[event.tool_call_id]
+            return {"live_tool_started_at": live}
+        return {}
+
+    def _fold_activity_phase(self, event: AgentEvent[Any], now: float) -> dict[str, Any]:
+        """Fold the PHASE the working line is in, and when that phase began.
+
+        The band's clock is keyed to the phase, not to the label — a batch
+        shedding a call, a tool name arriving in fragments and an intent being
+        revised all change the label without the agent having changed what it
+        is doing — and the phase's zero used to exist only inside whichever
+        widget happened to be constructed. A frontend that joins mid-turn was
+        therefore always at zero: the operator's report names the thinking
+        indicator restarting alongside the tool row, and a per-call stamp
+        cannot answer that one because there is no call behind it.
+
+        The rule is the phone projection's (``mobile/projection.py``
+        ``_derive_activity``) because both surfaces draw the same row and a
+        second rule would be a second answer. It is deliberately narrow: a
+        phase RESTARTS the zero only when it begins a kind of work, never when
+        it merely relabels one — the composed batch is the case that shows the
+        difference, since it announces a call per fragment and all of them
+        belong to one dictation.
+
+        The ``running`` phase is folded so the end rule can tell a batch that
+        still has siblings from one that has just lost its last call. Its
+        clock does NOT come from here: a running batch is measured from the
+        OLDEST live card's own start, which is finer than any phase edge and is
+        what keeps a narrowed label from reporting a shed sibling's age.
+
+        Any mismatch between this phase and the one the app derives is handled
+        at the reader (``OperatorApp._current_activity``), which withholds the
+        clock rather than passing a zero that does not belong: a facade with no
+        fold, a legacy producer and a compaction fallback all stay blank
+        instead of inventing an age.
+        """
+        state = self._state
+        phase = state.activity_phase
+
+        def into(new_phase: str) -> dict[str, Any]:
+            return {"activity_phase": new_phase, "activity_phase_started_at": now}
+
+        if isinstance(event, (AgentStartEvent, TurnEndEvent)):
+            # A turn boundary and a per-model-turn boundary are both the start
+            # of waiting on a model call: between two tool batches, and before
+            # the first, that IS what the turn is doing.
+            return into(ACTIVITY_PHASE_THINKING)
+        if isinstance(event, AgentEndEvent):
+            return {"activity_phase": "", "activity_phase_started_at": None}
+        if isinstance(event, ToolCallComposeEvent):
+            # One batch, one zero: a three-call batch announces three calls in
+            # one dictation, and restarting per announcement would show the
+            # same "still composing" state counting from zero three times.
+            return {} if phase == ACTIVITY_PHASE_COMPOSING else into(ACTIVITY_PHASE_COMPOSING)
+        if isinstance(event, ToolExecutionStartEvent):
+            return into(ACTIVITY_PHASE_RUNNING)
+        if isinstance(event, ToolExecutionEndEvent):
+            # Waiting on the model again — but only once the batch is done. A
+            # batch that still has a sibling executing is still `running`, and
+            # restarting there would reset the number the surviving row's
+            # label still claims.
+            remaining = set(state.live_tool_started_at) - {event.tool_call_id}
+            return into(ACTIVITY_PHASE_THINKING) if not remaining else {}
+        if isinstance(event, MessageStartEvent):
+            # A model call in flight with nothing streamed yet. The loop yields
+            # this from a placeholder at the top of EVERY provider call, so
+            # keying prose here would claim text for a tool-only turn; the
+            # first non-empty delta below is the transition to `responding`.
+            if str(getattr(event.message, "role", "") or "") == "assistant":
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        if isinstance(event, MessageUpdateEvent):
+            if event.delta and phase == ACTIVITY_PHASE_THINKING:
+                return into(ACTIVITY_PHASE_RESPONDING)
+            return {}
+        if isinstance(event, MessageEndEvent):
+            # Ends the PROSE phase only. For a tool-calling turn this arrives
+            # after the compose events, and the composed call is still what
+            # the turn is doing, so anything but `responding` is left alone.
+            if (
+                str(getattr(event.message, "role", "") or "") == "assistant"
+                and phase == ACTIVITY_PHASE_RESPONDING
+            ):
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        return {}
+
     def observe_event(self, session: Any, event: AgentEvent[Any]) -> FrontendUpdate | None:
         now = time.time()
         state = self._state
         changes: dict[str, Any] = {}
         self._fold_live_event(event)
+        changes.update(self._fold_live_tool_starts(event))
+        changes.update(self._fold_activity_phase(event, now))
         if isinstance(event, AgentStartEvent):
             changes.update(
                 streaming=True,
@@ -3632,6 +3871,16 @@ class FrontendStateStore:
         durable = state.model_copy(
             update={
                 "live_events": [],
+                # The live-batch anchor is transient by construction, exactly
+                # like the seed above: it describes calls executing RIGHT NOW
+                # in this process, and there is nothing for a later reader to
+                # restore from it — a resumed conversation's in-flight call is
+                # re-stamped by the producer that is still running it. Its
+                # scalar neighbours (`activity_started_at`, `activity_phase`)
+                # are deliberately NOT stripped: they are O(1) values the
+                # turn-end fold and the non-streaming gate already clear, so
+                # there is nothing here to make durable or to withhold.
+                "live_tool_started_at": {},
                 "jobs": [
                     job.model_copy(
                         update={

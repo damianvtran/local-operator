@@ -386,6 +386,39 @@ class _PlannedCall:
     resources: tuple[str, ...] | None = None
 
 
+def _tool_start_event(
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    args: dict[str, Any] | None,
+    intent: str | None,
+) -> ToolExecutionStartEvent:
+    """Build a ``tool_execution_start`` stamped with WHEN the call began.
+
+    One factory for the three sites that dispatch a tool — the parallel
+    ``runner``, its ``interruptible_runner`` sibling and the eval bridge —
+    because the stamp is the only thing a late-attaching viewer can seed a
+    live row's clock from, and a site that forgot it would leave that row
+    counting from the switch. Nothing else in this file would notice the
+    drift, so the three sites deliberately do not hold three copies of the
+    construction.
+
+    Stamped with ``time.time()``, not ``time.monotonic()``, because the value
+    crosses a process boundary: ``live_events`` is serialized onto the attach
+    wire and into checkpoints, where a monotonic reading means nothing.
+    Readers convert the AGE once and tick on their own monotonic clock (see
+    ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
+    move a counter that is already running.
+    """
+    return ToolExecutionStartEvent(
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        args=args or {},
+        intent=intent,
+        started_at_epoch=time.time(),
+    )
+
+
 def _batches_shared(item: _PlannedCall) -> bool:
     """Whether this call may run alongside its neighbours in one batch.
 
@@ -2034,7 +2067,7 @@ class AgentLoop:
                         return failure.model_dump(mode="json")
                     started = time.monotonic()
                     queue.put_nowait(
-                        ToolExecutionStartEvent(
+                        _tool_start_event(
                             tool_call_id=nested.id,
                             tool_name=name,
                             args=planned.args,
@@ -2259,7 +2292,7 @@ class AgentLoop:
                 # tool row with the intent — the TUI's argument summary scans
                 # values for a row identity — reinstating on the card the
                 # duplication that splitting fact from claim removes.
-                ToolExecutionStartEvent(
+                _tool_start_event(
                     tool_call_id=item.call.id,
                     tool_name=tool_name,
                     args=item.args,
@@ -2288,7 +2321,7 @@ class AgentLoop:
             started_at = time.monotonic()
             started_at_by_slot[slot] = started_at
             await queue.put(
-                ToolExecutionStartEvent(
+                _tool_start_event(
                     tool_call_id=item.call.id,
                     tool_name=tool_name,
                     args=item.args,
