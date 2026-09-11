@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from textual.events import MouseScrollUp
 
 from local_operator.harness.types import Message, TextContent
@@ -20,8 +21,8 @@ from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
-from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock
+from local_operator.tui.widgets.assistant import FALLBACK_WIDTH, AssistantBlock
+from local_operator.tui.widgets.transcript import GAP_CLASS, NoticeBlock, UserBlock
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -1667,3 +1668,131 @@ async def test_a_failed_fetch_on_an_unscrollable_frame_does_not_tell_the_reader_
             assert all("scroll up" not in text for text in faults)
             assert any("click" in text for text in faults)
             remote.load_older_display_page = real_load
+
+
+# --- the destination width is supplied BEFORE the rows are authored ---------
+
+
+def _wrapping_history(count: int = 90) -> list[Message]:
+    """Rows that all wrap differently at 80 and at 116 columns.
+
+    Both halves of the defect need covering, and they author differently: prose
+    and tool cards fold through the ladder, while a prompt wraps inside
+    ``UserBlock.__init__`` and never consults it. A shape with only one of them
+    would pass on a fix that had only reached the other.
+    """
+    prose = (
+        "The compaction marker is written by the summariser after the fold, and the "
+        "renderer reads it back on resume so the transcript can show where the "
+        "context boundary fell rather than silently rewriting the conversation."
+    )
+    rows: list[Message] = []
+    for index in range(count):
+        rows.append(
+            Message(
+                id=f"synthetic-row-{index:04}",
+                role="user" if index % 3 else "assistant",
+                content=[
+                    TextContent(text=f"row {index:04} — {prose}"),
+                ],
+                stop_reason="stop",
+            )
+        )
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_a_paged_block_is_folded_at_its_destination_width_not_the_fallback() -> None:
+    """The width must be known to the BUILDER, not repaired by the resize.
+
+    A page is projected DETACHED — nothing is mounted until ``insert_blocks`` —
+    so a block that has no width to ask folds at the 80-column fallback, pins
+    that fold as its height, and is then re-authored by the first layout's
+    resize. Two costs, and the second is what the operator reported: a second
+    build per block, and a painted frame whose rows wrap at 78 cells inside a
+    146-cell pane. ``insert_blocks``' own fold hint cannot fix it, because it
+    arrives after the rows exist — the block that wraps in ``__init__`` never
+    reads a hint set later.
+
+    So the assertion is stated at the authoring seam, as the FALLBACK rather
+    than as "== pane", for the reason the subagent page's fold-parity test
+    gives: the failure should name the defect, and every other width the ladder
+    may legitimately report mid-layout (a container, a parent region) would
+    still be a width the block is about to be given.
+    """
+    session = FakeSession()
+    session._history = _wrapping_history()
+    app = OperatorApp(lambda: _factory(session))
+    folds: list[tuple[str, int]] = []
+    watching = False
+
+    real_apply = AssistantBlock._apply_rows
+    real_build = UserBlock._build
+
+    def record_apply(self: AssistantBlock, text: Text) -> None:
+        if watching:
+            folds.append(("AssistantBlock", self._flat_width()))
+        return real_apply(self, text)
+
+    def record_build(self: UserBlock) -> object:
+        if watching:
+            folds.append(("UserBlock", self.fold_width(80)))
+        return real_build(self)
+
+    app_pilot = pytest.MonkeyPatch()
+    app_pilot.setattr(AssistantBlock, "_apply_rows", record_apply)
+    app_pilot.setattr(UserBlock, "_build", record_build)
+    painted_at_fallback: list[str] = []
+    try:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await settled(app, pilot)
+            view = app._transcript_view()
+            pane = view.scrollable_content_region.width
+            assert pane > FALLBACK_WIDTH, "the fixture needs a pane wider than the fallback"
+
+            refresh = app.screen._compositor_refresh
+
+            def capture() -> None:
+                # Visible-stale, read off the compositor: a frame that put a
+                # fallback-folded block in front of the reader. This is the
+                # half a reader sees, and it is why a one-frame repair is not
+                # good enough — the frame after a page mounts is the one the
+                # reader is looking at when they scroll up into it.
+                refresh()
+                top, bottom = view.scroll_y, view.scroll_y + view.size.height
+                for block in view.blocks():
+                    if block.size.width <= FALLBACK_WIDTH:
+                        continue
+                    if getattr(block, "_built_width", None) != FALLBACK_WIDTH:
+                        continue
+                    if block.virtual_region.bottom <= top or block.virtual_region.y >= bottom:
+                        continue
+                    painted_at_fallback.append(
+                        f"{type(block).__name__} painted at {block.size.width}"
+                    )
+
+            app.screen._compositor_refresh = capture
+            watching = True
+            try:
+                for _ in range(2):
+                    view.scroll_to(y=0, animate=False, immediate=True)
+                    await pilot.pause()
+                    view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+                    await settled(app, pilot)
+                    for _ in range(5):
+                        view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+                        await pilot.pause()
+            finally:
+                watching = False
+                app.screen._compositor_refresh = refresh
+    finally:
+        app_pilot.undo()
+
+    assert folds, "the paging path performed no authoring fold to check"
+    at_fallback = [kind for kind, width in folds if width == FALLBACK_WIDTH]
+    assert not at_fallback, (
+        f"{len(at_fallback)} of {len(folds)} folds during paging were at the "
+        f"{FALLBACK_WIDTH}-column fallback while the pane was wide: {sorted(set(folds))}"
+    )
+    assert all(width == pane for _, width in folds), sorted(set(folds))
+    assert not painted_at_fallback, painted_at_fallback

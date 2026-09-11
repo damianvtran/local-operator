@@ -379,7 +379,11 @@ class ReplayTarget(Protocol):
     ) -> None: ...
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]: ...
 
     def _painted_tool_card(self, call_id: str) -> Any: ...
@@ -387,7 +391,12 @@ class ReplayTarget(Protocol):
     def _settle_painted_tool_card(self, card: Any, result: Any) -> None: ...
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None: ...
 
 
@@ -415,9 +424,23 @@ class PreparedReplay(ReplayState):
         self.blocks.append(block)
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]:
-        return append_image_blocks(self, images, marker_text=marker_text, navigation_visible=False)
+        # ``fold_width`` is accepted to satisfy ``ReplayTarget``: a prepared
+        # replay is built OFFSCREEN, so there is no laid-out destination to
+        # name and the caller passes nothing (its blocks are folded when the
+        # presentation is committed into a mounted view).
+        return append_image_blocks(
+            self,
+            images,
+            marker_text=marker_text,
+            navigation_visible=False,
+            fold_width=fold_width,
+        )
 
     def _painted_tool_card(self, call_id: str) -> None:
         return None
@@ -426,9 +449,15 @@ class PreparedReplay(ReplayState):
         raise AssertionError("a prepared replay cannot contain a live tool card")
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None:
-        replay_tool_call(self, call, results, user_run=user_run)
+        # Zero for a prepared replay — see `_append_image_blocks` above.
+        replay_tool_call(self, call, results, user_run=user_run, fold_width=fold_width)
 
     def prepare(
         self,
@@ -663,7 +692,12 @@ class SessionPresentation:
 
 
 def project_settled_rows(
-    self: ReplayTarget, history: list[Any], *, bound: int | None = None, end: int | None = None
+    self: ReplayTarget,
+    history: list[Any],
+    *,
+    bound: int | None = None,
+    end: int | None = None,
+    fold_width: int = 0,
 ) -> bool:
     """Mount settled transcript rows through the ONE role-aware renderer.
 
@@ -688,6 +722,18 @@ def project_settled_rows(
     projection — never sees the split at all. The gap-replay caller passes
     no bound, because a reconnect gap is by definition the small set of
     rows no frontend painted and bounding it could hide one.
+
+    ``fold_width`` is the width every block this pass BUILDS will be given.
+    Zero is "not supplied", which is right for a pass that mounts where it
+    authors (the tail) and wrong for a PAGE collected for insertion above
+    the viewport: those blocks are built detached, so every one of them folds
+    at the 80-column fallback, pins that fold as its height, and is then
+    re-authored by the first layout's resize — a second build per block and a
+    painted frame whose rows wrap at 80 inside a 146-cell pane. The caller
+    that knows the destination (``OperatorApp._collect_resume_page_blocks``)
+    supplies it here so the rows are authored at the right width the first
+    and only time. It is threaded to CONSTRUCTION rather than applied after,
+    because a block that wraps in ``__init__`` never reads a later hint.
     """
     from contextlib import nullcontext
 
@@ -817,7 +863,13 @@ def project_settled_rows(
                     # Skip a receipt this session already painted live —
                     # replaying it would double the line (round 2, m2).
                     if key not in self._live_wake_receipts:
-                        self._append_block(WakeBlock(str(details.get("text", "")), catchup=False))
+                        self._append_block(
+                            WakeBlock(
+                                str(details.get("text", "")),
+                                catchup=False,
+                                fold_width=fold_width,
+                            )
+                        )
                         appended = True
                 continue
             # A peer message (`lop send` from another session) is also a
@@ -833,6 +885,7 @@ def project_settled_rows(
                         PeerMessageBlock(
                             str(details.get("body", "")),
                             details.get("sender") or {},
+                            fold_width=fold_width,
                         )
                     )
                     appended = True
@@ -851,7 +904,9 @@ def project_settled_rows(
             # distinction the transcript row itself exists to preserve.
             if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
                 details = getattr(message, "details", None) or {}
-                self._append_block(NoticeBlock(gate_timeout_notice(details), kind="warning"))
+                self._append_block(
+                    NoticeBlock(gate_timeout_notice(details), kind="warning", fold_width=fold_width)
+                )
                 appended = True
                 continue
             # A compaction that did NOT run. Rendered here for the same
@@ -863,7 +918,7 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == COMPACTION_REFUSED_TYPE:
                 details = getattr(message, "details", None) or {}
                 text, kind = compaction_refused_notice(details)
-                self._append_block(NoticeBlock(text, kind=kind))
+                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
             # The compaction boundary itself. The replay layer has always
@@ -883,7 +938,11 @@ def project_settled_rows(
             # error — the rows below are real history, they are simply outside
             # what the agent can still see.
             if getattr(message, "custom_type", None) == COMPACTION_MARKER_TYPE:
-                self._append_block(CompactionMarkerBlock(COMPACTION_MARKER_NOTICE, kind="note"))
+                self._append_block(
+                    CompactionMarkerBlock(
+                        COMPACTION_MARKER_NOTICE, kind="note", fold_width=fold_width
+                    )
+                )
                 appended = True
                 continue
             role = getattr(message, "role", None)
@@ -931,8 +990,10 @@ def project_settled_rows(
                     if isinstance(block, ImageContent)
                 ]
                 if text or replay_images:
-                    self._append_block(UserBlock(text, len(replay_images)))
-                    self._append_image_blocks(replay_images, marker_text=text)
+                    self._append_block(UserBlock(text, len(replay_images), fold_width=fold_width))
+                    self._append_image_blocks(
+                        replay_images, marker_text=text, fold_width=fold_width
+                    )
                     appended = True
                 # A bang-mode receipt replays as open as it lived: the
                 # user row is `! <command>` and the assistant message that
@@ -958,6 +1019,10 @@ def project_settled_rows(
             if assistant_row_text(text):
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
+                # Before `update_text`: this block authors its rows through the
+                # fold ladder on every update, and a hint set afterwards would
+                # only reach a rebuild that has already happened.
+                block.set_fold_hint(fold_width)
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)
@@ -971,7 +1036,7 @@ def project_settled_rows(
                 user_run = bool(
                     bang_pending and tool_calls[0] is call and getattr(call, "name", "") == "bash"
                 )
-                self._replay_tool_call(call, results, user_run=user_run)
+                self._replay_tool_call(call, results, user_run=user_run, fold_width=fold_width)
                 appended = True
             # A refused, failed or interrupted turn needs a notice the prose
             # alone does not carry — a refusal fires even when the model
@@ -988,7 +1053,7 @@ def project_settled_rows(
             )
             if notice is not None:
                 reason, severity = notice
-                self._append_block(NoticeBlock(reason, severity))
+                self._append_block(NoticeBlock(reason, severity, fold_width=fold_width))
                 appended = True
     # Every message this pass rendered, by stable id — the dedupe key a
     # later backward page is filtered through.
@@ -1013,7 +1078,12 @@ def project_settled_rows(
 
 
 def replay_tool_call(
-    self: ReplayTarget, call: Any, results: dict[str, Any], *, user_run: bool = False
+    self: ReplayTarget,
+    call: Any,
+    results: dict[str, Any],
+    *,
+    user_run: bool = False,
+    fold_width: int = 0,
 ) -> None:
     """Mount one settled tool row for a call from a previous session.
 
@@ -1094,6 +1164,12 @@ def replay_tool_call(
         getattr(call, "arguments", None) or {},
         user_run=user_run,
     )
+    # Before the `restore`/`mark_*` calls below re-author the row: the
+    # constructor's own build is the throwaway one (a detached card has no
+    # width to ask and falls to the console fallback), and every state call
+    # that follows rebuilds through the fold ladder — so this is the moment
+    # the card can be told the width its rows should be authored at.
+    card.set_fold_hint(fold_width)
     self._append_block(card)
     if result is None:
         # No result recorded: the session ended between the call and its
@@ -1188,6 +1264,7 @@ def append_image_blocks(
     *,
     marker_text: str | None = None,
     navigation_visible: bool = True,
+    fold_width: int = 0,
 ) -> list[ImageBlock]:
     """Mount one :class:`ImageBlock` per image, in order.
 
@@ -1232,6 +1309,7 @@ def append_image_blocks(
                 image.mime_type,
                 label=label,
                 navigation_visible=navigation_visible,
+                fold_width=fold_width,
             )
         except Exception:
             logger.debug("image block construction failed", exc_info=True)

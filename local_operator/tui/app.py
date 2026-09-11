@@ -9092,7 +9092,9 @@ class OperatorApp(App[None]):
                         # when the turn dies instead of returning a result.
                         live_cards[block.tool_call_id] = block
 
-    def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
+    def _project_settled_rows(
+        self, history: list[Any], *, bound: int | None = None, fold_width: int = 0
+    ) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
@@ -9104,7 +9106,7 @@ class OperatorApp(App[None]):
         # same subtracted question for a target that never seeded.
         self._projection_live_call_ids = live_projection_call_ids(session)
         try:
-            projected = project_settled_rows(self, history, bound=bound)
+            projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
@@ -9858,7 +9860,20 @@ class OperatorApp(App[None]):
         collected: list[Any] = []
         self._block_sink = collected
         try:
-            self._project_settled_rows(page)
+            # The width this page's blocks are about to be given. These rows
+            # are built DETACHED — nothing is mounted until `insert_blocks` —
+            # so without this every one of them folds at the 80-column
+            # fallback and pins that fold as its height, and `insert_blocks`'
+            # own hint arrived too late to be read: the block authors its rows
+            # before it is handed over. Corrected by the first layout's resize,
+            # which costs a second build per block and paints one frame of
+            # narrow rows — and it is the frame right after the page mounts,
+            # the one the reader is looking at when they scroll up into it.
+            # Measured at 150x40: 192 of 288 folds in three page mounts were at
+            # the fallback. Supplying it here, where the destination is known,
+            # is what makes the fold right the first time (PR #971).
+            transcript = self._transcript_view()
+            self._project_settled_rows(page, fold_width=transcript.scrollable_content_region.width)
         finally:
             self._block_sink = None
             # A page can end on a bang user row whose assistant lives in the
@@ -9952,11 +9967,16 @@ class OperatorApp(App[None]):
         )
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None:
         from local_operator.tui.session_presentation import replay_tool_call
 
-        return replay_tool_call(self, call, results, user_run=user_run)
+        return replay_tool_call(self, call, results, user_run=user_run, fold_width=fold_width)
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -23476,11 +23496,15 @@ class OperatorApp(App[None]):
             self._sync_boot_layout()
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]:
         from local_operator.tui.session_presentation import append_image_blocks
 
-        return append_image_blocks(self, images, marker_text=marker_text)
+        return append_image_blocks(self, images, marker_text=marker_text, fold_width=fold_width)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
