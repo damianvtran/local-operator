@@ -2823,6 +2823,16 @@ class ServingSessionHandle(SessionHandle):
         Shares :func:`naming.refresh_title` and the release-on-success rule with
         the TUI's own handler, so a session owned by a runtime and one owned by
         an app cannot disagree about what a refresh does to ``user_set``.
+
+        No generation stamp here, and that is not an omission. The TUI's twin
+        needs one because :meth:`OperatorApp._name_conversation_worker` stores
+        its answer whenever the generation still matches, so a call dispatched
+        before a refresh will happily overwrite the refreshed title. This
+        runtime's :meth:`_name_conversation_worker` instead re-reads
+        ``conversation_name`` AFTER its await and returns when anything is
+        already set, so a refresh that landed first is what the late call sees
+        and declines to overwrite. The guard is the name check, not a counter —
+        and it is why there is no generation concept on this path to stamp.
         """
         from local_operator.session import naming
 

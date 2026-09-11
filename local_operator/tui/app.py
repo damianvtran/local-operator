@@ -32529,6 +32529,14 @@ class OperatorApp(App[None]):
         ``_store_title``'s convenience wrapper (which re-reads it) is safe only
         for callers that do not suspend.
         """
+        # Generation-stamped at DISPATCH exactly as :meth:`_cmd_title_refresh`
+        # does, and for the same reason: an automatic naming call dispatched
+        # BEFORE this one still matches its own captured generation when it
+        # resumes, so without the bump it stores its pre-refresh answer over the
+        # title this refresh just landed. The follower asked for a fresh name
+        # and would be left with the stale one (review round 1, MAJOR-1).
+        self._name_generation += 1
+        generation = self._name_generation
         source = self._interaction
         current = session.conversation_name
         turns = None
@@ -32553,6 +32561,16 @@ class OperatorApp(App[None]):
         # against a title no longer in force, and storing over it would strip
         # the latch protecting the words the user just typed.
         standing = session.conversation_name
+        # Superseded alongside the rename guard, for the reason the worker twin
+        # checks both: a `/new` or `/resume` landing mid-call makes this answer
+        # belong to a conversation that is no longer here, and the retired
+        # source must not be painted or stamped.
+        if generation != source.naming.generation or source.retired:
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, standing, stored=False),
+                style="info",
+            )
         if not result.changed or standing != current:
             return SlashResult(
                 kind="notice",

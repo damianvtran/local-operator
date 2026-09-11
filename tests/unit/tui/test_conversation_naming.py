@@ -1628,6 +1628,53 @@ async def test_the_routed_refresh_also_writes_only_through_its_dispatch_source()
 
 
 @pytest.mark.asyncio
+async def test_the_routed_refresh_supersedes_a_naming_call_already_in_flight() -> None:
+    """A refresh answers LATER than the automatic call it replaces, not sooner.
+
+    The generation stamp, on the handler a follower reaches. An opening naming
+    call dispatched BEFORE the refresh still matches its own captured
+    generation when it resumes, so a routed handler that never bumped the
+    counter let that stale answer store straight over the refreshed title: the
+    user asked for a fresh name, watched it land, and was left with the one it
+    replaced. The worker path has stamped since it shipped; this is that guard
+    on the routed path (review round 1, MAJOR-1).
+    """
+    app, session = await _boot(title="<title>Auto Opener Title</title>")
+    gate = asyncio.Event()
+    session.name_gate = gate
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+
+        # The automatic first-turn call is dispatched and parked in flight; its
+        # answer is decided against the pre-refresh conversation.
+        app._submit_prompt("fix the login redirect loop")
+        await asyncio.wait_for(session.name_started.wait(), timeout=5)
+        session.gate.set()
+        await _settle()
+
+        # A name is in force by the time a follower can type `/title refresh`.
+        session.set_conversation_name("Existing Name", user_set=False)
+        session.grow_transcript(4)
+
+        # The routed refresh runs to completion while that call is still parked.
+        session.title = "<title>Routed Refresh Title</title>"
+        session.name_gate = None
+        result = await app._slash_result("title", "refresh", None)
+        await _settle()
+        assert result.text == "title refreshed: Routed Refresh Title"
+        assert session.conversation_name == "Routed Refresh Title"
+
+        # Now the stale call resumes and must decline to store.
+        session.title = "<title>Auto Opener Title</title>"
+        gate.set()
+        await _settle()
+
+        assert (
+            session.conversation_name == "Routed Refresh Title"
+        ), "a naming call dispatched before the refresh stored over its title"
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_landing_after_a_rename_leaves_the_rename_alone() -> None:
     """A `/rename` during the call outranks an answer decided before it.
 
