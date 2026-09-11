@@ -998,12 +998,14 @@ class Transcript:
                     rebuild = True
                 except BaseException:
                     # The BYTES roll back, but the clock does not roll back with
-                    # them: ``open("a")`` stamps the file before the write fails
-                    # and ``os.truncate`` stamps it again, so a failed
-                    # bookkeeping append still moves the mtime (measured at
-                    # +24763 h on a forced fsync failure). Restore it here too,
-                    # or the rollback path reintroduces the very defect the
-                    # success path closes.
+                    # them. Opening in append mode does NOT stamp the file; the
+                    # ``write()`` above does, and ``os.truncate`` stamps it
+                    # again even when it truncates to the identical size. So a
+                    # bookkeeping append that got its bytes out and then failed
+                    # at ``fsync`` still moves the mtime (measured at +24763 h
+                    # on a forced fsync failure). Restore it here too, or the
+                    # rollback path reintroduces the very defect the success
+                    # path closes.
                     try:
                         os.truncate(self.path, previous_size)
                     except FileNotFoundError:
