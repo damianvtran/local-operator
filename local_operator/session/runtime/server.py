@@ -332,6 +332,13 @@ _PAYLOAD_OPS = {
     "job_trajectory",
     "fork_snapshot",
     "credential",
+    # The §6 redaction forward: the ONE other op that carries a secret's value,
+    # and only in its own named field. It is a distinct op from ``credential``
+    # on purpose — the handler registers the value with the runtime's redactor,
+    # it does not store a credential — so it must never be reachable through
+    # that verb table. Old runtimes answer unknown-op, which the viewer's sink
+    # treats as a failure and (correctly) fails closed on.
+    "register_secret_redaction",
     "history_page",
     "frontend_sync",
     "record_shell",
@@ -2623,6 +2630,29 @@ class RuntimeServer:
             if inspect.isawaitable(result):
                 result = await result
             return result
+        if op == "register_secret_redaction":
+            # The viewer→runtime half of §6: the viewer's registration answered
+            # the broker's notice because this runtime registered nothing (it
+            # booted before a store existed at its config root, §13), and the
+            # value has to land in THIS process's VariableStore — the one the
+            # bash and eval redactors read. Validated for the same reason
+            # ``credential`` is: the payload path skips the control-frame
+            # validator, and this op carries a secret's value.
+            from local_operator.mobile.types import validate_control_frame
+
+            validate_control_frame(frame)
+            # getattr-probed like every optional capability: a reduced or older
+            # handle answers the unknown-op error rather than silently accepting
+            # a value it will not scrub. The handler only writes the value into
+            # the redaction set — never a credential, never an announcement,
+            # never a log line, never the event stream.
+            register = getattr(h, "register_secret_redaction", None)
+            if not callable(register):
+                raise ValueError("this owner cannot register a redaction")
+            outcome = register(str(frame.get("value", "")))
+            if inspect.isawaitable(outcome):
+                await outcome
+            return True
         if op == "cancel_subagents":
             cancel = getattr(h, "cancel_subagents_count", None)
             if not callable(cancel):

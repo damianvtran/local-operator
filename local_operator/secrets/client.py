@@ -28,6 +28,7 @@ error in ``passphrase`` mode, never to a plausible wrong answer (§13).
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import socket
 import subprocess
@@ -53,6 +54,8 @@ from local_operator.secrets.protocol import (
     send_frame,
     socket_path,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Hard ceiling on reaching the broker. §13 requires a retrieval attempted
 #: while the broker is down to return a clear error and NEVER to hang.
@@ -367,6 +370,29 @@ def register_session(
         connection.close()
         return None
     if not reply.get("ok"):
+        # **A refusal is not the same as "no store this boot", and it used to be
+        # invisible (review round 1, MAJOR-2).** In the hardened tier the broker
+        # refuses a registrant with no lineage — the shape a daemon-spawned
+        # (launchd, ppid 1) runtime has, §13 — and returning ``None`` without a
+        # line made that limit unreportable at every level: the callers' own
+        # ``except`` branches never fire because nothing is raised. Name the
+        # tier and the broker's own reason once, here, where every caller — the
+        # runtime handle and ``register_variable_store_session`` alike — passes
+        # through. The reason names the tier for the hardened case; ``key_mode``
+        # is the local corroboration, read defensively so logging can never
+        # raise out of the registration path.
+        from local_operator.secrets.keys import key_mode
+
+        try:
+            tier = key_mode(base)
+        except Exception:  # noqa: BLE001 — a log line must not break registration
+            tier = "unknown"
+        logger.warning(
+            "the %s-tier secret broker refused to register this session (%s): %s",
+            tier,
+            reply.get("code", "unknown"),
+            reply.get("error", "no reason given"),
+        )
         connection.close()
         return None
     # No timeout on the channel afterwards: it is long-lived and mostly idle,

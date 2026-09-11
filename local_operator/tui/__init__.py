@@ -19,43 +19,129 @@ logger = logging.getLogger(__name__)
 def _register_secret_session(app: Any) -> Any:
     """Register this process with the secret broker; ``None`` when there is none.
 
-    **This covers the TUI only when the TUI OWNS the session.** With an
-    in-process ``Session`` this process holds the ``VariableStore`` the §6
-    notice has to reach, so this registration is the one that answers it. An
-    ATTACHED TUI — the interactive default, where ``app._session`` is an
-    ``AttachedSession`` facade over a separate runtime process — has no store
-    at all, and the registration that matters there is the RUNTIME's own
-    (``ServingSessionHandle``), made in the process whose bash and eval
-    redactors read the store. Do not "fix" the sink below by reaching for the
-    viewer's session state looking for a store: there is nothing to reach.
+    **This process is registered in every shape, and that is deliberate.** The
+    §6 notice reaches the nearest REGISTERED ancestor of the retrieving child,
+    which in the attached architecture is normally the runtime that owns the
+    value's filter (``ServingSessionHandle``). But a runtime that booted before
+    a store existed at its root registers nothing (§13), and then this viewer's
+    entry is the only ancestor the broker can notify. Closing this channel
+    instead would leave no registered ancestor at all: the broker refuses the
+    retrieval for lacking ancestry, ``access.retrieve_secret`` then falls
+    through to its keyfile-tier local decrypt (``except BrokerDenied: if
+    hardened: raise``), and the value lands in the transcript with nothing
+    having been notified — the very leak §6 exists to prevent. So the entry is
+    kept, and the sink below makes it do real work rather than being a slot the
+    broker wastes.
 
-    The redaction sink is resolved LAZILY, per notice, rather than captured
-    here: the session is constructed inside the app after this runs, so its
-    ``VariableStore`` does not exist yet. A notice that arrives before it does
-    is dropped rather than acked, which the broker treats as "cannot be
-    scrubbed" and denies — the correct direction, since there is genuinely no
-    filter to catch that value at that moment (§6, review R3).
+    The sink resolves the redaction target LAZILY, per notice, in order:
+
+    1. ``app._session.variables`` — the TUI OWNS the session, so this process
+       holds the store the bash and eval redactors read and answers directly.
+    2. a forward to the attached runtime (``register_secret_redaction``) over
+       the same viewer→runtime control channel ``/credential store`` already
+       uses, so the value reaches the process that owns the filter.
+    3. RAISE — there is genuinely no filter anywhere this process can reach, so
+       the notice is not acknowledged and the broker fails closed.
+
+    The target is resolved per notice rather than captured here because the
+    session is constructed inside the app after this runs, and /new, /resume
+    and /reload replace it; a captured store would be stale.
+
+    **Budget (review round 1, MAJOR-1).** Registered entries are one per TUI
+    window (this one, made once at boot for the process's whole life) plus one
+    per runtime that HAS a store at its root — a no-store runtime does not
+    register at all, so a machine full of store-less sessions adds nothing.
+    Against the broker's ``MAX_SESSIONS`` (32) that is one entry per window and
+    per store-owning runtime rather than the unbounded per-retrieval growth the
+    cap was added for; the viewer entry is no longer inert, which is why it is
+    kept rather than closed. It is registered unconditionally (no store check,
+    unlike the runtime path), because gating it on a store existing at boot
+    loses the entry in exactly the case it exists for — a store created after
+    the runtime booted — and then NO ancestor registers: the broker refuses for
+    lack of ancestry and the keyfile fallback serves the value unnotified. A
+    store-less window therefore pays one broker start and keeps a fail-closed
+    entry, and that is the deliberate trade.
     """
     from local_operator.secrets.session import register_session as register
 
     def on_secret(name: str, value: bytes) -> None:
+        text = value.decode("utf-8", errors="replace")
         session = getattr(app, "_session", None)
         variables = getattr(session, "variables", None) if session is not None else None
-        if variables is None:
-            # The LAST-RESORT fail-closed path, not the primary one. An attached
-            # viewer has no store to redact through, so the runtime's own
-            # registration is what should have answered this notice; reach here
-            # only when there is genuinely no filter in this process. Logged
-            # because a silent denial is invisible in the agent's transcript.
-            logger.warning(
-                "%r could not be registered for redaction: no variable store in this "
-                "process, so the retrieval is denied rather than served unscrubbed",
-                name,
-            )
-            raise RuntimeError("no variable store is available to redact through yet")
-        variables.register_redaction(value.decode("utf-8", errors="replace"))
+        if variables is not None:
+            # (1) In-process session: the store is here, so the notice is
+            # answered here. Unchanged behaviour.
+            variables.register_redaction(text)
+            return
+        forward = (
+            getattr(session, "register_secret_redaction", None) if session is not None else None
+        )
+        if forward is not None:
+            # (2) Attached session: hand the value to the runtime that owns the
+            # filter. Raises on any failure, which is the fail-closed direction.
+            _forward_redaction_to_runtime(app, forward, text)
+            return
+        # (3) The LAST-RESORT fail-closed path. Logged because a silent denial
+        # is invisible in the agent's transcript; the raise is what stops
+        # ``SessionRegistration._read_loop`` from acknowledging, so the broker
+        # denies rather than serving a value nothing can scrub.
+        logger.warning(
+            "%r could not be registered for redaction: no variable store in this "
+            "process and no runtime to forward to, so the retrieval is denied "
+            "rather than served unscrubbed",
+            name,
+        )
+        raise RuntimeError("no variable store is available to redact through yet")
 
     return register(on_secret)
+
+
+def _forward_redaction_to_runtime(app: Any, forward: Any, value: str) -> None:
+    """Hand one §6 value to the attached runtime, bounded; raise on failure.
+
+    **Why the hop.** The broker's notice arrives on
+    ``SessionRegistration._read_loop``, a plain thread; the viewer's RPC to the
+    runtime runs on the app's event loop, so the call has to hop there.
+
+    **Why it is bounded on THIS side.** The broker denies the retrieval when no
+    acknowledgement arrives within ``NOTIFY_ACK_TIMEOUT_S`` (2 s). A
+    ``call_from_thread``-style hop blocks the notice thread with no timeout, so
+    a wedged loop would park here past that window and turn a fail-closed
+    denial into an ambiguous hang. Instead the coroutine is scheduled with
+    ``run_coroutine_threadsafe`` and the thread waits with an explicit timeout
+    (the transport's own ``REDACTION_FORWARD_TIMEOUT_S``, well under 2 s), so
+    the hop gives up, the sink raises, and the broker denies — fail closed.
+
+    **Why no Textual context is needed.** The forwarded coroutine touches only
+    the attach client's socket and its store; it never reads or mutates widgets,
+    so it does not need ``App._context()`` that ``call_from_thread`` would set.
+    """
+    import asyncio
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from local_operator.mobile.attach_client import REDACTION_FORWARD_TIMEOUT_S
+
+    loop = getattr(app, "_loop", None)
+    if loop is None:
+        # The app has not started its loop yet (a notice before the first turn,
+        # or a session constructed in the gap). There is nothing to forward to.
+        raise RuntimeError(
+            "the TUI is not running yet, so no attached runtime can be asked to redact"
+        )
+    try:
+        future = asyncio.run_coroutine_threadsafe(forward(value), loop)
+    except RuntimeError as exc:  # loop closed, or scheduling refused
+        raise RuntimeError(
+            f"the attached runtime cannot be reached to register this redaction: {exc}"
+        ) from exc
+    try:
+        future.result(timeout=REDACTION_FORWARD_TIMEOUT_S)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        raise RuntimeError(
+            "the attached runtime did not confirm the redaction within the forward "
+            "budget, so the value cannot be kept out of the transcript"
+        ) from exc
 
 
 async def run_tui(
@@ -103,11 +189,13 @@ async def run_tui(
         # notice must reach (QA Q2 — nothing in shipping code registered a
         # session before, which left the broker's table permanently empty and
         # `lop secret harden` unable to unlock its own store). An ATTACHED TUI
-        # is covered by the RUNTIME's registration instead (serving.py), since
-        # its `app._session` facade holds no store this sink could scrub
-        # through. Registration is deliberately best-effort: `register` returns
-        # None when no broker can be started, and the store is an optional
-        # capability rather than a boot dependency (§13).
+        # keeps the same registration as the broker's fallback for a runtime
+        # that registered nothing (it booted before a store existed), and its
+        # sink FORWARDS the notice to that runtime rather than being inert —
+        # see `_register_secret_session`. Registration is deliberately
+        # best-effort: `register` returns None when no broker can be started,
+        # and the store is an optional capability rather than a boot dependency
+        # (§13).
         registration = _register_secret_session(app)
         try:
             await app.run_async()

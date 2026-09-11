@@ -20,6 +20,7 @@ would prove nothing about the boundary that broke.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -36,7 +37,9 @@ from local_operator.secrets import client
 from local_operator.secrets.broker import SecretBroker
 from local_operator.secrets.keys import key_path, write_private_file
 from local_operator.secrets.store import SecretStore
+from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.tui import _register_secret_session
 from local_operator.variables import VariableStore
 
 _SUPPORTED = sys.platform == "darwin" or sys.platform.startswith("linux")
@@ -46,6 +49,10 @@ pytestmark = pytest.mark.skipif(
 
 SECRET_NAME = "RUNTIME_SINK_TOKEN"
 SECRET_VALUE = "runtime-sink-7c1f0b2a"
+
+#: A second value used by the forwarding tests, so a failure cannot be
+#: explained by the registry test having leaked the first one.
+FORWARDED_VALUE = "viewer-forward-4d9e1c"
 
 
 class RuntimeSessionDouble:
@@ -69,6 +76,16 @@ class RuntimeSessionDouble:
 
     def history(self) -> list[Any]:
         return []
+
+    def subscribe(self, handler: Any) -> Any:
+        """The event subscription ``RuntimeServer.start_in_process`` installs.
+
+        Only the wire test starts a server; the rest of this file never does, so
+        this hook exists purely so a REAL ``RuntimeServer`` can be driven over a
+        real socket against this double.
+        """
+        self._event_handler = handler
+        return lambda: None
 
     def set_approval_handler(self, handler: Any) -> None:
         self.approval_handler = handler
@@ -254,3 +271,198 @@ async def test_disposing_the_handle_deregisters_the_session(
         "the disposed handle left this process registered, so its descendants "
         "would stay authorized behind a session that has ended"
     )
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_handler_registers_a_forwarded_value(config_root: Path) -> None:
+    """The owner side of the forward writes to its store — and nowhere else.
+
+    This is what ``AttachedSession.register_secret_redaction`` reaches over the
+    control channel: the value goes into the ``VariableStore`` the bash and eval
+    redactors read, and the handler raises when there is no store, so the
+    viewer's sink declines to acknowledge and the broker denies.
+    """
+    variables = VariableStore()
+    handle = ServingSessionHandle(
+        RuntimeSessionDouble(variables), asyncio.get_running_loop(), cwd=str(config_root)
+    )
+    try:
+        handle.register_secret_redaction(FORWARDED_VALUE)
+        assert FORWARDED_VALUE in variables.redaction_values()
+        assert variables.redact(f"x={FORWARDED_VALUE}") == "x=[redacted]"
+        # Registered as a REDACTION, never as a credential: the value must not
+        # become readable back out of the store's credential surface.
+        assert FORWARDED_VALUE not in variables.credential_names()
+        # And the op must NOT be reachable through the ``/credential`` verb
+        # table: a verb whose only job is to scrub a value must never be able to
+        # store one, and the table's own unknown-action reply is the proof.
+        refusal = await handle.credential_op("register_secret_redaction", "", "x")
+        assert refusal.get("ok") is False and refusal.get("reason") == "unknown-action"
+    finally:
+        handle.close_secret_registration()
+
+    storeless = ServingSessionHandle(
+        RuntimeSessionDouble(None), asyncio.get_running_loop(), cwd=str(config_root)
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            storeless.register_secret_redaction(FORWARDED_VALUE)
+    finally:
+        storeless.close_secret_registration()
+
+
+@pytest.mark.asyncio
+async def test_the_wire_op_registers_the_value_in_the_runtime_store(config_root: Path) -> None:
+    """The viewer→runtime forward really crosses the control channel.
+
+    A real ``RuntimeServer`` over a real handle, driven by a real authenticated
+    socket: the payload op registers the value with the runtime's redactor and
+    answers ``True``. An OLD owner would answer unknown-op here, which the
+    viewer's sink turns into a raise (fail closed), so the seam degrades safely.
+    """
+    variables = VariableStore()
+    handle = ServingSessionHandle(
+        RuntimeSessionDouble(variables), asyncio.get_running_loop(), cwd=str(config_root)
+    )
+    runtime = RuntimeServer(handle, kind="daemon")
+    await runtime.start_in_process()
+    writer = None
+    try:
+        record = runtime._record
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=1 << 20
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "attach"}).encode() + b"\n")
+        await writer.drain()
+        welcome = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+        assert welcome.get("op") == "projection"
+
+        writer.write(
+            json.dumps(
+                {"op": "register_secret_redaction", "req": 1, "value": FORWARDED_VALUE}
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        for _ in range(30):
+            frame = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+            if frame.get("op") == "result" and frame.get("req") == 1:
+                break
+        else:  # pragma: no cover - only on a broken server
+            raise AssertionError("no result frame for register_secret_redaction")
+        assert frame["data"] is True
+        assert FORWARDED_VALUE in variables.redaction_values()
+    finally:
+        if writer is not None:
+            writer.close()
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_forwards_the_notice_and_the_child_is_served(
+    config_root: Path, running_broker: SecretBroker
+) -> None:
+    """The viewer's registration is NOT inert: it forwards to the runtime.
+
+    The shape shipping ``lop`` has when a runtime booted before its store
+    existed: the VIEWER is the only registered session, so the broker's notice
+    lands on the viewer's sink on a plain thread. The sink resolves
+    ``app._session.variables`` (absent on an attached facade), then forwards
+    the value to the attached runtime over the control channel — the loop hop is
+    exercised for real here — and only then acknowledges, so the child is served
+    AND the value is in the filter before the value can be printed.
+    """
+    filtered = VariableStore()
+
+    class AttachedDouble:
+        async def register_secret_redaction(self, value: str) -> None:
+            filtered.register_redaction(value)
+
+    class AppDouble:
+        _session = AttachedDouble()
+        _loop = asyncio.get_running_loop()
+
+    registration = _register_secret_session(AppDouble())
+    assert registration is not None, "the viewer registration did not reach a broker"
+    try:
+        # Off the loop on purpose: the notice has to be answered by a coroutine
+        # scheduled on THIS loop, so a synchronous subprocess.run here would
+        # block the very loop the forward needs — and the timeout this test
+        # would then see is a test artefact, not the production shape.
+        result = await asyncio.to_thread(_retrieve_in_child, config_root, SECRET_NAME)
+
+        assert result.returncode == 0, f"the child was refused: {result.stderr}"
+        assert result.stdout.strip() == SECRET_VALUE
+        assert SECRET_VALUE in filtered.redaction_values(), (
+            "the value was served before the forwarded redaction reached the "
+            "runtime's store, so the notice was not honoured"
+        )
+    finally:
+        registration.close()
+        _await_absent(config_root, os.getpid())
+
+
+class _ForwardFails:
+    """An attached runtime whose forward refuses (a lost owner, a full queue)."""
+
+    async def register_secret_redaction(self, value: str) -> None:
+        raise ConnectionError("runtime gone")
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_that_cannot_forward_denies_the_child(
+    config_root: Path, running_broker: SecretBroker
+) -> None:
+    """A forward that fails must fail CLOSED, not serve the value unredacted.
+
+    A noisy "log and continue" here would acknowledge the notice, let the broker
+    serve the child, and leave the session's redactor unaware of the value — the
+    §6 leak. The sink must raise instead, so the broker denies and the value
+    never reaches the transcript.
+    """
+
+    class AppDouble:
+        _session = _ForwardFails()
+        _loop = asyncio.get_running_loop()
+
+    registration = _register_secret_session(AppDouble())
+    assert registration is not None
+    try:
+        result = await asyncio.to_thread(_retrieve_in_child, config_root, SECRET_NAME)
+
+        assert result.returncode == 2, f"the child was served anyway: {result.stdout!r}"
+        assert SECRET_VALUE not in result.stdout
+        assert SECRET_VALUE not in result.stderr
+        assert "did not acknowledge the redaction notice" in result.stderr
+    finally:
+        registration.close()
+        _await_absent(config_root, os.getpid())
+
+
+@pytest.mark.asyncio
+async def test_the_viewer_sink_with_no_target_at_all_denies_the_child(
+    config_root: Path, running_broker: SecretBroker
+) -> None:
+    """The last-resort branch: nowhere to scrub → deny, never serve.
+
+    A session facade with neither a ``VariableStore`` nor a forwarding method
+    has no filter anywhere the viewer can reach, so the sink raises and the
+    broker denies. This is the branch that keeps the viewer entry fail-closed
+    rather than a silent pass-through.
+    """
+
+    class AppDouble:
+        _session = object()
+        _loop = asyncio.get_running_loop()
+
+    registration = _register_secret_session(AppDouble())
+    assert registration is not None
+    try:
+        result = await asyncio.to_thread(_retrieve_in_child, config_root, SECRET_NAME)
+
+        assert result.returncode == 2, f"the child was served anyway: {result.stdout!r}"
+        assert SECRET_VALUE not in result.stdout
+        assert "did not acknowledge the redaction notice" in result.stderr
+    finally:
+        registration.close()
+        _await_absent(config_root, os.getpid())
