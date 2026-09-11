@@ -2023,9 +2023,13 @@ class TestInflightRefreshCoordination:
 
         refresh_calls = {"n": 0}
 
-        async def fake_refresh(server_url, storage_arg, endpoints) -> auth_mod.RefreshOutcome:
+        async def fake_refresh(
+            server_url, storage_arg, endpoints, *, lock=None, **kwargs: Any
+        ) -> auth_mod.RefreshOutcome:
             refresh_calls["n"] += 1
-            # Mirror the real refresh: persist a fresh token under the lock.
+            # Mirror the real refresh: persist a fresh token under the lock
+            # (which the real one takes over from the caller and releases in
+            # its own finally, hence the ``lock`` keyword this fake accepts).
             await storage_arg.set_tokens(
                 OAuthToken(access_token="refreshed", refresh_token="r2", expires_in=3600)
             )
@@ -2175,7 +2179,7 @@ class TestInflightRefreshCoordination:
         refresh_calls: dict[str, Any] = {"n": 0, "endpoint": None}
 
         async def fake_refresh(
-            server_url: str, storage_arg: Any, endpoints: Any
+            server_url: str, storage_arg: Any, endpoints: Any, *, lock: Any = None, **kw: Any
         ) -> auth_mod.RefreshOutcome:
             refresh_calls["n"] += 1
             refresh_calls["endpoint"] = str(endpoints.oauth_metadata.token_endpoint)
@@ -2309,7 +2313,7 @@ class TestInflightRefreshCoordination:
         # The contention record is armed for the manager to re-voice: the MCP
         # transport turns the raise into a bare CancelledError, so the record is
         # the only channel that survives it.
-        assert auth_mod.REFRESH_CONTENTION.pop(self.URL) is True
+        assert auth_mod.REFRESH_CONTENTION.pop(self.URL) == auth_mod.REFRESH_REFUSAL_LOCK
 
     async def _drive_401_flow(self, provider, responder) -> list[Any]:
         """Pump ``async_auth_flow`` the way httpx does, recording every request
@@ -2448,7 +2452,7 @@ class TestInflightRefreshCoordination:
         spent: list[str] = []
 
         async def fake_refresh(
-            server_url: str, storage_arg: Any, endpoints: Any
+            server_url: str, storage_arg: Any, endpoints: Any, *, lock: Any = None, **kw: Any
         ) -> auth_mod.RefreshOutcome:
             tokens = await storage_arg.get_tokens()
             spent.append(tokens.refresh_token if tokens else "")
@@ -2518,7 +2522,7 @@ class TestInflightRefreshCoordination:
             await provider._initialize()
 
         async def dead_refresh(
-            server_url: str, storage_arg: Any, endpoints: Any
+            server_url: str, storage_arg: Any, endpoints: Any, *, lock: Any = None, **kw: Any
         ) -> auth_mod.RefreshOutcome:
             # Exactly what the real exchange does on a parsed invalid_grant: the
             # marker is written from THERE, keyed to the token it presented.
@@ -2589,7 +2593,7 @@ class TestInflightRefreshCoordination:
         posts: list[str] = []
 
         async def failed_refresh(
-            server_url: str, storage_arg: Any, endpoints: Any
+            server_url: str, storage_arg: Any, endpoints: Any, *, lock: Any = None, **kw: Any
         ) -> auth_mod.RefreshOutcome:
             posts.append("locked")
             return "failed"
@@ -2731,7 +2735,7 @@ class TestInflightRefreshCoordination:
         spent: dict[str, Any] = {}
 
         async def spy_refresh(
-            server_url: str, storage_arg: Any, endpoints: Any
+            server_url: str, storage_arg: Any, endpoints: Any, *, lock: Any = None, **kw: Any
         ) -> auth_mod.RefreshOutcome:
             tokens = await storage_arg.get_tokens()
             spent["refresh_token"] = tokens.refresh_token if tokens else None
@@ -3108,8 +3112,10 @@ asyncio.run(main())
         self, _cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A leaked lock (killed process) must not park a connect eternally: the
-        acquire gives up at the bound and yields False so the caller degrades to
-        the SDK's own refresh instead of hanging."""
+        acquire gives up at the bound and yields a FALSY handle, so the caller
+        takes the contended path (no POST) instead of hanging. Falsy, not
+        "proceed unlocked": an unexclusive exchange is the family-revoking
+        double-spend the lock exists to prevent."""
         import asyncio
         import time as _time
 
@@ -3125,7 +3131,7 @@ asyncio.run(main())
                 async with auth_mod._oauth_refresh_lock(self.URL_A) as locked:
                     elapsed = _time.monotonic() - started
                     # Degraded, but the body RAN: the connect proceeds.
-                    assert locked is False
+                    assert not locked
             assert elapsed < 10.0
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
@@ -3146,7 +3152,7 @@ asyncio.run(main())
             started = _time.monotonic()
             async with asyncio.timeout(20):
                 async with auth_mod._oauth_refresh_lock(self.URL_A) as locked:
-                    assert locked is True  # uncontended
+                    assert locked  # uncontended
             assert _time.monotonic() - started < 5.0
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX flock semantics")
@@ -3157,9 +3163,9 @@ asyncio.run(main())
         from local_operator.mcp import auth as auth_mod
 
         async with auth_mod._oauth_refresh_lock(self.URL_A) as first:
-            assert first is True
+            assert first
         async with auth_mod._oauth_refresh_lock(self.URL_A) as second:
-            assert second is True
+            assert second
 
 
 class TestRefreshLockDegradePaths:
@@ -3724,7 +3730,7 @@ class TestDeadGrantTombstone:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "factory_name",
-        ["server_error", "transport_error", "unparseable_body"],
+        ["server_error", "transport_error"],
     )
     async def test_transient_failures_never_tombstone(
         self, monkeypatch: pytest.MonkeyPatch, factory_name: str
@@ -3746,9 +3752,6 @@ class TestDeadGrantTombstone:
         def server_error(request):
             return httpx.Response(500, text="upstream exploded", request=request)
 
-        def unparseable_body(request):
-            return httpx.Response(200, text="not a token at all", request=request)
-
         def transport_error(request):
             raise httpx.ConnectError("network down", request=request)
 
@@ -3759,6 +3762,53 @@ class TestDeadGrantTombstone:
         assert outcome == "failed"
         assert storage.grant_is_dead() is False
         assert auth_mod.GRANT_DEAD_AT_KEY not in store.rows[0].data
+        # Neither failure leaves a "presented but unacknowledged" marker: a 5xx
+        # is an ANSWER (the server refused without rotating) and a ConnectError
+        # happens BEFORE the request is written, so in both cases the stored
+        # token is untouched and the next attempt is an ordinary retry.
+        assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in store.rows[0].data
+
+    @pytest.mark.asyncio
+    async def test_a_200_with_an_unreadable_body_marks_the_token_as_spent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An HTTP 200 whose body cannot be parsed is NOT a transient failure.
+
+        Unlike the two cases above, the server processed the exchange and
+        rotated: the token we presented IS spent, and its only replacement is in
+        a body we could not read. Retrying therefore means presenting a spent
+        token, which a reuse-detecting provider answers with ``invalid_grant``
+        AND a family revocation — the opposite of what the old ``"failed"``
+        classification implied. So the outcome is ``"unacknowledged"``: the
+        write-ahead send marker stays armed and the next refresh refuses to POST
+        (see ``test_a_sent_but_unacknowledged_exchange_blocks_the_next_post``).
+        No tombstone: nothing told us the GRANT is dead, only that this response
+        was unreadable.
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        store = FakeAuthStore()
+        storage = await self._seed_expired(store)
+
+        self._mock_token_endpoint(
+            monkeypatch, lambda request: httpx.Response(200, text="not a token", request=request)
+        )
+
+        outcome = await auth_mod._refresh_oauth_token_locked(self.URL, storage, self._endpoints())
+
+        assert outcome == "unacknowledged"
+        assert storage.grant_is_dead() is False
+        assert auth_mod.GRANT_DEAD_AT_KEY not in store.rows[0].data
+        marker = store.rows[0].data[auth_mod.GRANT_UNCONFIRMED_SEND_KEY]
+        presented = await storage.get_tokens()
+        assert presented is not None
+        assert presented.refresh_token is not None
+        # Keyed to the token this exchange actually presented, so a later
+        # rotation of the row makes it stale instead of suppressing the new one.
+        assert marker["digest"] == auth_mod._refresh_token_digest(presented.refresh_token)
+        assert storage.send_unconfirmed() is True
 
     @pytest.mark.asyncio
     async def test_a_400_that_is_not_invalid_grant_never_tombstones(

@@ -23,8 +23,11 @@ two claims here are stated in the terms the incident was described in:
 
 Before the corresponding fixes, (1) leaves the spent token stored and the next
 session's refresh POST revokes the family — ``"MCP authorization failed; run
-/mcp reauth"`` for every later session — and (2) ends the request in a
-non-interactive ``McpAuthRequiredError``. Both are asserted as outcomes here
+/mcp reauth"`` for every later session — and (2) ends in a transport-mangled
+``CancelledError`` ("Cancelled via cancel scope") with no token POST and no
+recovery: the 401 is handed to the SDK's authorization branch, whose browser
+refusal the anyio cancel scope swallows, so the session neither heals nor
+reports an actionable auth requirement. Both are asserted as outcomes here
 rather than as call counts, so the stage fails if the recovery merely looks
 plausible.
 """
@@ -282,6 +285,15 @@ async def test_a_cancelled_refresh_keeps_its_rotation_and_the_next_session_conne
                 await task
 
             tokens = _stored_tokens(store, url)
+            # The cancellation is delivered IMMEDIATELY now — teardown no longer
+            # waits out the refresh budget — and the rotation lands a moment
+            # later, persisted by the detached exchange, which still owns the
+            # refresh lock until it has. Polling is part of the contract rather
+            # than a concession: nothing else can recover that token.
+            deadline = time.monotonic() + 5
+            while tokens.get("refresh_token") != "refresh-1" and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+                tokens = _stored_tokens(store, url)
             assert tokens.get("refresh_token") == "refresh-1", (
                 "the cancelled exchange lost the server's rotation; the store is "
                 f"holding a spent token: {tokens!r}"

@@ -2020,7 +2020,7 @@ class TestAuthRequiredHandling:
 
         assert scheduled["called"] is False
         assert manager.auth_blocked("dd") is False
-        assert REFRESH_CONTENTION.pop(url) is False, "the record leaked past the disposal"
+        assert REFRESH_CONTENTION.pop(url) is None, "the record leaked past the disposal"
 
     @pytest.mark.asyncio
     async def test_the_contention_record_is_single_use(
@@ -3956,3 +3956,164 @@ class TestAnUnreadableGrantMarkerIsNotAChangedGrant:
         finally:
             await manager.disconnect_all()
             store.close()
+
+
+class TestRefreshRefusalCopy:
+    """The exact user-visible strings for the three split refusals.
+
+    The reviewer's minor and QA's Q5 both landed here: one message covered three
+    different situations, so it was untrue on two of them — a token endpoint
+    that ANSWERED 500 had not failed "under the refresh lock", and a lock held by
+    another session is not a server refusal. It also promised a retry that the
+    startup gate never performs. These assertions pin the rendered text because
+    a design review round follows, and copy that is not pinned drifts.
+    """
+
+    URL = "https://mcp.example.com/v1/mcp"
+
+    def test_the_three_refusals_say_different_true_things(self) -> None:
+        from local_operator.mcp.auth import (
+            REFRESH_REFUSAL_ENDPOINT,
+            REFRESH_REFUSAL_INFLIGHT,
+            REFRESH_REFUSAL_LOCK,
+            McpRefreshContendedError,
+        )
+
+        lock = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_LOCK))
+        inflight = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_INFLIGHT))
+        endpoint = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_ENDPOINT))
+
+        # No "retrying": the same string is the startup gate's reason a server
+        # is unavailable, and nothing schedules a retry there.
+        assert lock == (
+            f"MCP OAuth token refresh for {self.URL} was skipped: another session "
+            "holds the refresh lock"
+        )
+        assert inflight == (
+            f"MCP OAuth token refresh for {self.URL} did not finish in time; a rotation "
+            "is kept if the response lands"
+        )
+        assert endpoint == (
+            f"MCP OAuth token refresh for {self.URL} was rejected by the authorization server"
+        )
+        assert len({lock, inflight, endpoint}) == 3
+        assert str(McpRefreshContendedError(self.URL)) == lock
+
+    def test_an_unacknowledged_send_renders_the_actionable_reauth_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The third message, at the surface a user actually reads.
+
+        ``_auth_required_text`` composes the startup-toast line (and the
+        transcript notice, and ``/mcp``), leading with the command. A refresh
+        that was SENT and never confirmed is not an expired authorization, so the
+        error carries the reason and the tail says it instead.
+        """
+        from local_operator.mcp.auth import (
+            McpAuthRequiredError,
+            McpRefreshUnconfirmedError,
+        )
+
+        # We hold a grant for this URL (the unconfirmed state presupposes one), so
+        # the command is ``reauth``; the lookup itself is not what is under test.
+        monkeypatch.setattr(
+            "local_operator.mcp.auth.server_has_stored_grant",
+            lambda url, store=None: True,
+        )
+
+        rendered = McpManager._auth_required_text("notion", McpRefreshUnconfirmedError(self.URL))
+        assert rendered == "run /mcp reauth notion — a token refresh was sent but never confirmed"
+
+        # And the unchanged generic wording, so the new detail cannot silently
+        # become the text every other auth requirement renders.
+        assert (
+            McpManager._auth_required_text("notion", McpAuthRequiredError(self.URL))
+            == "run /mcp reauth notion — authorization expired"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unacknowledged_refusal_is_re_voiced_as_an_auth_requirement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-voice: a spent-possibly token must NOT be retried on backoff.
+
+        Contention is transient and retries. A token that may already be spent is
+        the opposite: retrying IS the reuse-detection POST, so this refusal has to
+        arrive as an auth requirement — auth block, actionable toast, abandoned
+        auto-reconnect — while carrying the truthful reason.
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_CONTENTION,
+            REFRESH_REFUSAL_UNCONFIRMED,
+            McpRefreshUnconfirmedError,
+        )
+        from local_operator.mcp.config import MCPAuthConfig, MCPHttpServerConfig
+
+        url = "https://srv.example/mcp"
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=url, auth=MCPAuthConfig(type="oauth"))
+        manager._configs["dd"] = cfg
+
+        async def bare_cancel(*_a: Any, **_kw: Any) -> Any:
+            # Exactly what the transport delivers: a CancelledError with no
+            # cancelling count, i.e. not an external cancellation.
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", bare_cancel)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_UNCONFIRMED)
+        with pytest.raises(McpRefreshUnconfirmedError) as excinfo:
+            await manager._connect_server("dd", cfg)
+        assert excinfo.value.detail == "a token refresh was sent but never confirmed"
+
+        # The manager arm for an auth requirement: blocked, not retried.
+        scheduled = {"called": False}
+        monkeypatch.setattr(
+            manager, "_schedule_reconnect", lambda name: scheduled.__setitem__("called", True)
+        )
+        # Arm a FRESH record: the connect above consumed the first one (single
+        # use), and a reconnect is its own refused attempt in reality.
+        incidents: list[tuple[str, str]] = []
+        manager.on_incident = lambda name, text: incidents.append((name, text))
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_UNCONFIRMED)
+        # ``_reconnect`` does not re-raise an auth requirement: it blocks on the
+        # grant, abandons the ladder and tells the model why.
+        await manager._reconnect("dd", 0.0, manager._epoch)
+        assert scheduled["called"] is False, "a spent-possibly token must not be retried"
+        assert manager.auth_blocked("dd") is True
+        assert manager.get_connection_status("dd") == "auth-required"
+        assert incidents[-1][1] == (
+            "MCP authorization failed; run /mcp reauth dd — a token refresh was sent "
+            "but never confirmed"
+        ), incidents
+
+    def test_each_refusal_reason_is_carried_on_the_ledger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason survives the transport with the record, one per refusal.
+
+        Two concurrent connects for the same server can both refuse; the ledger
+        holds one record each, so the second is not silently dropped (that reached
+        ``_reconnect`` as a bare cancellation and killed the reconnect task
+        instead of retrying it).
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_CONTENTION,
+            REFRESH_REFUSAL_ENDPOINT,
+            REFRESH_REFUSAL_INFLIGHT,
+            REFRESH_REFUSAL_LOCK,
+        )
+
+        url = "https://srv.example/mcp/two"
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_LOCK)
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_INFLIGHT)
+
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_LOCK
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_INFLIGHT
+        assert REFRESH_CONTENTION.pop(url) is None
+
+        # A reason is not a boolean: an unarmed server must pop as None, and a
+        # reason must never be confused with the un-armed answer.
+        REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_ENDPOINT)
+        assert REFRESH_CONTENTION.pop(url) == REFRESH_REFUSAL_ENDPOINT
