@@ -29,12 +29,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator.session import naming
+from local_operator.session.runtime import serving as serving_module
+from local_operator.slash_commands import SLASH_COMMANDS
+from local_operator.tui import app as app_module
 from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.terminal_title import TerminalTitle
@@ -1248,6 +1252,67 @@ def test_release_user_set_is_the_only_way_the_latch_reopens() -> None:
     # Idempotent: a second release on an already-open latch reports that it
     # held nothing rather than raising.
     assert name.release_user_set() is False
+
+
+@pytest.mark.asyncio
+async def test_typing_the_advertised_flag_runs_the_refresh_and_writes_a_receipt() -> None:
+    """The whole seam, from the keystrokes a user actually makes.
+
+    Every part of this is pinned somewhere already — the parser takes
+    ``--refresh``, the picker offers it, the handler asks with the refresh
+    prompt — and nothing pinned them TOGETHER. A parser that accepted the flag
+    while dispatch routed it to the "set the title to these words" branch would
+    pass every one of those tests and rename the conversation to "--refresh".
+    So this types the line into the editor and presses enter.
+    """
+    app, session = await _boot(title="<title>Fix the login flow</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        now = await _named(app, session, "fix the login redirect loop")
+        now[0] += 1
+        session.grow_transcript(3)
+
+        session.title = "<title>Billing importer rewrite</title>"
+        editor = app.query_one(Editor)
+        _set_editor_line(editor, "/title --refresh")
+        await pilot.press("enter")
+        await _settle()
+
+        # The refresh branch ran, and asked with the on-demand prompt.
+        assert len(session.completions) == 2, "the flag spelling spent no call"
+        system, _data = session.completions[1]
+        assert system == naming.REFRESH_SYSTEM_PROMPT
+        # ...and the user is told what happened, on the surface they typed into.
+        assert session.conversation_name == "Billing importer rewrite"
+        assert "title refreshed: Billing importer rewrite" in _transcript_text(app)
+
+
+def test_every_advertised_surface_teaches_the_same_spelling() -> None:
+    """Four surfaces, one spelling, and that agreement IS the change.
+
+    A user who meets `--refresh` in `/help`, `refresh` in a notice and
+    `--refresh` in the picker learns that the command has three spellings and
+    no rule. The bare words all still PARSE (pinned in
+    ``test_title_refresh_qa``); what is pinned here is what the product SAYS,
+    which is the part that drifts when a fifth surface is added later.
+    """
+    entry = next(c for c in SLASH_COMMANDS if c.name == "rename")
+    assert "--refresh" in entry.description
+
+    # The three notices, formatted the way each handler formats them. Built
+    # from the same f-string bodies rather than snapshotted, so this fails on a
+    # changed SPELLING and not on a reworded sentence around it.
+    named = "Fix the login flow"
+    assert "/title --refresh" in f"conversation: {named} — /title <words>, or /title --refresh"
+    assert "/title --refresh" in f"name: {named} — /title <words>, or /title --refresh"
+
+    # And the source lines those came from still exist, so a handler that stops
+    # advertising the flag cannot pass this test by the fixture agreeing with
+    # itself.
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+    serving_source = Path(serving_module.__file__).read_text(encoding="utf-8")
+    assert app_source.count("/title <words>, or /title --refresh") == 2
+    assert serving_source.count("/title <words>, or /title --refresh") == 1
 
 
 # -- the theme sampler and the drift regression it fixes ----------------------
