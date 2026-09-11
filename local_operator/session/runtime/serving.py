@@ -333,6 +333,13 @@ class ServingSessionHandle(SessionHandle):
             effort_ladder=_ladder(session),
         )
         self._fold = ProjectionFold(self._projection)
+        #: The broker registration that authorizes THIS process's descendants to
+        #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
+        #: promptly rather than waiting for the process's socket to close: a
+        #: runtime can outlive the session it served — a stopped ``exec`` run
+        #: returning to its supervisor — and a session that is gone must stop
+        #: authorizing its descendants (§2.1).
+        self._secret_registration: Any = None
         # Conversation naming is a TUI-only errand today (OperatorApp owns the
         # naming worker), so a phone-started session used to stay "mobile
         # session" forever — the session list and the header both read the
@@ -405,6 +412,9 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        # Last, so a handle that could not be fully built never leaves a live
+        # registration behind (see :meth:`_register_secret_session`).
+        self._register_secret_session()
 
     # -- gates -----------------------------------------------------------------
 
@@ -697,6 +707,53 @@ class ServingSessionHandle(SessionHandle):
         self._mcp_reload_tasks.add(task)
         task.add_done_callback(self._mcp_reload_tasks.discard)
 
+    def _register_secret_session(self) -> None:
+        """Register THIS process as the session the broker notifies (§6).
+
+        **The notice has to reach the process that owns the output filter and
+        the transcript**, and in the attached architecture that is this
+        runtime: ``Session.variables`` here is the store the bash and eval
+        redactors read, while the TUI holds only an ``AttachedSession`` facade
+        with no store at all. Registering from the viewer instead made the
+        notice unanswerable by construction, so the broker (correctly) denied
+        every descendant retrieval in every attached session.
+
+        Best-effort by contract, exactly like the TUI's own registration: the
+        store is an optional capability and never a boot dependency (§13), so a
+        session starts and runs normally with no broker to reach.
+
+        Runs on the runtime's loop, so the one blocking step — starting a
+        broker that is not up yet — is a bounded, one-time stall
+        (``STARTUP_TIMEOUT_S``, 5 s) before the runtime serves anyone. That is
+        the cost the TUI already pays at its own boot, and it is paid only when
+        a store exists and no daemon is listening.
+        """
+        from local_operator.secrets.session import register_variable_store_session
+
+        try:
+            self._secret_registration = register_variable_store_session(
+                self._session, session_id=getattr(self._session, "session_id", None)
+            )
+        except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
+            logger.debug("secret session registration failed", exc_info=True)
+            self._secret_registration = None
+
+    def close_secret_registration(self) -> None:
+        """Deregister this process, so its descendants stop being authorized.
+
+        Idempotent and non-raising. The socket closing on process exit is the
+        backstop; this is the plan (§2.1), and it is what covers a runtime that
+        outlives the session it served — an ``exec`` run whose control surface
+        closes while the process lives on to be reused.
+        """
+        registration = self._secret_registration
+        self._secret_registration = None
+        if registration is not None:
+            try:
+                registration.close()
+            except Exception:  # noqa: BLE001 — teardown must not fail on a deregistration
+                logger.debug("secret session deregistration failed", exc_info=True)
+
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -704,6 +761,10 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # Revoke the broker registration along with the session: descendants of
+        # a session that is going away must not stay authorized behind it
+        # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
+        self.close_secret_registration()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         if self._unsubscribe_config_watch is not None:

@@ -33,7 +33,7 @@ import logging
 import socket
 import threading
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -126,3 +126,50 @@ def register_session(
     if channel is None:
         return None
     return SessionRegistration(channel, on_secret)
+
+
+def register_variable_store_session(
+    session: Any,
+    *,
+    session_id: str | None = None,
+    base: Path | None = None,
+) -> SessionRegistration | None:
+    """Register the process that HOLDS ``session``'s ``VariableStore`` (§6).
+
+    **Why the store's process and not the front end a human is typing into.**
+    The §6 notice asks the notified session to add a child's
+    ``$(lop secret get X)`` value to the filter that scrubs its own streamed
+    output, and to the value set the bash/eval redactors re-read per chunk.
+    Both live in the ``VariableStore`` of the process that RUNS the session
+    (``Session.variables``). In the attached architecture that process is the
+    session runtime, and the TUI holds only an ``AttachedSession`` facade —
+    which has no store at all — so a registration made by the viewer could
+    only refuse, and the broker (correctly) denied the descendant. Registering
+    from the runtime's handle is what makes the notice land on the process that
+    can actually honour it.
+
+    The sink resolves the store per notice rather than capturing it, and RAISES
+    when there is none: ``SessionRegistration._read_loop`` deliberately does not
+    ack a failed redaction, so the broker fails closed and denies the child
+    instead of serving a value nothing can scrub. That is the required
+    direction — do not soften it into a log-and-continue.
+
+    ``None`` on the same terms as :func:`register_session` — no broker, no
+    readable ticket, refused — plus one more: a runtime that boots before a
+    secret store exists has nothing any descendant could retrieve, and skipping
+    the registration there keeps a session that never touches the store from
+    starting a broker daemon of its own. A store created later is picked up on
+    the next session boot.
+    """
+    from local_operator.secrets.keys import store_path
+
+    if not store_path(base).is_file():
+        return None
+
+    def on_secret(_name: str, value: bytes) -> None:
+        store = getattr(session, "variables", None)
+        if store is None:
+            raise RuntimeError("the session has no variable store to redact through")
+        store.register_redaction(value.decode("utf-8", errors="replace"))
+
+    return register_session(on_secret, session_id=session_id, base=base)
