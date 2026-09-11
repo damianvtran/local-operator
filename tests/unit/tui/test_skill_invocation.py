@@ -591,17 +591,26 @@ class TestInlineInvocation:
             assert not editor.picker.is_open()
 
     @pytest.mark.asyncio
-    async def test_a_sigil_inside_an_engaged_command_is_plain_text(self, skill_root) -> None:
-        """`/team ops $research` is a request about a skill, not an invocation.
+    async def test_a_sigil_stays_plain_text_where_the_claim_holds(self, skill_root) -> None:
+        """A `$` is plain text wherever a command's argument is NOT free text.
 
-        The arbitration case that only became possible when `$` went inline.
+        The arbitration case, narrowed to what survives the argument-slot floor.
+        A terminated recognised command still claims its line, but that claim is
+        now PARTIAL: it yields past a terminated NAME slot, because the request
+        after a team/agent name is free text destined for the model and a
+        `$skill` there is an invocation (see `_skill_argument_floor`). It holds
+        totally in the two shapes below — an enum-tail argument, whose values are
+        a fixed vocabulary, and a NAME slot still being typed, where the roster
+        list owns the caret. The positive half of this contract is asserted in
+        `test_skill_in_command_argument.py`.
         """
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            editor = await self._draft(app, pilot, "/team ops $res")
-            assert editor.picker.mode is not PickerMode.SKILL
+            for buffer in ("/model $res", "/team $res"):
+                editor = await self._draft(app, pilot, buffer)
+                assert editor.picker.mode is not PickerMode.SKILL, buffer
 
     @pytest.mark.asyncio
     async def test_enter_reassembles_the_draft_and_stages_it(self, skill_root) -> None:

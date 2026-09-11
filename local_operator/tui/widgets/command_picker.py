@@ -55,6 +55,7 @@ from textual.widgets import Static
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
     ArgumentChoice,
+    ArgumentMode,
     SlashCommand,
     match_choices,
     match_commands,
@@ -310,6 +311,91 @@ def _claiming_command(line: str, commands: frozenset[str] = frozenset()) -> int 
     return None
 
 
+def _skill_argument_floor(
+    line: str,
+    claim: int,
+    prompt_commands: frozenset[str],
+    name_commands: frozenset[str],
+) -> int | None:
+    """Column at or after which a boundary ``$`` may open inside a claim, else ``None``.
+
+    THE one definition of "past the name slot", read both by :func:`skill_token`
+    (deciding whether a token opens at all) and by
+    :func:`_skill_argument_region` (deciding what a reassembly rebuilds), for
+    the same non-drift reason :func:`skill_token_is_leading` is one definition:
+    two copies of this rule is how the gate and the edit end up disagreeing
+    about which half of a line belongs to the command.
+
+    The claim in :func:`_claiming_command` is now PARTIAL. It is lifted only
+    where the argument is free text destined for the model
+    (``consumes_prompt``), and only PAST the name slot, which is what keeps the
+    three picker phases mutually exclusive: while a name is still being typed
+    (``/team del``) there is no skill token at all, so the roster list owns the
+    caret unopposed. ``None`` means the claim stands WHOLE — an enum-tail
+    argument (``/model``, ``/theme``), any non-prompt command, or a name slot
+    still open.
+
+    ``claim`` is the index :func:`_claiming_command` returned; the caller has
+    already established it is not ``None``.
+    """
+    word, _sep, argument = line[claim + 1 :].partition(" ")
+    word = word.lower()
+    if word not in prompt_commands:
+        # Enum-tail and every non-prompt command: a `$` here is plain argument
+        # text, exactly as before this rule existed.
+        return None
+    arg_start = claim + 1 + len(word) + 1
+    if word not in name_commands:
+        # `/goal`, `/loop`, `/btw`, `/fork` — no name slot, so the whole
+        # argument is the request and the boundary is where it starts.
+        return arg_start
+    first, first_sep, _rest = argument.partition(" ")
+    if not first_sep:
+        # The name slot is still open: the roster list owns this caret.
+        return None
+    if word in ("team", "teams") and first.lower() == "chart":
+        # `/team chart <name>`'s second slot is another name list, not free
+        # text, so the claim stands whole through both levels.
+        return None
+    return arg_start + len(first) + 1
+
+
+def _skill_argument_region(
+    text: str,
+    cursor: int | None,
+    commands: frozenset[str],
+    prompt_commands: frozenset[str],
+    name_commands: frozenset[str],
+) -> tuple[int, int] | None:
+    """Buffer span a ``$`` reassembly rebuilds inside a claim, or ``None``.
+
+    The buffer-offset projection of :func:`_skill_argument_floor`, shaped like
+    :func:`slash_token_span`. ``[region_start, region_end)`` STARTS at the floor
+    so it cannot drift from the gate that let the token open in the first place
+    — one helper answers both questions — and ENDS at the line end per the
+    inline contract stated verbatim in :func:`slash_argument_context`'s own
+    docstring: "the argument is the text from the word-terminating space to the
+    END OF THE LINE the command is on".
+
+    Deliberately does NOT use :func:`slash_argument_context`. That parser is
+    gated on ``ArgumentMode``, which states whether a command offers a VALUE
+    LIST and says nothing about whether its argument is free text;
+    ``consumes_prompt`` is that statement. Reading the wrong flag would leave
+    the four prompt commands that offer no list — ``/goal``, ``/loop``,
+    ``/btw``, ``/fork`` — with a token that opens but no region to rebuild, and
+    they would fall through to the whole-buffer reassembly that puts the skill
+    in FRONT of the command word.
+    """
+    line, line_start, column = _line_of_cursor(text, cursor)
+    claim = _claiming_command(line, commands)
+    if claim is None or column <= claim:
+        return None
+    floor = _skill_argument_floor(line, claim, prompt_commands, name_commands)
+    if floor is None:
+        return None
+    return line_start + floor, line_start + len(line)
+
+
 def slash_context(
     text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
 ) -> SlashContext | None:
@@ -470,7 +556,11 @@ def slash_argument(
 
 
 def skill_token(
-    text: str, cursor: int | None = None, commands: frozenset[str] = frozenset()
+    text: str,
+    cursor: int | None = None,
+    commands: frozenset[str] = frozenset(),
+    prompt_commands: frozenset[str] = frozenset(),
+    name_commands: frozenset[str] = frozenset(),
 ) -> SlashContext | None:
     """The ``$skill`` token being typed at the caret, or ``None``.
 
@@ -502,6 +592,21 @@ def skill_token(
     lists would fight over one caret. Empty ``commands`` (the pure-parser
     default) disables claiming, matching every other parser here.
 
+    That claim is PARTIALLY lifted by ``prompt_commands`` and ``name_commands``.
+    A command whose argument is free text destined for the model
+    (``consumes_prompt``) is exactly where reaching for a skill makes sense —
+    ``/team delivery $research explain the MR`` — so a boundary ``$`` there
+    opens the picker, but only AT OR AFTER the argument's name-slot boundary
+    (:func:`_skill_argument_floor`). That floor is what keeps the relaxation
+    from costing disjointness: while the name is still being typed (``/team ``,
+    ``/team del``, ``/team $``) there is no skill token, so the roster list
+    answers alone and ``/team $`` cannot hijack it. At most one of the three
+    phases can answer for any caret, by construction, exactly as before.
+
+    BOTH default to ``frozenset()``, which keeps the claim TOTAL — the
+    behaviour every parser-level test and every caller outside the composer
+    relies on. Only the composer, which has the registry, passes them.
+
     ``query`` is ``""`` for a bare ``$``, which opens the list on the full set.
     The caret must be INSIDE the token; moving it out into the request closes
     the list, which is what makes the picker phase a property of the parse.
@@ -517,10 +622,19 @@ def skill_token(
     # through `_active_slash`, so the two sigils cannot disagree about who owns
     # the caret.
     claim = _claiming_command(line, commands)
+    floor = 0
     if claim is not None and column > claim:
-        return None
+        argument_floor = _skill_argument_floor(line, claim, prompt_commands, name_commands)
+        if argument_floor is None:
+            return None
+        floor = argument_floor
     dollar = _active_sigil(line, column, "$")
     if dollar is None:
+        return None
+    # The floor is tested on the RESOLVED `$`, not on the caret: the caret can
+    # sit anywhere inside the token, so a token opened before the floor stays
+    # closed however far right the user has typed.
+    if dollar < floor:
         return None
     end = dollar + 1
     while end < len(line) and not line[end].isspace():
@@ -590,6 +704,8 @@ def completion_for(
     row_name: str,
     commands: tuple[str, ...],
     known: frozenset[str] = frozenset(),
+    prompt_commands: frozenset[str] = frozenset(),
+    name_commands: frozenset[str] = frozenset(),
 ) -> tuple[str, int] | None:
     """The buffer and caret that accepting ``row_name`` produces — pure.
 
@@ -614,9 +730,23 @@ def completion_for(
     parse the caller would otherwise have had to repeat.
     """
     if mode is CompletionMode.SKILL:
-        token = skill_token(text, caret, known)
+        token = skill_token(text, caret, known, prompt_commands, name_commands)
         if token is None:
             return None
+        # INSIDE a prompt command's argument the token must become the
+        # ARGUMENT's prefix, not the buffer's. The submit-side parser is
+        # anchored at offset 0 of the ARGUMENT string, and `_reassembled_skill`
+        # below moves to the BUFFER start, which here would produce
+        # `$gitlab /team delivery …` — a line neither parser can read. So when
+        # a region exists and holds the token, that path is the only one
+        # allowed to run: a `None` from it falls through to the span
+        # replacement, never to the whole-buffer reassembly.
+        region = _skill_argument_region(text, caret, known, prompt_commands, name_commands)
+        if region is not None and region[0] <= token.start < region[1]:
+            reassembled = _reassembled_skill_argument(text, token, row_name, region)
+            if reassembled is not None:
+                return reassembled
+            return _skill_span_replacement(text, token, row_name)
         # INLINE ENGAGE, modelled exactly as NAME_ARGUMENT models it below. A
         # `$` is inline now, so a draft can survive OUTSIDE the token — either
         # before it (`fix this $res`) or on another line — and the submit-side
@@ -636,16 +766,7 @@ def completion_for(
         reassembled = _reassembled_skill(text, token, row_name)
         if reassembled is not None:
             return reassembled
-        # Same trailing-space contract as the command word: it terminates the
-        # token, closes the list, and opens the request. The suffix beyond the
-        # token is preserved because a user can complete a `$skill` typed in
-        # front of a request they already wrote.
-        # `token.start` is the `$`, which is not column 0 when the draft is
-        # indented; the leading run is preserved rather than normalised away so
-        # completing never silently reformats what the user typed.
-        lead = text[: token.start]
-        completed = f"{lead}${row_name} {text[token.end :].lstrip()}"
-        return completed, token.start + len(row_name) + 2
+        return _skill_span_replacement(text, token, row_name)
     if mode is CompletionMode.COMMAND:
         context = slash_context(text, caret, known)
         if context is None:
@@ -687,6 +808,87 @@ def completion_for(
         if outside:
             return _reassembled_completion(filled, caret_after, known)
     return filled, caret_after
+
+
+def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
+    """Replace just the ``$`` token's span with ``row_name`` \u2014 the plain path.
+
+    Factored out because :func:`completion_for` now reaches it from TWO places:
+    the ordinary inline case, and the argument case where the token already
+    leads its region and :func:`_reassembled_skill_argument` declines. One
+    definition so the two cannot drift into producing different buffers for
+    what the user experiences as the same keystroke.
+
+    Same trailing-space contract as the command word: it terminates the token,
+    closes the list, and opens the request. The suffix beyond the token is
+    preserved because a user can complete a ``$skill`` typed in front of a
+    request they already wrote. ``token.start`` is the ``$``, which is not
+    column 0 when the draft is indented; the leading run is preserved rather
+    than normalised away so completing never silently reformats what the user
+    typed.
+    """
+    lead = text[: token.start]
+    completed = f"{lead}${row_name} {text[token.end :].lstrip()}"
+    return completed, token.start + len(row_name) + 2
+
+
+def _reassembled_skill_argument(
+    text: str, token: SlashContext, row_name: str, region: tuple[int, int]
+) -> tuple[str, int] | None:
+    """Move a ``$`` token to the front of a prompt command's ARGUMENT.
+
+    The argument-scoped mirror of :func:`_reassembled_skill`, and it exists
+    because that one moves the token to the BUFFER start. Inside a command
+    argument that is the wrong destination: the submit-side parser
+    (:mod:`local_operator.skills.invoke`) is anchored at offset 0 of the
+    ARGUMENT string, so the token has to become the ARGUMENT's prefix.
+    Reassembling to the buffer start instead would produce
+    ``$gitlab /team delivery \u2026``, which neither the command dispatcher nor the
+    skill parser can read.
+
+    The command word and any name slot sit BEFORE ``region[0]`` by
+    construction \u2014 the region starts at :func:`_skill_argument_floor`, which is
+    past the name slot \u2014 so ``/team delivery`` is untouched here rather than
+    preserved by an extra rule. ``region`` comes from
+    :func:`_skill_argument_region`, which deliberately does not consult
+    :func:`slash_argument_context`; see there for why ``ArgumentMode`` is the
+    wrong flag to gate this on.
+
+    ``None`` whenever nothing but whitespace precedes the token INSIDE the
+    region, which is the only case this is for: the token already leads the
+    argument, so the caller's span replacement is the whole and correct answer
+    for both sub-cases — ``/team delivery $gi`` gains the separator the user
+    has not typed yet, and ``/team delivery $gi fix this`` does NOT gain a
+    trailing one, because the separator before the request is already there and
+    a space after the user's own sentence is a stray character no other
+    completion in this codebase appends.
+
+    The caret parks immediately after the ``$<name> `` separator rather than at
+    the end of the text, which is where :func:`_reassembled_skill` parks. Two
+    completion paths reach THIS slot — span replacement when no prose precedes
+    the ``$``, reassembly when some does — and which one runs depends on
+    something the user cannot see; parking them differently would move Tab's
+    caret by the length of their own prose for no visible reason. Consistency
+    within the slot outranks consistency across slots, and in the bare case the
+    two conventions coincide anyway.
+    """
+    region_start, region_end = region
+    if not text[region_start : token.start].strip():
+        return None
+    # One adjoining separator goes with the token, the same rule
+    # :func:`_reassembled_skill` and :func:`_reassembled_completion` use, so the
+    # gap the token used to occupy does not survive the move. The PRECEDING
+    # separator is preferred; the following one is taken only when the token
+    # opens the rebuilt region.
+    start, end = token.start, token.end
+    if start > region_start and text[start - 1] in " \t\n":
+        start -= 1
+    elif end < region_end and text[end] in " \t\n":
+        end += 1
+    rest = (text[region_start:start] + text[end:region_end]).strip()
+    assembled = f"${row_name} {rest} " if rest else f"${row_name} "
+    new_text = text[:region_start] + assembled + text[region_end:]
+    return new_text, region_start + len(row_name) + 2
 
 
 def _reassembled_skill(text: str, token: SlashContext, row_name: str) -> tuple[str, int] | None:
@@ -1046,6 +1248,8 @@ class CommandPicker(Static):
         self._suppress_report = False
         self._commands: list[SlashCommand] = []
         self._command_names: frozenset[str] = frozenset()
+        self._prompt_command_names: frozenset[str] = frozenset()
+        self._name_prompt_commands: frozenset[str] = frozenset()
         #: Whether the ``$`` token the SKILL list is showing for sits INLINE
         #: rather than at the buffer start. Latched by ``sync_skills`` so the
         #: app's one-tick-later ``set_choices`` refill re-derives under the same
@@ -1093,6 +1297,24 @@ class CommandPicker(Static):
         # claimed the rest of the line. Cached so it is not rebuilt per keystroke.
         self._command_names = frozenset(
             name.lower() for command in commands for name in command.names
+        )
+        # The `$` arbitration's two halves, cached beside the vocabulary above
+        # and for the same reason. A command whose argument is free text bound
+        # for the model gives up its claim PAST the name slot, so a skill can be
+        # reached from inside the request; `_skill_argument_floor` reads both
+        # sets to find that boundary. Derived from the registry so they cannot
+        # drift from the flag they describe.
+        self._prompt_command_names = frozenset(
+            name.lower()
+            for command in commands
+            if command.consumes_prompt
+            for name in command.names
+        )
+        self._name_prompt_commands = frozenset(
+            name.lower()
+            for command in commands
+            if command.consumes_prompt and command.arguments is not ArgumentMode.NONE
+            for name in command.names
         )
 
     def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
@@ -1387,7 +1609,13 @@ class CommandPicker(Static):
         inside an engaged command's argument reads as plain text here for the
         same reason it does there.
         """
-        token = skill_token(text, cursor, self._command_names)
+        token = skill_token(
+            text,
+            cursor,
+            self._command_names,
+            self._prompt_command_names,
+            self._name_prompt_commands,
+        )
         if token is None:
             self._dismissed_query = None
             self._mode = PickerMode.SKILL
