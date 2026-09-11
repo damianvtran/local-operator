@@ -199,8 +199,25 @@ class RecordPublisher:
 
     def __init__(self, record: SessionRecord, root: Path | None = None) -> None:
         self.record = record
-        self._root = root
-        self.path = publish(record, root)
+        # RESOLVE THE DIRECTORY ONCE, HERE, and use that resolution for the
+        # rest of this publisher's life. ``root=None`` means "whatever
+        # ``config_dir()`` says now", and ``config_dir()`` deliberately reads
+        # the environment on every call (see its docstring: tests re-point it
+        # after import) — so leaving ``self._root`` as None made every later
+        # ``heartbeat``/``close`` re-resolve it. A runtime that outlived its
+        # own config dir then rewrote its record into whatever directory was
+        # current at that moment, and deleted THAT file on close, leaving its
+        # own record behind: records are keyed by pid alone, so the file it
+        # clobbered belonged to a different session. Measured in this suite,
+        # where the autouse fixture hands every test a fresh HOME: a runtime
+        # whose shutdown landed after the NEXT test had started removed that
+        # test's record, which is how two unrelated tests read "no session
+        # matches <name>" and "the record still says started=False".
+        #
+        # Pin the CONFIG dir rather than the run dir so ``root`` keeps meaning
+        # what every caller already passes.
+        self._root = root if root is not None else config_dir()
+        self.path = publish(record, self._root)
 
     def heartbeat(self, **updates: object) -> None:
         """Rewrite the record with fresh liveness plus any changed fields
