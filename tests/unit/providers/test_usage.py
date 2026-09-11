@@ -12,6 +12,7 @@ import json
 import math
 import time
 from typing import Any
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -1593,6 +1594,94 @@ def _qwencloud_fr_rows(commodity: str) -> dict[str, Any]:
     return {"code": "200", "data": {"Data": []}}
 
 
+def _qwencloud_console_client(
+    payload: dict[str, Any],
+    requests: list[httpx.Request] | None = None,
+    status: int = 200,
+) -> httpx.AsyncClient:
+    """Route console-gateway posts, which are FORM-encoded, not JSON.
+
+    Every other helper in this module reads ``json.loads(request.content)``.
+    The console gateway takes ``application/x-www-form-urlencoded`` with the
+    real request nested as a JSON string in the ``params`` field, so a
+    JSON-reading handler raises before it can assert anything.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        return httpx.Response(status, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _console_form(request: httpx.Request) -> dict[str, Any]:
+    """The decoded form body, with ``params`` parsed back out of its JSON string.
+
+    ``keep_blank_values`` is load-bearing, not defensive: the fetcher sends
+    ``sec_token`` as an empty string (the gateway echoes it and never
+    validates it), and ``parse_qs`` DROPS blank values by default. Without
+    this flag the helper silently hides a key the request really carries, so
+    an assertion on the body's key set fails against a correct fetcher.
+    """
+    form = {k: v[0] for k, v in parse_qs(request.content.decode(), keep_blank_values=True).items()}
+    if "params" in form:
+        form["params"] = json.loads(form["params"])
+    return form
+
+
+#: Verbatim production body captured 2026-09-11 from a live personal Token
+#: Plan account. `per1WeekPercentage` is a FRACTION USED (0.2405 == 24.05%
+#: used, 75.95% remaining), not a 0-100 percentage, and `per1WeekResetTime`
+#: is epoch MILLISECONDS. Reading either the way the sibling fields elsewhere
+#: in this module read is the regression this body pins.
+QWENCLOUD_CONSOLE_BODY = {
+    "code": "200",
+    "data": {
+        "DataV2": {
+            "ret": ["SUCCESS::接口调用成功"],
+            "data": {
+                "msg": "Success.",
+                "code": "SUCCESS",
+                "data": {
+                    "per1WeekResetTime": 1789746540000,
+                    "per1WeekPercentage": 0.240515384368425,
+                },
+                "requestId": "captured-request-id",
+                "success": True,
+            },
+        },
+        "success": True,
+        "httpStatus": 200,
+        "errorCode": "",
+        "api": "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage",
+        "errorMsg": "",
+    },
+    "httpStatusCode": "200",
+    "requestId": "captured-request-id",
+    "successResponse": True,
+}
+
+#: The same endpoint with an expired or absent session cookie, captured the
+#: same day: HTTP **200** carrying a FAILURE. `code` is still "200" and
+#: `successResponse` is still true -- only `data.success` is false. A
+#: status-code check, or the sibling BSS helper's `payload["code"] != "200"`
+#: check, both read this as data and report a fabricated window.
+QWENCLOUD_CONSOLE_NOT_LOGGED_IN = {
+    "code": "200",
+    "data": {
+        "success": False,
+        "httpStatus": 200,
+        "errorCode": "BailianGateway.Login.NotLogined",
+        "api": "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage",
+        "errorMsg": "BailianGateway.Login.NotLogined",
+    },
+    "httpStatusCode": "200",
+    "requestId": "captured-request-id",
+    "successResponse": True,
+}
+
+
 @pytest.mark.asyncio
 async def test_qwencloud_token_plan_personal_window_and_packs() -> None:
     """The personal commodity is the 7-day credit window; add-on instances are
@@ -1739,6 +1828,398 @@ async def test_qwencloud_token_plan_fails_closed_on_console_need_login() -> None
             oauth_creds={"access": "expired-mgmt"},
         )
     assert report is None
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_reports_the_personal_seven_day_window() -> None:
+    """The console gateway is the only route that sees a personal Token Plan:
+    for this account BSS answers IsGray true with an empty seat summary and
+    zero instances on every commodity, so the 7-day window exists nowhere
+    else. The vendor sends a FRACTION used; the panel needs a percentage."""
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+
+    assert report is not None
+    assert report.provider == "alibaba-token-plan"
+    assert [(limit.id, limit.label) for limit in report.limits] == [("credits-7d", "7 Day Credits")]
+    window = report.limits[0]
+    assert window.amount.used == pytest.approx(24.0515384368425)
+    assert window.amount.limit == 100.0
+    assert window.amount.remaining == pytest.approx(75.9484615631575)
+    assert window.amount.unit == "percent"
+    assert window.amount.fraction() == pytest.approx(0.240515384368425)
+    assert window.resets_at_ms == 1_789_746_540_000
+    assert window.window == "7d"
+    assert window.shared is True
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_sends_one_form_post_with_only_the_ticket() -> None:
+    """The request shape IS the contract here: the gateway takes a form body
+    with the real call nested as a JSON string, and authenticates on exactly
+    one cookie. A JSON post is rejected, and a second credential riding along
+    would widen what a read-only usage probe spends."""
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+
+    assert report is not None
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://cs-data.qwencloud.com/data/api.json"
+    assert request.headers["content-type"].startswith("application/x-www-form-urlencoded")
+    form = _console_form(request)
+    # The blank `sec_token` is part of the body and must survive decoding; see
+    # `_console_form` on why the default `parse_qs` would hide it here.
+    assert set(form) == {"product", "action", "region", "sec_token", "params"}
+    assert form["product"] == "sfm_bailian"
+    assert form["action"] == "IntlBroadScopeAspnGateway"
+    assert form["region"] == "ap-southeast-1"
+    assert form["sec_token"] == ""
+    assert form["params"]["Api"] == ("zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage")
+    assert form["params"]["V"] == "1.0"
+    assert form["params"]["Data"]["cornerstoneParam"]["productCode"] == "p_efm"
+    # One cookie, and it is the only credential on the request. No Bearer:
+    # the management token is refused by this host outright.
+    assert request.headers["cookie"] == "login_qwencloud_ticket=fake-console-ticket"
+    assert "authorization" not in request.headers
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_does_not_persist_the_cookie_on_the_shared_client() -> None:
+    """The client is owned by the CALLER and reused across every provider in
+    one `/usage` refresh. A full-account console session cookie left in its
+    jar would ride along on the next provider's request, so the ticket is
+    passed per-request and the jar must come back empty."""
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+        assert report is not None
+        assert dict(client.cookies) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["alibaba-token-plan", "alibaba-token-plan-oauth"])
+async def test_qwencloud_console_reaches_both_spellings_of_the_provider(provider) -> None:
+    """`alibaba-token-plan-oauth` is a login FLAVOUR of `alibaba-token-plan`,
+    not a second provider: `credential_provider_id` maps it onto the base id
+    and the console ticket is stored once, under that base id. Both spellings
+    are live keys in `_FETCHERS`, so a console route gated on the bare
+    literal would silently stop reporting for anyone who signed in via OAuth
+    -- and nothing else in the suite would catch it.
+    """
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
+    async with client:
+        report = await fetch_usage(client, provider, extra_creds={"ticket": "fake-console-ticket"})
+
+    assert report is not None
+    assert len(requests) == 1
+    assert "cs-data.qwencloud.com" in str(requests[0].url)
+    assert [limit.id for limit in report.limits] == ["credits-7d"]
+    assert report.limits[0].amount.used == pytest.approx(24.0515384368425)
+    # The report is filed under the id the credential is STORED under, which is
+    # the base id for either spelling -- one account, not two half-filled ones.
+    assert report.provider == "alibaba-token-plan"
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_fails_closed_on_a_two_hundred_carrying_not_logined() -> None:
+    """An expired session cookie answers HTTP 200 with `code: "200"` and
+    `successResponse: true` -- only the inner `data.success` is false. Both
+    the status check every sibling fetcher makes and `_qwencloud_bss_call`'s
+    `payload["code"] != "200"` check pass on this body, so a parser built to
+    either pattern reports a fabricated window from a dead credential."""
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_NOT_LOGGED_IN)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra_creds",
+    [None, {}, {"ticket": ""}, {"project_id": "qwencloud-console:personal"}],
+)
+async def test_qwencloud_console_without_a_ticket_sends_nothing(extra_creds) -> None:
+    """No stored cookie means no request leaves the process -- not a request
+    that fails. A probe fired with an empty credential would be answered with
+    NotLogined, which is indistinguishable from an expired one and costs a
+    round trip to learn nothing."""
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
+    async with client:
+        report = await fetch_usage(client, "alibaba-token-plan", extra_creds=extra_creds)
+    assert report is None
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_ignores_the_other_stored_row_fields() -> None:
+    """The stored console row carries bookkeeping the CLI writes beside the
+    ticket (`project_id`, `captured_at`). The fetcher reads `ticket` and
+    nothing else, so a row growing a field never changes the request."""
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            extra_creds={
+                "ticket": "fake-console-ticket",
+                "project_id": "qwencloud-console:personal",
+                "captured_at": 1_789_000_000_000,
+            },
+        )
+
+    assert report is not None
+    assert len(requests) == 1
+    form = _console_form(requests[0])
+    assert "project_id" not in form
+    assert "captured_at" not in form
+    assert requests[0].headers["cookie"] == "login_qwencloud_ticket=fake-console-ticket"
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_falls_through_to_bss_and_never_doubles_the_window() -> None:
+    """Console first, BSS only when console returns None. Both routes build a
+    `credits-7d` limit, so they are safe only because they are mutually
+    exclusive per fetch: a fall-through that ran both would append the same id
+    twice and the panel would render one window as two."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if "cs-data" in str(request.url):
+            # A teams account: the personal endpoint has nothing to report.
+            return httpx.Response(200, json=QWENCLOUD_CONSOLE_NOT_LOGGED_IN)
+        body = json.loads(request.content)
+        if body.get("action") == "QuerySubscriptionGray":
+            return httpx.Response(200, json={"code": "200", "data": {"IsGray": False}})
+        if body.get("action") == "DescribeFrInstances":
+            return httpx.Response(200, json=_qwencloud_fr_rows(body["params"]["CommodityCode"]))
+        return httpx.Response(200, json={"code": "200", "data": {}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            access_token="sk-sp-wire-key",
+            oauth_creds={"access": "mgmt-token"},
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+
+    assert report is not None
+    ids = [limit.id for limit in report.limits]
+    assert ids == ["credits-7d", "credits-packs"]
+    assert len(ids) == len(set(ids))
+    # The console host was tried FIRST, then the BSS gateway answered.
+    assert "cs-data.qwencloud.com" in seen[0]
+    assert any("cli.qwencloud.com" in url for url in seen[1:])
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_wins_over_bss_when_both_could_answer() -> None:
+    """Ordering is not arbitrary: for the account shape this exists to serve,
+    BSS returns a report with no window at all (IsGray true, empty seat
+    summary), which is a worse answer than the console's real one -- and a
+    non-None one, so it would win if it ran first."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if "cs-data" in str(request.url):
+            return httpx.Response(200, json=QWENCLOUD_CONSOLE_BODY)
+        return httpx.Response(200, json={"code": "200", "data": {"IsGray": True}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client,
+            "alibaba-token-plan",
+            access_token="sk-sp-wire-key",
+            oauth_creds={"access": "mgmt-token"},
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+
+    assert report is not None
+    assert [limit.id for limit in report.limits] == ["credits-7d"]
+    assert report.limits[0].amount.unit == "percent"
+    # Only the console host was asked; BSS never ran.
+    assert all("cs-data" in url for url in seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"code": "200"},
+        {"code": "200", "data": {"success": True}},
+        {"code": "200", "data": {"success": True, "DataV2": {}}},
+        {"code": "200", "data": {"success": True, "DataV2": {"data": {"success": False}}}},
+        # Truthy but not `True` at either envelope: a `== True` read or a
+        # bare truthiness check both let this through.
+        {"code": "200", "data": {"success": 1, "DataV2": {"data": {"success": True, "data": {}}}}},
+        {
+            "code": "200",
+            "data": {
+                "success": True,
+                "DataV2": {"data": {"success": "true", "data": {"per1WeekPercentage": 0.5}}},
+            },
+        },
+        # Every envelope right, the number missing.
+        {
+            "code": "200",
+            "data": {"success": True, "DataV2": {"data": {"success": True, "data": {}}}},
+        },
+        # Every envelope right, the number unparseable.
+        {
+            "code": "200",
+            "data": {
+                "success": True,
+                "DataV2": {
+                    "data": {"success": True, "data": {"per1WeekPercentage": "not-a-number"}}
+                },
+            },
+        },
+    ],
+)
+async def test_qwencloud_console_fails_closed_on_a_partial_envelope(body) -> None:
+    """Four nested envelopes with `data` at three levels and `success` at two.
+    Any of them missing means the answer is not the one asked for, and a
+    report built from a partial parse is worse than no report: it renders as
+    a real number."""
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", [0, -5, None, "not-a-number", ""])
+async def test_qwencloud_console_drops_an_unusable_reset_time(reset) -> None:
+    """A reset time is a countdown the panel renders: 0, negative or garbage
+    would render as 1970 or a negative duration. The window itself is still
+    real, so the row survives with no countdown rather than being dropped."""
+    body = json.loads(json.dumps(QWENCLOUD_CONSOLE_BODY))
+    body["data"]["DataV2"]["data"]["data"]["per1WeekResetTime"] = reset
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+
+    assert report is not None
+    assert report.limits[0].resets_at_ms is None
+    assert report.limits[0].amount.used == pytest.approx(24.0515384368425)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fraction", "used", "remaining"),
+    [(0.0, 0.0, 100.0), (1.0, 100.0, 0.0), (1.5, 100.0, 0.0), (-0.3, 0.0, 100.0)],
+)
+async def test_qwencloud_console_clamps_the_fraction_into_a_percentage(
+    fraction, used, remaining
+) -> None:
+    """The vendor fraction is unvalidated input. Outside 0..1 it would render
+    a bar past full or a negative remainder, and `remaining` is derived from
+    the clamped value so the pair can never disagree."""
+    body = json.loads(json.dumps(QWENCLOUD_CONSOLE_BODY))
+    body["data"]["DataV2"]["data"]["data"]["per1WeekPercentage"] = fraction
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+
+    assert report is not None
+    amount = report.limits[0].amount
+    assert amount.used == pytest.approx(used)
+    assert amount.remaining == pytest.approx(remaining)
+    # `fraction()` is Optional by contract; a clamped window is always
+    # measurable, so None here would itself be the regression.
+    clamped = amount.fraction()
+    assert clamped is not None
+    assert 0.0 <= clamped <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_extra_creds_does_not_change_any_other_provider() -> None:
+    """The keyword is additive: a ticket in hand must not alter a route that
+    has nothing to do with QwenCloud.
+
+    This is a regression pin, not a hypothetical. Gated on the ticket alone,
+    the console route ran for EVERY provider, and because the parse succeeds
+    for a live ticket it returned a report labelled `alibaba-token-plan`
+    before the real fetcher was ever called -- so this provider's slot
+    silently received QwenCloud's 7-day window, and a full-account console
+    session cookie was spent on an unrelated host.
+    """
+    requests: list[httpx.Request] = []
+    client = _qwencloud_console_client({"data": {"limit": 10, "usage": 4}}, requests)
+    async with client:
+        report = await fetch_usage(
+            client,
+            "openrouter",
+            api_key="fake-key",
+            extra_creds={"ticket": "fake-console-ticket"},
+        )
+    assert report is not None
+    assert all("cs-data" not in str(request.url) for request in requests)
+    # The label is the other half of the defect: a report from the console
+    # route carries QwenCloud's provider id whatever was asked for.
+    assert report.provider == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_qwencloud_console_never_raises() -> None:
+    """ "A quota fetcher never raises" is a module-wide contract: `/usage`
+    renders a table, and one provider's dead endpoint must not take it down."""
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(boom))
+    async with client:
+        assert (
+            await fetch_usage(
+                client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+            )
+            is None
+        )
+
+    client = _qwencloud_console_client({"code": "200"}, status=502)
+    async with client:
+        assert (
+            await fetch_usage(
+                client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+            )
+            is None
+        )
 
 
 class TestZaiSignInReportsUsage:
