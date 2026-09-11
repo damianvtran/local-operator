@@ -135,8 +135,9 @@ The table prints `STATE PID KIND CONVERSATION MODEL RSS FOOTPRINT UPTIME
 HB_AGE`:
 
 - `STATE` — `live` (pid alive and heartbeating), `wedged` (pid alive but its
-  owner has not heartbeat within the timeout, so it will not service the socket
-  promptly), or `stale` (dead; the record is reaped on the next scan).
+  runtime has not sent a heartbeat within the timeout, so it will not service
+  the socket promptly), or `stale` (dead; the record is reaped on the next
+  scan).
 - `PID` `KIND` `CONVERSATION` `MODEL` — session identity. `KIND` is `tui`
   (interactive), `daemon` (daemon-owned), or `exec` (headless one-shot).
   `CONVERSATION` falls back to the session id when the session has no name yet.

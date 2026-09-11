@@ -114,7 +114,7 @@ class HangingFollowerSession(JobsSession):
     rather than merely the one that happens to run first.
     """
 
-    #: What `AttachedSession` declares (`remote.py:203`), and the app reads it to
+    #: What `AttachedSession` declares (`attached.py`), and the app reads it to
     #: know this worker's `error=None` means "the owner did not tell me" rather
     #: than "the turn succeeded". A follower fake without it models the wire
     #: ORDER while claiming the authority of an in-process session.
@@ -133,7 +133,7 @@ class OwnerEndRacingFollowerSession(JobsSession):
     """The follower interleaving that breaks a latch placed at the CALL SITE.
 
     `AttachedSession._on_wire_event` clears `_streaming` and only THEN emits the
-    relayed `agent_end` (remote.py: the `AgentEndEvent` arm), and it runs on the
+    relayed `agent_end` (attached.py: the `AgentEndEvent` arm), and it runs on the
     socket read pump — a different task from Textual's message pump. So the
     owner's end can land inside the fallback's own post-to-dispatch window:
     guard 2 reads a just-cleared False, the fallback proceeds, and the real
@@ -1504,7 +1504,7 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
         runtime_locality: RuntimeLocality = "this-machine"
 
         async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
-            raise RuntimeError("session owner is reconnecting")
+            raise RuntimeError("the runtime is reconnecting")
 
     app = OperatorApp(lambda: _factory(RefusingFollowerSession()))
     async with app.run_test(size=(100, 30)) as pilot:

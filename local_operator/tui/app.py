@@ -4756,7 +4756,7 @@ class OperatorApp(App[None]):
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
-                raise RuntimeError("The prepared owner is no longer active")
+                raise RuntimeError("The prepared runtime is no longer active")
             remote = await AttachedSession.connect(
                 record,
                 session_id,
@@ -4765,7 +4765,7 @@ class OperatorApp(App[None]):
                 display_window=True,
             )
         if not _is_viewer(remote):
-            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
@@ -4841,7 +4841,7 @@ class OperatorApp(App[None]):
         try:
             session = source.session
             if not _is_viewer(session):
-                raise RuntimeError("Sidebar navigation requires an owner-backed session")
+                raise RuntimeError("Sidebar navigation requires a runtime-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
             #
@@ -4859,7 +4859,7 @@ class OperatorApp(App[None]):
             # logs at debug and whose `finally` releases the preparation, so no
             # user-visible surface observes it.
             if speculative and session.is_cold:
-                raise RuntimeError("The prepared owner is no longer ready")
+                raise RuntimeError("The prepared runtime is no longer ready")
             if speculative or refresh:
                 await session.ensure_display_current()
             if not refresh:
@@ -5726,8 +5726,9 @@ class OperatorApp(App[None]):
         preparation loop expensive.
 
         Both terms move only on durable content. `display_history_revision` is
-        bumped by compaction, prune and recovery (`remote.py:1385,1506`) — the
-        rewrites that can make an over-budget window SMALLER.
+        bumped by compaction, prune and recovery (`attached.py`'s
+        `_invalidate_display_history`) — the rewrites that can make an
+        over-budget window SMALLER.
         `history_message_count` is the durable row count.
         """
         session = source.session
@@ -5946,7 +5947,7 @@ class OperatorApp(App[None]):
         if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
         if not _is_viewer(session):
-            raise RuntimeError("The conversation is not owner-backed")
+            raise RuntimeError("The conversation is not runtime-backed")
         if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
@@ -5959,7 +5960,7 @@ class OperatorApp(App[None]):
         focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not _is_viewer(previous):
-            raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed current session")
         if not refreshing:
             self._close_subagent_view()
             self._close_org_chart_view()
@@ -6444,7 +6445,7 @@ class OperatorApp(App[None]):
                 # A BIND THAT DID NOT BIND IS A FAILURE. The bind has two
                 # silent returns that look identical here — "already bound,
                 # nothing to do" and "cannot bind right now" (the facade is
-                # `_recovering`, remote.py) — and only the second leaves the
+                # `_recovering`, attached.py) — and only the second leaves the
                 # session cold. Committing on that second one publishes a COLD
                 # session as connected: `display_only` goes False, the saved
                 # transcript is swapped in live, and then
@@ -7770,7 +7771,7 @@ class OperatorApp(App[None]):
         Says the same thing the owner's own ``/stop`` says, because it is the
         same fact: the session is cold and ``/resume`` is the way back. The
         id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
-        is what turns every later "owner is reconnecting" into the truth.
+        is what turns every later "runtime is reconnecting" into the truth.
         """
         source = source or self._interaction
         session = source.session
@@ -16451,7 +16452,7 @@ class OperatorApp(App[None]):
                         # recoverable (press again), so it renders as a
                         # warning that says exactly what is unknown.
                         self._replace_stop_notice(
-                            f"could not confirm the stop with the session owner — "
+                            f"could not confirm the stop with the runtime — "
                             f"{offered} subagent{'s' if offered != 1 else ''} may still "
                             "be running; press Esc twice again to retry",
                             "warning",
@@ -20149,7 +20150,7 @@ class OperatorApp(App[None]):
             record = getattr(session, "record_shell", None) if session is not None else None
             if not callable(record):
                 self._notice_for(
-                    source, "Shell finished, but this owner cannot save its receipt", "error"
+                    source, "Shell finished, but this runtime cannot save its receipt", "error"
                 )
                 return
             try:
@@ -24095,7 +24096,7 @@ class OperatorApp(App[None]):
             # second line about the same fact pointing the other way is the
             # defect, not the diagnosis.
             logger.debug(
-                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                "build skew (runtime) at %s: %s is current, this window (%s) is behind",
                 reason,
                 owner.label(),
                 loaded.label(),
@@ -24165,7 +24166,7 @@ class OperatorApp(App[None]):
                 # in this build, so anything without it is older than this
                 # window.
                 announce(
-                    "owner-unknown",
+                    "runtime-unknown",
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
@@ -24200,7 +24201,7 @@ class OperatorApp(App[None]):
                 # reaper compares itself against disk and acts on the answer
                 # (QA round 1, Q-1 all-refs sub-case).
                 announce(
-                    "owner",
+                    "runtime",
                     owner.label(),
                     loaded.label(),
                     # Collapsed by hand when the versions are EQUAL (the
@@ -24230,7 +24231,7 @@ class OperatorApp(App[None]):
                 )
                 return
             announce(
-                "owner",
+                "runtime",
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
@@ -24241,7 +24242,7 @@ class OperatorApp(App[None]):
 
         if runtime_idle and callable(ask):
             logger.debug(
-                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                "build skew (runtime) at %s: %s -> %s; runtime idle, requesting refresh",
                 reason,
                 owner.label() if owner is not None else "<unstamped>",
                 loaded.label(),
@@ -24798,8 +24799,8 @@ class OperatorApp(App[None]):
             # list (a reduced test double) still falls through, matching the
             # pre-guard behaviour the round-4 walk established.
             self._system_notice(
-                f"/{entry.name} is not available from this session's owner; "
-                "run it in the owner's terminal",
+                f"/{entry.name} is not available from this session's runtime; "
+                "run it in the runtime's terminal",
                 "warning",
             )
             return
@@ -25246,7 +25247,7 @@ class OperatorApp(App[None]):
             # `AttachedSession.request_stop` does.
             self._issued_own_stop = False
             self._system_notice(
-                "cannot stop this session's owner — the owner is an older process; "
+                "cannot stop this session's runtime — the runtime is an older process; "
                 "close it there or upgrade",
                 "warning",
             )
@@ -25936,14 +25937,16 @@ class OperatorApp(App[None]):
                 self._system_notice(text_line, kind)
             elif bool(getattr(session, "_recovering", False)):
                 # `is_cold` is a superset of the drop: it is also true while
-                # the facade is redialing an owner that died. There "send a
+                # the facade is redialing a runtime that died. There "send a
                 # message" is not the lever — the facade's own answer for the
-                # gap is `_unavailable_reason()` ("session owner is
+                # gap is `_unavailable_reason()` ("the runtime is
                 # reconnecting"), the sentence the prompt path already uses
-                # (review round 2, R2-M1).
+                # (review round 2, R2-M1). That literal is matched nowhere;
+                # `_is_runtime_gone` excludes it on the `reconnecting`
+                # substring alone, which the wording keeps.
                 reason = getattr(session, "_unavailable_reason", None)
                 self._system_notice(
-                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    f"{reason() if callable(reason) else 'the runtime is reconnecting'}; "
                     "try /model again in a moment",
                     "warning",
                 )
@@ -29708,8 +29711,9 @@ class OperatorApp(App[None]):
         self._interaction.draft.aside = None
         panel.close()
         panel._on_height = None
-        # Give the transcript its own last rows back, and land the reader at
-        # the end of the conversation they came back to.
+        # Give the transcript its own last rows back, and land the reader
+        # back where THEY were — the tail only if that is where they already
+        # were (see the `is_following_tail` guard below).
         #
         # DROP the inline rule rather than write a number back. The sheet's own
         # bottom padding is the conversation's trailing row of ground (1 in the
@@ -29721,8 +29725,31 @@ class OperatorApp(App[None]):
         # which is the only place that knows which layout is up.
         transcript = self._transcript_view()
         if transcript is not None:
+            # `follow_tail()` ONLY when the reader was already at the end —
+            # not unconditionally. The unconditional call was itself a
+            # defect: a reader who scrolled BACK to re-read something before
+            # opening the aside (the exact gesture the docstring at
+            # `_reserve_ground_for_aside` names — "re-reading is a thing
+            # people do WHILE asking an aside about it") got yanked to the
+            # tail the moment they closed the card, landing on unrelated
+            # content and one click away from the D2/D3 defects this same
+            # change fixes elsewhere. Measured: parked at `scroll_y=3` of 15,
+            # `/btw` opened and closed with no scroll gesture in between —
+            # `scroll_y` came back as `15`, not `3`. Clearing the padding
+            # rule alone (no `follow_tail()`) already lands the SAME row at
+            # the SAME offset, because the padding is the only thing that
+            # moved: the conversation's own rows never did.
+            #
+            # `is_following_tail()`, not `is_near_bottom()`: the anchor is the
+            # authority on INTENT (did the reader ask to be at the end),
+            # which is what a re-acquire on close should honour, and it is
+            # already resynced against the padded extent by
+            # `_reserve_ground_for_aside`'s own `follow_tail()` call when the
+            # aside opened at the tail.
+            was_following = transcript.is_following_tail
             transcript.styles.clear_rule("padding")
-            transcript.follow_tail()
+            if was_following:
+                transcript.follow_tail()
         draft = self._aside_draft
         images = self._aside_draft_images
         self._aside_draft = None
@@ -35619,7 +35646,7 @@ class OperatorApp(App[None]):
         if session is not self._session:
             logger.debug("dropped a recall refusal for a session that is no longer current")
             return
-        logger.debug("session owner refused the recall of steer %s", command_id)
+        logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
     def _settle_queued_steer_notices_unsent(self) -> None:

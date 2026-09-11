@@ -2612,7 +2612,16 @@ class ToolCard(ExpandableActionBlock):
             # this one says `1m57s`, and `117s` two seconds later on the same
             # row is the app disagreeing with itself about how it writes a
             # duration.
-            if elapsed < 10:
+            if elapsed < 0.05:
+                # `<0.1s`, never `0.0s`. Rounding a genuinely fast tool to
+                # `0.0s` reprints the exact string the fabricated-duration bug
+                # produced, which is why the missing-duration report came back
+                # against a tool that had simply returned at once — the reader
+                # cannot tell a real sub-50 ms call from a row whose duration
+                # was lost. Reads as "too fast to measure", and is exactly
+                # DURATION_COL wide so the column still holds.
+                duration = "<0.1s"
+            elif elapsed < 10:
                 duration = f"{elapsed:.1f}s"
             elif elapsed < 60:
                 duration = f"{elapsed:.0f}s"
