@@ -541,3 +541,55 @@ async def test_clicking_a_row_with_no_focus_of_its_own_reaches_the_composer() ->
 
         assert app.focused is editor
         assert app.query_one("#input-dock").has_class(COMPOSER_FOCUSED_CLASS)
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_row_above_the_viewport_reveals_its_top() -> None:
+    """Expanding a row the reader has scrolled past brings its top back.
+
+    The row's body grows BELOW its top, and with the tail anchor holding the
+    bottom steady the growth lands above the viewport: the reader presses
+    expand and gets the middle of the body, with the heading and the first
+    fields off-screen and no key that reaches them (design round 1, D3).
+    Reveal-then-act is this ledger's existing convention for a key that acts on
+    a row it may have left off-screen.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        cards = _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+
+        card = cards[0]
+        assert card.virtual_region.y < view.scroll_y, "premise: the row is above the fold"
+        card.toggle_expanded()
+        await pilot.pause()
+        assert card.expanded is True
+        assert view.scroll_y <= card.virtual_region.y + 0.5
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_row_at_the_tail_still_follows_the_tail() -> None:
+    """The reveal is for rows ABOVE the fold only; the tail keeps the bottom.
+
+    Expanding the newest row must not yank the view back to its top: the
+    reader is following the bottom, the growth is below their eyes, and the
+    tail anchor is what holds the offset there.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        cards = _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y >= view.max_scroll_y - 1, "premise: following the tail"
+
+        cards[-1].toggle_expanded()
+        await pilot.pause()
+        assert cards[-1].expanded is True
+        assert view.scroll_y >= view.max_scroll_y - 1
