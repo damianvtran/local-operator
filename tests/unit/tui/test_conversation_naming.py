@@ -1767,6 +1767,51 @@ async def test_a_routed_refresh_also_frees_the_latch_it_superseded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_routed_refresh_is_never_answered_with_a_verdict() -> None:
+    """A cancel is the caller going away, so it must not come back as a title
+    outcome — and it must behave the same whichever await it lands in.
+
+    `_ask_for_title` swallows `CancelledError` because it has to: the automatic
+    naming task is detached and routinely cancelled at shutdown, where a
+    propagating cancel would be a teardown traceback for a feature nobody waited
+    on. That left the two awaits inside the routed op answering one signal two
+    different ways — the history read raising, the naming call returning a
+    verdict for a request nobody was holding.
+    """
+
+    class _Slow:
+        conversation_name = "Fix the login flow"
+
+        def history(self) -> list[Any]:
+            return [SimpleNamespace(role="user", text="fix the login redirect loop")]
+
+        async def complete_once(self, system: str, prompt: str) -> str:
+            await asyncio.sleep(30)  # cancelled while the model is thinking
+            return "<title>Never reached</title>"
+
+    task = asyncio.ensure_future(naming.routed_refresh("Fix the login flow", _Slow()))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_a_receipt_never_quotes_a_title_that_does_not_exist() -> None:
+    """Every branch but one quotes the name in force. A superseded refresh on a
+    never-named conversation had none, and rendered "title unchanged: " with
+    nothing after the colon."""
+    for outcome in (naming.TITLE_REFRESHED, naming.TITLE_UNCHANGED, naming.TITLE_NOTHING_YET):
+        assert naming.refresh_receipt(naming.TitleRefresh(outcome, "X"), "") == (
+            "nothing to title yet — /title <words> names it by hand"
+        ), outcome
+    # The one exception is honest with or without a name: it reports that no
+    # judgement happened rather than quoting one.
+    assert "could not reach the model" in naming.refresh_receipt(
+        naming.TitleRefresh(naming.TITLE_UNAVAILABLE), ""
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_routed_budget_covers_the_history_read_too() -> None:
     """The deadline must bound the WHOLE op, not just the naming call.
 

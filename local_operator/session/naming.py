@@ -662,6 +662,14 @@ def provisional_title(text: str) -> str:
 #: nothing propagates out of a naming call into the turn beside it.
 CALL_FAILED = object()
 
+#: Returned when the naming call was CANCELLED rather than failing on its own.
+#: Separate from :data:`CALL_FAILED` because the two have opposite meanings for
+#: the two kinds of caller: a detached worker must swallow both (its cancel is a
+#: routine shutdown), while an awaited caller must re-raise this one — its
+#: cancel is the client that asked going away, and a receipt for a request
+#: nobody is holding is worse than no answer. Both collapse to "no title".
+CALL_CANCELLED = object()
+
 
 async def _ask_for_title(
     system: str, prompt: str, complete_fn, timeout: float
@@ -680,11 +688,19 @@ async def _ask_for_title(
     """
     try:
         raw = await asyncio.wait_for(complete_fn(system, prompt), timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        # CancelledError is caught deliberately: the naming task is detached
-        # and routinely cancelled at shutdown, and letting that propagate
-        # would surface a teardown traceback for a feature nobody waited on.
+    except asyncio.TimeoutError:
         return CALL_FAILED
+    except asyncio.CancelledError:
+        # Swallowed, deliberately and load-bearingly: the automatic naming task
+        # is DETACHED and routinely cancelled at shutdown, so propagating would
+        # surface a teardown traceback for a feature nobody waited on.
+        #
+        # Reported apart from a timeout all the same, because a caller that IS
+        # awaited (:func:`routed_refresh`) has the opposite obligation: a cancel
+        # there is its own caller going away, and reporting that as a title
+        # outcome would answer a request nobody is listening to. It re-raises on
+        # this sentinel; the detached callers collapse it like any failure.
+        return CALL_CANCELLED
     except Exception:
         # EVERY provider failure, 429 included. The turn is running alongside
         # this call and must never learn it happened; the request is `isolated`
@@ -1040,6 +1056,11 @@ TITLE_UNCHANGED = "unchanged"
 TITLE_UNAVAILABLE = "unavailable"
 TITLE_NOTHING_YET = "nothing-yet"
 
+#: The call was cancelled. NOT a user-facing outcome — it exists so an awaited
+#: caller can tell a cancel apart from a failure and re-raise it. See
+#: :data:`CALL_CANCELLED`.
+TITLE_CANCELLED = "cancelled"
+
 
 #: The receipt each outcome earns, in the words every surface says them in.
 #: ONE spelling for three handlers (the TUI worker, the routed ``slash_result``
@@ -1062,12 +1083,21 @@ def refresh_receipt(result: "TitleRefresh", standing: str, *, stored: bool = Tru
     this command with a name it did not choose and claim a store that never
     happened. Same outcome, opposite receipts.
     """
-    if result.outcome == TITLE_REFRESHED:
-        return f"title refreshed: {standing}" if stored else f"title unchanged: {standing}"
+    if result.outcome == TITLE_REFRESHED and stored and standing:
+        return f"title refreshed: {standing}"
+    if result.outcome == TITLE_UNAVAILABLE:
+        # Honest with or without a name: it reports that no judgement happened
+        # rather than asserting one the dead provider never made.
+        return "could not reach the model — the title is unchanged"
+    if not standing:
+        # Every remaining branch quotes the name in force, and there isn't one:
+        # a superseded refresh on a never-named conversation reached this and
+        # rendered "title unchanged: " with nothing after the colon. The
+        # nothing-yet wording is the truth for all of them — there is no title,
+        # and the way to get one by hand is the same.
+        return "nothing to title yet — /title <words> names it by hand"
     if result.outcome == TITLE_NOTHING_YET:
         return "nothing to title yet — /title <words> names it by hand"
-    if result.outcome == TITLE_UNAVAILABLE:
-        return "could not reach the model — the title is unchanged"
     return f"title unchanged: {standing}"
 
 
@@ -1131,6 +1161,11 @@ async def refresh_title(
         # resolves itself as soon as the conversation has content.
         return TitleRefresh(TITLE_NOTHING_YET)
     title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
+    if title is CALL_CANCELLED:
+        # Not an outcome the user is ever shown: the awaited callers re-raise it
+        # (see :func:`routed_refresh`) and the worker's own ``CancelledError``
+        # branch has already returned by the time one could reach a receipt.
+        return TitleRefresh(TITLE_CANCELLED)
     if title is CALL_FAILED:
         # The model was never reached. Reported apart from "unchanged" because
         # the two differ in the only way that matters to someone who typed a
@@ -1143,7 +1178,8 @@ async def refresh_title(
         # was nothing worth titling, which is the nothing-yet case arriving from
         # the model rather than from an empty transcript.
         return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
-    assert isinstance(title, str)  # narrowed: CALL_FAILED and None returned above
+    # narrowed: CALL_CANCELLED, CALL_FAILED and None all returned above
+    assert isinstance(title, str)
     if current and title.casefold() == current.casefold():
         return TitleRefresh(TITLE_UNCHANGED, current)
     return TitleRefresh(TITLE_REFRESHED, title)
@@ -1188,14 +1224,22 @@ async def routed_refresh(current: str, session: Any) -> TitleRefresh:
         )
 
     try:
-        return await asyncio.wait_for(_gather(), ROUTED_TITLE_TIMEOUT_S)
+        result = await asyncio.wait_for(_gather(), ROUTED_TITLE_TIMEOUT_S)
     except asyncio.CancelledError:
-        # NOT swallowed: a cancelled op is the caller going away, and the
-        # runtime's own teardown must not be reported to it as a title outcome.
+        # A cancel landing in the HISTORY read arrives here as itself. Never
+        # swallowed: the op's caller has gone away, and a receipt for a request
+        # nobody holds is worse than no answer.
         raise
     except Exception:  # noqa: BLE001 — naming is decoration; never fail the op
         logger.debug("routed title refresh could not complete", exc_info=True)
         return TitleRefresh(TITLE_UNAVAILABLE)
+    if result.outcome == TITLE_CANCELLED:
+        # A cancel landing in the NAMING call is swallowed down there (it has to
+        # be, for the detached workers) and surfaces as this outcome instead, so
+        # the two awaits answer one signal the same way rather than one raising
+        # and the other returning a title verdict.
+        raise asyncio.CancelledError
+    return result
 
 
 @dataclass
