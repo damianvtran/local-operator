@@ -1502,6 +1502,52 @@ async def test_action_home_moves_the_offset_at_press_time(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_action_home_that_moves_nothing_keeps_following_the_tail(tmp_path) -> None:
+    """A Home press that cannot move the reader must not release the follower.
+
+    Review round 1, M1. A child page whose transcript still fits the viewport
+    (`max_scroll_y == 0`) is showing its own end, and it is LIVE: the rows it
+    goes on to produce have to be followed. `_size_updated` reaches
+    `_scroll_to_tail()` only `if changed and self._tail_anchor.following`, so
+    releasing here stops a still-short page dead — the next output lands below
+    the fold with no input to reveal it, the failure class
+    `TranscriptView.TailAnchor.note_user_scroll` documents.
+
+    The pre-fix code got this right only by accident: its release rode
+    `watch_scroll_y`, which needs an offset change to fire, so a press that
+    moved nothing released nothing. Releasing at press time must be keyed on
+    POSITION for the same reason ``_snap_landing_to_row_head`` keys its release
+    that way — `scroll_y < max_scroll_y` is what "this press left the tail"
+    means, and a press that moved nothing cannot have left it.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(3):
+        await transcript.append_message(Message.assistant(f"short {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        await _wait_geometry_settled(pilot, view._body)
+        # The whole page fits: Home has nowhere to go, and the reader is
+        # already at the end it is following.
+        assert view._body.max_scroll_y == 0
+        assert view._body.scroll_y == 0
+        assert view._body.is_following_tail is True
+
+        view.action_home()
+
+        assert view._body.scroll_y == 0
+        assert view._body.is_following_tail is True
+        await _wait_history(pilot, view)
+
+
+@pytest.mark.asyncio
 async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -> None:
     """Scrolling to the top loads history per ARRIVAL — never a cascade.
 
