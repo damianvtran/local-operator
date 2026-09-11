@@ -29,6 +29,7 @@ from local_operator.tui.widgets.tool_card import (
     ROW_INDENT,
     ROW_INDENT_MIN_WIDTH,
     ToolCard,
+    row_indent,
 )
 from local_operator.tui.widgets.transcript import PeerMessageBlock, WakeBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -104,17 +105,34 @@ async def test_every_ledger_row_starts_its_icon_on_the_same_cell() -> None:
 def test_the_inset_ladder_is_the_same_for_every_row_type(make) -> None:
     """Present at the threshold, gone below it — for all three row types.
 
-    The inset is breathing room, and breathing room is the first thing a
-    narrow ledger spends: one more cell there pushes the row past the rung
-    where the `⟨∅⟩` answer survives. Asserted at the boundary because that is
-    the part that can regress, and per row type because a ladder that only
-    `ToolCard` walks is how the two rows drifted apart in the first place.
+    The inset is breathing room, and breathing room is the first thing a narrow
+    ledger spends. Asserted at the boundary because that is the part that can
+    regress, and per row type because a ladder that only `ToolCard` walks is
+    how the two rows drifted apart in the first place.
+
+    What is asserted here is the LADDER and nothing more: one cell of inset at
+    `ROW_INDENT_MIN_WIDTH`, none at `-1`, for each row type. The reason the
+    threshold sits at 30 belongs to `ToolCard` — below it, one more cell pushes
+    the row past the rung where the `⟨∅⟩` answer slot survives — and that rung
+    is protected by
+    `test_tool_card.test_activating_an_inert_row_changes_the_painted_frame`.
+    The wake and peer rows have no notice/answer slot of their own, so there is
+    nothing of that rung for them to assert; they only have to agree with the
+    threshold, which is what this checks.
     """
     block = make()
     at_threshold = block._build_row(ROW_INDENT_MIN_WIDTH).plain
     below = block._build_row(ROW_INDENT_MIN_WIDTH - 1).plain
     assert _icon_column(Text(at_threshold)) == ROW_INDENT
     assert _icon_column(Text(below)) == 0
+    # ... and the inset the row paints IS the ledger's one derivation, at every
+    # width and for every row type. The two assertions above pin the geometry
+    # at the boundary; this one pins that no builder has re-inlined a rule of
+    # its own beside `row_indent` — which is the shape the round-1 review
+    # (MINOR) rejected, and which no boundary test can see.
+    for width in (ROW_INDENT_MIN_WIDTH + 8, ROW_INDENT_MIN_WIDTH, ROW_INDENT_MIN_WIDTH - 1, 10):
+        row = block._build_row(width).plain
+        assert _icon_column(Text(row)) == row_indent(width), (width, row)
 
 
 @pytest.mark.asyncio

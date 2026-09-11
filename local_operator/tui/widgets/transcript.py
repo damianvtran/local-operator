@@ -761,6 +761,15 @@ class ExpandableActionBlock(TranscriptBlock):
     ]
     can_focus = True
 
+    #: The width the summary row was last BUILT at, written by each subclass's
+    #: ``_refresh_row``. Declared on the base because the base now owns a reader
+    #: of it (:meth:`_row_indent`): the copy gutter asks the inset question of
+    #: the width the row was PAINTED at, not of the current pane width, and the
+    #: two agree only because ``_refresh_row`` writes this from the width it
+    #: hands ``_build_row``. ``-1`` is "never built"; ``row_indent(-1)`` is 0,
+    #: which is the honest answer for a row that has not been drawn yet.
+    _built_width: int = -1
+
     @classmethod
     def _bound_keys(cls) -> frozenset[str]:
         """Every key this row class answers itself, MERGED across the hierarchy.
@@ -802,6 +811,28 @@ class ExpandableActionBlock(TranscriptBlock):
     def _refresh_row(self) -> None:
         """Rebuild and apply this subclass's current summary/expansion."""
         raise NotImplementedError
+
+    def _row_indent(self) -> int:
+        """Cells of left inset on this row's summary line AS BUILT.
+
+        Declared here rather than per subclass because BOTH ledger rows this
+        base carries (the wake receipt and the inbound peer receipt) draw the
+        same summary row, and the inset is one property of one ledger: a wake
+        or a peer row sitting between tool rows has to start its icon, name
+        column and summary on the same cells they do, or the column stops
+        reading as a column.
+
+        Delegates to the ledger's single derivation
+        (:func:`~local_operator.tui.widgets.tool_card.row_indent`, imported
+        locally because `tool_card` imports this module). That is what makes
+        the copy gutter and the painted row agree by construction — the two
+        callers read the same function of the same number, so a later change to
+        the rule cannot reach one and miss the other. The number is this row's
+        last built width, which is the width `_build_row` was given.
+        """
+        from local_operator.tui.widgets.tool_card import row_indent
+
+        return row_indent(self._built_width)
 
     @property
     def expanded(self) -> bool:
@@ -1606,7 +1637,7 @@ class WakeBlock(ExpandableActionBlock):
         """The icon field on the summary row; the expansion's indent below it.
 
         The summary row's field is the ledger's shared left inset
-        (:data:`ROW_INDENT`) plus the icon, exactly as :class:`ToolCard` counts
+        (:func:`row_indent`) plus the icon, exactly as :class:`ToolCard` counts
         it — a wake row sits between tool rows, so a gutter measured against a
         different spine would eat the first character of the wake's name when
         copied. Read back off the row as built rather than assumed, because
@@ -1617,24 +1648,6 @@ class WakeBlock(ExpandableActionBlock):
         if index != 0:
             return OUTPUT_INDENT
         return self._row_indent() + ToolCard.ICON_COLS
-
-    def _row_indent(self) -> int:
-        """Cells of left inset on the summary row AS BUILT.
-
-        One derivation, shared by the row builder and the copy gutter, so a
-        gutter can never disagree with the row it is measured against. The
-        inset is the SHARED ledger spine, not decoration: a wake receipt sits
-        between tool rows and must start its icon, name column and summary on
-        the same cells they do, or the column stops reading as a column. It is
-        dropped on a narrow ledger for the same reason :class:`ToolCard` drops
-        it — breathing room is the first thing a narrow row should spend.
-        """
-        from local_operator.tui.widgets.tool_card import (
-            ROW_INDENT,
-            ROW_INDENT_MIN_WIDTH,
-        )
-
-        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
 
     def refresh_row(self) -> None:
         """Repaint at the current width — the ledger's shared column moved."""
@@ -1695,8 +1708,7 @@ class WakeBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
-            ROW_INDENT,
-            ROW_INDENT_MIN_WIDTH,
+            row_indent,
             truncate_cells,
         )
 
@@ -1705,9 +1717,10 @@ class WakeBlock(ExpandableActionBlock):
         # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
         # taken off the budget BEFORE anything is measured, so the name column
         # and every rung below size themselves against the width the row will
-        # really be drawn in. Threshold read here against the width being BUILT
-        # rather than `_built_width`, which this runs before updating.
-        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        # really be drawn in. Read off the width being BUILT rather than
+        # `_built_width`, which this runs before updating, and through the
+        # ledger's one derivation so the copy gutter reads the same rule.
+        indent = row_indent(width)
         width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
@@ -2226,7 +2239,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         """The icon field on the summary row; the expansion's indent below it.
 
         The summary row's field is the ledger's shared left inset
-        (:data:`ROW_INDENT`) plus the icon, exactly as :class:`ToolCard` counts
+        (:func:`row_indent`) plus the icon, exactly as :class:`ToolCard` counts
         it — a peer receipt sits between tool rows, so a gutter measured
         against a different spine would eat the first character of the peer
         row's name when copied. Read back off the row as built rather than
@@ -2237,25 +2250,6 @@ class PeerMessageBlock(ExpandableActionBlock):
         if index != 0:
             return OUTPUT_INDENT
         return self._row_indent() + ToolCard.ICON_COLS
-
-    def _row_indent(self) -> int:
-        """Cells of left inset on the summary row AS BUILT.
-
-        One derivation, shared by the row builder and the copy gutter, so a
-        gutter can never disagree with the row it is measured against. The
-        inset is the SHARED ledger spine, not decoration: an inbound peer
-        receipt sits between tool rows and must start its icon, name column
-        and summary on the same cells they do, or the column stops reading as
-        a column. It is dropped on a narrow ledger for the same reason
-        :class:`ToolCard` drops it — breathing room is the first thing a
-        narrow row should spend.
-        """
-        from local_operator.tui.widgets.tool_card import (
-            ROW_INDENT,
-            ROW_INDENT_MIN_WIDTH,
-        )
-
-        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
 
     def copy_row_is_chrome(self, index: int) -> bool:
         """The summary and the sender identity are the app talking.
@@ -2326,8 +2320,7 @@ class PeerMessageBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
-            ROW_INDENT,
-            ROW_INDENT_MIN_WIDTH,
+            row_indent,
             truncate_cells,
         )
 
@@ -2336,9 +2329,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
         # taken off the budget BEFORE anything is measured, so the name column
         # and every rung below size themselves against the width the row will
-        # really be drawn in. Threshold read here against the width being BUILT
-        # rather than `_built_width`, which this runs before updating.
-        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        # really be drawn in. Read off the width being BUILT rather than
+        # `_built_width`, which this runs before updating, and through the
+        # ledger's one derivation so the copy gutter reads the same rule.
+        indent = row_indent(width)
         width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
